@@ -70,6 +70,36 @@ func TestReconcileMarksMissingPanesStale(t *testing.T) {
 	}
 }
 
+// A restarted tmux server numbers panes from %0 again, so a pane id alone
+// cannot tell a pre-restart session from the new pane that took its id.
+func TestReconcileMarksSessionsFromBeforeServerRestartStale(t *testing.T) {
+	serverStart := t0.Add(-30 * time.Minute)
+	ghost := sess("ghost", model.StateWaiting, "%1", t0.Add(-time.Hour))
+	ghost.StartedAt = t0.Add(-2 * time.Hour)
+	fresh := sess("fresh", model.StateWaiting, "%2", t0.Add(-time.Minute))
+	fresh.StartedAt = t0.Add(-10 * time.Minute)
+	// Started in the server's first second: start_time is whole seconds.
+	sameSecond := sess("same-second", model.StateWorking, "%3", t0.Add(-time.Minute))
+	sameSecond.StartedAt = serverStart.Add(900 * time.Millisecond)
+	unknown := sess("no-start", model.StateWorking, "%4", t0.Add(-time.Minute)) // StartedAt zero
+	st := openStore(t, ghost, fresh, sameSecond, unknown)
+	var live []tmux.Pane
+	for _, id := range []string{"%1", "%2", "%3", "%4"} {
+		live = append(live, tmux.Pane{ID: id, ServerStart: serverStart})
+	}
+	if err := fleet.Reconcile(context.Background(), st, live, t0); err != nil {
+		t.Fatal(err)
+	}
+	if g := get(t, st, "ghost"); g.State != model.StateStale || !g.UpdatedAt.Equal(t0) {
+		t.Errorf("ghost = %s at %v, want stale at %v", g.State, g.UpdatedAt, t0)
+	}
+	for _, id := range []string{"fresh", "same-second", "no-start"} {
+		if s := get(t, st, id); s.State == model.StateStale {
+			t.Errorf("%s marked stale, want it left alone", id)
+		}
+	}
+}
+
 func TestReconcileIgnoresSessionsWithoutPane(t *testing.T) {
 	old := t0.Add(-time.Hour)
 	st := openStore(t, sess("nopane", model.StateWorking, "", old))

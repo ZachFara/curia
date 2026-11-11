@@ -17,44 +17,68 @@ import (
 )
 
 // Reconcile marks stale, with UpdatedAt now, every session that is neither
-// ended nor already stale and whose non-empty Pane is not among live. A
-// session with no pane (started outside tmux) is never marked stale. Each
-// change goes through store.UpdateSession and re-checks the stored row,
-// because a hook may have moved or ended the session since it was listed.
+// ended nor already stale and whose non-empty Pane is not among live, or
+// whose non-zero StartedAt is before the live server's start: a restarted
+// server numbers its panes from %0 again, so the pane id now names another
+// pane. A session with no pane (started outside tmux) is never marked stale.
+// Each change goes through store.UpdateSession and re-checks the stored row,
+// because a hook may have moved, restarted or ended the session since it was
+// listed.
 func Reconcile(ctx context.Context, st *store.Store, live []tmux.Pane, now time.Time) error {
-	alive := make(map[string]bool, len(live))
-	for _, p := range live {
-		alive[p.ID] = true
-	}
+	srv := newServer(live)
 	sessions, err := st.ListSessions(ctx, store.ListFilter{})
 	if err != nil {
 		return fmt.Errorf("fleet: reconcile: %w", err)
 	}
 	for _, s := range sessions {
-		if !goneFrom(s, s.Pane, alive) {
+		if !srv.goneFrom(s, s.Pane) {
 			continue
 		}
-		pane := s.Pane
-		err := st.UpdateSession(ctx, s.ID, func(cur model.Session, _ bool) model.Session {
-			// Sessions are never deleted, so the row is found; if it were
-			// not, cur has an empty ID and UpdateSession refuses to write it.
-			if goneFrom(cur, pane, alive) {
-				cur.State, cur.UpdatedAt = model.StateStale, now
-			}
-			return cur
-		})
-		if err != nil {
+		if err := markStale(ctx, st, s, srv, now); err != nil {
 			return fmt.Errorf("fleet: reconcile: %w", err)
 		}
 	}
 	return nil
 }
 
-// goneFrom reports whether s is still a live session in pane and pane is not
-// alive, that is, whether s should become stale.
-func goneFrom(s model.Session, pane string, alive map[string]bool) bool {
-	return s.Pane != "" && s.Pane == pane && !alive[pane] &&
-		s.State != model.StateEnded && s.State != model.StateStale
+// server is what Reconcile knows of the live tmux server.
+type server struct {
+	alive map[string]bool
+	start time.Time // zero when no pane reported it
+}
+
+func newServer(live []tmux.Pane) server {
+	srv := server{alive: make(map[string]bool, len(live))}
+	for _, p := range live {
+		srv.alive[p.ID] = true
+		if p.ServerStart.After(srv.start) {
+			srv.start = p.ServerStart
+		}
+	}
+	return srv
+}
+
+// goneFrom reports whether s is still a live session in pane whose pane is
+// gone, that is, whether s should become stale: pane is not on the server,
+// or s started before the server did.
+func (srv server) goneFrom(s model.Session, pane string) bool {
+	if s.Pane == "" || s.Pane != pane || s.State == model.StateEnded || s.State == model.StateStale {
+		return false
+	}
+	return !srv.alive[pane] || (!s.StartedAt.IsZero() && s.StartedAt.Before(srv.start))
+}
+
+// markStale marks the session listed as stale, deciding again from the
+// stored row inside the update.
+func markStale(ctx context.Context, st *store.Store, listed model.Session, srv server, now time.Time) error {
+	return st.UpdateSession(ctx, listed.ID, func(cur model.Session, _ bool) model.Session {
+		// Sessions are never deleted, so the row is found; if it were not,
+		// cur has an empty ID and UpdateSession refuses to write it.
+		if srv.goneFrom(cur, listed.Pane) {
+			cur.State, cur.UpdatedAt = model.StateStale, now
+		}
+		return cur
+	})
 }
 
 // Rank groups, in order: needs_decision, waiting, idle-unseen, working,
