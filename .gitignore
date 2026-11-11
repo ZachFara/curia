@@ -1,0 +1,10 @@
+# Throwaway scripts, experiments and notes (AGENTS.md).
+/.scratch/
+# Orchestrator working files.
+/.superpowers/
+# Per-task git worktrees.
+/.worktrees/
+# Pinned tool binaries installed by the Makefile.
+/.bin/
+# Built binary (`make build`).
+/curia

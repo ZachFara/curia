@@ -1,0 +1,42 @@
+# CI runs exactly `make check`, the same command as the pre-commit hook
+# (docs/decisions/0007). Branch protection requires the job named `check`;
+# do not rename it.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, plan-1]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Reads the toolchain directive in go.mod, so CI uses the same Go as local.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # Pinned tool binaries; the key changes whenever a version in the
+      # Makefile or the Go toolchain changes.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .bin
+          key: bin-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod') }}
+
+      # tmux is installed so the real-tmux tests run instead of skipping.
+      - name: install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: make check
+        run: make check
