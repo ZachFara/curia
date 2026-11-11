@@ -5,7 +5,7 @@ This file mirrors the plan for humans; it does not replace it. Task order, inter
 ## Status
 
 - **Phase 1 (setup): merged** to `main` as PR #1. `main` is protected (PRs required, `check` required, no force pushes, admins included).
-- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 merged (Task 5, PR #8). Wave 4 (Tasks 7 and 8) dispatched in parallel.
+- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 merged (Task 5, PR #8). Wave 4 merged (Tasks 7 and 8, PRs #10 and #9). Wave 5 (Task 9) dispatched.
 
 ## Plan 1 waves
 
@@ -46,7 +46,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 9 | Dashboard popup and sidebar | Opus (expected, confirmed at dispatch) | `ui.Source`, `ui.New`, `Mode`, `ui.ContextLevel`/`Level`; 8 columns, 1 s refresh, the plan's keys; `curia ui` and `curia sidebar`; `TestContextLevelThresholds`, `TestViewShowsRankedRows`, `TestEnterSwitchesToSelectedPane`, `TestSidebarEnterDoesNotQuit`, `TestKillRequiresConfirmation`, `TestFilterNarrowsRows`, `TestRowWithoutPaneNotJumpable`, `TestNarrowWidthTruncates` pass. | not started |
+| 9 | Dashboard popup and sidebar | Opus (confirmed: a UI with keyboard, mouse and layout behaviour) | `ui.Source`, `ui.New`, `Mode`, `ui.ContextLevel`/`Level`; 8 columns, 1 s refresh, the plan's keys; `curia ui` and `curia sidebar`; `TestContextLevelThresholds`, `TestViewShowsRankedRows`, `TestEnterSwitchesToSelectedPane`, `TestSidebarEnterDoesNotQuit`, `TestKillRequiresConfirmation`, `TestFilterNarrowsRows`, `TestRowWithoutPaneNotJumpable`, `TestNarrowWidthTruncates` pass. | in progress |
 
 ### Wave 6
 
@@ -64,6 +64,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 6. Task 11's golden `ls --json` file is hand-written but real runs produce real timestamps; decide at Task 11 dispatch how time fields are compared.
 8. `curia uninstall` only removes entries for the current binary path (Ruling 13); entries from a moved or rebuilt binary stay behind and fire against a missing file. Decide whether uninstall should also match older paths.
 9. Under sustained heavy write load a waiting SQLite writer can time out (SQLite polls for the lock rather than queueing). Hooks are short so this is unlikely in practice; revisit if the log shows busy errors.
+10. `fleet.Reconcile` matches sessions to panes by pane id alone. A restarted tmux server numbers panes from `%0` again, so an old session whose id is reused is never marked stale and `next` could jump to an unrelated pane. The data model has no server identity; decide in the final review or Plan 2.
 7. No LICENSE file yet although the repo is public; the spec leaves AGPL-3.0 or MIT open. Owner to decide.
 
 ## Rulings
@@ -90,13 +91,17 @@ Format: Ruling: what — why — cost if wrong.
 
 16. Ruling: `curia ls --json` keys are the store's column names for the fields `model.Session` has (`id`, `agent`, `tmux_pane`, `tmux_session`, `tmux_window`, `cwd`, `repo`, `branch`, `state`, `model`, `context_used`, `context_max`, `subagents_active`, `last_update`, `seen_at`, `transcript_path`, `started_at`, `updated_at`); times are RFC 3339 UTC and a zero time is `null`; `transcript_offset` is internal and omitted — the plan says only "snake_case keys" and agents will script against this output — renaming a key later breaks scripts.
 17. Ruling: `curia seen` and `curia next` log their errors and exit 0 — tmux runs them from a hook and a key binding, where a failing command prints noise into the status line — a broken install is visible only in the log.
-18. Ruling: `attention.Apply` runs after every hook event whose session has a window, as the plan says, and Task 8 reports what that adds to hook latency — the plan is explicit; a cheaper rule (only on state changes) is a later optimisation if the 20 ms budget is at risk — one extra tmux call per hook event.
+18. Superseded by Ruling 19.
+19. Ruling: the hook calls `attention.Apply` only when the event could change the window's marker (the session's marker before and after `hook.Run` differ, or its window changed; a new session ending a red one in the same pane also clears that window), reading the previous row by key — the tmux call measured about 8 ms, against a 20 ms budget on every hook event; this amends the plan's "call `attention.Apply` after `hook.Run`" — a marker change this comparison cannot see is not re-applied until that session's next change or `curia seen`.
+20. Ruling: `curia next` reconciles with live panes before choosing its target, as `ls` does; `curia status` does not — `next` must not jump to a dead pane, and `status` runs every 2 seconds — the badge can count a session whose pane was killed until `ls`, `next` or the dashboard runs.
+21. Ruling: the dashboard shows `session:window` using the window's name, which it resolves from `tmux.Client.ListPanes` on each refresh, falling back to the stored window id — Ruling 9 stores the id, which is unreadable in a table — one more tmux call per refresh.
 
 ## Ledger
 
 One line per task: wave, worktree, branch, status.
 
 - Task 1: wave 1, `.worktrees/plan1-t1-scaffold`, `feat/plan1-t1-scaffold`, merged (PR #2), Sonnet, 0 fix rounds.
+- Task 9: wave 5, `.worktrees/plan1-t9-ui`, `feat/plan1-t9-ui`, in progress.
 - Task 7: wave 4, `.worktrees/plan1-t7-fleet`, `feat/plan1-t7-fleet`, merged (PR #10), Opus, 0 fix rounds.
 - Task 8: wave 4, `.worktrees/plan1-t8-attention`, `feat/plan1-t8-attention`, merged (PR #9), Sonnet, 1 fix rounds.
 - Task 5: wave 3, `.worktrees/plan1-t5-hook`, `feat/plan1-t5-hook`, merged (PR #8), Opus, 1 fix rounds.
@@ -108,8 +113,8 @@ One line per task: wave, worktree, branch, status.
 
 ## Next steps
 
-1. Review and merge Tasks 7 and 8 into `plan-1`.
-2. Dispatch Wave 5 (Task 9).
+1. Review and merge Task 9 into `plan-1`.
+2. Dispatch Wave 6 (Task 11), then the final whole-branch review.
 
 ## Deferred minors (for the final review)
 
@@ -120,3 +125,5 @@ One line per task: wave, worktree, branch, status.
 - Task 6: the real-tmux round trip checks `escapeMessage` through raw tmux, not `DisplayMessage` end to end.
 - Task 10: a dangling symlink target is still replaced by a regular file; rewritten files get mode 0600 whatever they had; a binary path with a space or quote goes unquoted into the hook command and tmux snippet.
 - Task 5: a payload over 1 MiB drops the event; stdin read has no deadline; whole-process hook latency was only measured on a loaded machine (check in Task 11).
+- Task 7: `ls --json` HTML-escapes `&&` and passes raw C1 and bidi characters; `ls` help text is inaccurate about hidden stale sessions; `Reconcile`'s in-transaction re-check is untested; `newTmuxClient` is used by four commands and belongs in `common.go`.
+- Task 8: each `Apply` re-lists all live sessions; `seen` stops at the first failing window.
