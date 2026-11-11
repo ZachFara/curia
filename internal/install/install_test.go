@@ -354,9 +354,13 @@ func TestTmuxFenceAddedOnceAndRemoved(t *testing.T) {
 		t.Errorf("conf = %q", got)
 	}
 	snip := readFile(t, snippet)
+	// pane-focus-in (mark seen) fires only with focus-events on, off by default.
+	if !strings.HasPrefix(snip, "set -g focus-events on\n") {
+		t.Errorf("snippet does not start with focus-events on:\n%s", snip)
+	}
 	for _, want := range []string{
 		"set -g status-interval 2\n",
-		"set -ag status-right ' #(" + testBin + " status)'\n",
+		`if -F '#{m:*@curia_badge*,#{status-right}}' '' "set -ag status-right ' #{@curia_badge}#(` + testBin + ` status)'"` + "\n",
 		"bind a display-popup -E -w 90% -h 80% '" + testBin + " ui'\n",
 		"bind N run-shell '" + testBin + " next'\n",
 		`set-hook -g pane-focus-in 'run-shell -b "` + testBin + ` seen #{pane_id}"'` + "\n",

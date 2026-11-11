@@ -15,9 +15,13 @@ const (
 )
 
 // snippetTemplate is the tmux configuration Curia installs; %[1]s is the
-// binary path.
-const snippetTemplate = `set -g status-interval 2
-set -ag status-right ' #(%[1]s status)'
+// binary path. tmux runs pane-focus-in only with focus-events on, which is
+// off by default. The badge is appended to status-right only when it is not
+// there yet: the never-set @curia_badge option expands to nothing and marks
+// it, so sourcing the snippet again adds no second badge.
+const snippetTemplate = `set -g focus-events on
+set -g status-interval 2
+if -F '#{m:*@curia_badge*,#{status-right}}' '' "set -ag status-right ' #{@curia_badge}#(%[1]s status)'"
 set -g window-status-format '#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'
 set -g window-status-current-format '#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'
 bind a display-popup -E -w 90%% -h 80%% '%[1]s ui'
