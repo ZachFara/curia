@@ -32,14 +32,14 @@ set-hook -g pane-focus-in 'run-shell -b "%[1]s seen #{pane_id}"'
 func WriteTmux(snippetPath, tmuxConfPath, bin string) error {
 	snippetPath = filepath.Clean(snippetPath)
 	tmuxConfPath = filepath.Clean(tmuxConfPath)
-	if err := writeAtomic(snippetPath, []byte(fmt.Sprintf(snippetTemplate, bin))); err != nil {
-		return err
-	}
 	conf, err := readConf(tmuxConfPath)
 	if err != nil {
 		return err
 	}
-	if strings.Contains(conf, fenceBegin+"\n") {
+	if err := writeAtomic(snippetPath, []byte(fmt.Sprintf(snippetTemplate, bin))); err != nil {
+		return err
+	}
+	if hasFence(conf) {
 		return nil
 	}
 	if conf != "" && !strings.HasSuffix(conf, "\n") {
@@ -78,6 +78,17 @@ func RemoveTmux(tmuxConfPath string) error {
 		return nil
 	}
 	return writeAtomic(tmuxConfPath, []byte(strings.Join(out, "")))
+}
+
+// hasFence reports whether conf has a begin fence line, with or without a
+// trailing newline.
+func hasFence(conf string) bool {
+	for _, line := range strings.Split(conf, "\n") {
+		if strings.TrimRight(line, "\r") == fenceBegin {
+			return true
+		}
+	}
+	return false
 }
 
 // readConf returns the file's text, or "" when it does not exist.

@@ -228,17 +228,45 @@ func saveSettings(path string, original []byte, settings map[string]any, now tim
 		return err
 	}
 	if original != nil {
-		backup := path + ".bak." + strconv.FormatInt(now.Unix(), 10)
-		if err := os.WriteFile(backup, original, 0o600); err != nil {
+		if err := writeBackup(path, original, now); err != nil {
 			return fmt.Errorf("back up settings: %w", err)
 		}
 	}
 	return writeAtomic(path, buf.Bytes())
 }
 
+// writeBackup stores original beside path as path+".bak.<unix seconds>",
+// adding ".1", ".2" and so on when that name is taken. It never overwrites an
+// existing backup.
+func writeBackup(path string, original []byte, now time.Time) error {
+	base := path + ".bak." + strconv.FormatInt(now.Unix(), 10)
+	for i := 0; ; i++ {
+		name := base
+		if i > 0 {
+			name += "." + strconv.Itoa(i)
+		}
+		f, err := os.OpenFile(filepath.Clean(name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := f.Write(original); err != nil {
+			_ = f.Close()
+			return err
+		}
+		return f.Close()
+	}
+}
+
 // writeAtomic writes data to path via a temporary file and a rename, creating
-// the parent directory if needed.
+// the parent directory if needed. If path is a symlink the write lands on the
+// file it points to, so the link survives.
 func writeAtomic(path string, data []byte) error {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err

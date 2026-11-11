@@ -11,6 +11,11 @@ import (
 
 const testBin = "/opt/curia/bin/curia"
 
+var expectedEvents = []string{
+	"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+	"Notification", "Stop", "SubagentStop", "SessionEnd",
+}
+
 var testNow = time.Unix(1700000000, 0)
 
 func writeFile(t *testing.T, path, content string) {
@@ -117,15 +122,12 @@ func TestHooksMergePreservesUserHooks(t *testing.T) {
 		t.Error("unknown event key dropped")
 	}
 	checkOurEntries(t, m)
-	if len(hookEvents) != 8 {
-		t.Errorf("hookEvents = %d, want 8", len(hookEvents))
-	}
 }
 
 // checkOurEntries asserts each event ends with exactly one well-formed entry of ours.
 func checkOurEntries(t *testing.T, m map[string]any) {
 	t.Helper()
-	for _, ev := range hookEvents {
+	for _, ev := range expectedEvents {
 		entries := eventEntries(t, m, ev)
 		if countOurs(entries) != 1 {
 			t.Errorf("%s: ours = %d", ev, countOurs(entries))
@@ -158,7 +160,7 @@ func TestHooksIdempotent(t *testing.T) {
 		t.Errorf("second Hooks changed the file:\n%s\nvs\n%s", once, twice)
 	}
 	m := readSettings(t, path)
-	for _, ev := range hookEvents {
+	for _, ev := range expectedEvents {
 		if n := countOurs(eventEntries(t, m, ev)); n != 1 {
 			t.Errorf("%s: ours = %d", ev, n)
 		}
@@ -243,7 +245,7 @@ func TestMissingSettingsCreated(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := readSettings(t, path)
-	for _, ev := range hookEvents {
+	for _, ev := range expectedEvents {
 		if n := countOurs(eventEntries(t, m, ev)); n != 1 {
 			t.Errorf("%s: ours = %d", ev, n)
 		}
@@ -274,7 +276,7 @@ func TestUnhooksRemovesOnlyOurs(t *testing.T) {
 	if _, ok := hooks["Custom"]; !ok {
 		t.Error("user's Custom event removed")
 	}
-	for _, ev := range hookEvents {
+	for _, ev := range expectedEvents {
 		if ev == "Stop" {
 			continue
 		}
@@ -404,5 +406,142 @@ func TestRemoveTmuxLeavesUnfencedAndBrokenConfAlone(t *testing.T) {
 	}
 	if got := readFile(t, conf); got != broken {
 		t.Errorf("conf changed: %q", got)
+	}
+}
+
+func TestBackupNeverOverwritten(t *testing.T) {
+	path := settingsIn(t)
+	writeFile(t, path, userSettings)
+	if err := Hooks(path, testBin, testNow); err != nil {
+		t.Fatal(err)
+	}
+	// Drop one of our entries by hand so the next Hooks writes again in the same second.
+	m := readSettings(t, path)
+	delete(asMap(m["hooks"]), "SessionEnd")
+	b, _ := json.Marshal(m)
+	writeFile(t, path, string(b))
+	if err := Hooks(path, testBin, testNow); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, path+".bak.1700000000"); got != userSettings {
+		t.Errorf("first backup overwritten: %q", got)
+	}
+	if got := readFile(t, path+".bak.1700000000.1"); got != string(b) {
+		t.Errorf("second backup = %q", got)
+	}
+}
+
+func TestInstallThenUninstallKeepsOriginalBackup(t *testing.T) {
+	path := settingsIn(t)
+	writeFile(t, path, userSettings)
+	if err := Hooks(path, testBin, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := Unhooks(path, testBin); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	matches, _ := filepath.Glob(path + ".bak.*")
+	for _, m := range matches {
+		found = found || readFile(t, m) == userSettings
+	}
+	if len(matches) != 2 || !found {
+		t.Errorf("backups = %v, want two, one holding the original bytes", matches)
+	}
+}
+
+func TestSymlinkedSettingsSurvive(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "repo", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, target, userSettings)
+	link := filepath.Join(dir, "home", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []func() error{
+		func() error { return Hooks(link, testBin, testNow) },
+		func() error { return Unhooks(link, testBin) },
+	} {
+		if err := step(); err != nil {
+			t.Fatal(err)
+		}
+		if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("link replaced: %v %v", fi, err)
+		}
+	}
+	if m := readSettings(t, target); m["model"] != "opus" {
+		t.Errorf("target = %v", m)
+	}
+	if strings.Contains(readFile(t, target), " hook ") {
+		t.Error("target still has our hooks after Unhooks")
+	}
+	if got := readFile(t, link+".bak.1700000000"); got != userSettings {
+		t.Errorf("backup beside link = %q", got)
+	}
+}
+
+func TestSymlinkedTmuxConfSurvives(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "repo", "tmux.conf")
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	original := "set -g mouse on\n"
+	writeFile(t, target, original)
+	link := filepath.Join(dir, ".tmux.conf")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteTmux(filepath.Join(dir, "curia.tmux"), link, testBin); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link replaced after WriteTmux: %v %v", fi, err)
+	}
+	if !strings.Contains(readFile(t, target), fenceBegin) {
+		t.Error("fence not written at the link's destination")
+	}
+	if err := RemoveTmux(link); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link replaced after RemoveTmux: %v %v", fi, err)
+	}
+	if got := readFile(t, target); got != original {
+		t.Errorf("target = %q", got)
+	}
+}
+
+func TestFenceAtEOFWithoutNewlineNotDuplicated(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, ".tmux.conf")
+	writeFile(t, conf, "set -g mouse on\n"+fenceBegin)
+	if err := WriteTmux(filepath.Join(dir, "curia.tmux"), conf, testBin); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(readFile(t, conf), fenceBegin); n != 1 {
+		t.Errorf("begin fences = %d", n)
+	}
+}
+
+func TestWriteTmuxLeavesNoSnippetWhenConfUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	snippet := filepath.Join(dir, "curia.tmux")
+	// A directory where the conf should be makes reading it fail.
+	conf := filepath.Join(dir, "conf-dir")
+	if err := os.Mkdir(conf, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteTmux(snippet, conf, testBin); err == nil {
+		t.Fatal("want error")
+	}
+	if _, err := os.Stat(snippet); !os.IsNotExist(err) {
+		t.Errorf("snippet written before conf validated: %v", err)
 	}
 }
