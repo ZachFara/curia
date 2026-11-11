@@ -590,10 +590,6 @@ func TestUpdateSessionLosesNoUpdates(t *testing.T) {
 		handles[i] = open(t, path)
 	}
 	ctx := context.Background()
-	// SQLite's busy handler polls rather than queues, so a writer can starve
-	// for as long as others keep the lock saturated. The load is sized to
-	// finish well inside busy_timeout (2000ms), so no call may time out and
-	// every call must count.
 	const goroutines, calls = 10, 10
 	var wg sync.WaitGroup
 	for g := range goroutines {
@@ -602,12 +598,7 @@ func TestUpdateSessionLosesNoUpdates(t *testing.T) {
 			defer wg.Done()
 			s := handles[g%len(handles)]
 			for i := range calls {
-				err := s.UpdateSession(ctx, "shared", func(sess model.Session, _ bool) model.Session {
-					sess.ID, sess.Agent, sess.State = "shared", "claude", model.StateWorking
-					sess.SubagentsActive++
-					return sess
-				})
-				if err != nil {
+				if err := incrementShared(ctx, s); err != nil {
 					t.Errorf("goroutine %d call %d: %v", g, i, err)
 					return
 				}
@@ -618,6 +609,30 @@ func TestUpdateSessionLosesNoUpdates(t *testing.T) {
 	if got := get(t, handles[0], "shared").SubagentsActive; got != goroutines*calls {
 		t.Errorf("SubagentsActive = %d, want %d (updates lost)", got, goroutines*calls)
 	}
+}
+
+// incrementShared adds one to the shared session's SubagentsActive through
+// UpdateSession. SQLite's busy handler polls rather than queues, so under
+// this load a writer can starve past busy_timeout and get SQLITE_BUSY. That
+// comes from BEGIN, before fn runs, so the attempt wrote nothing and is
+// retried; any other error, or BUSY after fn ran, is returned.
+func incrementShared(ctx context.Context, s *store.Store) error {
+	const maxAttempts = 20
+	var err error
+	for range maxAttempts {
+		ran := false
+		err = s.UpdateSession(ctx, "shared", func(sess model.Session, _ bool) model.Session {
+			ran = true
+			sess.ID, sess.Agent, sess.State = "shared", "claude", model.StateWorking
+			sess.SubagentsActive++
+			return sess
+		})
+		var se *sqlite.Error
+		if err == nil || ran || !errors.As(err, &se) || se.Code()&0xff != sqlite3.SQLITE_BUSY {
+			return err
+		}
+	}
+	return fmt.Errorf("still busy after %d attempts: %w", maxAttempts, err)
 }
 
 func TestUpdateSessionPreservesConcurrentMarkSeen(t *testing.T) {
