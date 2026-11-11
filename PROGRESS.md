@@ -33,7 +33,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 5 | Hook command | Opus (confirmed: integrates four packages, cross-process locking, latency budget) | `hook.Parse`, `hook.Env`, `hook.Run` in the plan's order; one payload fixture per event kind; `curia hook <Event>` exits 0 on every path and logs errors; `TestParseFixtures`, `TestRunSessionStartRecordsSession`, `TestSessionStartEndsPriorSessionInPane`, `TestHookWithoutTmuxPane`, `TestStopReadsTranscript`, `TestHookLatency` (p95 < 20 ms), `TestMalformedPayloadExitsZero`, `TestHookExitsZeroWhenStoreLocked` pass under `-race`. | in progress |
+| 5 | Hook command | Opus (confirmed: integrates four packages, cross-process locking, latency budget) | `hook.Parse`, `hook.Env`, `hook.Run` in the plan's order; one payload fixture per event kind; `curia hook <Event>` exits 0 on every path and logs errors; `TestParseFixtures`, `TestRunSessionStartRecordsSession`, `TestSessionStartEndsPriorSessionInPane`, `TestHookWithoutTmuxPane`, `TestStopReadsTranscript`, `TestHookLatency` (p95 < 20 ms), `TestMalformedPayloadExitsZero`, `TestHookExitsZeroWhenStoreLocked` pass under `-race`. | merged (PR #8) |
 
 ### Wave 4
 
@@ -93,7 +93,7 @@ Format: Ruling: what — why — cost if wrong.
 One line per task: wave, worktree, branch, status.
 
 - Task 1: wave 1, `.worktrees/plan1-t1-scaffold`, `feat/plan1-t1-scaffold`, merged (PR #2), Sonnet, 0 fix rounds.
-- Task 5: wave 3, `.worktrees/plan1-t5-hook`, `feat/plan1-t5-hook`, in progress.
+- Task 5: wave 3, `.worktrees/plan1-t5-hook`, `feat/plan1-t5-hook`, merged (PR #8), Opus, 1 fix rounds.
 - Task 2: wave 2, `.worktrees/plan1-t2-store`, `feat/plan1-t2-store`, merged (PR #7), Opus, 1 fix rounds.
 - Task 3: wave 2, `.worktrees/plan1-t3-state`, `feat/plan1-t3-state`, merged (PR #3), Sonnet, 0 fix rounds.
 - Task 4: wave 2, `.worktrees/plan1-t4-transcript`, `feat/plan1-t4-transcript`, merged (PR #4), Sonnet, 1 fix rounds.
