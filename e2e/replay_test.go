@@ -6,7 +6,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
@@ -28,8 +30,9 @@ const (
 	timeToken = `"<time>"`
 	// p95Budget is the p95 wall time of one hook process, start included.
 	p95Budget = 50 * time.Millisecond
-	// minTimedRuns is how many hook processes the latency pass times at least.
-	minTimedRuns = 100
+	// minTimedRuns is how many hook processes the latency pass times at
+	// least, so its p95 rests on about 20 tail samples.
+	minTimedRuns = 400
 	// startBudget is how soon a started session must be in the store.
 	startBudget = time.Second
 )
@@ -63,6 +66,7 @@ type hookRun struct {
 // checks the result. A second, sequential pass on a fresh store times the
 // same events one process at a time.
 func TestReplayFiveSessions(t *testing.T) {
+	began := time.Now()
 	root, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
@@ -73,6 +77,7 @@ func TestReplayFiveSessions(t *testing.T) {
 	h := newHome(t, bin)
 	h.replay(t, lines)
 	out := h.mustRun(t, "ls", "--json")
+	checkTimes(t, out, began)
 	want, err := os.ReadFile(filepath.Join("testdata", "ls.golden.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -86,9 +91,14 @@ func TestReplayFiveSessions(t *testing.T) {
 	if got := h.mustRun(t, "status"); got != "W1" {
 		t.Errorf("curia status = %q, want %q", got, "W1")
 	}
-	checkLog(t, h.logPath)
+	checkLog(t, h.logPath, append(slices.Clone(hookLog), lsLog))
 
-	checkLatency(t, newHome(t, bin).timeSequential(t, lines))
+	timed := newHome(t, bin)
+	runs := timed.timeSequential(t, lines)
+	checkLatency(t, runs)
+	// Exit 0 and silence hold even when a hook fails inside, so the log is
+	// what shows that every timed run did its work.
+	checkLog(t, timed.logPath, repeat(hookLog, len(runs)/len(lines)))
 }
 
 // build builds curia into a temp dir, execs it once untimed, and returns its
@@ -104,12 +114,11 @@ func build(t *testing.T, root string) string {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
-	// Untimed warm-up: macOS checks a new executable on its first exec
-	// (about 300 ms here), once per binary, not per hook, so it is no part of
-	// a hook's cost. --help reads no config and opens no store.
-	if out, err := exec.Command(bin, "--help").CombinedOutput(); err != nil {
-		t.Fatalf("curia --help: %v\n%s", err, out)
-	}
+	// Untimed warm-up, in a throwaway home like every other exec: macOS
+	// checks a new executable on its first exec (about 300 ms here), once per
+	// binary, not per hook, so it is no part of a hook's cost. --help reads
+	// no config and opens no store.
+	newHome(t, bin).mustRun(t, "--help")
 	return bin
 }
 
@@ -138,9 +147,10 @@ func newHome(t *testing.T, bin string) *home {
 	}
 }
 
-// statSources stats every file the binary is built from. This package
-// imports none of them, so without this `go test` would reuse a cached pass
-// after they change; it keys its cache on the files a test stats.
+// statSources stats every file the binary is built from and every replay
+// fixture. This package imports none of them, so without this `go test`
+// would reuse a cached pass after they change; it keys its cache on the
+// files a test stats.
 func statSources(t *testing.T, root string) {
 	t.Helper()
 	for _, f := range []string{"go.mod", "go.sum"} {
@@ -148,7 +158,7 @@ func statSources(t *testing.T, root string) {
 			t.Fatal(err)
 		}
 	}
-	for _, dir := range []string{"cmd", "internal"} {
+	for _, dir := range []string{"cmd", "internal", filepath.Join("testdata", "replay")} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				return err
@@ -212,8 +222,8 @@ func (h *home) replay(t *testing.T, lines []replayLine) {
 	}
 }
 
-// timeSequential runs the lines in file order, one process at a time, as
-// many times over as it takes to time at least minTimedRuns runs, and
+// timeSequential runs the lines in file order, one process at a time, in as
+// many whole rounds as it takes to time at least minTimedRuns runs, and
 // returns the wall time of every run.
 func (h *home) timeSequential(t *testing.T, lines []replayLine) []hookRun {
 	t.Helper()
@@ -248,24 +258,65 @@ func (h *home) mustRun(t *testing.T, args ...string) string {
 	return stdout
 }
 
-// run runs curia with args, stdin and h.env plus extraEnv (if not empty).
+// run runs curia with args, stdin and h.env plus extraEnv (if not empty), and
+// times it from process start to exit. Its stdin, stdout and stderr are temp
+// files, so os/exec copies nothing through pipes inside the timed window.
 func (h *home) run(stdin []byte, extraEnv string, args ...string) (stdout, stderr string, took time.Duration, err error) {
+	files, err := h.stdio(stdin)
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer closeAll(files)
 	cmd := exec.Command(h.bin, args...)
 	cmd.Dir = h.dir
 	cmd.Env = slices.Clone(h.env)
 	if extraEnv != "" {
 		cmd.Env = append(cmd.Env, extraEnv)
 	}
-	cmd.Stdin = bytes.NewReader(stdin)
-	var out, errOut bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errOut
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = files[0], files[1], files[2]
 	began := time.Now()
 	err = cmd.Run()
-	return out.String(), errOut.String(), time.Since(began), err
+	took = time.Since(began)
+	out, oerr := os.ReadFile(files[1].Name())
+	errOut, eerr := os.ReadFile(files[2].Name())
+	return string(out), string(errOut), took, errors.Join(err, oerr, eerr)
+}
+
+// stdio creates a run's stdin (holding stdin, read from the start), stdout
+// and stderr as temp files in h.dir.
+func (h *home) stdio(stdin []byte) ([]*os.File, error) {
+	var files []*os.File
+	for _, name := range []string{"stdin-*", "stdout-*", "stderr-*"} {
+		f, err := os.CreateTemp(h.dir, name)
+		if err != nil {
+			closeAll(files)
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	if _, err := files[0].Write(stdin); err != nil {
+		closeAll(files)
+		return nil, err
+	}
+	if _, err := files[0].Seek(0, 0); err != nil {
+		closeAll(files)
+		return nil, err
+	}
+	return files, nil
+}
+
+// closeAll closes and removes files.
+func closeAll(files []*os.File) {
+	for _, f := range files {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}
 }
 
 // checkLatency logs p50, p95 and max per event and overall, and fails if the
 // p95 over every run reaches p95Budget or a SessionStart takes startBudget.
+// On failure it also logs the load average, to tell a slow hook from a busy
+// machine.
 func checkLatency(t *testing.T, runs []hookRun) {
 	t.Helper()
 	byEvent := map[string][]time.Duration{}
@@ -274,21 +325,36 @@ func checkLatency(t *testing.T, runs []hookRun) {
 		byEvent[r.event] = append(byEvent[r.event], r.took)
 		all = append(all, r.took)
 	}
-	events := make([]string, 0, len(byEvent))
-	for e := range byEvent {
-		events = append(events, e)
+	starts := byEvent["SessionStart"]
+	if len(starts) == 0 {
+		t.Fatal("the latency pass timed no SessionStart")
 	}
-	slices.Sort(events)
-	for _, e := range events {
+	for _, e := range slices.Sorted(maps.Keys(byEvent)) {
 		t.Logf("%-12s %s", e, stats(byEvent[e]))
 	}
 	t.Logf("%-12s %s", "all", stats(all))
 	if p := percentile(all, 95); p >= p95Budget {
-		t.Errorf("p95 wall time of curia hook = %v, want under %v", p, p95Budget)
+		t.Errorf("p95 wall time of curia hook = %v, want under %v (load average %s)", p, p95Budget, loadAverage())
 	}
-	if m := slices.Max(byEvent["SessionStart"]); m >= startBudget {
-		t.Errorf("slowest SessionStart took %v, want the session stored within %v", m, startBudget)
+	if m := slices.Max(starts); m >= startBudget {
+		t.Errorf("slowest SessionStart took %v, want the session stored within %v (load average %s)",
+			m, startBudget, loadAverage())
 	}
+}
+
+// loadAverage is the machine's 1-minute load average, for diagnosis only.
+func loadAverage() string {
+	if b, err := os.ReadFile("/proc/loadavg"); err == nil { // Linux
+		if f := strings.Fields(string(b)); len(f) > 0 {
+			return f[0]
+		}
+	}
+	if b, err := exec.Command("sysctl", "-n", "vm.loadavg").Output(); err == nil { // macOS: "{ 1.0 2.0 3.0 }"
+		if f := strings.Fields(strings.Trim(string(b), "{} \n")); len(f) > 0 {
+			return f[0]
+		}
+	}
+	return "unknown"
 }
 
 func stats(d []time.Duration) string {
@@ -300,6 +366,32 @@ func percentile(d []time.Duration, p float64) time.Duration {
 	s := slices.Sorted(slices.Values(d))
 	rank := int(math.Ceil(p / 100 * float64(len(s))))
 	return s[max(rank, 1)-1]
+}
+
+// checkTimes fails unless every non-null time in `curia ls --json` lies
+// between began and now, and no session was updated before it started.
+func checkTimes(t *testing.T, out string, began time.Time) {
+	t.Helper()
+	var rows []struct {
+		ID        string     `json:"id"`
+		SeenAt    *time.Time `json:"seen_at"`
+		StartedAt *time.Time `json:"started_at"`
+		UpdatedAt *time.Time `json:"updated_at"`
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("curia ls --json: %v\n%s", err, out)
+	}
+	now := time.Now()
+	for _, r := range rows {
+		for name, v := range map[string]*time.Time{"seen_at": r.SeenAt, "started_at": r.StartedAt, "updated_at": r.UpdatedAt} {
+			if v != nil && (v.Before(began) || v.After(now)) {
+				t.Errorf("%s %s = %v, want between test start %v and now %v", r.ID, name, v, began, now)
+			}
+		}
+		if r.StartedAt != nil && r.UpdatedAt != nil && r.UpdatedAt.Before(*r.StartedAt) {
+			t.Errorf("%s updated_at %v is before started_at %v", r.ID, r.UpdatedAt, r.StartedAt)
+		}
+	}
 }
 
 // jsonTime matches a JSON string that may hold a time.
@@ -323,12 +415,12 @@ func normalise(out, root string) string {
 // pane or a cwd, that attribute of one log line.
 var logEntry = regexp.MustCompile(`^time=\S+ level=(\S+) msg=("[^"]*"|\S+)(?: ((?:pane|cwd)=\S+))?`)
 
-// expectedLog is every log entry the replay should leave, as level, message
-// and pane or cwd, sorted. With no tmux server, each SessionStart in a pane
-// logs that tmux could not say which window holds the pane, and ls logs that
-// it did not reconcile. Each payload cwd does not exist, so git cannot change
-// into it, which is not "not a git repository" and is logged.
-var expectedLog = []string{
+// hookLog is every log entry one run of the replay's hook lines should
+// leave, as level, message and pane or cwd. With no tmux server, each
+// SessionStart in a pane logs that tmux could not say which window holds the
+// pane. Each payload cwd does not exist, so git cannot change into it, which
+// is not "not a git repository" and is logged.
+var hookLog = []string{
 	`WARN "git failed" cwd=/nonexistent/replay/api`,
 	`WARN "git failed" cwd=/nonexistent/replay/cli`,
 	`WARN "git failed" cwd=/nonexistent/replay/docs`,
@@ -339,11 +431,23 @@ var expectedLog = []string{
 	`WARN "tmux pane info" pane=%3`,
 	`WARN "tmux pane info" pane=%4`,
 	`WARN "tmux pane info" pane=%4`,
-	`WARN "tmux unreachable, not reconciling"`,
 }
 
-// checkLog fails unless the log holds exactly the expected entries.
-func checkLog(t *testing.T, path string) {
+// lsLog is the entry `curia ls` leaves when tmux is unreachable.
+const lsLog = `WARN "tmux unreachable, not reconciling"`
+
+// repeat returns n copies of entries, one after another.
+func repeat(entries []string, n int) []string {
+	var out []string
+	for range n {
+		out = append(out, entries...)
+	}
+	return out
+}
+
+// checkLog fails unless the log holds exactly the entries in want, in any
+// order.
+func checkLog(t *testing.T, path string, want []string) {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
@@ -359,8 +463,9 @@ func checkLog(t *testing.T, path string) {
 		got = append(got, strings.TrimSpace(strings.Join(m[1:], " ")))
 	}
 	slices.Sort(got)
-	if !slices.Equal(got, expectedLog) {
-		t.Errorf("log entries:\n%s\nwant:\n%s\nlog:\n%s",
-			strings.Join(got, "\n"), strings.Join(expectedLog, "\n"), data)
+	want = slices.Sorted(slices.Values(want))
+	if !slices.Equal(got, want) {
+		t.Errorf("log %s: got %d entries, want %d:\n%s\nwant:\n%s\nlog:\n%s", path, len(got), len(want),
+			strings.Join(got, "\n"), strings.Join(want, "\n"), data)
 	}
 }
