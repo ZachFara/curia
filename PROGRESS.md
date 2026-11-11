@@ -4,9 +4,8 @@ This file mirrors the plan for humans; it does not replace it. Task order, inter
 
 ## Status
 
-- **Phase 1 (setup): in review** on branch `chore/setup`. Module, root command and smoke test, `make check`, lefthook hooks, CI workflow, PR template, AGENTS.md, decision records 0001 to 0009. Waiting for the PR to `main` and the owner's approval.
-- GitHub branch protection on `main` (require PRs, require the `check` status, no force pushes) is set up by the orchestrator when the remote exists; it is not in this branch.
-- Phase 2 (Plan 1 execution) has not started. It starts only when the owner says so.
+- **Phase 1 (setup): merged** to `main` as PR #1. `main` is protected (PRs required, `check` required, no force pushes, admins included).
+- **Phase 2: in progress** on integration branch `plan-1`. Wave 1 (Task 1) dispatched.
 
 ## Plan 1 waves
 
@@ -18,7 +17,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 1 | Scaffold, shared types and config | Sonnet (expected, confirmed at dispatch) | `internal/model` types and constants exactly as the Interfaces block; `config.Default`, `config.Load`; `TestDefaults`, `TestLoadMissingFileReturnsDefaults`, `TestLoadOverrides`, `TestCuriaDBEnvOverride` pass; `go build ./cmd/curia` works. `go.mod` and `cmd/curia/main.go` already exist (Ruling 3): Task 1 does not edit them. | not started |
+| 1 | Scaffold, shared types and config | Sonnet (confirmed: 3 files, exact signatures and tests in the plan, no concurrency or UI) | `internal/model` types and constants exactly as the Interfaces block; `config.Default`, `config.Load`; `TestDefaults`, `TestLoadMissingFileReturnsDefaults`, `TestLoadOverrides`, `TestCuriaDBEnvOverride` pass; `go build ./cmd/curia` works. `go.mod` and `cmd/curia/main.go` already exist (Ruling 3): Task 1 does not edit them. | in progress |
 
 ### Wave 2
 
@@ -35,16 +34,21 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
 | 5 | Hook command | Opus (expected, confirmed at dispatch) | `hook.Parse`, `hook.Env`, `hook.Run` in the plan's order; one payload fixture per event kind; `curia hook <Event>` exits 0 on every path and logs errors; `TestParseFixtures`, `TestRunSessionStartRecordsSession`, `TestSessionStartEndsPriorSessionInPane`, `TestHookWithoutTmuxPane`, `TestStopReadsTranscript`, `TestHookLatency` (p95 < 20 ms), `TestMalformedPayloadExitsZero`, `TestHookExitsZeroWhenStoreLocked` pass under `-race`. | not started |
-| 7 | Fleet ranking, badge, ls, status, next | Sonnet (expected, confirmed at dispatch) | `fleet.Reconcile`, `Rank`, `Counts`/`Count`, `Badge`, `Next`; `curia ls [--json]`, `curia status`, `curia next` in their own files; `TestReconcileMarksMissingPanesStale`, `TestReconcileIgnoresSessionsWithoutPane`, `TestRankOrder`, `TestRankOldestFirstWithinGroup`, `TestBadge`, `TestNextSkipsSessionsWithoutPane`, `TestNextNoneWhenAllWorking`, `TestLsJSONGolden` pass. | not started |
 
 ### Wave 4
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
+| 7 | Fleet ranking, badge, ls, status, next | Sonnet (expected, confirmed at dispatch) | `fleet.Reconcile`, `Rank`, `Counts`/`Count`, `Badge`, `Next`; `curia ls [--json]`, `curia status`, `curia next` in their own files; `TestReconcileMarksMissingPanesStale`, `TestReconcileIgnoresSessionsWithoutPane`, `TestRankOrder`, `TestRankOldestFirstWithinGroup`, `TestBadge`, `TestNextSkipsSessionsWithoutPane`, `TestNextNoneWhenAllWorking`, `TestLsJSONGolden` pass. | not started |
 | 8 | Attention markers and mark-seen | Sonnet (expected, confirmed at dispatch) | `attention.Marker`, `WindowMarker`, `Apply`; `curia seen <pane>`; `cmd/curia/hook.go` calls `attention.Apply` after `hook.Run` and a tmux failure never changes the exit code; `TestMarkerByState`, `TestWindowMarkerStrongestWins`, `TestApplySetsWindowOption`, `TestSeenClearsMarker` pass. | not started |
-| 9 | Dashboard popup and sidebar | Opus (expected, confirmed at dispatch) | `ui.Source`, `ui.New`, `Mode`, `ui.ContextLevel`/`Level`; 8 columns, 1 s refresh, the plan's keys; `curia ui` and `curia sidebar`; `TestContextLevelThresholds`, `TestViewShowsRankedRows`, `TestEnterSwitchesToSelectedPane`, `TestSidebarEnterDoesNotQuit`, `TestKillRequiresConfirmation`, `TestFilterNarrowsRows`, `TestRowWithoutPaneNotJumpable`, `TestNarrowWidthTruncates` pass. | not started |
 
 ### Wave 5
+
+| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 9 | Dashboard popup and sidebar | Opus (expected, confirmed at dispatch) | `ui.Source`, `ui.New`, `Mode`, `ui.ContextLevel`/`Level`; 8 columns, 1 s refresh, the plan's keys; `curia ui` and `curia sidebar`; `TestContextLevelThresholds`, `TestViewShowsRankedRows`, `TestEnterSwitchesToSelectedPane`, `TestSidebarEnterDoesNotQuit`, `TestKillRequiresConfirmation`, `TestFilterNarrowsRows`, `TestRowWithoutPaneNotJumpable`, `TestNarrowWidthTruncates` pass. | not started |
+
+### Wave 6
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
@@ -52,27 +56,36 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 
 ## Open Questions
 
-1. Wave 3 runs Tasks 5 and 7 in parallel and both add commands that need to load config and open the store in cmd/curia; decide at Phase 2 pre-flight whether one owns a shared helper or Task 7 moves a wave later.
+1. Resolved by Ruling 4.
 2. Go 1.26 is keg-only via Homebrew on the dev Mac and not on PATH by default; owner to add it to their shell config (dotfiles are chezmoi-managed).
-3. `make check` runs every test under `-race`, which slows code several times. `TestHookLatency` (Task 5, p95 < 20 ms in-process) may be flaky under the race detector, especially on CI runners. Decide at Task 5 dispatch how the budget is measured (for example, the test measures without `-race` via a build tag, or the budget is checked against a race-free run), without skipping or loosening the test.
-4. The plan puts two commands in one file twice: `cmd/curia/ui.go` holds `ui` and `sidebar` (Task 9), `cmd/curia/install.go` holds `install` and `uninstall` (Task 10). AGENTS.md says one file per command. Proposed reading: the plan's Files list wins, and "one file per command" means no command is added to `main.go` or to another task's file. Confirm before dispatching Wave 2.
-5. `go.mod` says `go 1.26.0` plus `toolchain go1.26.11`, not the bare `go 1.26` the setup brief asked for: three dependencies declare `go 1.26.0`, which sorts after `1.26`, so the go command rejects the bare form (decision 0001).
+3. `TestHookLatency` (Task 5, p95 < 20 ms in-process) runs under `-race` in `make check` and may be flaky, especially on CI runners. Decide at Task 5 dispatch how the budget is measured, without skipping or loosening the test.
+4. Resolved by Ruling 5.
+5. `go.mod` says `go 1.26.0` plus `toolchain go1.26.11` rather than bare `go 1.26` (decision 0001).
+6. Task 11's golden `ls --json` file is hand-written but real runs produce real timestamps; decide at Task 11 dispatch how time fields are compared.
+7. No LICENSE file yet although the repo is public; the spec leaves AGPL-3.0 or MIT open. Owner to decide.
 
 ## Rulings
 
 Format: Ruling: what — why — cost if wrong.
 
-1. Ruling: deadcode runs as `deadcode -test ./...` (test binaries count as roots) — Plan 1 is built bottom-up in parallel waves, so packages like store exist for several waves before any command reaches them; without `-test` every wave-2 PR would fail — a function used only by tests survives until the end; mitigated by the Wave 5 done criterion above: the orchestrator runs `deadcode ./...` (no `-test`) on plan-1 and every reported symbol must be either a deliberate test double (`tmux.Fake`) or fixed before the PR to main.
+1. Ruling: deadcode runs as `deadcode -test ./...` (test binaries count as roots) — Plan 1 is built bottom-up in parallel waves, so packages like store exist for several waves before any command reaches them; without `-test` every wave-2 PR would fail — a function used only by tests survives until the end; mitigated by the final-wave done criterion above: the orchestrator runs `deadcode ./...` (no `-test`) on plan-1 and every reported symbol must be either a deliberate test double (`tmux.Fake`) or fixed before the PR to main.
 2. Ruling: the repo's first commit (spec and plan only) was made directly on main — a PR needs a base branch to exist — none beyond one unreviewed docs commit.
 3. Ruling: Phase 1 creates `go.mod` and `cmd/curia/main.go`, although plan Task 1 lists them under "Create"; Task 1 only adds `internal/model` and `internal/config`, so `main.go` already satisfies Task 1's text: a cobra root command named `curia` with a `--version` flag, and nothing else — `go.mod` must exist for setup's dependencies and `main.go` is a shared file owned by the orchestrator — the Task 1 brief needs an amendment.
 
+4. Ruling: Task 7 moves one wave later; waves are now 1: T1; 2: T2, T3, T4, T6, T10; 3: T5; 4: T7, T8; 5: T9; 6: T11 — Tasks 5 and 7 both need config, store and log wiring in `cmd/curia`; Task 5 creates it once and Tasks 7, 8 and 9 reuse it — one extra wave of wall-clock time.
+5. Ruling: the plan's Files lists win over "one file per command": `ui` and `sidebar` share `cmd/curia/ui.go`, `install` and `uninstall` share `install.go`; the convention means no command goes in `main.go` or another task's file — the plan decides files — a trivial file split later.
+6. Ruling: in Task 10 an entry is ours when its command starts with `<bin> hook ` (bin, one space, `hook`, one space) — the extra spaces in the plan are a formatting artifact — an entry with odd spacing would not be recognised as ours.
+7. Ruling: `state.Apply` on a session with an empty ID (first seen mid-run) sets ID, Agent, Pane, Cwd, TranscriptPath and StartedAt from the event, as SessionStart would, then applies the event's own rule — `agent` is NOT NULL in the schema and a row without a pane could never be jumped to — mid-run sessions record a pane where the plan named only the ID.
+8. Ruling: an ended session receiving any event except SessionStart is returned unchanged, including `UpdatedAt` — "ignores every event" is the more specific rule — an ended row's `updated_at` does not advance.
+9. Ruling: `Session.TmuxWindow` stores the tmux window id (for example `@7`) — Task 8 sets window options by that value — the dashboard must resolve a readable window name another way, decided at Task 9.
+
 ## Ledger
 
-One line per task: wave, worktree, branch, status. Empty until Phase 2.
+One line per task: wave, worktree, branch, status.
+
+- Task 1: wave 1, `.worktrees/plan1-t1-scaffold`, `feat/plan1-t1-scaffold`, in progress.
 
 ## Next steps
 
-1. Owner reviews and approves the `chore/setup` PR; orchestrator sets up branch protection on `main` requiring the `check` status.
-2. After merge: create `plan-1` from `main`.
-3. Phase 2 pre-flight: verify the waves against each task's Interfaces block, settle Open Questions 1, 3 and 4, confirm each task's model, and write Task 1's brief with the Ruling 3 amendment.
-4. Dispatch Wave 1 (Task 1).
+1. Review and merge Task 1 into `plan-1`.
+2. Dispatch Wave 2 (Tasks 2, 3, 4, 6, 10) in parallel.
