@@ -1,0 +1,7 @@
+{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":7,"cache_read_input_tokens":70,"cache_creation_input_tokens":700,"output_tokens":1},"content":[{"type":"text","text":"Real."}]}}
+this is not json
+{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0},"content":[{"type":"text","text":"No response requested."}]}}
+{"type":"assistant","message":
+{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"no usage"}]}}
+{"type":"assistant","message":{"model":"claude-opus-5-5","usage":"bogus","content":[]}}
+[1,2,3]
