@@ -1,6 +1,8 @@
 package transcript_test
 
 import (
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,8 +176,8 @@ func TestHostileValues(t *testing.T) {
 		`{"type":"assistant","message":{"model":"m2","usage":{"input_tokens":1,"cache_read_input_tokens":1,"cache_creation_input_tokens":1},"content":[{"type":"text","text":""},{"type":"text","text":"\nsecond line"},null,5]}}`,
 	}
 	u, _ := mustRead(t, tempFile(t, []byte(lines[0]+"\n")), 0)
-	if !u.Found || u.ContextUsed < 0 {
-		t.Errorf("update = %+v", u)
+	if !u.Found || u.ContextUsed != math.MaxInt32 {
+		t.Errorf("update = %+v, want ContextUsed %d", u, math.MaxInt32)
 	}
 	u, _ = mustRead(t, tempFile(t, []byte(lines[1]+"\n")), 0)
 	if !u.Found || u.Model != "m2" || u.ContextUsed != 3 || u.LastAssistantText != "" {
@@ -186,5 +188,68 @@ func TestHostileValues(t *testing.T) {
 func TestDirectoryPathReturnsError(t *testing.T) {
 	if _, _, err := transcript.Read(t.TempDir(), 0); err == nil {
 		t.Error("expected error reading a directory")
+	}
+}
+
+func assistantLine(model, text string, in int) string {
+	block := `{"type":"tool_use","id":"t","name":"Bash","input":{}}`
+	if text != "" {
+		block = `{"type":"text","text":"` + text + `"}`
+	}
+	return fmt.Sprintf(`{"type":"assistant","message":{"model":%q,"usage":{"input_tokens":%d,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[%s]}}`+"\n", model, in, block)
+}
+
+func TestTextFromEarlierLineUsageFromLast(t *testing.T) {
+	content := assistantLine("m1", "All done.\\nMore", 100) + assistantLine("m2", "", 250)
+	u, off := mustRead(t, tempFile(t, []byte(content)), 0)
+	if !u.Found || u.LastAssistantText != "All done." || u.Model != "m2" || u.ContextUsed != 250 {
+		t.Errorf("update = %+v", u)
+	}
+	if off != int64(len(content)) {
+		t.Errorf("offset = %d", off)
+	}
+}
+
+func TestLargeUnreadSpanStartsInTailWindow(t *testing.T) {
+	// A usable line, then ~1.5 MiB of short lines, then the last usable line.
+	filler := strings.Repeat(`{"type":"user","message":{"content":"`+strings.Repeat("y", 90)+`"}}`+"\n", 16000)
+	content := assistantLine("before", "Early.", 1) + filler + assistantLine("last", "Late.", 2)
+	u, off := mustRead(t, tempFile(t, []byte(content)), 0)
+	if !u.Found || u.Model != "last" || u.ContextUsed != 2 || u.LastAssistantText != "Late." {
+		t.Errorf("update = %+v", u)
+	}
+	if off != int64(len(content)) {
+		t.Errorf("offset = %d, want %d", off, len(content))
+	}
+
+	// With only an early usable line outside the window, nothing is reported.
+	content = assistantLine("before", "Early.", 1) + filler
+	u, off = mustRead(t, tempFile(t, []byte(content)), 0)
+	if u.Found || off != int64(len(content)) {
+		t.Errorf("update = %+v, offset %d, want empty and %d", u, off, len(content))
+	}
+}
+
+func TestTailWindowStartsMidLine(t *testing.T) {
+	// One 1.5 MiB line spans the window start; its tail must not be parsed as
+	// a line, and the following line is read normally.
+	big := `{"type":"user","message":{"content":"` + strings.Repeat("z", 3<<19) + `"}}` + "\n"
+	content := assistantLine("before", "Early.", 1) + big + assistantLine("last", "Late.", 2)
+	u, off := mustRead(t, tempFile(t, []byte(content)), 0)
+	if !u.Found || u.Model != "last" || u.LastAssistantText != "Late." {
+		t.Errorf("update = %+v", u)
+	}
+	if off != int64(len(content)) {
+		t.Errorf("offset = %d, want %d", off, len(content))
+	}
+}
+
+func TestTailWindowWithoutCompleteLine(t *testing.T) {
+	// No newline anywhere in the window: nothing consumed, offset unchanged.
+	content := assistantLine("before", "Early.", 1) + strings.Repeat("q", 2<<20)
+	start := int64(len(assistantLine("before", "Early.", 1)))
+	u, off := mustRead(t, tempFile(t, []byte(content)), start)
+	if u.Found || off != start {
+		t.Errorf("update = %+v, offset %d, want empty and %d", u, off, start)
 	}
 }
