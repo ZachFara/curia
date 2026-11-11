@@ -1,0 +1,1 @@
+{"session_id":"sess-1","transcript_path":"/p/t.jsonl","cwd":"/repo","permission_mode":"default","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"src/api.ts","old_string":"a","new_string":"b"}}
