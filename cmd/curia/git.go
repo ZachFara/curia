@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -17,33 +20,63 @@ import (
 // keep the hook past its timeout.
 const gitWaitDelay = 100 * time.Millisecond
 
+// maxHeadBytes bounds the read of a git dir's HEAD file, which is untrusted.
+// A symbolic ref is far shorter.
+const maxHeadBytes = 4096
+
 // gitInfo returns the repository top level and current branch for cwd, or
-// empty strings when cwd is empty or not in a repository. The branch is
-// empty on a detached HEAD. The two git commands run at the same time,
-// bounded by subprocessTimeout. Any failure other than "not a git
-// repository" (git missing, a timeout, a git too old for --show-current) is
-// logged on logger as one warning.
+// empty strings when cwd is empty or not in a repository. It runs one git
+// process, bounded by subprocessTimeout, for the top level and the git dir,
+// then reads the branch from <git dir>/HEAD: "ref: refs/heads/<branch>", and
+// anything else (a detached HEAD) is no branch. This is right in a linked
+// worktree, whose git dir has its own HEAD, and before the first commit. Any
+// failure other than "not a git repository" (git missing, a timeout, an
+// unreadable HEAD) is logged on logger as one warning.
 func gitInfo(ctx context.Context, cwd string, logger *slog.Logger) (repo, branch string) {
 	if cwd == "" { // git -C "" would use this process's directory
 		return "", ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 	defer cancel()
-	waitRepo := startGit(ctx, cwd, "rev-parse", "--show-toplevel")
-	waitBranch := startGit(ctx, cwd, "branch", "--show-current")
-	repoRes, branchRes := waitRepo(), waitBranch()
-	if repoRes.err != nil {
-		// The branch call fails for the same reason; one line is enough.
-		if !repoRes.notARepository() {
-			repoRes.log(logger, cwd)
+	res := runGit(ctx, cwd, "rev-parse", "--show-toplevel", "--absolute-git-dir")
+	if res.err != nil {
+		if !res.notARepository() {
+			res.log(logger, cwd)
 		}
 		return "", ""
 	}
-	if branchRes.err != nil {
-		branchRes.log(logger, cwd)
-		return repoRes.out, ""
+	repo, gitDir, ok := strings.Cut(res.out, "\n")
+	if !ok || strings.Contains(gitDir, "\n") {
+		logger.Warn("git failed", "cwd", cwd, "args", strings.Join(res.args, " "), "err", "unexpected output", "stdout", res.out)
+		return "", ""
 	}
-	return repoRes.out, branchRes.out
+	branch, err := headBranch(gitDir)
+	if err != nil {
+		logger.Warn("git HEAD unreadable", "cwd", cwd, "err", err.Error())
+	}
+	return repo, branch
+}
+
+// headBranch returns the branch the HEAD file in gitDir names, or "" when
+// HEAD is detached.
+func headBranch(gitDir string) (string, error) {
+	f, err := os.Open(filepath.Clean(filepath.Join(gitDir, "HEAD")))
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(io.LimitReader(f, maxHeadBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(b) > maxHeadBytes {
+		return "", fmt.Errorf("%s/HEAD exceeds %d bytes", gitDir, maxHeadBytes)
+	}
+	ref, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "ref: refs/heads/")
+	if !ok {
+		return "", nil
+	}
+	return ref, nil
 }
 
 // gitResult is the outcome of one git call.
@@ -69,24 +102,19 @@ func (r gitResult) log(logger *slog.Logger, cwd string) {
 	logger.Warn("git failed", "cwd", cwd, "args", strings.Join(r.args, " "), "err", msg, "stderr", r.stderr)
 }
 
-// startGit starts git -C cwd args; the returned func waits for it. Its
-// stdout and stderr are captured, never passed through.
-func startGit(ctx context.Context, cwd string, args ...string) func() gitResult {
+// runGit runs git -C cwd args and waits for it. Its stdout and stderr are
+// captured, never passed through.
+func runGit(ctx context.Context, cwd string, args ...string) gitResult {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", cwd}, args...)...)
 	cmd.Env = gitEnv()
 	cmd.WaitDelay = gitWaitDelay
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	res := gitResult{args: args}
-	if res.err = cmd.Start(); res.err != nil {
-		return func() gitResult { return res }
-	}
-	return func() gitResult {
-		res.err = cmd.Wait()
-		res.timedOut = ctx.Err() != nil
-		res.out, res.stderr = strings.TrimSpace(out.String()), strings.TrimSpace(stderr.String())
-		return res
-	}
+	res.err = cmd.Run()
+	res.timedOut = ctx.Err() != nil
+	res.out, res.stderr = strings.TrimSpace(out.String()), strings.TrimSpace(stderr.String())
+	return res
 }
 
 // gitRepoVars are the variables `git rev-parse --local-env-vars` lists: set
