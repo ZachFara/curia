@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/ZachFara/curia/internal/hook"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/tmux"
 )
 
 // hookResult is what one in-process run of `curia hook` produced.
@@ -220,4 +222,96 @@ func TestHookLogCannotBeForged(t *testing.T) {
 	if len(res.log) != 1 {
 		t.Errorf("log = %q, want the untrusted text kept on one line", res.log)
 	}
+}
+
+// markerCalls returns the SetWindowOption calls the fake recorded.
+func markerCalls(f *tmux.Fake) []string {
+	var out []string
+	for _, c := range f.Calls {
+		if strings.HasPrefix(c, "SetWindowOption") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// markerHook is a hook run in pane %1 of window @7 against a fake tmux.
+type markerHook struct {
+	t    *testing.T
+	db   string
+	fake *tmux.Fake
+}
+
+func newMarkerHook(t *testing.T) *markerHook {
+	t.Helper()
+	db := hookHome(t)
+	t.Setenv("TMUX_PANE", "%1")
+	fake := useFakeTmux(t)
+	fake.Panes = []tmux.Pane{{ID: "%1", Session: "s", WindowID: "@7"}}
+	return &markerHook{t: t, db: db, fake: fake}
+}
+
+// event runs one hook event for session id and returns the marker calls it made.
+func (m *markerHook) event(kind, id string) []string {
+	m.t.Helper()
+	m.fake.Calls = nil
+	body := `{"session_id":"` + id + `","cwd":"` + m.t.TempDir() + `","message":"needs you"}`
+	assertQuietExitZero(m.t, runHookCmd(m.t, strings.NewReader(body), "hook", kind))
+	return markerCalls(m.fake)
+}
+
+func (m *markerHook) seen() {
+	m.t.Helper()
+	dbPath := m.db
+	st, err := store.Open(dbPath)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	if err := st.MarkSeen(context.Background(), "%1", time.Now()); err != nil {
+		m.t.Fatal(err)
+	}
+}
+
+func wantCalls(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Errorf("marker calls = %q, want %q", got, want)
+	}
+}
+
+func TestHookToolEventsOnWorkingSessionMakeNoCall(t *testing.T) {
+	m := newMarkerHook(t)
+	wantCalls(t, m.event("SessionStart", "A"))
+	wantCalls(t, m.event("PreToolUse", "A"))
+	wantCalls(t, m.event("PostToolUse", "A"))
+}
+
+func TestHookNotificationOnSeenSessionSetsRed(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.seen()
+	wantCalls(t, m.event("Notification", "A"), "SetWindowOption @7 @curia_marker red")
+}
+
+func TestHookPostToolUseClearsRed(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	wantCalls(t, m.event("PostToolUse", "A"), "SetWindowOption @7 @curia_marker ")
+}
+
+func TestHookSessionEndClearsRed(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	wantCalls(t, m.event("SessionEnd", "A"), "SetWindowOption @7 @curia_marker ")
+}
+
+func TestHookSessionStartEndingRedSessionClearsIt(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	// B takes over pane %1; A is ended inside hook.Run while red.
+	wantCalls(t, m.event("SessionStart", "B"), "SetWindowOption @7 @curia_marker ")
 }

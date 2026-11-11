@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/hook"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -94,15 +96,55 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	}
 	defer func() { _ = st.Close() }()
 	client := newTmuxClient()
+	before, listErr := st.ListSessions(ctx, store.ListFilter{IncludeEnded: true})
+	if listErr != nil {
+		logger.Error("hook list sessions before event", "err", listErr.Error())
+	}
 	sess, err := hookRun(ctx, model.EventKind(args[0]), payload, hookEnv(ctx, client, logger), st, cfg)
-	if sess.TmuxWindow != "" {
+	if err != nil && sess.ID == "" {
+		return err // nothing was written
+	}
+	for _, w := range markerWindows(before, listErr == nil, sess) {
 		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
-		defer cancel()
-		if aerr := attention.Apply(actx, client, st, sess.TmuxWindow); aerr != nil {
-			logger.Error("hook attention marker", "window", sess.TmuxWindow, "err", aerr.Error())
+		if aerr := attention.Apply(actx, client, st, w); aerr != nil {
+			logger.Error("hook attention marker", "window", w, "err", aerr.Error())
 		}
+		cancel()
 	}
 	return err
+}
+
+// markerWindows returns the windows whose marker this event may have
+// changed, given the sessions listed before hook.Run (known is false when
+// that read failed, which means apply) and the session it returned. The
+// event can change a window's marker when the session's marker or ended-ness
+// changed, or it moved away from a window, or when it ended a red session in the same pane
+// (SessionStart ends the pane's other sessions inside hook.Run).
+func markerWindows(before []model.Session, known bool, after model.Session) []string {
+	var windows []string
+	add := func(w string) {
+		if w != "" && !slices.Contains(windows, w) {
+			windows = append(windows, w)
+		}
+	}
+	var prev model.Session
+	for _, b := range before {
+		switch {
+		case b.ID == after.ID:
+			prev = b
+		case after.Pane != "" && b.Pane == after.Pane && b.State != model.StateEnded && attention.Marker(b) != "":
+			add(b.TmuxWindow)
+		}
+	}
+	changed := !known ||
+		attention.Marker(prev) != attention.Marker(after) ||
+		(prev.TmuxWindow != "" && prev.TmuxWindow != after.TmuxWindow) ||
+		(prev.State == model.StateEnded) != (after.State == model.StateEnded)
+	if changed {
+		add(after.TmuxWindow)
+		add(prev.TmuxWindow)
+	}
+	return windows
 }
 
 // readPayload reads stdin, up to maxPayloadBytes.

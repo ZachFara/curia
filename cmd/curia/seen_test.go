@@ -86,7 +86,7 @@ func TestHookAppliesMarker(t *testing.T) {
 	fake := useFakeTmux(t)
 	prev := hookRun
 	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (model.Session, error) {
-		return model.Session{ID: "A", TmuxWindow: "@7", State: model.StateWorking}, nil
+		return model.Session{ID: "A", TmuxWindow: "@7", State: model.StateWaiting, UpdatedAt: time.Now()}, nil
 	}
 	t.Cleanup(func() { hookRun = prev })
 
@@ -122,7 +122,7 @@ func TestHookAttentionFailureIsLoggedExitZero(t *testing.T) {
 	t.Cleanup(func() { newTmuxClient = prevC })
 	prev := hookRun
 	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (model.Session, error) {
-		return model.Session{ID: "A", TmuxWindow: "@7"}, nil
+		return model.Session{ID: "A", TmuxWindow: "@7", State: model.StateWaiting, UpdatedAt: time.Now()}, nil
 	}
 	t.Cleanup(func() { hookRun = prev })
 
