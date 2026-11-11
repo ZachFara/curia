@@ -5,7 +5,7 @@ This file mirrors the plan for humans; it does not replace it. Task order, inter
 ## Status
 
 - **Phase 1 (setup): merged** to `main` as PR #1. `main` is protected (PRs required, `check` required, no force pushes, admins included).
-- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 merged (Task 5, PR #8). Wave 4 merged (Tasks 7 and 8, PRs #10 and #9). Wave 5 (Task 9) dispatched.
+- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 merged (Task 5, PR #8). Wave 4 merged (Tasks 7 and 8, PRs #10 and #9). Wave 5 merged (Task 9, PR #11). Wave 6 (Task 11) dispatched.
 
 ## Plan 1 waves
 
@@ -52,7 +52,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 11 | End-to-end replay of five sessions | Opus (expected, confirmed at dispatch) | Hand-written fixtures in `testdata/replay/` and golden `e2e/testdata/ls.golden.json` (never generated from program output); `TestReplayFiveSessions` passes (every run exits 0, p95 < 50 ms per process, `ls --json` order S2, S3, S1, S5, `status` prints `W1`); `go test -race ./...` passes; the live check in Step 5 done by hand and reported. **Plan-level criterion:** the orchestrator runs `deadcode ./...` (without `-test`) on `plan-1`; every reported symbol is either a deliberate test double (`tmux.Fake`) or fixed before the PR to main (Ruling 1). | not started |
+| 11 | End-to-end replay of five sessions | Opus (confirmed: cross-process test of the built binary with timing and concurrency) | Hand-written fixtures in `testdata/replay/` and golden `e2e/testdata/ls.golden.json` (never generated from program output); `TestReplayFiveSessions` passes (every run exits 0, p95 < 50 ms per process, `ls --json` order S2, S3, S1, S5, `status` prints `W1`); `go test -race ./...` passes; the live check in Step 5 done by hand and reported. **Plan-level criterion:** the orchestrator runs `deadcode ./...` (without `-test`) on `plan-1`; every reported symbol is either a deliberate test double (`tmux.Fake`) or fixed before the PR to main (Ruling 1). | in progress |
 
 ## Open Questions
 
@@ -61,7 +61,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 3. `TestHookLatency` (Task 5, p95 < 20 ms in-process) runs under `-race` in `make check` and may be flaky, especially on CI runners. Decide at Task 5 dispatch how the budget is measured, without skipping or loosening the test.
 4. Resolved by Ruling 5.
 5. `go.mod` says `go 1.26.0` plus `toolchain go1.26.11` rather than bare `go 1.26` (decision 0001).
-6. Task 11's golden `ls --json` file is hand-written but real runs produce real timestamps; decide at Task 11 dispatch how time fields are compared.
+6. Resolved by Ruling 23.
 8. `curia uninstall` only removes entries for the current binary path (Ruling 13); entries from a moved or rebuilt binary stay behind and fire against a missing file. Decide whether uninstall should also match older paths.
 9. Under sustained heavy write load a waiting SQLite writer can time out (SQLite polls for the lock rather than queueing). Hooks are short so this is unlikely in practice; revisit if the log shows busy errors.
 10. `fleet.Reconcile` matches sessions to panes by pane id alone. A restarted tmux server numbers panes from `%0` again, so an old session whose id is reused is never marked stale and `next` could jump to an unrelated pane. The data model has no server identity; decide in the final review or Plan 2.
@@ -96,11 +96,17 @@ Format: Ruling: what — why — cost if wrong.
 20. Ruling: `curia next` reconciles with live panes before choosing its target, as `ls` does; `curia status` does not — `next` must not jump to a dead pane, and `status` runs every 2 seconds — the badge can count a session whose pane was killed until `ls`, `next` or the dashboard runs.
 21. Ruling: the dashboard shows `session:window` using the window's name, which it resolves from `tmux.Client.ListPanes` on each refresh, falling back to the stored window id — Ruling 9 stores the id, which is unreadable in a table — one more tmux call per refresh.
 
+22. Ruling: views show the repo as the basename of the stored path; the store and `ls --json` keep the full git top-level path — the plan's hook records `rev-parse --show-toplevel` and the spec's column is `repo@branch` — two repos with the same directory name look alike in a table.
+23. Ruling: Task 11 compares `ls --json` with its hand-written golden file after normalising what cannot be fixed in advance: every non-null time becomes `"<time>"` and the repository root in paths becomes `<root>`; payload `cwd` values are paths that do not exist, so repo and branch are empty — the golden file must be written by hand, and real runs produce real times and machine-specific paths — a wrong timestamp value would not be caught by this test (the store tests cover time round-trips).
+24. Ruling: Task 11 runs the binary with `TMUX` unset and `TMUX_TMPDIR` set to an empty temp directory, so no tmux server is reachable — the plan says "no tmux server", and the hook would otherwise query the developer's real server — none.
+25. Ruling: the live check in Task 11 Step 5 (`curia install`, three real sessions) is left to the owner — it edits the real `~/.claude/settings.json` and `~/.tmux.conf` — Plan 1 merges tested but not proven against a live setup until the owner runs it.
+
 ## Ledger
 
 One line per task: wave, worktree, branch, status.
 
 - Task 1: wave 1, `.worktrees/plan1-t1-scaffold`, `feat/plan1-t1-scaffold`, merged (PR #2), Sonnet, 0 fix rounds.
+- Task 11: wave 6, `.worktrees/plan1-t11-replay`, `feat/plan1-t11-replay`, in progress.
 - Task 9: wave 5, `.worktrees/plan1-t9-ui`, `feat/plan1-t9-ui`, merged (PR #11), Opus, 1 fix rounds.
 - Task 7: wave 4, `.worktrees/plan1-t7-fleet`, `feat/plan1-t7-fleet`, merged (PR #10), Opus, 0 fix rounds.
 - Task 8: wave 4, `.worktrees/plan1-t8-attention`, `feat/plan1-t8-attention`, merged (PR #9), Sonnet, 1 fix rounds.
@@ -113,8 +119,8 @@ One line per task: wave, worktree, branch, status.
 
 ## Next steps
 
-1. Review and merge Task 9 into `plan-1`.
-2. Dispatch Wave 6 (Task 11), then the final whole-branch review.
+1. Review and merge Task 11 into `plan-1`.
+2. Run `deadcode ./...` without `-test`, then the final whole-branch review, then open the PR from `plan-1` to `main`.
 
 ## Deferred minors (for the final review)
 
@@ -127,3 +133,4 @@ One line per task: wave, worktree, branch, status.
 - Task 5: a payload over 1 MiB drops the event; stdin read has no deadline; whole-process hook latency was only measured on a loaded machine (check in Task 11).
 - Task 7: `ls --json` HTML-escapes `&&` and passes raw C1 and bidi characters; `ls` help text is inaccurate about hidden stale sessions; `Reconcile`'s in-transaction re-check is untested; `newTmuxClient` is used by four commands and belongs in `common.go`.
 - Task 8: each `Apply` re-lists all live sessions; `seen` stops at the first failing window.
+- Task 9: `internal/ui` duplicates `ls.go`'s text cleaner and `age`; the kill confirmation does not re-check that the row is still live; the filter matches the full repo path while the cell shows the basename; `ls` table should show the repo basename too (Ruling 22).
