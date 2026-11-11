@@ -15,8 +15,8 @@ func Apply(s model.Session, ev model.Event, openDecision bool) model.Session {
 	if Ignores(s, ev.Kind) {
 		return s
 	}
-	if s.ID == "" {
-		start(&s, ev)
+	if s.ID == "" && ev.Kind != model.SessionStart {
+		start(&s, ev) // first seen mid-run; SessionStart starts below
 	}
 	s.UpdatedAt = ev.At
 
@@ -74,8 +74,14 @@ func stop(s *model.Session, ev model.Event, openDecision bool) {
 	}
 }
 
-// start copies the session identity from ev, as SessionStart does.
+// start copies the session identity from ev, as SessionStart does. The
+// transcript offset belongs to the old transcript, so it restarts at 0 when
+// the path changes; a session with no path yet keeps it, because the hook
+// read ev's transcript up to it.
 func start(s *model.Session, ev model.Event) {
+	if s.TranscriptPath != "" && s.TranscriptPath != ev.TranscriptPath {
+		s.TranscriptOffset = 0
+	}
 	s.ID = ev.SessionID
 	s.Agent = "claude"
 	s.Pane = ev.Pane

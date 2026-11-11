@@ -197,6 +197,42 @@ func TestIgnores(t *testing.T) {
 	}
 }
 
+func TestSessionStartResetsOffsetForNewTranscript(t *testing.T) {
+	s := base()
+	s.TranscriptOffset = 500
+	same := state.Apply(s, model.Event{Kind: model.SessionStart, SessionID: "s1", TranscriptPath: "/t", At: t1}, false)
+	if same.TranscriptOffset != 500 {
+		t.Errorf("same transcript: offset = %d, want 500 kept", same.TranscriptOffset)
+	}
+	moved := state.Apply(s, model.Event{Kind: model.SessionStart, SessionID: "s1", TranscriptPath: "/t2", At: t1}, false)
+	if moved.TranscriptPath != "/t2" || moved.TranscriptOffset != 0 {
+		t.Errorf("new transcript: path %q offset %d, want /t2 and 0", moved.TranscriptPath, moved.TranscriptOffset)
+	}
+	// First seen mid-run: the hook has already read ev's transcript up to the
+	// offset, so the offset belongs to the path the session takes from ev.
+	fresh := model.Session{TranscriptOffset: 300}
+	got := state.Apply(fresh, model.Event{Kind: model.PostToolUse, SessionID: "n", TranscriptPath: "/tp", At: t1}, false)
+	if got.TranscriptOffset != 300 {
+		t.Errorf("first seen mid-run: offset = %d, want 300 kept", got.TranscriptOffset)
+	}
+}
+
+func TestPostToolUseTaskDoesNotCountSubagent(t *testing.T) {
+	got := state.Apply(base(), model.Event{Kind: model.PostToolUse, SessionID: "s1", ToolName: "Task", At: t1}, false)
+	if got.SubagentsActive != 0 {
+		t.Errorf("SubagentsActive = %d, want 0 (only PreToolUse counts)", got.SubagentsActive)
+	}
+}
+
+func TestNotificationWithEmptyMessage(t *testing.T) {
+	s := base()
+	s.LastUpdate = "Bash ls"
+	got := state.Apply(s, model.Event{Kind: model.Notification, SessionID: "s1", At: t1}, false)
+	if got.State != model.StateWaiting || got.LastUpdate != "" || !got.UpdatedAt.Equal(t1) {
+		t.Errorf("got %+v, want waiting with the (empty) prompt text", got)
+	}
+}
+
 func TestSubagentCountNeverNegative(t *testing.T) {
 	s := base()
 	got := state.Apply(s, model.Event{Kind: model.SubagentStop, SessionID: "s1", At: t1}, false)
@@ -225,6 +261,12 @@ func TestLastUpdateTruncatedTo80Runes(t *testing.T) {
 	}, false)
 	if n := len([]rune(got.LastUpdate)); n != 80 {
 		t.Errorf("message LastUpdate runes = %d, want 80", n)
+	}
+	got = state.Apply(base(), model.Event{
+		Kind: model.Stop, SessionID: "s1", Message: target, At: t1,
+	}, false)
+	if got.LastUpdate != string([]rune(target)[:80]) {
+		t.Errorf("Stop LastUpdate = %q, want the first 80 runes", got.LastUpdate)
 	}
 }
 
