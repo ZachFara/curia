@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -166,17 +167,14 @@ func (m Model) cellText(s model.Session, c column) string {
 	case colWindow:
 		return m.windowText(s)
 	case colRepo:
-		if s.Repo == "" || s.Branch == "" {
-			return s.Repo
-		}
-		return s.Repo + "@" + s.Branch
+		return repoText(s)
 	case colModel:
 		return s.Model
 	case colContext:
 		if s.ContextMax <= 0 {
 			return ""
 		}
-		return fmt.Sprintf("%d%%", s.ContextUsed*100/s.ContextMax)
+		return fmt.Sprintf("%d%%", contextPct(s.ContextUsed, s.ContextMax))
 	case colSubagents:
 		return strconv.Itoa(s.SubagentsActive)
 	case colUpdate:
@@ -184,6 +182,19 @@ func (m Model) cellText(s model.Session, c column) string {
 	default:
 		return age(s.UpdatedAt, m.now())
 	}
+}
+
+// repoText is "repo@branch" with the basename of the stored repo path
+// (Ruling 22), the repo alone without a branch, and empty without a repo.
+func repoText(s model.Session) string {
+	if s.Repo == "" {
+		return ""
+	}
+	repo := filepath.Base(s.Repo)
+	if s.Branch == "" {
+		return repo
+	}
+	return repo + "@" + s.Branch
 }
 
 // windowText is "session:window" with the window's current name, or its

@@ -154,9 +154,10 @@ func TestContextLevelThresholds(t *testing.T) {
 		{86, 100, LevelCrit},
 		{50, 0, LevelUnknown},
 		{0, 200000, LevelOK},
-		{170001, 200000, LevelCrit}, // 85.0005% is above 85%
-		{170000, 200000, LevelWarn},
-		{119999, 200000, LevelOK},
+		{171999, 200000, LevelWarn}, // shown as 85%, so Warn
+		{172000, 200000, LevelCrit}, // 86%
+		{119999, 200000, LevelOK},   // shown as 59%
+		{120000, 200000, LevelWarn},
 	}
 	for _, tc := range tests {
 		if got := ContextLevel(tc.used, tc.max, 60, 85); got != tc.want {
@@ -576,5 +577,92 @@ func TestPasteIsNotACommand(t *testing.T) {
 	m, _ = m.Update(paste("au th"))
 	if s := statusLine(m); !strings.Contains(s, "/au th") {
 		t.Errorf("status line = %q, want the pasted filter /au th", s)
+	}
+}
+
+// A stale session's pane is gone; after a tmux server restart its id may
+// name an unrelated pane, so it is never jumped to or killed.
+func TestStaleRowNotJumpableOrKillable(t *testing.T) {
+	stale := threeSessions()[1] // pane %5, which the fake server has
+	stale.State = model.StateStale
+	m, fake, _ := newTest(t, ModePopup, stale)
+	m, cmd := press(m, "enter")
+	if isQuit(cmd) || !strings.Contains(statusLine(m), "pane gone") {
+		t.Errorf("Enter on a stale row: quit %v, status %q, want pane gone", isQuit(cmd), statusLine(m))
+	}
+	y := lineWith(m.View(), "claude-sonnet-4-5")
+	m, cmd = m.Update(tea.MouseMsg{X: 3, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if isQuit(cmd) || !strings.Contains(statusLine(m), "pane gone") {
+		t.Errorf("click on a stale row: quit %v, status %q, want pane gone", isQuit(cmd), statusLine(m))
+	}
+	m, _ = press(m, "x")
+	if s := statusLine(m); !strings.Contains(s, "pane gone") {
+		t.Errorf("x on a stale row: status %q, want pane gone", s)
+	}
+	_, _ = press(m, "y")
+	if got := slices.Concat(calls(fake, "SwitchTo"), calls(fake, "KillPane")); len(got) != 0 {
+		t.Errorf("tmux calls on a stale row = %q, want none", got)
+	}
+}
+
+// Ruling 22: the repo column shows the basename of the stored repo path.
+func TestRepoColumnShowsBasename(t *testing.T) {
+	s := threeSessions()[:2]
+	s[0].Repo = "/Users/me/src/curia"
+	s[1].Repo, s[1].Branch, s[1].Model = "", "main", "no-repo-model"
+	m, _, _ := newTest(t, ModePopup, s...)
+	view := m.View()
+	if !strings.Contains(view, "curia@main") || strings.Contains(view, "/Users/me") {
+		t.Errorf("repo column is not curia@main:\n%s", view)
+	}
+	line := strings.Split(view, "\n")[lineWith(view, "no-repo-model")]
+	if strings.Contains(line, "@main") || strings.Contains(line, ".") {
+		t.Errorf("row without a repo = %q, want an empty repo cell", line)
+	}
+}
+
+func TestShownPercentMatchesColor(t *testing.T) {
+	s := threeSessions()[0]
+	s.ContextUsed, s.ContextMax = 171999, 200000 // 85.9995%
+	m, _, _ := newTest(t, ModePopup, s)
+	if !strings.Contains(m.View(), "85%") {
+		t.Errorf("view lacks 85%%:\n%s", m.View())
+	}
+	if l := ContextLevel(s.ContextUsed, s.ContextMax, 60, 85); l != LevelWarn {
+		t.Errorf("level of a row shown as 85%% = %v, want Warn", l)
+	}
+}
+
+// slowTmux is a tmux client whose ListPanes waits until its context ends.
+type slowTmux struct {
+	tmux.Fake
+	deadline time.Duration // time left on ListPanes' context when called
+}
+
+func (s *slowTmux) ListPanes(ctx context.Context) ([]tmux.Pane, error) {
+	if d, ok := ctx.Deadline(); ok {
+		s.deadline = time.Until(d)
+	}
+	return nil, ctx.Err()
+}
+
+// slowSource uses up most of the refresh's time.
+type slowSource struct{ fakeSource }
+
+func (s *slowSource) Sessions(ctx context.Context) ([]model.Session, error) {
+	d, _ := ctx.Deadline()
+	time.Sleep(time.Until(d) - 50*time.Millisecond)
+	return s.fakeSource.Sessions(ctx)
+}
+
+// The window-name lookup has its own timeout: a slow Source does not
+// leave it an expired or nearly expired context.
+func TestWindowNamesHaveOwnTimeout(t *testing.T) {
+	tm := &slowTmux{}
+	src := &slowSource{fakeSource{sessions: threeSessions()[:1]}}
+	m := New(src, tm, config.Default(), func() time.Time { return testNow }, ModePopup)
+	_ = refresh(t, m)
+	if tm.deadline < 500*time.Millisecond {
+		t.Errorf("ListPanes got %v of its timeout, want its own (about %v)", tm.deadline, tmuxTimeout)
 	}
 }

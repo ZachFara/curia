@@ -19,9 +19,9 @@ import (
 const (
 	// refreshEvery is how often the model re-reads its Source.
 	refreshEvery = time.Second
-	// refreshTimeout bounds one refresh: the Source and the tmux pane list.
+	// refreshTimeout bounds one read of the Source.
 	refreshTimeout = 2 * time.Second
-	// tmuxTimeout bounds one jump or kill.
+	// tmuxTimeout bounds one tmux call: the window-name lookup, a jump or a kill.
 	tmuxTimeout = time.Second
 )
 
@@ -52,21 +52,28 @@ const (
 	LevelCrit
 )
 
-// ContextLevel is LevelOK under warnPct percent of limit (the context
-// window's size), LevelWarn from warnPct to critPct percent inclusive,
-// LevelCrit above critPct, and LevelUnknown when limit is not positive. It
-// compares exact fractions, so 85.1% is above 85%.
+// ContextLevel grades the whole percentage of limit (the context window's
+// size) that used fills, rounded down as the dashboard shows it: LevelOK
+// under warnPct, LevelWarn from warnPct to critPct inclusive, LevelCrit
+// above critPct, and LevelUnknown when limit is not positive.
 func ContextLevel(used, limit, warnPct, critPct int) Level {
-	switch {
-	case limit <= 0:
+	if limit <= 0 {
 		return LevelUnknown
-	case used*100 < warnPct*limit:
+	}
+	switch pct := contextPct(used, limit); {
+	case pct < warnPct:
 		return LevelOK
-	case used*100 <= critPct*limit:
+	case pct <= critPct:
 		return LevelWarn
 	default:
 		return LevelCrit
 	}
+}
+
+// contextPct is the whole percentage of limit that used fills, rounded
+// down; limit must be positive.
+func contextPct(used, limit int) int {
+	return used * 100 / limit
 }
 
 // Model is the dashboard's Bubble Tea model.
@@ -122,13 +129,15 @@ func (m Model) refresh() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 		defer cancel()
 		sessions, err := src.Sessions(ctx)
-		return refreshMsg{sessions: sessions, names: windowNames(ctx, tm), err: err}
+		return refreshMsg{sessions: sessions, names: windowNames(tm), err: err}
 	}
 }
 
 // windowNames maps each window id on the server to its name; nil when tmux
 // cannot list its panes, so every window shows its stored id.
-func windowNames(ctx context.Context, tm tmux.Client) map[string]string {
+func windowNames(tm tmux.Client) map[string]string {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxTimeout)
+	defer cancel()
 	panes, err := tm.ListPanes(ctx)
 	if err != nil {
 		return nil
@@ -304,8 +313,7 @@ func (m Model) jump() (Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	if s.Pane == "" {
-		m.notice = "not in tmux"
+	if m.notice = unreachable(s); m.notice != "" {
 		return m, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxTimeout)
@@ -324,14 +332,27 @@ func (m Model) jump() (Model, tea.Cmd) {
 // fixed now, so a refresh that reorders the rows cannot change the target.
 func (m Model) askKill() Model {
 	s, ok := m.current()
-	switch {
-	case !ok:
-	case s.Pane == "":
-		m.notice = "not in tmux"
-	default:
+	if !ok {
+		return m
+	}
+	if m.notice = unreachable(s); m.notice == "" {
 		m.killPane = s.Pane
 	}
 	return m
+}
+
+// unreachable says why s's pane cannot be jumped to or killed, or is empty
+// when it can. A stale session's pane is gone; after a tmux server restart
+// its id may name an unrelated pane, so it is never used.
+func unreachable(s model.Session) string {
+	switch {
+	case s.Pane == "":
+		return "not in tmux"
+	case s.State == model.StateStale:
+		return "pane gone"
+	default:
+		return ""
+	}
 }
 
 // confirmKill kills the pane on "y"; any other key cancels. The row
