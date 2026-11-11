@@ -4,16 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 	"text/tabwriter"
 	"time"
-	"unicode"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/ui"
 )
 
 // lsJSON is --json.
@@ -106,49 +105,13 @@ func printJSON(w io.Writer, sessions []model.Session) error {
 }
 
 // printTable prints one row per session. Every cell is session text, which
-// is untrusted, so it goes through cell before reaching the terminal.
+// is untrusted, so it goes through ui.Cell before reaching the terminal.
 func printTable(w io.Writer, sessions []model.Session, now time.Time) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "STATE\tPANE\tREPO\tBRANCH\tAGE\tLAST UPDATE")
 	for _, s := range sessions {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", cell(string(s.State)), cell(s.Pane),
-			cell(s.Repo), cell(s.Branch), age(s.UpdatedAt, now), cell(s.LastUpdate))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", ui.Cell(string(s.State)), ui.Cell(s.Pane),
+			ui.Cell(s.Repo), ui.Cell(s.Branch), ui.Cell(ui.Age(s.UpdatedAt, now)), ui.Cell(s.LastUpdate))
 	}
 	return tw.Flush()
-}
-
-// cell makes s safe to print in a table: every character that is not
-// printable (control characters such as ESC, C1 codes, tabs, line breaks,
-// and invisible format characters such as bidi overrides) becomes '?', so
-// no escape sequence reaches the terminal and the row stays one line.
-// An empty cell is "-".
-func cell(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return strings.Map(func(r rune) rune {
-		if unicode.IsPrint(r) { // includes the ASCII space
-			return r
-		}
-		return '?'
-	}, s)
-}
-
-// age is how long before now t was, in its largest whole unit; "-" for the
-// zero time.
-func age(t, now time.Time) string {
-	if t.IsZero() {
-		return "-"
-	}
-	d := max(now.Sub(t), 0)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d/time.Second))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d/time.Minute))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d/time.Hour))
-	default:
-		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
-	}
 }
