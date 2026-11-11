@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,17 +11,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 )
 
-// lsNow is the clock of curia ls; tests replace it. lsJSON is --json.
-var (
-	lsNow  = time.Now
-	lsJSON bool
-)
+// lsJSON is --json.
+var lsJSON bool
 
 func init() {
 	c := &cobra.Command{
@@ -47,8 +42,8 @@ func runLs(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	now := lsNow()
-	if err = reconcile(cmd.Context(), st, cfg, now); err != nil {
+	now := clock()
+	if err = reconcile(cmd.Context(), st, newTmuxClient(), cfg.LogPath, now); err != nil {
 		return err
 	}
 	sessions, err := st.ListSessions(cmd.Context(), store.ListFilter{HideStaleBefore: now.Add(-cfg.StaleHideAfter)})
@@ -60,22 +55,6 @@ func runLs(cmd *cobra.Command, _ []string) error {
 		return printJSON(cmd.OutOrStdout(), ranked)
 	}
 	return printTable(cmd.OutOrStdout(), ranked, now)
-}
-
-// reconcile marks sessions whose pane is gone as stale. When tmux cannot
-// list its panes (no server, or not installed) it logs that and skips.
-func reconcile(ctx context.Context, st *store.Store, cfg config.Config, now time.Time) error {
-	tctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
-	defer cancel()
-	panes, err := newTmux().ListPanes(tctx)
-	if err != nil {
-		if logger, closeLog, lerr := openLog(cfg.LogPath); lerr == nil {
-			logger.Warn("ls: tmux unreachable, not reconciling", "err", err.Error())
-			_ = closeLog()
-		}
-		return nil
-	}
-	return fleet.Reconcile(ctx, st, panes, now)
 }
 
 // lsRow is one session in `curia ls --json`. Its keys are the store's

@@ -9,8 +9,7 @@ import (
 )
 
 func TestNextSwitchesToMostUrgentPane(t *testing.T) {
-	fake := livePanes("%1", "%2", "%3")
-	fleetHome(t, fake,
+	_, fake := fleetHome(t, []string{"%1", "%2", "%3"},
 		model.Session{ID: "a", Agent: "claude", State: model.StateWorking, Pane: "%1", UpdatedAt: at(11, 0)},
 		model.Session{ID: "b", Agent: "claude", State: model.StateWaiting, Pane: "%2", UpdatedAt: at(11, 0)},
 		model.Session{ID: "c", Agent: "claude", State: model.StateWaiting, Pane: "%3", UpdatedAt: at(10, 0)},
@@ -20,7 +19,7 @@ func TestNextSwitchesToMostUrgentPane(t *testing.T) {
 	if err != nil || out != "" {
 		t.Errorf("next = %q, %v, want no output", out, err)
 	}
-	if want := []string{"SwitchTo %3"}; !reflect.DeepEqual(fake.Calls, want) {
+	if want := []string{"ListPanes", "SwitchTo %3"}; !reflect.DeepEqual(fake.Calls, want) {
 		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
 	}
 	if log := readLog(t); log != nil {
@@ -28,15 +27,31 @@ func TestNextSwitchesToMostUrgentPane(t *testing.T) {
 	}
 }
 
+// Ruling 20: next reconciles first, so it never jumps to a pane that is gone.
+func TestNextSkipsAndMarksStaleSessionWhosePaneIsGone(t *testing.T) {
+	db, fake := fleetHome(t, []string{"%2"},
+		model.Session{ID: "gone", Agent: "claude", State: model.StateWaiting, Pane: "%1", UpdatedAt: at(10, 0)},
+		model.Session{ID: "live", Agent: "claude", State: model.StateWaiting, Pane: "%2", UpdatedAt: at(11, 0)},
+	)
+	if out, err := runRoot(t, "next"); err != nil || out != "" {
+		t.Errorf("next = %q, %v, want no output", out, err)
+	}
+	if want := []string{"ListPanes", "SwitchTo %2"}; !reflect.DeepEqual(fake.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
+	}
+	if s := getSession(t, db, "gone"); s.State != model.StateStale || !s.UpdatedAt.Equal(fleetNow) {
+		t.Errorf("gone = %s at %v, want stale at %v", s.State, s.UpdatedAt, fleetNow)
+	}
+}
+
 func TestNextSaysNothingNeedsYou(t *testing.T) {
-	fake := livePanes("%1")
-	fleetHome(t, fake,
+	_, fake := fleetHome(t, []string{"%1"},
 		model.Session{ID: "a", Agent: "claude", State: model.StateWorking, Pane: "%1", UpdatedAt: at(11, 0)},
 	)
 	if out, err := runRoot(t, "next"); err != nil || out != "" {
 		t.Errorf("next = %q, %v, want no output", out, err)
 	}
-	if want := []string{"DisplayMessage nothing needs you"}; !reflect.DeepEqual(fake.Calls, want) {
+	if want := []string{"ListPanes", "DisplayMessage nothing needs you"}; !reflect.DeepEqual(fake.Calls, want) {
 		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
 	}
 }
@@ -46,16 +61,18 @@ func TestNextLogsErrorsAndExitsZero(t *testing.T) {
 		name  string
 		setup func(t *testing.T)
 		args  []string
+		want  []string // substrings of each log line, in order
 	}{
-		{"tmux fails", func(t *testing.T) {
-			fleetHome(t, &downTmux{},
+		{"tmux unreachable", func(t *testing.T) {
+			fleetHome(t, nil,
 				model.Session{ID: "a", Agent: "claude", State: model.StateWaiting, Pane: "%1", UpdatedAt: at(11, 0)})
-		}, []string{"next"}},
+			useDownTmux(t)
+		}, []string{"next"}, []string{"not reconciling", "next failed"}},
 		{"store fails", func(t *testing.T) {
-			fleetHome(t, livePanes())
+			fleetHome(t, nil)
 			t.Setenv("CURIA_DB", t.TempDir()) // a directory is not a database
-		}, []string{"next"}},
-		{"bad arguments", func(t *testing.T) { fleetHome(t, livePanes()) }, []string{"next", "--bogus"}},
+		}, []string{"next"}, []string{"next failed"}},
+		{"bad arguments", func(t *testing.T) { fleetHome(t, nil) }, []string{"next", "--bogus"}, []string{"next failed"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,8 +80,14 @@ func TestNextLogsErrorsAndExitsZero(t *testing.T) {
 			if out, err := runRoot(t, tc.args...); err != nil || out != "" {
 				t.Errorf("next = %q, %v, want no output and exit 0", out, err)
 			}
-			if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "next failed") {
-				t.Errorf("log = %q, want one line reporting the failure", log)
+			log := readLog(t)
+			if len(log) != len(tc.want) {
+				t.Fatalf("log = %q, want %d lines", log, len(tc.want))
+			}
+			for i, w := range tc.want {
+				if !strings.Contains(log[i], w) {
+					t.Errorf("log line %d = %q, want it to contain %q", i, log[i], w)
+				}
 			}
 		})
 	}

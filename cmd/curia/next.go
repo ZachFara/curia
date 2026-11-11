@@ -15,9 +15,10 @@ func init() {
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "next",
 		Short: "Switch to the session that needs you most (run from a tmux key binding)",
-		Long: "Switches the tmux client to the pane of the most urgent session that needs a\n" +
-			"decision, is waiting, or went idle since you last looked; otherwise shows\n" +
-			"\"nothing needs you\". Always exits 0; errors go to the log file.",
+		Long: "Marks sessions whose pane is gone as stale (as ls does), then switches the\n" +
+			"tmux client to the pane of the most urgent session that needs a decision, is\n" +
+			"waiting, or went idle since you last looked; otherwise shows \"nothing needs\n" +
+			"you\". Always exits 0; errors go to the log file.",
 		Args: cobra.ArbitraryArgs,
 		// Bad flags or arguments reach runNext, so they are logged, not printed.
 		DisableFlagParsing: true,
@@ -25,8 +26,9 @@ func init() {
 	})
 }
 
-// runNext jumps to fleet.Next and always exits 0, logging any error: tmux
-// runs it from a key binding, where output and exit codes go unseen.
+// runNext reconciles as ls does, jumps to fleet.Next and always exits 0,
+// logging any error: tmux runs it from a key binding, where output and exit
+// codes go unseen.
 func runNext(cmd *cobra.Command, args []string) {
 	cfg, cfgErr := loadConfig()
 	if cfgErr != nil {
@@ -54,13 +56,17 @@ func jumpNext(ctx context.Context, cfg config.Config, args []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	client := newTmuxClient()
+	// Reconcile first, so a session whose pane is gone is never the target.
+	if err = reconcile(ctx, st, client, cfg.LogPath, clock()); err != nil {
+		return err
+	}
 	sessions, err := st.ListSessions(ctx, store.ListFilter{})
 	if err != nil {
 		return err
 	}
 	tctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 	defer cancel()
-	client := newTmux()
 	s, ok := fleet.Next(sessions)
 	if !ok {
 		return client.DisplayMessage(tctx, "nothing needs you")

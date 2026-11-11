@@ -23,15 +23,19 @@ func at(hh, mm int) time.Time {
 }
 
 // fleetHome isolates HOME and CURIA_DB (see hookHome), fixes the clock at
-// fleetNow, makes the commands use client instead of the tmux binary, and
-// seeds the store. It returns the database path.
-func fleetHome(t *testing.T, client tmux.Client, sessions ...model.Session) string {
+// fleetNow, makes the commands use a tmux.Fake (see useFakeTmux) whose
+// server has the given panes, and seeds the store. It returns the database
+// path and the fake.
+func fleetHome(t *testing.T, panes []string, sessions ...model.Session) (string, *tmux.Fake) {
 	t.Helper()
 	db := hookHome(t)
-	prevTmux, prevNow := newTmux, lsNow
-	newTmux = func() tmux.Client { return client }
-	lsNow = func() time.Time { return fleetNow }
-	t.Cleanup(func() { newTmux, lsNow, lsJSON = prevTmux, prevNow, false })
+	fake := useFakeTmux(t)
+	for _, id := range panes {
+		fake.Panes = append(fake.Panes, tmux.Pane{ID: id, Session: "work", WindowID: "@1"})
+	}
+	prevClock := clock
+	clock = func() time.Time { return fleetNow }
+	t.Cleanup(func() { clock, lsJSON = prevClock, false })
 	st, err := store.Open(db)
 	if err != nil {
 		t.Fatal(err)
@@ -42,16 +46,16 @@ func fleetHome(t *testing.T, client tmux.Client, sessions ...model.Session) stri
 			t.Fatal(err)
 		}
 	}
-	return db
+	return db, fake
 }
 
-// livePanes is a fake tmux server with the given panes.
-func livePanes(ids ...string) *tmux.Fake {
-	f := &tmux.Fake{}
-	for _, id := range ids {
-		f.Panes = append(f.Panes, tmux.Pane{ID: id, Session: "work", WindowID: "@1"})
-	}
-	return f
+// useDownTmux makes the commands use a tmux client whose server is
+// unreachable; tmux.Fake cannot fail, so this replaces it.
+func useDownTmux(t *testing.T) {
+	t.Helper()
+	prev := newTmuxClient
+	newTmuxClient = func() tmux.Client { return &downTmux{} }
+	t.Cleanup(func() { newTmuxClient = prev })
 }
 
 // downTmux is a tmux client whose server is unreachable.
@@ -117,7 +121,7 @@ func goldenSessions() []model.Session {
 }
 
 func TestLsJSONGolden(t *testing.T) {
-	db := fleetHome(t, livePanes("%1", "%2", "%3", "%4", "%5"), goldenSessions()...)
+	db, _ := fleetHome(t, []string{"%1", "%2", "%3", "%4", "%5"}, goldenSessions()...)
 	out, err := runRoot(t, "ls", "--json")
 	if err != nil {
 		t.Fatalf("ls --json: %v\n%s", err, out)
@@ -135,7 +139,7 @@ func TestLsJSONGolden(t *testing.T) {
 }
 
 func TestLsJSONEmpty(t *testing.T) {
-	fleetHome(t, livePanes())
+	fleetHome(t, nil)
 	out, err := runRoot(t, "ls", "--json")
 	if err != nil || out != "[]\n" {
 		t.Errorf("ls --json on an empty store = %q, %v, want \"[]\\n\"", out, err)
@@ -143,7 +147,7 @@ func TestLsJSONEmpty(t *testing.T) {
 }
 
 func TestLsTable(t *testing.T) {
-	fleetHome(t, livePanes("%1", "%2", "%3", "%4", "%5"), goldenSessions()...)
+	fleetHome(t, []string{"%1", "%2", "%3", "%4", "%5"}, goldenSessions()...)
 	out, err := runRoot(t, "ls")
 	if err != nil {
 		t.Fatalf("ls: %v\n%s", err, out)
@@ -174,7 +178,7 @@ func TestLsTableStripsControlCharacters(t *testing.T) {
 		Branch:     "br\u202eanch\u009b2J\x9b", // U+009B is the C1 CSI; \x9b a raw, invalid byte
 		LastUpdate: "line one\nline two\r\x1b[2Jcleared\ttab",
 	}
-	fleetHome(t, livePanes("%1"), evil)
+	fleetHome(t, []string{"%1"}, evil)
 	out, err := runRoot(t, "ls")
 	if err != nil {
 		t.Fatalf("ls: %v\n%s", err, out)
@@ -191,9 +195,10 @@ func TestLsTableStripsControlCharacters(t *testing.T) {
 }
 
 func TestLsSkipsReconcileWhenTmuxUnreachable(t *testing.T) {
-	db := fleetHome(t, &downTmux{}, model.Session{
+	db, _ := fleetHome(t, nil, model.Session{
 		ID: "a", Agent: "claude", Pane: "%1", State: model.StateWorking, UpdatedAt: at(11, 0),
 	})
+	useDownTmux(t)
 	out, err := runRoot(t, "ls", "--json")
 	if err != nil {
 		t.Fatalf("ls --json: %v\n%s", err, out)
@@ -210,7 +215,7 @@ func TestLsSkipsReconcileWhenTmuxUnreachable(t *testing.T) {
 }
 
 func TestLsReportsStoreError(t *testing.T) {
-	fleetHome(t, livePanes())
+	fleetHome(t, nil)
 	t.Setenv("CURIA_DB", t.TempDir()) // a directory is not a database
 	if _, err := runRoot(t, "ls"); err == nil {
 		t.Error("ls returned nil error when the store cannot open")
