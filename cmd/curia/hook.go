@@ -96,15 +96,13 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	}
 	defer func() { _ = st.Close() }()
 	client := newTmuxClient()
-	before, listErr := st.ListSessions(ctx, store.ListFilter{IncludeEnded: true})
-	if listErr != nil {
-		logger.Error("hook list sessions before event", "err", listErr.Error())
-	}
-	sess, err := hookRun(ctx, model.EventKind(args[0]), payload, hookEnv(ctx, client, logger), st, cfg)
+	kind := model.EventKind(args[0])
+	before := snapshotBefore(ctx, st, kind, payload, logger)
+	sess, err := hookRun(ctx, kind, payload, hookEnv(ctx, client, logger), st, cfg)
 	if err != nil && sess.ID == "" {
 		return err // nothing was written
 	}
-	for _, w := range markerWindows(before, listErr == nil, sess) {
+	for _, w := range markerWindows(before, sess) {
 		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 		if aerr := attention.Apply(actx, client, st, w); aerr != nil {
 			logger.Error("hook attention marker", "window", w, "err", aerr.Error())
@@ -114,32 +112,65 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	return err
 }
 
-// markerWindows returns the windows whose marker this event may have
-// changed, given the sessions listed before hook.Run (known is false when
-// that read failed, which means apply) and the session it returned. The
-// event can change a window's marker when the session's marker or ended-ness
-// changed, or it moved away from a window, or when it ended a red session in the same pane
-// (SessionStart ends the pane's other sessions inside hook.Run).
-func markerWindows(before []model.Session, known bool, after model.Session) []string {
+// beforeEvent is what the store held, before hook.Run, about the windows an
+// event may change. known is false when it could not be read.
+type beforeEvent struct {
+	prev  model.Session   // the event's session; zero if it did not exist
+	peers []model.Session // red live sessions that share the pane (SessionStart only)
+	known bool
+}
+
+// snapshotBefore reads the event's session by id, and on SessionStart in a
+// pane the pane's other red sessions (the only event where hook.Run ends
+// them). It is used only to decide whether to call tmux. A read that fails
+// is logged and leaves known false.
+func snapshotBefore(ctx context.Context, st *store.Store, kind model.EventKind, payload []byte, logger *slog.Logger) beforeEvent {
+	pane := os.Getenv("TMUX_PANE")
+	ev, err := hook.Parse(kind, payload, pane, time.Time{})
+	if err != nil {
+		return beforeEvent{} // hook.Run will report it
+	}
+	prev, _, err := st.GetSession(ctx, ev.SessionID)
+	if err != nil {
+		logger.Error("hook read session before event", "err", err.Error())
+		return beforeEvent{}
+	}
+	b := beforeEvent{prev: prev, known: true}
+	if kind != model.SessionStart || pane == "" {
+		return b
+	}
+	live, err := st.ListSessions(ctx, store.ListFilter{})
+	if err != nil {
+		logger.Error("hook list sessions before event", "err", err.Error())
+		return beforeEvent{}
+	}
+	for _, p := range live {
+		if p.Pane == pane && p.ID != ev.SessionID && p.State != model.StateStale && attention.Marker(p) != "" {
+			b.peers = append(b.peers, p)
+		}
+	}
+	return b
+}
+
+// markerWindows returns the windows whose marker the event may have changed:
+// the windows of the red peers it ended, and, when the session's marker
+// changed (an ended session has none, so ending a red one counts), or it
+// moved away from a window, or the before read failed, the session's old and
+// new windows.
+func markerWindows(before beforeEvent, after model.Session) []string {
 	var windows []string
 	add := func(w string) {
 		if w != "" && !slices.Contains(windows, w) {
 			windows = append(windows, w)
 		}
 	}
-	var prev model.Session
-	for _, b := range before {
-		switch {
-		case b.ID == after.ID:
-			prev = b
-		case after.Pane != "" && b.Pane == after.Pane && b.State != model.StateEnded && attention.Marker(b) != "":
-			add(b.TmuxWindow)
-		}
+	for _, p := range before.peers {
+		add(p.TmuxWindow)
 	}
-	changed := !known ||
+	prev := before.prev
+	changed := !before.known ||
 		attention.Marker(prev) != attention.Marker(after) ||
-		(prev.TmuxWindow != "" && prev.TmuxWindow != after.TmuxWindow) ||
-		(prev.State == model.StateEnded) != (after.State == model.StateEnded)
+		(prev.TmuxWindow != "" && prev.TmuxWindow != after.TmuxWindow)
 	if changed {
 		add(after.TmuxWindow)
 		add(prev.TmuxWindow)

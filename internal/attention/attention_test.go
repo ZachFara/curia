@@ -111,3 +111,14 @@ func TestSeenClearsMarker(t *testing.T) {
 		t.Errorf("calls = %q, want %q", fake.Calls, want)
 	}
 }
+
+func TestApplyEmptyWindowDoesNothing(t *testing.T) {
+	st := openStore(t, model.Session{ID: "a", State: model.StateWaiting, UpdatedAt: t0})
+	fake := &tmux.Fake{}
+	if err := Apply(context.Background(), fake, st, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("calls = %q, want none", fake.Calls)
+	}
+}

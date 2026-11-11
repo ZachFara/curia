@@ -41,8 +41,11 @@ func WindowMarker(sessions []model.Session) string {
 
 // Apply sets the @curia_marker option of window (a tmux window id) to the
 // WindowMarker of the window's live sessions: those in the store with that
-// TmuxWindow whose state is neither ended nor stale.
+// TmuxWindow whose state is neither ended nor stale. An empty window does nothing.
 func Apply(ctx context.Context, tm tmux.Client, st *store.Store, window string) error {
+	if window == "" {
+		return nil // a session outside tmux has no window
+	}
 	all, err := st.ListSessions(ctx, store.ListFilter{})
 	if err != nil {
 		return fmt.Errorf("attention: list sessions: %w", err)
