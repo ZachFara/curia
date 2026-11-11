@@ -141,15 +141,11 @@ func TestApplyTransitions(t *testing.T) {
 	}
 }
 
-func TestEndedIgnoresEventsExceptSessionStart(t *testing.T) {
+func TestEndedIgnoresSubagentStopAndSessionEnd(t *testing.T) {
 	ended := base()
 	ended.State = model.StateEnded
-	kinds := []model.EventKind{
-		model.UserPromptSubmit, model.PreToolUse, model.PostToolUse,
-		model.Notification, model.Stop, model.SubagentStop, model.SessionEnd,
-	}
-	for _, k := range kinds {
-		ev := model.Event{Kind: k, SessionID: "s1", ToolName: "Task", Message: "m", At: t1}
+	for _, k := range []model.EventKind{model.SubagentStop, model.SessionEnd} {
+		ev := model.Event{Kind: k, SessionID: "s1", At: t1}
 		if got := state.Apply(ended, ev, true); got != ended {
 			t.Errorf("%s changed an ended session: %+v", k, got)
 		}
@@ -158,6 +154,46 @@ func TestEndedIgnoresEventsExceptSessionStart(t *testing.T) {
 	got := state.Apply(ended, ev, false)
 	if got.State != model.StateWorking || got.Pane != "%2" || got.StartedAt != t1 {
 		t.Errorf("SessionStart did not revive ended session: %+v", got)
+	}
+}
+
+// TestEndedResumesOnActivity: a session ended by a nested session's start in
+// its pane is alive again when it shows activity (Ruling 27).
+func TestEndedResumesOnActivity(t *testing.T) {
+	ended := base()
+	ended.State = model.StateEnded
+	for kind, want := range map[model.EventKind]model.State{
+		model.UserPromptSubmit: model.StateWorking,
+		model.PreToolUse:       model.StateWorking,
+		model.PostToolUse:      model.StateWorking,
+		model.Notification:     model.StateWaiting,
+		model.Stop:             model.StateIdle,
+	} {
+		ev := model.Event{Kind: kind, SessionID: "s1", ToolName: "Bash", Message: "m", At: t1}
+		got := state.Apply(ended, ev, false)
+		live := ended
+		live.State = model.StateWorking
+		if got.State != want || !got.UpdatedAt.Equal(t1) || got != state.Apply(live, ev, false) {
+			t.Errorf("%s on an ended session = %+v, want it applied normally (state %s)", kind, got, want)
+		}
+	}
+}
+
+func TestIgnores(t *testing.T) {
+	ended, live := base(), base()
+	ended.State = model.StateEnded
+	kinds := []model.EventKind{
+		model.SessionStart, model.UserPromptSubmit, model.PreToolUse, model.PostToolUse,
+		model.Notification, model.Stop, model.SubagentStop, model.SessionEnd,
+	}
+	for _, k := range kinds {
+		want := k == model.SubagentStop || k == model.SessionEnd
+		if got := state.Ignores(ended, k); got != want {
+			t.Errorf("Ignores(ended, %s) = %v, want %v", k, got, want)
+		}
+		if state.Ignores(live, k) {
+			t.Errorf("Ignores(idle, %s) = true", k)
+		}
 	}
 }
 

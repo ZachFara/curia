@@ -99,8 +99,8 @@ func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store)
 // apply is the update Run makes inside the store transaction. It must not
 // call the store.
 func apply(s model.Session, ev model.Event, start startInfo, cfg config.Config) (model.Session, error) {
-	if s.State == model.StateEnded && ev.Kind != model.SessionStart {
-		return s, nil // an ended session ignores the event, transcript included
+	if state.Ignores(s, ev.Kind) {
+		return s, nil // the transcript is not read either
 	}
 	var err error
 	switch ev.Kind {

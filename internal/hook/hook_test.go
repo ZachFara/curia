@@ -366,7 +366,7 @@ func TestTranscriptReadResumesFromOffset(t *testing.T) {
 	}
 }
 
-func TestEndedSessionIgnoresLaterEvents(t *testing.T) {
+func TestEndedSessionIgnoresSubagentStopAndSessionEnd(t *testing.T) {
 	st := openStore(t)
 	tr := writeTranscript(t)
 	env := (&fakeEnv{}).env("%3")
@@ -375,9 +375,40 @@ func TestEndedSessionIgnoresLaterEvents(t *testing.T) {
 
 	later := env
 	later.Now = func() time.Time { return t0.Add(time.Hour) }
-	got := run(t, st, later, model.Stop, payload("A", tr, ""))
-	if got != ended {
-		t.Errorf("Stop after SessionEnd changed the session:\n %+v\nwant\n %+v", got, ended)
+	for _, kind := range []model.EventKind{model.SubagentStop, model.SessionEnd} {
+		if got := run(t, st, later, kind, payload("A", tr, "")); got != ended {
+			t.Errorf("%s after SessionEnd changed the session:\n %+v\nwant\n %+v", kind, got, ended)
+		}
+	}
+}
+
+// TestNestedSessionDoesNotHideParent: a `claude -p` run from an agent's Bash
+// tool inherits TMUX_PANE, so its SessionStart ends the outer session; the
+// outer session's next activity brings it back (Ruling 27).
+func TestNestedSessionDoesNotHideParent(t *testing.T) {
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%7")
+	steps := []struct {
+		kind  model.EventKind
+		id    string
+		extra string
+	}{
+		{model.SessionStart, "OUTER", ""},
+		{model.PreToolUse, "OUTER", `,"tool_name":"Bash"`},
+		{model.SessionStart, "NESTED", ""},
+		{model.SessionEnd, "NESTED", ""},
+		{model.PostToolUse, "OUTER", `,"tool_name":"Bash"`},
+		{model.Notification, "OUTER", `,"message":"Claude needs your permission to use Bash"`},
+	}
+	for _, s := range steps {
+		run(t, st, env, s.kind, payload(s.id, "", s.extra))
+	}
+	listed, err := st.ListSessions(context.Background(), store.ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != "OUTER" || listed[0].State != model.StateWaiting {
+		t.Errorf("listed = %+v, want OUTER waiting only", listed)
 	}
 }
 

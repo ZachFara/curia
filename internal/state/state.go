@@ -8,10 +8,11 @@ const maxLastUpdateRunes = 80
 
 // Apply returns s after applying ev. openDecision reports whether the
 // transcript ends in an open decision, which turns a Stop into needs_decision.
-// It is pure: no I/O and no clock. An ended session ignores every event
-// except SessionStart and is returned unchanged.
+// It is pure: no I/O and no clock. An ended session ignores SubagentStop and
+// SessionEnd and is returned unchanged (see Ignores); any other event is
+// applied as usual and brings it back.
 func Apply(s model.Session, ev model.Event, openDecision bool) model.Session {
-	if s.State == model.StateEnded && ev.Kind != model.SessionStart {
+	if Ignores(s, ev.Kind) {
 		return s
 	}
 	if s.ID == "" {
@@ -47,6 +48,14 @@ func Apply(s model.Session, ev model.Event, openDecision bool) model.Session {
 		s.State = model.StateEnded
 	}
 	return s
+}
+
+// Ignores reports whether Apply returns s unchanged for an event of kind: an
+// ended session ignores SubagentStop and SessionEnd. Any other event means
+// the session is alive, for example one ended by a nested session's
+// SessionStart in its pane, so it is applied.
+func Ignores(s model.Session, kind model.EventKind) bool {
+	return s.State == model.StateEnded && (kind == model.SubagentStop || kind == model.SessionEnd)
 }
 
 func countSubagent(s *model.Session, ev model.Event) {
