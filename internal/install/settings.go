@@ -156,9 +156,24 @@ func eventList(hooks map[string]any, event string) ([]any, error) {
 	return list, nil
 }
 
+// hookPrefix is how every hook command of ours for bin starts.
+func hookPrefix(bin string) string {
+	return shellQuote(bin) + " hook "
+}
+
+// shellQuote returns s as one POSIX shell word: unchanged when it holds only
+// [A-Za-z0-9_./-], else single-quoted with each ' written as '\”.
+func shellQuote(s string) string {
+	const safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-"
+	if s != "" && strings.Trim(s, safe) == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func ourEntry(bin, event string) map[string]any {
 	entry := map[string]any{
-		"hooks": []any{map[string]any{"type": "command", "command": bin + " hook " + event}},
+		"hooks": []any{map[string]any{"type": "command", "command": hookPrefix(bin) + event}},
 	}
 	if event == "PreToolUse" || event == "PostToolUse" {
 		entry["matcher"] = "*"
@@ -166,14 +181,15 @@ func ourEntry(bin, event string) map[string]any {
 	return entry
 }
 
-// isOurs reports whether a hook command was added by Curia for this binary.
+// isOurs reports whether a hook command was added by Curia for this binary,
+// in the form ourEntry writes it.
 func isOurs(hook any, bin string) bool {
 	h, ok := hook.(map[string]any)
 	if !ok {
 		return false
 	}
 	cmd, _ := h["command"].(string)
-	return strings.HasPrefix(cmd, bin+" hook ")
+	return strings.HasPrefix(cmd, hookPrefix(bin))
 }
 
 func containsOurs(entries []any, bin string) bool {

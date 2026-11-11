@@ -14,20 +14,43 @@ const (
 	fenceEnd   = "# <<< curia <<<"
 )
 
-// snippetTemplate is the tmux configuration Curia installs; %[1]s is the
-// binary path. tmux runs pane-focus-in only with focus-events on, which is
-// off by default. The badge is appended to status-right only when it is not
-// there yet: the never-set @curia_badge option expands to nothing and marks
-// it, so sourcing the snippet again adds no second badge.
-const snippetTemplate = `set -g focus-events on
-set -g status-interval 2
-if -F '#{m:*@curia_badge*,#{status-right}}' '' "set -ag status-right ' #{@curia_badge}#(%[1]s status)'"
-set -g window-status-format '#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'
-set -g window-status-current-format '#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'
-bind a display-popup -E -w 90%% -h 80%% '%[1]s ui'
-bind N run-shell '%[1]s next'
-set-hook -g pane-focus-in 'run-shell -b "%[1]s seen #{pane_id}"'
-`
+// windowFormat shows a red dot before a window whose @curia_marker is red.
+const windowFormat = `'#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'`
+
+// snippet is the tmux configuration Curia installs for the binary at bin.
+// tmux runs pane-focus-in only with focus-events on, which is off by
+// default. The badge is appended to status-right only when it is not there
+// yet: the never-set @curia_badge option expands to nothing and marks it, so
+// sourcing the snippet again adds no second badge. Each command that reaches
+// a shell holds bin as one shell word, wrapped in one tmux quoting layer per
+// tmux parse on the way.
+func snippet(bin string) string {
+	b := shellQuote(bin)
+	return strings.Join([]string{
+		"set -g focus-events on",
+		"set -g status-interval 2",
+		"if -F '#{m:*@curia_badge*,#{status-right}}' '' " +
+			tmuxQuote("set -ag status-right "+tmuxQuote(" #{@curia_badge}#("+b+" status)")),
+		"set -g window-status-format " + windowFormat,
+		"set -g window-status-current-format " + windowFormat,
+		"bind a display-popup -E -w 90% -h 80% " + tmuxQuote(b+" ui"),
+		"bind N run-shell " + tmuxQuote(b+" next"),
+		"set-hook -g pane-focus-in " + tmuxQuote("run-shell -b "+tmuxQuote(b+" seen #{pane_id}")),
+	}, "\n") + "\n"
+}
+
+// tmuxDoubleQuoted escapes what tmux reads specially inside double quotes.
+var tmuxDoubleQuoted = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`)
+
+// tmuxQuote returns s as one tmux configuration word that parses back to s:
+// single-quoted (nothing inside is special) unless s holds a single quote,
+// else double-quoted with backslash, double quote and dollar escaped.
+func tmuxQuote(s string) string {
+	if !strings.Contains(s, "'") {
+		return "'" + s + "'"
+	}
+	return `"` + tmuxDoubleQuoted.Replace(s) + `"`
+}
 
 // WriteTmux writes the Curia tmux snippet to snippetPath and adds one fenced
 // source-file line for it to the tmux configuration at tmuxConfPath, creating
@@ -40,7 +63,7 @@ func WriteTmux(snippetPath, tmuxConfPath, bin string) error {
 	if err != nil {
 		return err
 	}
-	if err := writeAtomic(snippetPath, []byte(fmt.Sprintf(snippetTemplate, bin))); err != nil {
+	if err := writeAtomic(snippetPath, []byte(snippet(bin))); err != nil {
 		return err
 	}
 	if hasFence(conf) {

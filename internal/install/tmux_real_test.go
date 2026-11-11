@@ -76,3 +76,76 @@ func TestSnippetInRealTmux(t *testing.T) {
 		t.Errorf("status-right has %d badges after two sources, want 1: %q", n, right)
 	}
 }
+
+// TestSnippetQuotedBinaryInRealTmux sources the snippet for a binary path with
+// a space, a dollar and a single quote, then runs the commands that reach the shell
+// through every quoting layer. The "binary" is a symlink to /bin/sh, so
+// `<bin> seen %0` runs the script file ./seen, which the test writes; tmux runs
+// its commands in dir, the directory the server was started from.
+func TestSnippetQuotedBinaryInRealTmux(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	tm := realTmux(ctx, t, dir)
+	binDir := filepath.Join(dir, "my $HOME tools", "it's")
+	if err := os.MkdirAll(binDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(binDir, "curia")
+	if err := os.Symlink("/bin/sh", bin); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(dir, "calls")
+	for _, name := range []string{"seen", "status"} {
+		script := "printf '%s\\n' \"" + name + " $*\" >> '" + calls + "'\n"
+		writeFile(t, filepath.Join(dir, name), script)
+	}
+
+	sourceSnippet(t, tm, dir, bin, 2)
+
+	// The focus hook: set-hook, then run-shell, then the shell.
+	if out, err := tm("set-hook", "-R", "pane-focus-in"); err != nil {
+		t.Fatalf("set-hook -R: %v: %s", err, out)
+	}
+	waitForLine(t, calls, "seen %0")
+
+	// The badge: if -F, then set -ag, then the #() job. Only an attached
+	// client starts status jobs, so the stored job runs in sh by hand.
+	right, err := tm("show", "-gv", "status-right")
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoted := `'` + dir + `/my $HOME tools/it'\''s/curia'`
+	if want := " #{@curia_badge}#(" + quoted + " status)\n"; !strings.HasSuffix(right, want) {
+		t.Fatalf("status-right = %q, want suffix %q", right, want)
+	}
+	job := strings.TrimSuffix(right[strings.LastIndex(right, "#(")+2:], ")\n")
+	sh := exec.CommandContext(ctx, "/bin/sh", "-c", job)
+	sh.Dir = dir
+	if out, err := sh.CombinedOutput(); err != nil {
+		t.Fatalf("status job %q: %v: %s", job, err, out)
+	}
+	waitForLine(t, calls, "status ")
+
+	for _, key := range []string{"a", "N"} {
+		if out, err := tm("list-keys", "-T", "prefix", key); err != nil || !strings.Contains(out, "curia") {
+			t.Errorf("binding %s = %q, %v", key, out, err)
+		}
+	}
+}
+
+// waitForLine waits a few seconds for the file at path to hold line.
+func waitForLine(t *testing.T, path, line string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, _ := os.ReadFile(filepath.Clean(path))
+		if strings.Contains(string(b), line+"\n") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s = %q, want line %q", path, b, line)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

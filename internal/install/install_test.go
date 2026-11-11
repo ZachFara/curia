@@ -3,6 +3,7 @@ package install
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -143,6 +144,57 @@ func checkOurEntries(t *testing.T, m map[string]any) {
 		if cmd["type"] != "command" || cmd["command"] != testBin+" hook "+ev {
 			t.Errorf("%s: hook = %v", ev, cmd)
 		}
+	}
+}
+
+// awkwardBins are binary paths that need shell quoting, with the quoted word
+// each must appear as.
+var awkwardBins = map[string]string{
+	"/opt/my tools/curia": `'/opt/my tools/curia'`,
+	"/opt/it's/curia":     `'/opt/it'\''s/curia'`,
+}
+
+// checkHookCommand asserts cmd is quoted's hook command for ev, and that the
+// shell Claude Code runs it with sees bin as one word.
+func checkHookCommand(t *testing.T, cmd, bin, quoted, ev string) {
+	t.Helper()
+	if want := quoted + " hook " + ev; cmd != want {
+		t.Errorf("%s: command = %q, want %q", ev, cmd, want)
+	}
+	out, err := exec.Command("/bin/sh", "-c", "printf '[%s]' "+cmd).Output()
+	if want := "[" + bin + "][hook][" + ev + "]"; err != nil || string(out) != want {
+		t.Errorf("%s: sh parses %q as %q (%v), want %q", ev, cmd, out, err, want)
+	}
+}
+
+func TestHooksQuoteBinaryPath(t *testing.T) {
+	for bin, quoted := range awkwardBins {
+		t.Run(bin, func(t *testing.T) {
+			path := settingsIn(t)
+			writeFile(t, path, userSettings)
+			if err := Hooks(path, bin, testNow); err != nil {
+				t.Fatal(err)
+			}
+			once := readFile(t, path)
+			for _, ev := range expectedEvents {
+				entries := eventEntries(t, readSettings(t, path), ev)
+				cmd, _ := asMap(asList(asMap(entries[len(entries)-1])["hooks"])[0])["command"].(string)
+				checkHookCommand(t, cmd, bin, quoted, ev)
+			}
+			// The quoted form is recognized as ours: no second entry, and Unhooks removes it.
+			if err := Hooks(path, bin, testNow.Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if got := readFile(t, path); got != once {
+				t.Errorf("second Hooks changed the file:\n%s", got)
+			}
+			if err := Unhooks(path, bin); err != nil {
+				t.Fatal(err)
+			}
+			if got := readFile(t, path); strings.Contains(got, " hook ") {
+				t.Errorf("our hooks left after Unhooks:\n%s", got)
+			}
+		})
 	}
 }
 
@@ -363,7 +415,7 @@ func TestTmuxFenceAddedOnceAndRemoved(t *testing.T) {
 		`if -F '#{m:*@curia_badge*,#{status-right}}' '' "set -ag status-right ' #{@curia_badge}#(` + testBin + ` status)'"` + "\n",
 		"bind a display-popup -E -w 90% -h 80% '" + testBin + " ui'\n",
 		"bind N run-shell '" + testBin + " next'\n",
-		`set-hook -g pane-focus-in 'run-shell -b "` + testBin + ` seen #{pane_id}"'` + "\n",
+		`set-hook -g pane-focus-in "run-shell -b '` + testBin + ` seen #{pane_id}'"` + "\n",
 		"set -g window-status-current-format '#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'\n",
 	} {
 		if !strings.Contains(snip, want) {
