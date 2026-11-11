@@ -8,6 +8,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/tmux"
 )
 
 // loadConfig loads ~/.config/curia/config.toml over the defaults (a missing
@@ -41,3 +42,7 @@ func openLog(path string) (*slog.Logger, func() error, error) {
 	}
 	return slog.New(slog.NewTextHandler(f, nil)), f.Close, nil
 }
+
+// newTmux returns the tmux client the fleet commands use: the default
+// server. Tests replace it with a tmux.Fake.
+var newTmux = func() tmux.Client { return tmux.NewExec("") }
