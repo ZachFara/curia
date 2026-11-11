@@ -35,12 +35,14 @@ type startInfo struct {
 }
 
 // Run records one hook event and returns the session as stored. In order it
-// parses the payload, appends the raw event, ends any other session in the
-// pane on SessionStart, then in one store transaction loads the session,
-// folds in the transcript's new lines (PostToolUse, Notification, Stop),
-// applies the state machine and writes the result. Git and tmux are queried
-// on SessionStart only, before that transaction, so no subprocess runs while
-// the write lock is held.
+// parses the payload, appends the raw event, and on SessionStart, or for a
+// session it has no row for yet (one first seen mid-run, Ruling 29), ends any
+// other session in the pane and asks git and tmux about it. Then in one store
+// transaction it loads the session, folds in the transcript's new lines
+// (PostToolUse, Notification, Stop), applies the state machine and writes the
+// result. Git and tmux run before that transaction, so no subprocess runs
+// while the write lock is held, and only once per session besides
+// SessionStart.
 //
 // A transcript that cannot be read does not stop the update: the session is
 // written without it and the read error is returned with it.
@@ -52,8 +54,16 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 	if err = st.AppendEvent(ctx, ev, payload); err != nil {
 		return model.Session{}, err
 	}
-	var start startInfo
-	if kind == model.SessionStart {
+	starting := kind == model.SessionStart
+	if !starting {
+		var found bool
+		if _, found, err = st.GetSession(ctx, ev.SessionID); err != nil {
+			return model.Session{}, err
+		}
+		starting = !found // first seen mid-run
+	}
+	var start *startInfo
+	if starting {
 		if start, err = sessionStart(ctx, ev, env, st); err != nil {
 			return model.Session{}, err
 		}
@@ -73,8 +83,8 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 // sessionStart ends the other sessions in ev's pane and asks git and tmux
 // about the new one. Git and tmux run at the same time: each is a subprocess
 // of several milliseconds, and together they would use most of the budget.
-func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store) (startInfo, error) {
-	var start startInfo
+func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store) (*startInfo, error) {
+	start := &startInfo{}
 	if ev.Pane == "" {
 		start.repo, start.branch = env.Git(ev.Cwd)
 		return start, nil
@@ -96,21 +106,38 @@ func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store)
 	return start, nil
 }
 
-// apply is the update Run makes inside the store transaction. It must not
-// call the store.
-func apply(s model.Session, ev model.Event, start startInfo, cfg config.Config) (model.Session, error) {
+// apply is the update Run makes inside the store transaction. start is what
+// git and tmux said, or nil when they were not asked. It must not call the
+// store.
+func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config) (model.Session, error) {
 	if state.Ignores(s, ev.Kind) {
 		return s, nil // the transcript is not read either
 	}
-	var err error
-	switch ev.Kind {
-	case model.SessionStart:
+	switch {
+	case ev.Kind == model.SessionStart:
 		s.Repo, s.Branch = start.repo, start.branch
 		s.TmuxSession, s.TmuxWindow = start.tmuxSession, start.window
+	case start != nil:
+		// First seen mid-run. A SessionStart may have written the row since
+		// Run looked, so fill only what is still empty.
+		fillEmpty(&s.Repo, start.repo)
+		fillEmpty(&s.Branch, start.branch)
+		fillEmpty(&s.TmuxSession, start.tmuxSession)
+		fillEmpty(&s.TmuxWindow, start.window)
+	}
+	var err error
+	switch ev.Kind {
 	case model.PostToolUse, model.Notification, model.Stop:
 		err = readTranscript(&s, &ev, cfg)
 	}
 	return state.Apply(s, ev, false), err // Plan 2 wires real open decisions
+}
+
+// fillEmpty sets *field to v when *field is empty.
+func fillEmpty(field *string, v string) {
+	if *field == "" {
+		*field = v
+	}
 }
 
 // readTranscript reads the transcript's lines after s.TranscriptOffset into

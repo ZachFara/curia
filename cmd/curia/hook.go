@@ -116,27 +116,28 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 // event may change. known is false when it could not be read.
 type beforeEvent struct {
 	prev  model.Session   // the event's session; zero if it did not exist
-	peers []model.Session // red live sessions that share the pane (SessionStart only)
+	peers []model.Session // red live sessions that share the pane (when hook.Run ends them)
 	known bool
 }
 
-// snapshotBefore reads the event's session by id, and on SessionStart in a
-// pane the pane's other red sessions (the only event where hook.Run ends
-// them). It is used only to decide whether to call tmux. A read that fails
-// is logged and leaves known false.
+// snapshotBefore reads the event's session by id, and, in a pane, on
+// SessionStart or for a session with no row yet (the events where hook.Run
+// ends the pane's other sessions), the pane's other red sessions. It is used
+// only to decide whether to call tmux. A read that fails is logged and
+// leaves known false.
 func snapshotBefore(ctx context.Context, st *store.Store, kind model.EventKind, payload []byte, logger *slog.Logger) beforeEvent {
 	pane := os.Getenv("TMUX_PANE")
 	ev, err := hook.Parse(kind, payload, pane, time.Time{})
 	if err != nil {
 		return beforeEvent{} // hook.Run will report it
 	}
-	prev, _, err := st.GetSession(ctx, ev.SessionID)
+	prev, found, err := st.GetSession(ctx, ev.SessionID)
 	if err != nil {
 		logger.Error("hook read session before event", "err", err.Error())
 		return beforeEvent{}
 	}
 	b := beforeEvent{prev: prev, known: true}
-	if kind != model.SessionStart || pane == "" {
+	if (found && kind != model.SessionStart) || pane == "" {
 		return b
 	}
 	live, err := st.ListSessions(ctx, store.ListFilter{})

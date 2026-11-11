@@ -222,6 +222,66 @@ func TestGitAndTmuxOnlyOnSessionStart(t *testing.T) {
 	}
 }
 
+// A session first seen mid-run (already running when Curia was installed)
+// gets what a SessionStart would have given it, once (Ruling 29).
+func TestFirstSeenMidRunIsEnrichedOnce(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{}
+	env := f.env("%2")
+	got := run(t, st, env, model.Notification, payload("M", "", `,"message":"needs you"`))
+	want := model.Session{
+		ID: "M", Agent: "claude", Pane: "%2", TmuxSession: "work", TmuxWindow: "@7",
+		Cwd: "/src/curia", Repo: "/src/curia", Branch: "feat/hook", LastUpdate: "needs you",
+		State: model.StateWaiting, StartedAt: t0, UpdatedAt: t0,
+	}
+	if got != want || get(t, st, "M") != want {
+		t.Errorf("first seen =\n %+v\nwant\n %+v", got, want)
+	}
+	for _, kind := range []model.EventKind{model.PreToolUse, model.Stop, model.Notification} {
+		run(t, st, env, kind, payload("M", "", `,"tool_name":"Bash"`))
+	}
+	if !slices.Equal(f.gitCalls, []string{"/src/curia"}) || !slices.Equal(f.paneCalls, []string{"%2"}) {
+		t.Errorf("Git calls %q, PaneInfo calls %q, want one each", f.gitCalls, f.paneCalls)
+	}
+}
+
+func TestFirstSeenMidRunEndsPriorSessionInPane(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{}
+	run(t, st, f.env("%3"), model.SessionStart, payload("A", "", ""))
+	run(t, st, f.env("%3"), model.PostToolUse, payload("B", "", `,"tool_name":"Read"`))
+	if a := get(t, st, "A"); a.State != model.StateEnded {
+		t.Errorf("A = %s, want ended by B first seen in its pane", a.State)
+	}
+	if b := get(t, st, "B"); b.State != model.StateWorking {
+		t.Errorf("B = %s, want working", b.State)
+	}
+}
+
+// TestFirstSeenKeepsWhatAConcurrentSessionStartFilled runs a SessionStart for
+// the same session while the first-seen event is asking git, that is between
+// its keyed read and its transaction.
+func TestFirstSeenKeepsWhatAConcurrentSessionStartFilled(t *testing.T) {
+	st := openStore(t)
+	starter := (&fakeEnv{}).env("%2")
+	starter.Git = func(string) (string, string) { return "/other", "main" }
+	starter.PaneInfo = func(string) (string, string) { return "other", "@9" }
+	env := (&fakeEnv{}).env("%2")
+	git := env.Git
+	env.Git = func(cwd string) (string, string) {
+		run(t, st, starter, model.SessionStart, payload("M", "", ""))
+		return git(cwd)
+	}
+	got := run(t, st, env, model.Notification, payload("M", "", `,"message":"needs you"`))
+	if got.Repo != "/other" || got.Branch != "main" || got.TmuxSession != "other" || got.TmuxWindow != "@9" {
+		t.Errorf("got repo %q branch %q tmux %q/%q, want the SessionStart's /other main other/@9",
+			got.Repo, got.Branch, got.TmuxSession, got.TmuxWindow)
+	}
+	if got.State != model.StateWaiting {
+		t.Errorf("State = %s, want waiting", got.State)
+	}
+}
+
 func TestSessionStartEndsPriorSessionInPane(t *testing.T) {
 	st := openStore(t)
 	f := &fakeEnv{}

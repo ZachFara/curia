@@ -317,6 +317,24 @@ func TestHookSessionStartEndingRedSessionClearsIt(t *testing.T) {
 	wantCalls(t, m.event("SessionStart", "B"), "SetWindowOption @7 @curia_marker ")
 }
 
+// A session already running at install time is first seen mid-run; it gets
+// its window like a started one, so its marker shows (Ruling 29).
+func TestHookFirstSeenMidRunGetsWindowAndMarker(t *testing.T) {
+	m := newMarkerHook(t)
+	wantCalls(t, m.event("Notification", "M"), "SetWindowOption @7 @curia_marker red")
+	if s := getSession(t, m.db, "M"); s.TmuxSession != "s" || s.TmuxWindow != "@7" || s.State != model.StateWaiting {
+		t.Errorf("M = %+v, want waiting in s/@7", s)
+	}
+}
+
+func TestHookFirstSeenMidRunEndingRedSessionClearsIt(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	// B, already running, shows up in pane %1; A is ended inside hook.Run while red.
+	wantCalls(t, m.event("PostToolUse", "B"), "SetWindowOption @7 @curia_marker ")
+}
+
 // useFakeTmux makes the commands use a tmux.Fake and returns it.
 func useFakeTmux(t *testing.T) *tmux.Fake {
 	t.Helper()
