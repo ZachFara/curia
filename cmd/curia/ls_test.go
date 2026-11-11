@@ -1,0 +1,223 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/tmux"
+)
+
+// fleetNow is the fixed clock of the fleet command tests.
+var fleetNow = time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+
+// at returns fleetNow's date at hh:mm UTC.
+func at(hh, mm int) time.Time {
+	return time.Date(2026, 11, 11, hh, mm, 0, 0, time.UTC)
+}
+
+// fleetHome isolates HOME and CURIA_DB (see hookHome), fixes the clock at
+// fleetNow, makes the commands use a tmux.Fake (see useFakeTmux) whose
+// server has the given panes, and seeds the store. It returns the database
+// path and the fake.
+func fleetHome(t *testing.T, panes []string, sessions ...model.Session) (string, *tmux.Fake) {
+	t.Helper()
+	db := hookHome(t)
+	fake := useFakeTmux(t)
+	for _, id := range panes {
+		fake.Panes = append(fake.Panes, tmux.Pane{ID: id, Session: "work", WindowID: "@1"})
+	}
+	prevClock := clock
+	clock = func() time.Time { return fleetNow }
+	t.Cleanup(func() { clock, lsJSON = prevClock, false })
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	for _, s := range sessions {
+		if err := st.UpsertSession(context.Background(), s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return db, fake
+}
+
+// useDownTmux makes the commands use a tmux client whose server is
+// unreachable; tmux.Fake cannot fail, so this replaces it.
+func useDownTmux(t *testing.T) {
+	t.Helper()
+	prev := newTmuxClient
+	newTmuxClient = func() tmux.Client { return &downTmux{} }
+	t.Cleanup(func() { newTmuxClient = prev })
+}
+
+// downTmux is a tmux client whose server is unreachable.
+type downTmux struct{ tmux.Fake }
+
+var errNoServer = errors.New("no server running on /tmp/tmux-501/default")
+
+func (*downTmux) ListPanes(context.Context) ([]tmux.Pane, error) { return nil, errNoServer }
+
+func (*downTmux) SwitchTo(context.Context, string) error { return errNoServer }
+
+func (*downTmux) DisplayMessage(context.Context, string) error { return errNoServer }
+
+func getSession(t *testing.T, db, id string) model.Session {
+	t.Helper()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	s, found, err := st.GetSession(context.Background(), id)
+	if err != nil || !found {
+		t.Fatalf("GetSession(%s) = found %v, err %v", id, found, err)
+	}
+	return s
+}
+
+// goldenSessions covers every rank group, a session outside tmux, one whose
+// pane is gone (marked stale by ls), one stale long enough to be hidden, and
+// an ended one.
+func goldenSessions() []model.Session {
+	s := func(id string, state model.State, pane string, updated time.Time) model.Session {
+		return model.Session{
+			ID: id, Agent: "claude", Pane: pane, State: state,
+			StartedAt: at(9, 0), UpdatedAt: updated,
+		}
+	}
+	full := model.Session{
+		ID: "a-decision", Agent: "claude", Pane: "%1", TmuxSession: "work", TmuxWindow: "@1",
+		Cwd: "/src/curia", Repo: "curia", Branch: "main", State: model.StateNeedsDecision,
+		Model: "claude-opus-5-5", ContextUsed: 120000, ContextMax: 200000, SubagentsActive: 1,
+		LastUpdate: `Allow Bash: rm -rf "build"?`, TranscriptPath: "/t/a.jsonl", TranscriptOffset: 4096,
+		StartedAt: at(9, 0).Add(123456789 * time.Nanosecond), UpdatedAt: at(11, 45),
+	}
+	waiting := s("b-waiting", model.StateWaiting, "%2", at(11, 50))
+	waiting.SeenAt = at(11, 55)
+	idleUnseen := s("c-idle-unseen", model.StateIdle, "%3", at(11, 30))
+	idleUnseen.SeenAt = at(11, 0)
+	idleSeen := s("e-idle-seen", model.StateIdle, "%5", at(11, 40))
+	idleSeen.SeenAt = at(11, 59)
+	return []model.Session{
+		s("h-ended", model.StateEnded, "%6", at(11, 0)),
+		s("g-stale-old", model.StateStale, "%8", at(11, 0)),
+		s("g-stale-recent", model.StateStale, "%7", at(11, 55)),
+		s("f-pane-gone", model.StateWorking, "%9", at(11, 10)),
+		idleSeen,
+		s("i-no-pane", model.StateWorking, "", at(11, 58)),
+		s("d-working", model.StateWorking, "%4", at(11, 20)),
+		idleUnseen,
+		waiting,
+		full,
+	}
+}
+
+func TestLsJSONGolden(t *testing.T) {
+	db, _ := fleetHome(t, []string{"%1", "%2", "%3", "%4", "%5"}, goldenSessions()...)
+	out, err := runRoot(t, "ls", "--json")
+	if err != nil {
+		t.Fatalf("ls --json: %v\n%s", err, out)
+	}
+	want, err := os.ReadFile(filepath.Join("testdata", "ls.golden.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != string(want) {
+		t.Errorf("ls --json output:\n%s\nwant (testdata/ls.golden.json):\n%s", out, want)
+	}
+	if s := getSession(t, db, "f-pane-gone"); s.State != model.StateStale || !s.UpdatedAt.Equal(fleetNow) {
+		t.Errorf("f-pane-gone in store = %s at %v, want stale at %v", s.State, s.UpdatedAt, fleetNow)
+	}
+}
+
+func TestLsJSONEmpty(t *testing.T) {
+	fleetHome(t, nil)
+	out, err := runRoot(t, "ls", "--json")
+	if err != nil || out != "[]\n" {
+		t.Errorf("ls --json on an empty store = %q, %v, want \"[]\\n\"", out, err)
+	}
+}
+
+func TestLsTable(t *testing.T) {
+	fleetHome(t, []string{"%1", "%2", "%3", "%4", "%5"}, goldenSessions()...)
+	out, err := runRoot(t, "ls")
+	if err != nil {
+		t.Fatalf("ls: %v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	wantStates := []string{
+		"STATE", "needs_decision", "waiting", "idle", "working", "working", "idle", "stale", "stale",
+	}
+	if len(lines) != len(wantStates) {
+		t.Fatalf("ls printed %d lines, want %d:\n%s", len(lines), len(wantStates), out)
+	}
+	for i, w := range wantStates {
+		if f := strings.Fields(lines[i]); len(f) == 0 || f[0] != w {
+			t.Errorf("line %d = %q, want state %s", i, lines[i], w)
+		}
+	}
+	for _, want := range []string{"%1", "curia", "main", "15m", `Allow Bash: rm -rf "build"?`} {
+		if !strings.Contains(lines[1], want) {
+			t.Errorf("first row %q is missing %q", lines[1], want)
+		}
+	}
+}
+
+func TestLsTableStripsControlCharacters(t *testing.T) {
+	evil := model.Session{
+		ID: "x", Agent: "claude", Pane: "%1", State: model.StateWaiting, UpdatedAt: at(11, 0),
+		Repo:       "repo\x1b]0;owned\x07",
+		Branch:     "br\u202eanch\u009b2J\x9b", // U+009B is the C1 CSI; \x9b a raw, invalid byte
+		LastUpdate: "line one\nline two\r\x1b[2Jcleared\ttab",
+	}
+	fleetHome(t, []string{"%1"}, evil)
+	out, err := runRoot(t, "ls")
+	if err != nil {
+		t.Fatalf("ls: %v\n%s", err, out)
+	}
+	if strings.ContainsAny(out, "\x1b\x07\r\t\u202e\u009b") || strings.Contains(out, "\x9b") {
+		t.Errorf("ls passed a control character through: %q", out)
+	}
+	if n := strings.Count(out, "\n"); n != 2 {
+		t.Errorf("ls printed %d lines, want a header and one row: %q", n, out)
+	}
+	if !strings.Contains(out, "line one?line two??[2Jcleared?tab") {
+		t.Errorf("last update not kept with control characters replaced: %q", out)
+	}
+}
+
+func TestLsSkipsReconcileWhenTmuxUnreachable(t *testing.T) {
+	db, _ := fleetHome(t, nil, model.Session{
+		ID: "a", Agent: "claude", Pane: "%1", State: model.StateWorking, UpdatedAt: at(11, 0),
+	})
+	useDownTmux(t)
+	out, err := runRoot(t, "ls", "--json")
+	if err != nil {
+		t.Fatalf("ls --json: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, `"state": "working"`) {
+		t.Errorf("ls --json = %s, want the session listed as working", out)
+	}
+	if s := getSession(t, db, "a"); s.State != model.StateWorking {
+		t.Errorf("session became %s without a tmux server", s.State)
+	}
+	if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "no server running") {
+		t.Errorf("log = %q, want one line saying reconcile was skipped", log)
+	}
+}
+
+func TestLsReportsStoreError(t *testing.T) {
+	fleetHome(t, nil)
+	t.Setenv("CURIA_DB", t.TempDir()) // a directory is not a database
+	if _, err := runRoot(t, "ls"); err == nil {
+		t.Error("ls returned nil error when the store cannot open")
+	}
+}
