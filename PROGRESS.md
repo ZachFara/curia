@@ -46,7 +46,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 9 | Dashboard popup and sidebar | Opus (confirmed: a UI with keyboard, mouse and layout behaviour) | `ui.Source`, `ui.New`, `Mode`, `ui.ContextLevel`/`Level`; 8 columns, 1 s refresh, the plan's keys; `curia ui` and `curia sidebar`; `TestContextLevelThresholds`, `TestViewShowsRankedRows`, `TestEnterSwitchesToSelectedPane`, `TestSidebarEnterDoesNotQuit`, `TestKillRequiresConfirmation`, `TestFilterNarrowsRows`, `TestRowWithoutPaneNotJumpable`, `TestNarrowWidthTruncates` pass. | in progress |
+| 9 | Dashboard popup and sidebar | Opus (confirmed: a UI with keyboard, mouse and layout behaviour) | `ui.Source`, `ui.New`, `Mode`, `ui.ContextLevel`/`Level`; 8 columns, 1 s refresh, the plan's keys; `curia ui` and `curia sidebar`; `TestContextLevelThresholds`, `TestViewShowsRankedRows`, `TestEnterSwitchesToSelectedPane`, `TestSidebarEnterDoesNotQuit`, `TestKillRequiresConfirmation`, `TestFilterNarrowsRows`, `TestRowWithoutPaneNotJumpable`, `TestNarrowWidthTruncates` pass. | merged (PR #11) |
 
 ### Wave 6
 
@@ -101,7 +101,7 @@ Format: Ruling: what — why — cost if wrong.
 One line per task: wave, worktree, branch, status.
 
 - Task 1: wave 1, `.worktrees/plan1-t1-scaffold`, `feat/plan1-t1-scaffold`, merged (PR #2), Sonnet, 0 fix rounds.
-- Task 9: wave 5, `.worktrees/plan1-t9-ui`, `feat/plan1-t9-ui`, in progress.
+- Task 9: wave 5, `.worktrees/plan1-t9-ui`, `feat/plan1-t9-ui`, merged (PR #11), Opus, 1 fix rounds.
 - Task 7: wave 4, `.worktrees/plan1-t7-fleet`, `feat/plan1-t7-fleet`, merged (PR #10), Opus, 0 fix rounds.
 - Task 8: wave 4, `.worktrees/plan1-t8-attention`, `feat/plan1-t8-attention`, merged (PR #9), Sonnet, 1 fix rounds.
 - Task 5: wave 3, `.worktrees/plan1-t5-hook`, `feat/plan1-t5-hook`, merged (PR #8), Opus, 1 fix rounds.
