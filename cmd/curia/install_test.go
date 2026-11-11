@@ -76,6 +76,24 @@ func TestInstallAndUninstallRoundTrip(t *testing.T) {
 	}
 }
 
+// Re-sourcing ~/.tmux.conf unsets nothing in a running server, so uninstall
+// says how to undo the snippet instead.
+func TestUninstallSaysHowToUndoTmux(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	out, err := runRoot(t, "uninstall")
+	if err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	for _, want := range []string{"Restart tmux", "tmux set-hook -gu pane-focus-in; tmux unbind a; tmux unbind N"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("uninstall output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "source-file") {
+		t.Errorf("uninstall output still says to re-source:\n%s", out)
+	}
+}
+
 func TestInstallRefusesInvalidSettings(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
