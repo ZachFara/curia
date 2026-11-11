@@ -5,7 +5,7 @@ This file mirrors the plan for humans; it does not replace it. Task order, inter
 ## Status
 
 - **Phase 1 (setup): merged** to `main` as PR #1. `main` is protected (PRs required, `check` required, no force pushes, admins included).
-- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 merged (Task 5, PR #8). Wave 4 merged (Tasks 7 and 8, PRs #10 and #9). Wave 5 merged (Task 9, PR #11). Wave 6 merged (Task 11, PR #12). All eleven tasks are in `plan-1`. `deadcode ./...` without `-test` reports only `tmux.Fake` (the deliberate test double). Final whole-branch review in progress.
+- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 merged (Task 5, PR #8). Wave 4 merged (Tasks 7 and 8, PRs #10 and #9). Wave 5 merged (Task 9, PR #11). Wave 6 merged (Task 11, PR #12). All eleven tasks are in `plan-1`. `deadcode ./...` without `-test` reports only `tmux.Fake` (the deliberate test double). The final whole-branch review (Fable) found the branch ready after one fix wave: 2 Critical and 6 Important cross-task findings, all reproduced with the built binary on an isolated tmux server. The fix wave is in progress on `fix/plan1-final-review`.
 
 ## Plan 1 waves
 
@@ -64,7 +64,12 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 6. Resolved by Ruling 23.
 8. `curia uninstall` only removes entries for the current binary path (Ruling 13); entries from a moved or rebuilt binary stay behind and fire against a missing file. Decide whether uninstall should also match older paths.
 9. Under sustained heavy write load a waiting SQLite writer can time out (SQLite polls for the lock rather than queueing). Hooks are short so this is unlikely in practice; revisit if the log shows busy errors.
-10. `fleet.Reconcile` matches sessions to panes by pane id alone. A restarted tmux server numbers panes from `%0` again, so an old session whose id is reused is never marked stale and `next` could jump to an unrelated pane. The data model has no server identity; decide in the final review or Plan 2.
+10. Resolved by Ruling 28 for a restarted server. `fleet.Reconcile` matches sessions to panes by pane id alone. A restarted tmux server numbers panes from `%0` again, so an old session whose id is reused is never marked stale and `next` could jump to an unrelated pane. The data model has no server identity; decide in the final review or Plan 2.
+11. The `events` table keeps full hook payloads (up to 1 MiB each, including tool output) with no pruning. Add retention in Plan 2.
+12. A session outside tmux that dies without SessionEnd keeps its last state forever (it is never stale by design), so a waiting one pins `W1`. An age-out or a `curia forget` belongs in a later plan.
+13. Two tmux servers on different sockets can both have a `%1`; telling them apart needs a `tmux_server` column (restore plan).
+14. `curia install` records the resolved binary path; an upgrade that changes the path orphans the old hook entries (see Ruling 13). Decide at packaging time whether to match any `curia hook <Event>` entry.
+15. SQLite runs with the default `synchronous=FULL`; unmeasured on Linux. Consider `NORMAL` if hook latency is a problem there.
 7. No LICENSE file yet although the repo is public; the spec leaves AGPL-3.0 or MIT open. Owner to decide.
 
 ## Rulings
@@ -103,6 +108,13 @@ Format: Ruling: what — why — cost if wrong.
 
 26. Ruling: Task 11 asserts latency (p95 under 50 ms per process, unchanged) over a separate sequential pass of 400 timed runs on a fresh database; the concurrent replay asserts correctness only; one untimed warm-up run is allowed — the script has 10 runs, so its p95 is its maximum, and three simultaneous SessionStarts on a loaded machine measure CPU contention rather than hook cost — latency while several sessions start at the same instant is not gated by a test.
 
+27. Ruling (amends Ruling 8): an ended session resumes on UserPromptSubmit, PreToolUse, PostToolUse, Notification or Stop; SubagentStop and SessionEnd on an ended session are still ignored — a nested `claude -p` in the same pane ends its parent, and the parent would never come back, hiding a session that may be waiting on a permission prompt — a straggler event after a real SessionEnd resurrects a row until its pane closes.
+28. Ruling: `tmux.Pane` gains `ServerStart` (from `#{start_time}`), and `fleet.Reconcile` also marks a session stale when it started before the live tmux server did — after a tmux restart pane ids are reused, so `next` and the dashboard's kill would act on unrelated panes (closes Open Question 10) — two servers on different sockets are still not told apart.
+29. Ruling (extends Ruling 7): a session whose row does not exist yet gets SessionStart's treatment on its first event of any kind: prior sessions in its pane are ended and repo, branch, tmux session and window are filled — sessions already running at install time otherwise never get a window or a marker — one extra git and tmux call on a session's first event.
+30. Ruling (amends the plan's two git commands): SessionStart runs one git process (`rev-parse --show-toplevel --absolute-git-dir`) and reads `HEAD` for the branch — SessionStart took 15 to 23 ms at the median against the 20 ms constraint — branch detection reads git's `HEAD` file format directly.
+31. Ruling (amends the spec's F1 table): a Notification whose `notification_type` is `idle_prompt` or `auth_success` changes no state — Claude Code also notifies after about 60 seconds of idle, which would turn every finished session red — if the field differs in the installed Claude Code the old behaviour remains; the owner confirms in the live check.
+32. Ruling: the fix wave is one Opus agent on `fix/plan1-final-review` with a PR into `plan-1` and one scoped re-review on Fable — the skill's single fix wave — none.
+
 ## Ledger
 
 One line per task: wave, worktree, branch, status.
@@ -121,9 +133,9 @@ One line per task: wave, worktree, branch, status.
 
 ## Next steps
 
-1. Final whole-branch review, one fix wave, one scoped re-review.
+1. Finish the fix wave, one scoped re-review, merge into `plan-1`.
 2. Open the PR from `plan-1` to `main` with the full list of rulings.
-3. Owner: run the live check from Task 11 Step 5 (`curia install`, three real sessions).
+3. Owner: run the live check from Task 11 Step 5 (`curia install`, three real sessions) before merging to `main`. Confirm in it: the window marker clears on focus; a nested `claude -p` does not hide its parent; an idle session does not turn `waiting` after a minute. `curia install` edits `~/.tmux.conf`, which chezmoi manages, so run `chezmoi re-add` afterwards.
 
 ## Deferred minors (for the final review)
 
