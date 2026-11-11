@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -186,6 +188,39 @@ func TestLsTableShowsRepoBasename(t *testing.T) {
 	}
 	if out, _ = runRoot(t, "ls", "--json"); !strings.Contains(out, `"repo": "/Users/me/src/curia"`) {
 		t.Errorf("ls --json lost the full repo path:\n%s", out)
+	}
+}
+
+// ls --json prints no raw C1, bidi or other unprintable rune and does not
+// HTML-escape, yet stays valid JSON that decodes to the stored strings.
+func TestLsJSONEscapesUnprintableRunes(t *testing.T) {
+	odd := model.Session{
+		ID: "x", Agent: "claude", Pane: "%1", State: model.StateWaiting, UpdatedAt: at(11, 0),
+		Repo:       "repo\x1b]0;owned\x07",
+		Branch:     "br\u202eanch\u009b2J",
+		LastUpdate: "make && ./run <x> \U000E0001 é 世 \u2028",
+	}
+	fleetHome(t, []string{"%1"}, odd)
+	out, err := runRoot(t, "ls", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range out {
+		if r != '\n' && !unicode.IsPrint(r) {
+			t.Errorf("ls --json printed the raw rune %U:\n%s", r, out)
+		}
+	}
+	for _, want := range []string{"make && ./run <x>", `\u202e`, `\u009b`, `\udb40\udc01`, "é 世", `\u001b`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ls --json lacks %q:\n%s", want, out)
+		}
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("ls --json is not valid JSON: %v\n%s", err, out)
+	}
+	if len(rows) != 1 || rows[0]["repo"] != odd.Repo || rows[0]["branch"] != odd.Branch || rows[0]["last_update"] != odd.LastUpdate {
+		t.Errorf("decoded %q, want the stored strings back", rows)
 	}
 }
 

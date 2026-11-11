@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
+	"unicode/utf16"
 
 	"github.com/spf13/cobra"
 
@@ -99,9 +103,37 @@ func printJSON(w io.Writer, sessions []model.Session) error {
 			StartedAt: jsonTime(s.StartedAt), UpdatedAt: jsonTime(s.UpdatedAt),
 		})
 	}
-	enc := json.NewEncoder(w)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // "&&" in a command stays readable
 	enc.SetIndent("", "  ")
-	return enc.Encode(rows)
+	if err := enc.Encode(rows); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
+	return err
+}
+
+// escapeUnprintable writes every unprintable rune of encoded JSON (C1
+// controls, bidi overrides and other invisible format characters, which the
+// encoder leaves raw) as a \uXXXX escape, a surrogate pair above U+FFFF, so
+// they cannot reach a terminal. Outside strings JSON holds only printable
+// runes and the line breaks of the indentation, which are kept, and inside
+// strings the escapes decode to the same text.
+func escapeUnprintable(encoded string) string {
+	var b strings.Builder
+	for _, r := range encoded {
+		switch {
+		case r == '\n' || unicode.IsPrint(r):
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			hi, lo := utf16.EncodeRune(r)
+			fmt.Fprintf(&b, `\u%04x\u%04x`, hi, lo)
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+	}
+	return b.String()
 }
 
 // printTable prints one row per session, the repo as its basename. Every
