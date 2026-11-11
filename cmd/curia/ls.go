@@ -104,14 +104,15 @@ func printJSON(w io.Writer, sessions []model.Session) error {
 	return enc.Encode(rows)
 }
 
-// printTable prints one row per session. Every cell is session text, which
-// is untrusted, so it goes through ui.Cell before reaching the terminal.
+// printTable prints one row per session, the repo as its basename. Every
+// cell is session text, which is untrusted, so it goes through ui.Cell
+// before reaching the terminal.
 func printTable(w io.Writer, sessions []model.Session, now time.Time) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "STATE\tPANE\tREPO\tBRANCH\tAGE\tLAST UPDATE")
 	for _, s := range sessions {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", ui.Cell(string(s.State)), ui.Cell(s.Pane),
-			ui.Cell(s.Repo), ui.Cell(s.Branch), ui.Cell(ui.Age(s.UpdatedAt, now)), ui.Cell(s.LastUpdate))
+			ui.Cell(ui.RepoName(s.Repo)), ui.Cell(s.Branch), ui.Cell(ui.Age(s.UpdatedAt, now)), ui.Cell(s.LastUpdate))
 	}
 	return tw.Flush()
 }

@@ -187,14 +187,23 @@ func (m Model) cellText(s model.Session, c column) string {
 // repoText is "repo@branch" with the basename of the stored repo path
 // (Ruling 22), the repo alone without a branch, and empty without a repo.
 func repoText(s model.Session) string {
-	if s.Repo == "" {
+	repo := RepoName(s.Repo)
+	if repo == "" {
 		return ""
 	}
-	repo := filepath.Base(s.Repo)
 	if s.Branch == "" {
 		return repo
 	}
 	return repo + "@" + s.Branch
+}
+
+// RepoName is how views show a stored repository path: its basename
+// (Ruling 22), or empty for no repository. curia ls uses it too.
+func RepoName(repo string) string {
+	if repo == "" {
+		return ""
+	}
+	return filepath.Base(repo)
 }
 
 // windowText is "session:window" with the window's current name, or its

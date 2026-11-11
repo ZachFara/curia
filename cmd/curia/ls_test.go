@@ -171,6 +171,24 @@ func TestLsTable(t *testing.T) {
 	}
 }
 
+// Ruling 22: the table shows the repo's basename; --json keeps the full path.
+func TestLsTableShowsRepoBasename(t *testing.T) {
+	fleetHome(t, []string{"%1"}, model.Session{
+		ID: "x", Agent: "claude", Pane: "%1", State: model.StateWaiting, UpdatedAt: at(11, 0),
+		Repo: "/Users/me/src/curia", Branch: "main",
+	})
+	out, err := runRoot(t, "ls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := strings.Fields(strings.Split(out, "\n")[1]); len(f) < 3 || f[2] != "curia" {
+		t.Errorf("ls row = %q, want repo column curia", out)
+	}
+	if out, _ = runRoot(t, "ls", "--json"); !strings.Contains(out, `"repo": "/Users/me/src/curia"`) {
+		t.Errorf("ls --json lost the full repo path:\n%s", out)
+	}
+}
+
 func TestLsTableStripsControlCharacters(t *testing.T) {
 	evil := model.Session{
 		ID: "x", Agent: "claude", Pane: "%1", State: model.StateWaiting, UpdatedAt: at(11, 0),
