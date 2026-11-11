@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -175,14 +179,14 @@ func TestUpsertRoundTrip(t *testing.T) {
 	upsert(t, s, want)
 	got := get(t, s, want.ID)
 
-	// Times survive to the second.
+	// Times survive to the nanosecond (ruling 15).
 	for name, pair := range map[string][2]time.Time{
 		"StartedAt": {got.StartedAt, want.StartedAt},
 		"UpdatedAt": {got.UpdatedAt, want.UpdatedAt},
 		"SeenAt":    {got.SeenAt, want.SeenAt},
 	} {
-		if !pair[0].Equal(pair[1].Truncate(time.Second)) {
-			t.Errorf("%s = %v, want %v", name, pair[0], pair[1].Truncate(time.Second))
+		if !pair[0].Equal(pair[1]) {
+			t.Errorf("%s = %v, want %v", name, pair[0], pair[1])
 		}
 	}
 	got.StartedAt, got.UpdatedAt, got.SeenAt = time.Time{}, time.Time{}, time.Time{}
@@ -212,17 +216,23 @@ func TestUpsertZeroTimesRoundTripAsZero(t *testing.T) {
 	}
 }
 
-func TestUpsertStoresTimesAsUTCRFC3339(t *testing.T) {
+func TestUpsertStoresTimesAsFixedWidthUTC(t *testing.T) {
 	path := dbPath(t)
 	s := open(t, path)
-	at := time.Date(2026, 11, 11, 9, 0, 5, 123, time.FixedZone("EST", -5*3600))
-	upsert(t, s, model.Session{ID: "t", Agent: "claude", State: model.StateWorking, UpdatedAt: at})
-	var text string
-	if err := rawDB(t, path).QueryRow(`SELECT updated_at FROM sessions WHERE id = 't'`).Scan(&text); err != nil {
-		t.Fatal(err)
+	cases := map[string]time.Time{
+		"2026-11-11T14:00:05.000000123Z": time.Date(2026, 11, 11, 9, 0, 5, 123, time.FixedZone("EST", -5*3600)),
+		"2026-11-11T14:00:05.000000000Z": time.Date(2026, 11, 11, 14, 0, 5, 0, time.UTC),
+		"2026-11-11T14:00:05.500000000Z": time.Date(2026, 11, 11, 14, 0, 5, 500_000_000, time.UTC),
 	}
-	if text != "2026-11-11T14:00:05Z" {
-		t.Errorf("updated_at stored as %q, want 2026-11-11T14:00:05Z", text)
+	for want, at := range cases {
+		upsert(t, s, model.Session{ID: "t", Agent: "claude", State: model.StateWorking, UpdatedAt: at})
+		var text string
+		if err := rawDB(t, path).QueryRow(`SELECT updated_at FROM sessions WHERE id = 't'`).Scan(&text); err != nil {
+			t.Fatal(err)
+		}
+		if text != want {
+			t.Errorf("updated_at stored as %q, want %q", text, want)
+		}
 	}
 }
 
@@ -270,6 +280,46 @@ func TestListHidesStaleWithoutUpdatedAt(t *testing.T) {
 	}
 }
 
+func TestListOrdersStaleCutoffWithinOneSecond(t *testing.T) {
+	// Stored text must sort like the times it encodes, even within a second
+	// and against a whole-second time (RFC3339Nano would trim ".000" and
+	// sort "05Z" after "05.5Z").
+	s := open(t, dbPath(t))
+	base := time.Date(2026, 11, 11, 14, 0, 5, 0, time.UTC)
+	upsert(t, s, model.Session{ID: "a-whole-second", Agent: "claude", State: model.StateStale, UpdatedAt: base})
+	upsert(t, s, model.Session{ID: "b-100ms", Agent: "claude", State: model.StateStale, UpdatedAt: base.Add(100 * time.Millisecond)})
+	upsert(t, s, model.Session{ID: "c-900ms", Agent: "claude", State: model.StateStale, UpdatedAt: base.Add(900 * time.Millisecond)})
+	got, err := s.ListSessions(context.Background(), store.ListFilter{HideStaleBefore: base.Add(500 * time.Millisecond)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"c-900ms"}; !reflect.DeepEqual(ids(got), want) {
+		t.Errorf("ids = %v, want %v", ids(got), want)
+	}
+}
+
+func TestListToleratesNullColumns(t *testing.T) {
+	// A row written by something other than Store, with every nullable
+	// column NULL, must not break the whole list.
+	path := dbPath(t)
+	s := open(t, path)
+	upsert(t, s, model.Session{ID: "a-normal", Agent: "claude", State: model.StateWorking})
+	_, err := rawDB(t, path).Exec(`INSERT INTO sessions (id, agent, state, subagents_active) VALUES ('b-sparse', 'claude', 'idle', NULL)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListSessions(context.Background(), store.ListFilter{})
+	if err != nil {
+		t.Fatalf("ListSessions with a sparse row: %v", err)
+	}
+	if want := []string{"a-normal", "b-sparse"}; !reflect.DeepEqual(ids(got), want) {
+		t.Fatalf("ids = %v, want %v", ids(got), want)
+	}
+	if want := (model.Session{ID: "b-sparse", Agent: "claude", State: model.StateIdle}); !reflect.DeepEqual(got[1], want) {
+		t.Errorf("sparse row:\n got %+v\nwant %+v", got[1], want)
+	}
+}
+
 func TestMarkSeen(t *testing.T) {
 	s := open(t, dbPath(t))
 	ctx := context.Background()
@@ -277,7 +327,7 @@ func TestMarkSeen(t *testing.T) {
 	upsert(t, s, model.Session{ID: "gone", Agent: "claude", Pane: "%3", State: model.StateEnded})
 	upsert(t, s, model.Session{ID: "other", Agent: "claude", Pane: "%4", State: model.StateWaiting})
 
-	at := time.Date(2026, 11, 11, 15, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 11, 11, 15, 0, 0, 123_456_789, time.UTC)
 	if err := s.MarkSeen(ctx, "%3", at); err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +419,7 @@ func TestAppendEvent(t *testing.T) {
 		if err := rows.Scan(&sid, &kind, &tool, &at); err != nil {
 			t.Fatal(err)
 		}
-		if sid != "sess-1" || kind != "PreToolUse" || tool != "Edit" || at != "2026-11-11T14:00:05Z" {
+		if sid != "sess-1" || kind != "PreToolUse" || tool != "Edit" || at != "2026-11-11T14:00:05.000000000Z" {
 			t.Errorf("event row = %q %q %q %q", sid, kind, tool, at)
 		}
 	}
@@ -461,44 +511,177 @@ func openAndUpsertConcurrently(t *testing.T, path string, n int) {
 	wg.Wait()
 }
 
-func TestWriteUnderExclusiveLockReturnsError(t *testing.T) {
+// holdExclusive opens the store at a fresh path with one session "held",
+// then has another connection take BEGIN EXCLUSIVE until the test ends. It
+// returns a Store opened while the lock is held.
+func holdExclusive(t *testing.T) *store.Store {
+	t.Helper()
 	path := dbPath(t)
-	s := open(t, path)
+	upsert(t, open(t, path), model.Session{ID: "held", Agent: "claude", State: model.StateWorking})
 	ctx := context.Background()
-	upsert(t, s, model.Session{ID: "held", Agent: "claude", State: model.StateWorking})
-
 	conn, err := rawDB(t, path).Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = conn.Close() }()
 	if _, err := conn.ExecContext(ctx, `BEGIN EXCLUSIVE`); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _, _ = conn.ExecContext(ctx, `ROLLBACK`) }()
+	t.Cleanup(func() {
+		_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		_ = conn.Close()
+	})
+	return open(t, path)
+}
 
+// assertBusyAfterTimeout runs write and requires it to fail with
+// SQLITE_BUSY after waiting out busy_timeout (2000ms), never hanging.
+func assertBusyAfterTimeout(t *testing.T, write func() error) {
+	t.Helper()
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- write() }()
+	select {
+	case err := <-done:
+		var se *sqlite.Error
+		if !errors.As(err, &se) || se.Code()&0xff != sqlite3.SQLITE_BUSY {
+			t.Fatalf("write under an exclusive lock returned %v, want SQLITE_BUSY", err)
+		}
+		if elapsed := time.Since(start); elapsed < 1900*time.Millisecond {
+			t.Errorf("write failed after %v, want it to wait out busy_timeout (2000ms)", elapsed)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("write hung under an exclusive lock")
+	}
+}
+
+func TestWriteUnderExclusiveLockReturnsError(t *testing.T) {
+	t.Parallel()
 	// A hook opening the store while the lock is held still opens it, and
 	// views can still read (WAL).
-	late := open(t, path)
+	late := holdExclusive(t)
+	ctx := context.Background()
 	if _, ok, err := late.GetSession(ctx, "held"); err != nil || !ok {
 		t.Fatalf("read under lock = ok %v, err %v; want true, nil", ok, err)
 	}
+	assertBusyAfterTimeout(t, func() error {
+		return late.UpsertSession(ctx, model.Session{ID: "blocked", Agent: "claude", State: model.StateWorking})
+	})
+}
 
-	done := make(chan error, 1)
-	start := time.Now()
-	go func() {
-		done <- late.UpsertSession(ctx, model.Session{ID: "blocked", Agent: "claude", State: model.StateWorking})
-	}()
-	select {
-	case err := <-done:
-		elapsed := time.Since(start)
-		if err == nil {
-			t.Fatal("UpsertSession under an exclusive lock returned nil, want an error")
+func TestUpdateSessionUnderExclusiveLockReturnsBusy(t *testing.T) {
+	t.Parallel()
+	late := holdExclusive(t)
+	called := false
+	assertBusyAfterTimeout(t, func() error {
+		return late.UpdateSession(context.Background(), "held", func(s model.Session, _ bool) model.Session {
+			called = true
+			return s
+		})
+	})
+	if called {
+		t.Error("fn ran without the write lock; UpdateSession must take it before reading")
+	}
+}
+
+func TestUpdateSessionLosesNoUpdates(t *testing.T) {
+	path := dbPath(t)
+	handles := make([]*store.Store, 5)
+	for i := range handles {
+		handles[i] = open(t, path)
+	}
+	ctx := context.Background()
+	// SQLite's busy handler polls rather than queues, so a writer can starve
+	// for as long as others keep the lock saturated. The load is sized to
+	// finish well inside busy_timeout (2000ms), so no call may time out and
+	// every call must count.
+	const goroutines, calls = 10, 10
+	var wg sync.WaitGroup
+	for g := range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s := handles[g%len(handles)]
+			for i := range calls {
+				err := s.UpdateSession(ctx, "shared", func(sess model.Session, _ bool) model.Session {
+					sess.ID, sess.Agent, sess.State = "shared", "claude", model.StateWorking
+					sess.SubagentsActive++
+					return sess
+				})
+				if err != nil {
+					t.Errorf("goroutine %d call %d: %v", g, i, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if got := get(t, handles[0], "shared").SubagentsActive; got != goroutines*calls {
+		t.Errorf("SubagentsActive = %d, want %d (updates lost)", got, goroutines*calls)
+	}
+}
+
+func TestUpdateSessionPreservesConcurrentMarkSeen(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	upsert(t, s, model.Session{ID: "a", Agent: "claude", Pane: "%3", State: model.StateWorking})
+	setState := func(st model.State) func(model.Session, bool) model.Session {
+		return func(sess model.Session, _ bool) model.Session {
+			sess.State = st
+			return sess
 		}
-		if elapsed < 1900*time.Millisecond {
-			t.Errorf("UpsertSession failed after %v, want it to wait out busy_timeout (2000ms)", elapsed)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("UpsertSession hung under an exclusive lock")
+	}
+	if err := s.UpdateSession(ctx, "a", setState(model.StateWaiting)); err != nil {
+		t.Fatal(err)
+	}
+	seen := time.Date(2026, 11, 11, 15, 0, 0, 42, time.UTC)
+	if err := s.MarkSeen(ctx, "%3", seen); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateSession(ctx, "a", setState(model.StateIdle)); err != nil {
+		t.Fatal(err)
+	}
+	got := get(t, s, "a")
+	if got.State != model.StateIdle || !got.SeenAt.Equal(seen) {
+		t.Errorf("got state %s SeenAt %v, want idle and %v", got.State, got.SeenAt, seen)
+	}
+}
+
+func TestUpdateSessionCreatesAbsentRow(t *testing.T) {
+	s := open(t, dbPath(t))
+	want := model.Session{ID: "new", Agent: "claude", State: model.StateWorking, ContextMax: 200000}
+	var sawFound bool
+	var sawSession model.Session
+	err := s.UpdateSession(context.Background(), "new", func(sess model.Session, found bool) model.Session {
+		sawSession, sawFound = sess, found
+		return want
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sawFound || !reflect.DeepEqual(sawSession, model.Session{}) {
+		t.Errorf("fn got (%+v, %v), want zero Session and false", sawSession, sawFound)
+	}
+	if got := get(t, s, "new"); !reflect.DeepEqual(got, want) {
+		t.Errorf("created row:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestUpdateSessionRejectsChangedID(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	orig := model.Session{ID: "a", Agent: "claude", State: model.StateWorking}
+	upsert(t, s, orig)
+	err := s.UpdateSession(ctx, "a", func(sess model.Session, _ bool) model.Session {
+		sess.ID, sess.State = "b", model.StateIdle
+		return sess
+	})
+	if err == nil {
+		t.Fatal("UpdateSession with a changed ID returned nil, want an error")
+	}
+	if got := get(t, s, "a"); !reflect.DeepEqual(got, orig) {
+		t.Errorf("a changed:\n got %+v\nwant %+v", got, orig)
+	}
+	if _, ok, err := s.GetSession(ctx, "b"); err != nil || ok {
+		t.Errorf("GetSession(b) = ok %v, err %v; want nothing written", ok, err)
 	}
 }

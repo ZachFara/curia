@@ -45,7 +45,7 @@ type ListFilter struct {
 // Open opens the database at path, creating its parent directory and the
 // file if needed, and applies any pending migrations.
 func Open(path string) (*Store, error) {
-	abs, err := filepath.Abs(filepath.Clean(path))
+	abs, err := filepath.Abs(path) // Abs also cleans the path
 	if err != nil {
 		return nil, fmt.Errorf("store: resolve %s: %w", path, err)
 	}
@@ -159,15 +159,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	return tx.Commit()
 }
 
-// querier is satisfied by both *sql.DB and *sql.Tx.
-type querier interface {
+// dbtx is satisfied by both *sql.DB and *sql.Tx.
+type dbtx interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // pending returns the migration paths in names whose base name is not
 // recorded in schema_migrations.
-func pending(ctx context.Context, q querier, names []string) ([]string, error) {
+func pending(ctx context.Context, q dbtx, names []string) ([]string, error) {
 	var exists bool
 	err := q.QueryRowContext(ctx,
 		`SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')`).
@@ -201,10 +202,54 @@ func pending(ctx context.Context, q querier, names []string) ([]string, error) {
 }
 
 // UpsertSession inserts s or overwrites every stored field of the row with
-// the same ID, in one statement: concurrent hooks never read-modify-write.
+// the same ID, in one statement. It writes the caller's snapshot blindly:
+// to change a session based on its stored value, use UpdateSession.
 // An empty Pane is stored as NULL, so pane-scoped updates never match it.
 func (s *Store) UpsertSession(ctx context.Context, sess model.Session) error {
-	_, err := s.db.ExecContext(ctx, `
+	if err := upsert(ctx, s.db, sess); err != nil {
+		return fmt.Errorf("store: upsert session %s: %w", sess.ID, err)
+	}
+	return nil
+}
+
+// UpdateSession changes one session based on its stored value, without
+// losing concurrent updates. In one write transaction that takes the write
+// lock before reading (BEGIN IMMEDIATE), it loads the session id (the zero
+// Session and found=false if there is none), calls fn, and upserts what fn
+// returns. Concurrent callers in any process therefore run one at a time,
+// and each fn sees what the previous caller committed. A caller that waits
+// longer than busy_timeout for the lock gets an error and fn is not called.
+//
+// fn must not call the Store: the transaction holds the write lock, so a
+// write from fn would wait on it until busy_timeout. If fn returns a Session
+// whose ID is not id, nothing is written and an error is returned.
+func (s *Store) UpdateSession(ctx context.Context, id string, fn func(s model.Session, found bool) model.Session) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: update session %s: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	cur, found, err := getSession(ctx, tx, id)
+	if err != nil {
+		return fmt.Errorf("store: update session %s: %w", id, err)
+	}
+	next := fn(cur, found)
+	if next.ID != id {
+		return fmt.Errorf("store: update session %s: fn returned a session with ID %q", id, next.ID)
+	}
+	if err = upsert(ctx, tx, next); err != nil {
+		return fmt.Errorf("store: update session %s: %w", id, err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("store: update session %s: commit: %w", id, err)
+	}
+	return nil
+}
+
+// upsert is the single INSERT ... ON CONFLICT statement behind UpsertSession
+// and UpdateSession.
+func upsert(ctx context.Context, e dbtx, sess model.Session) error {
+	_, err := e.ExecContext(ctx, `
 INSERT INTO sessions (
   id, agent, tmux_pane, tmux_session, tmux_window, cwd, repo, branch, state, model,
   context_used, context_max, subagents_active, last_update, seen_at, transcript_path,
@@ -224,26 +269,36 @@ ON CONFLICT(id) DO UPDATE SET
 		sess.State, sess.Model, sess.ContextUsed, sess.ContextMax, sess.SubagentsActive, sess.LastUpdate,
 		formatTime(sess.SeenAt), sess.TranscriptPath, formatTime(sess.StartedAt), formatTime(sess.UpdatedAt),
 		sess.TranscriptOffset)
-	if err != nil {
-		return fmt.Errorf("store: upsert session %s: %w", sess.ID, err)
-	}
-	return nil
+	return err
 }
 
+// selectSessions reads every column Session maps to. Each nullable column is
+// COALESCEd (times are scanned as NullString), so a row written by something
+// other than Store with NULLs in it cannot break a whole list.
 const selectSessions = `
-SELECT id, agent, COALESCE(tmux_pane, ''), tmux_session, tmux_window, cwd, repo, branch, state, model,
-  context_used, context_max, subagents_active, last_update, seen_at, transcript_path,
+SELECT COALESCE(id, ''), COALESCE(agent, ''), COALESCE(tmux_pane, ''), COALESCE(tmux_session, ''),
+  COALESCE(tmux_window, ''), COALESCE(cwd, ''), COALESCE(repo, ''), COALESCE(branch, ''),
+  COALESCE(state, ''), COALESCE(model, ''), COALESCE(context_used, 0), COALESCE(context_max, 0),
+  COALESCE(subagents_active, 0), COALESCE(last_update, ''), seen_at, COALESCE(transcript_path, ''),
   started_at, updated_at, transcript_offset
 FROM sessions`
 
 // GetSession returns the session with the given id, and false if there is none.
 func (s *Store) GetSession(ctx context.Context, id string) (model.Session, bool, error) {
-	sess, err := scanSession(s.db.QueryRowContext(ctx, selectSessions+` WHERE id = ?`, id))
+	sess, found, err := getSession(ctx, s.db, id)
+	if err != nil {
+		return model.Session{}, false, fmt.Errorf("store: get session %s: %w", id, err)
+	}
+	return sess, found, nil
+}
+
+func getSession(ctx context.Context, q dbtx, id string) (model.Session, bool, error) {
+	sess, err := scanSession(q.QueryRowContext(ctx, selectSessions+` WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Session{}, false, nil
 	}
 	if err != nil {
-		return model.Session{}, false, fmt.Errorf("store: get session %s: %w", id, err)
+		return model.Session{}, false, err
 	}
 	return sess, true, nil
 }
@@ -337,12 +392,17 @@ func (s *Store) EndOthersInPane(ctx context.Context, pane, keepID string, at tim
 	return nil
 }
 
-// formatTime renders t as UTC RFC 3339 text, and the zero time as NULL.
+// timeLayout is UTC RFC 3339 with exactly nine fractional digits. The fixed
+// width makes stored text sort like the times it encodes, which SQL
+// comparisons rely on; RFC3339Nano trims trailing zeros and would not.
+const timeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// formatTime renders t in timeLayout, and the zero time as NULL.
 func formatTime(t time.Time) any {
 	if t.IsZero() {
 		return nil
 	}
-	return t.UTC().Format(time.RFC3339)
+	return t.UTC().Format(timeLayout)
 }
 
 // parseTime reverses formatTime.
@@ -350,5 +410,5 @@ func parseTime(v sql.NullString) (time.Time, error) {
 	if !v.Valid {
 		return time.Time{}, nil
 	}
-	return time.Parse(time.RFC3339, v.String)
+	return time.Parse(timeLayout, v.String)
 }
