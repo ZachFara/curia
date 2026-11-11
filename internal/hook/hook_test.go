@@ -205,6 +205,23 @@ func TestRunSessionStartRecordsSession(t *testing.T) {
 	}
 }
 
+func TestGitAndTmuxOnlyOnSessionStart(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{}
+	env := f.env("%3")
+	run(t, st, env, model.SessionStart, payload("A", "/p/a.jsonl", ""))
+	for _, kind := range []model.EventKind{
+		model.UserPromptSubmit, model.PreToolUse, model.PostToolUse, model.Notification,
+		model.Stop, model.SubagentStop, model.SessionEnd,
+	} {
+		run(t, st, env, kind, payload("A", "/p/a.jsonl", `,"tool_name":"Edit"`))
+	}
+	if len(f.gitCalls) != 1 || len(f.paneCalls) != 1 {
+		t.Errorf("Git called %d times, PaneInfo %d times, want once each (SessionStart)",
+			len(f.gitCalls), len(f.paneCalls))
+	}
+}
+
 func TestSessionStartEndsPriorSessionInPane(t *testing.T) {
 	st := openStore(t)
 	f := &fakeEnv{}

@@ -1,14 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
-	"slices"
 	"strings"
 	"time"
 
@@ -114,7 +111,7 @@ func hookEnv(ctx context.Context, logger *slog.Logger) hook.Env {
 	return hook.Env{
 		Pane: os.Getenv("TMUX_PANE"),
 		Now:  time.Now,
-		Git:  func(cwd string) (string, string) { return gitInfo(ctx, cwd) },
+		Git:  func(cwd string) (string, string) { return gitInfo(ctx, cwd, logger) },
 		PaneInfo: func(pane string) (string, string) {
 			pctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 			defer cancel()
@@ -126,58 +123,4 @@ func hookEnv(ctx context.Context, logger *slog.Logger) hook.Env {
 			return p.Session, p.WindowID
 		},
 	}
-}
-
-// gitInfo returns the repository top level and current branch for cwd, or
-// empty strings when cwd is empty or not in a repository. The branch is
-// empty on a detached HEAD. The two git commands run at the same time.
-func gitInfo(ctx context.Context, cwd string) (repo, branch string) {
-	if cwd == "" { // git -C "" would use this process's directory
-		return "", ""
-	}
-	ctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
-	defer cancel()
-	waitRepo := startGit(ctx, cwd, "rev-parse", "--show-toplevel")
-	waitBranch := startGit(ctx, cwd, "branch", "--show-current")
-	repo, err := waitRepo()
-	branch, _ = waitBranch()
-	if err != nil {
-		return "", ""
-	}
-	return repo, branch
-}
-
-// startGit starts git -C cwd args; the returned func waits for it and
-// returns its trimmed stdout. Its stderr is discarded, never passed through.
-func startGit(ctx context.Context, cwd string, args ...string) func() (string, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", cwd}, args...)...)
-	cmd.Env = gitEnv()
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Start(); err != nil {
-		return func() (string, error) { return "", err }
-	}
-	return func() (string, error) {
-		err := cmd.Wait()
-		return strings.TrimSpace(out.String()), err
-	}
-}
-
-// gitRepoVars are the variables `git rev-parse --local-env-vars` lists: set
-// in this process (for example because Claude Code was started from a git
-// hook) they would point git at another repository than cwd's.
-var gitRepoVars = []string{
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
-	"GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
-	"GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
-	"GIT_SHALLOW_FILE", "GIT_COMMON_DIR",
-}
-
-// gitEnv is this process's environment without gitRepoVars, so git finds
-// the repository from -C alone.
-func gitEnv() []string {
-	return slices.DeleteFunc(os.Environ(), func(kv string) bool {
-		name, _, _ := strings.Cut(kv, "=")
-		return slices.Contains(gitRepoVars, name)
-	})
 }

@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -220,44 +219,5 @@ func TestHookLogCannotBeForged(t *testing.T) {
 	assertQuietExitZero(t, res)
 	if len(res.log) != 1 {
 		t.Errorf("log = %q, want the untrusted text kept on one line", res.log)
-	}
-}
-
-func TestGitInfo(t *testing.T) {
-	// A git hook (lefthook's pre-commit runs these tests) exports GIT_DIR and
-	// friends; gitInfo must look at cwd regardless.
-	other := t.TempDir()
-	gitInit(t, other, "main")
-	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
-	t.Setenv("GIT_WORK_TREE", other)
-
-	dir := t.TempDir()
-	if repo, branch := gitInfo(context.Background(), dir); repo != "" || branch != "" {
-		t.Errorf("outside a repo: %q, %q", repo, branch)
-	}
-	if repo, branch := gitInfo(context.Background(), ""); repo != "" || branch != "" {
-		t.Errorf("empty cwd: %q, %q", repo, branch)
-	}
-	gitInit(t, dir, "feat/x")
-	sub := filepath.Join(dir, "sub")
-	if err := os.Mkdir(sub, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	repo, branch := gitInfo(context.Background(), sub)
-	wantRepo, _ := filepath.EvalSymlinks(dir)
-	if repo != wantRepo || branch != "feat/x" {
-		t.Errorf("gitInfo = %q, %q, want %q, feat/x", repo, branch, wantRepo)
-	}
-}
-
-// gitInit makes dir a git repository on branch. It runs git with gitEnv, so
-// a GIT_DIR inherited from a git hook cannot make it reinitialise (and mark
-// bare) the repository running the tests.
-func gitInit(t *testing.T, dir, branch string) {
-	t.Helper()
-	cmd := exec.Command("git", "init", "-q", "-b", branch, dir)
-	cmd.Env = gitEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v %s", err, out)
 	}
 }
