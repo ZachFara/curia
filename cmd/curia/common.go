@@ -46,6 +46,10 @@ func openLog(path string) (*slog.Logger, func() error, error) {
 	return slog.New(slog.NewTextHandler(f, nil)), f.Close, nil
 }
 
+// newTmuxClient builds the tmux client every command uses; tests replace it
+// with a tmux.Fake.
+var newTmuxClient = func() tmux.Client { return tmux.NewExec("") }
+
 // clock is the wall clock of the fleet commands (ls, next); tests fix it.
 var clock = time.Now
 

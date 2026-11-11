@@ -38,10 +38,6 @@ var (
 // hookDeadline bounds a whole hook run; tests shorten it.
 var hookDeadline = 5 * time.Second
 
-// newTmuxClient builds the tmux client every command uses; tests replace it
-// with a tmux.Fake.
-var newTmuxClient = func() tmux.Client { return tmux.NewExec("") }
-
 func init() {
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "hook <event>",
