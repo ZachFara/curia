@@ -23,22 +23,28 @@ import (
 // pane. A session with no pane (started outside tmux) is never marked stale.
 // Each change goes through store.UpdateSession and re-checks the stored row,
 // because a hook may have moved, restarted or ended the session since it was
-// listed.
-func Reconcile(ctx context.Context, st *store.Store, live []tmux.Pane, now time.Time) error {
+// listed. It returns the distinct non-empty tmux windows of the sessions it
+// marked stale, whose attention markers may now be out of date.
+func Reconcile(ctx context.Context, st *store.Store, live []tmux.Pane, now time.Time) ([]string, error) {
 	srv := newServer(live)
 	sessions, err := st.ListSessions(ctx, store.ListFilter{})
 	if err != nil {
-		return fmt.Errorf("fleet: reconcile: %w", err)
+		return nil, fmt.Errorf("fleet: reconcile: %w", err)
 	}
+	var windows []string
 	for _, s := range sessions {
 		if !srv.goneFrom(s, s.Pane) {
 			continue
 		}
-		if err := markStale(ctx, st, s, srv, now); err != nil {
-			return fmt.Errorf("fleet: reconcile: %w", err)
+		window, err := markStale(ctx, st, s, srv, now)
+		if err != nil {
+			return windows, fmt.Errorf("fleet: reconcile: %w", err)
+		}
+		if window != "" && !slices.Contains(windows, window) {
+			windows = append(windows, window)
 		}
 	}
-	return nil
+	return windows, nil
 }
 
 // server is what Reconcile knows of the live tmux server.
@@ -69,16 +75,24 @@ func (srv server) goneFrom(s model.Session, pane string) bool {
 }
 
 // markStale marks the session listed as stale, deciding again from the
-// stored row inside the update.
-func markStale(ctx context.Context, st *store.Store, listed model.Session, srv server, now time.Time) error {
-	return st.UpdateSession(ctx, listed.ID, func(cur model.Session, _ bool) model.Session {
+// stored row inside the update. It returns the window of the row it marked,
+// or "" when it marked none.
+func markStale(ctx context.Context, st *store.Store, listed model.Session, srv server, now time.Time) (string, error) {
+	var window string
+	err := st.UpdateSession(ctx, listed.ID, func(cur model.Session, _ bool) model.Session {
+		window = ""
 		// Sessions are never deleted, so the row is found; if it were not,
 		// cur has an empty ID and UpdateSession refuses to write it.
 		if srv.goneFrom(cur, listed.Pane) {
 			cur.State, cur.UpdatedAt = model.StateStale, now
+			window = cur.TmuxWindow
 		}
 		return cur
 	})
+	if err != nil {
+		return "", err
+	}
+	return window, nil
 }
 
 // Rank groups, in order: needs_decision, waiting, idle-unseen, working,

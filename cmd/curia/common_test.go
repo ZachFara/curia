@@ -4,10 +4,13 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/tmux"
 )
 
 func TestLoadConfigReadsDefaultPath(t *testing.T) {
@@ -94,5 +97,50 @@ func TestOpenLogAppendsOneLinePerEntry(t *testing.T) {
 	}
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
 		t.Errorf("log mode = %v, %v, want 0600", info.Mode().Perm(), err)
+	}
+}
+
+// redGoneSession waits unseen in window @3, in a pane that is gone.
+var redGoneSession = model.Session{
+	ID: "red", Agent: "claude", State: model.StateWaiting, Pane: "%9", TmuxWindow: "@3",
+	StartedAt: at(9, 0), UpdatedAt: at(11, 0),
+}
+
+// When reconcile marks a red session stale, its window's marker is
+// re-applied, so the window does not stay red until it closes.
+func TestReconcileReappliesMarkerOfStaleWindows(t *testing.T) {
+	_, fake := fleetHome(t, []string{"%1"}, redGoneSession)
+	if _, err := runRoot(t, "ls"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ListPanes", "SetWindowOption @3 @curia_marker "}; !slices.Equal(fake.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
+	}
+	// Nothing new is stale on the next run: no marker call.
+	fake.Calls = nil
+	if _, err := runRoot(t, "ls"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ListPanes"}; !slices.Equal(fake.Calls, want) {
+		t.Errorf("second run tmux calls = %q, want %q", fake.Calls, want)
+	}
+}
+
+func TestReconcileMarkerFailureIsLoggedNotFatal(t *testing.T) {
+	db, _ := fleetHome(t, nil, redGoneSession)
+	failing := &failingTmux{}
+	failing.Panes = []tmux.Pane{{ID: "%1"}}
+	prev := newTmuxClient
+	newTmuxClient = func() tmux.Client { return failing }
+	t.Cleanup(func() { newTmuxClient = prev })
+	out, err := runRoot(t, "ls", "--json")
+	if err != nil || !strings.Contains(out, `"state": "stale"`) {
+		t.Errorf("ls --json = %s, %v, want the session listed as stale", out, err)
+	}
+	if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "no server") || !strings.Contains(log[0], "@3") {
+		t.Errorf("log = %q, want one line with the failed marker update", log)
+	}
+	if s := getSession(t, db, "red"); s.State != model.StateStale {
+		t.Errorf("red = %s, want stale", s.State)
 	}
 }

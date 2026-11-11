@@ -73,7 +73,7 @@ func markStaleAfter(t *testing.T, listed, stored model.Session, live []string, s
 	for _, id := range append(live, "%2") {
 		panes = append(panes, tmux.Pane{ID: id, ServerStart: serverStart})
 	}
-	if err = markStale(ctx, st, listed, newServer(panes), now); err != nil {
+	if _, err = markStale(ctx, st, listed, newServer(panes), now); err != nil {
 		t.Fatal(err)
 	}
 	got, _, err := st.GetSession(ctx, listed.ID)

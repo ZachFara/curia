@@ -59,7 +59,7 @@ func TestReconcileMarksMissingPanesStale(t *testing.T) {
 		sess("live", model.StateWaiting, "%2", old),
 	)
 	now := t0
-	if err := fleet.Reconcile(context.Background(), st, []tmux.Pane{{ID: "%2"}}, now); err != nil {
+	if _, err := fleet.Reconcile(context.Background(), st, []tmux.Pane{{ID: "%2"}}, now); err != nil {
 		t.Fatal(err)
 	}
 	if g := get(t, st, "gone"); g.State != model.StateStale || !g.UpdatedAt.Equal(now) {
@@ -87,7 +87,7 @@ func TestReconcileMarksSessionsFromBeforeServerRestartStale(t *testing.T) {
 	for _, id := range []string{"%1", "%2", "%3", "%4"} {
 		live = append(live, tmux.Pane{ID: id, ServerStart: serverStart})
 	}
-	if err := fleet.Reconcile(context.Background(), st, live, t0); err != nil {
+	if _, err := fleet.Reconcile(context.Background(), st, live, t0); err != nil {
 		t.Fatal(err)
 	}
 	if g := get(t, st, "ghost"); g.State != model.StateStale || !g.UpdatedAt.Equal(t0) {
@@ -100,10 +100,36 @@ func TestReconcileMarksSessionsFromBeforeServerRestartStale(t *testing.T) {
 	}
 }
 
+// Reconcile reports the windows of the sessions it marked stale, so the
+// caller can re-apply their markers.
+func TestReconcileReportsWindowsMarkedStale(t *testing.T) {
+	old := t0.Add(-time.Hour)
+	inWindow := func(id string, state model.State, pane, window string) model.Session {
+		s := sess(id, state, pane, old)
+		s.TmuxWindow = window
+		return s
+	}
+	st := openStore(t,
+		inWindow("gone-a", model.StateWaiting, "%1", "@3"),
+		inWindow("gone-b", model.StateWorking, "%2", "@3"),
+		inWindow("gone-c", model.StateIdle, "%5", "@4"),
+		inWindow("no-window", model.StateWaiting, "%6", ""),
+		inWindow("live", model.StateWaiting, "%7", "@5"),
+		inWindow("already-stale", model.StateStale, "%8", "@6"),
+	)
+	windows, err := fleet.Reconcile(context.Background(), st, []tmux.Pane{{ID: "%7"}}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"@3", "@4"}; !reflect.DeepEqual(windows, want) {
+		t.Errorf("windows = %q, want %q", windows, want)
+	}
+}
+
 func TestReconcileIgnoresSessionsWithoutPane(t *testing.T) {
 	old := t0.Add(-time.Hour)
 	st := openStore(t, sess("nopane", model.StateWorking, "", old))
-	if err := fleet.Reconcile(context.Background(), st, nil, t0); err != nil {
+	if _, err := fleet.Reconcile(context.Background(), st, nil, t0); err != nil {
 		t.Fatal(err)
 	}
 	if s := get(t, st, "nopane"); s.State != model.StateWorking || !s.UpdatedAt.Equal(old) {
@@ -118,7 +144,7 @@ func TestReconcileLeavesStaleAndEndedAlone(t *testing.T) {
 		sess("stale", model.StateStale, "%1", old),
 		sess("ended", model.StateEnded, "%2", old),
 	)
-	if err := fleet.Reconcile(context.Background(), st, nil, t0); err != nil {
+	if _, err := fleet.Reconcile(context.Background(), st, nil, t0); err != nil {
 		t.Fatal(err)
 	}
 	if s := get(t, st, "stale"); s.State != model.StateStale || !s.UpdatedAt.Equal(old) {
@@ -135,7 +161,7 @@ func TestReconcileKeepsOtherFields(t *testing.T) {
 		ContextUsed: 10, TranscriptOffset: 99, SeenAt: t0.Add(-2 * time.Hour), UpdatedAt: t0.Add(-time.Hour),
 	}
 	st := openStore(t, in)
-	if err := fleet.Reconcile(context.Background(), st, nil, t0); err != nil {
+	if _, err := fleet.Reconcile(context.Background(), st, nil, t0); err != nil {
 		t.Fatal(err)
 	}
 	want := in
