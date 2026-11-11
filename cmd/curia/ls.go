@@ -27,7 +27,8 @@ func init() {
 		Use:   "ls",
 		Short: "List sessions, most in need of you first",
 		Long: "Marks sessions whose tmux pane is gone as stale, then lists every session that\n" +
-			"has not ended, ranked by how much it needs you. --json prints a JSON array.",
+			"has not ended, except those stale for longer than stale_hide_after (10m by\n" +
+			"default), ranked by how much it needs you. --json prints a JSON array.",
 		Args: cobra.NoArgs,
 		RunE: runLs,
 	}

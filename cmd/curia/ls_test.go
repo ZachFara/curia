@@ -224,6 +224,19 @@ func TestLsJSONEscapesUnprintableRunes(t *testing.T) {
 	}
 }
 
+// ls hides sessions stale for longer than stale_hide_after; its help says so.
+func TestLsHelpMentionsHiddenStaleSessions(t *testing.T) {
+	t.Cleanup(func() { // cobra keeps --help set on the command
+		if ls, _, err := rootCmd.Find([]string{"ls"}); err == nil {
+			_ = ls.Flags().Set("help", "false")
+		}
+	})
+	out, err := runRoot(t, "ls", "--help")
+	if err != nil || !strings.Contains(out, "stale_hide_after") {
+		t.Errorf("ls --help = %q, %v, want it to say old stale sessions are hidden", out, err)
+	}
+}
+
 func TestLsTableStripsControlCharacters(t *testing.T) {
 	evil := model.Session{
 		ID: "x", Agent: "claude", Pane: "%1", State: model.StateWaiting, UpdatedAt: at(11, 0),
