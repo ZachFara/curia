@@ -278,21 +278,30 @@ func writeBackup(path string, original []byte, now time.Time) error {
 
 // writeAtomic writes data to path via a temporary file and a rename, creating
 // the parent directory if needed. If path is a symlink the write lands on the
-// file it points to, so the link survives.
+// file it points to, so the link survives. A file that exists keeps its
+// permission bits; a new one is 0600.
 func writeAtomic(path string, data []byte) error {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
+	}
+	mode := fs.FileMode(0o600)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".curia-*")
+	tmp, err := os.CreateTemp(dir, ".curia-*") // created 0600
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return err
 	}

@@ -431,6 +431,40 @@ func TestTmuxFenceAddedOnceAndRemoved(t *testing.T) {
 	}
 }
 
+// A rewritten file keeps its mode (a user's ~/.tmux.conf is usually 0644);
+// a file Curia creates is 0600. The fixtures use 0400, a mode other than
+// 0600 that gosec allows a test to set.
+func TestRewriteKeepsFileMode(t *testing.T) {
+	dir := t.TempDir()
+	conf, settings := filepath.Join(dir, ".tmux.conf"), filepath.Join(dir, "settings.json")
+	writeFile(t, conf, "set -g mouse on\n")
+	writeFile(t, settings, userSettings)
+	for _, p := range []string{conf, settings} {
+		if err := os.Chmod(p, 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snippet := filepath.Join(dir, "curia", "curia.tmux")
+	if err := WriteTmux(snippet, conf, testBin); err != nil {
+		t.Fatal(err)
+	}
+	if err := Hooks(settings, testBin, testNow); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]os.FileMode{conf: 0o400, settings: 0o400, snippet: 0o600}
+	for p, mode := range want {
+		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != mode {
+			t.Errorf("%s: mode %v, %v, want %v", filepath.Base(p), fi.Mode().Perm(), err, mode)
+		}
+	}
+	if err := RemoveTmux(conf); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(conf); err != nil || fi.Mode().Perm() != 0o400 {
+		t.Errorf("after RemoveTmux: mode %v, %v, want 0400", fi.Mode().Perm(), err)
+	}
+}
+
 func TestTmuxConfCreatedAndEmptiedWhenMissing(t *testing.T) {
 	dir := t.TempDir()
 	conf := filepath.Join(dir, ".tmux.conf")
