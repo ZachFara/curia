@@ -5,7 +5,7 @@ This file mirrors the plan for humans; it does not replace it. Task order, inter
 ## Status
 
 - **Phase 1 (setup): merged** to `main` as PR #1. `main` is protected (PRs required, `check` required, no force pushes, admins included).
-- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 merged (Task 5, PR #8). Wave 4 merged (Tasks 7 and 8, PRs #10 and #9). Wave 5 merged (Task 9, PR #11). Wave 6 (Task 11) dispatched.
+- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 merged (Task 5, PR #8). Wave 4 merged (Tasks 7 and 8, PRs #10 and #9). Wave 5 merged (Task 9, PR #11). Wave 6 merged (Task 11, PR #12). All eleven tasks are in `plan-1`. `deadcode ./...` without `-test` reports only `tmux.Fake` (the deliberate test double). Final whole-branch review in progress.
 
 ## Plan 1 waves
 
@@ -101,6 +101,8 @@ Format: Ruling: what — why — cost if wrong.
 24. Ruling: Task 11 runs the binary with `TMUX` unset and `TMUX_TMPDIR` set to an empty temp directory, so no tmux server is reachable — the plan says "no tmux server", and the hook would otherwise query the developer's real server — none.
 25. Ruling: the live check in Task 11 Step 5 (`curia install`, three real sessions) is left to the owner — it edits the real `~/.claude/settings.json` and `~/.tmux.conf` — Plan 1 merges tested but not proven against a live setup until the owner runs it.
 
+26. Ruling: Task 11 asserts latency (p95 under 50 ms per process, unchanged) over a separate sequential pass of 400 timed runs on a fresh database; the concurrent replay asserts correctness only; one untimed warm-up run is allowed — the script has 10 runs, so its p95 is its maximum, and three simultaneous SessionStarts on a loaded machine measure CPU contention rather than hook cost — latency while several sessions start at the same instant is not gated by a test.
+
 ## Ledger
 
 One line per task: wave, worktree, branch, status.
@@ -119,8 +121,9 @@ One line per task: wave, worktree, branch, status.
 
 ## Next steps
 
-1. Review and merge Task 11 into `plan-1`.
-2. Run `deadcode ./...` without `-test`, then the final whole-branch review, then open the PR from `plan-1` to `main`.
+1. Final whole-branch review, one fix wave, one scoped re-review.
+2. Open the PR from `plan-1` to `main` with the full list of rulings.
+3. Owner: run the live check from Task 11 Step 5 (`curia install`, three real sessions).
 
 ## Deferred minors (for the final review)
 
@@ -134,3 +137,4 @@ One line per task: wave, worktree, branch, status.
 - Task 7: `ls --json` HTML-escapes `&&` and passes raw C1 and bidi characters; `ls` help text is inaccurate about hidden stale sessions; `Reconcile`'s in-transaction re-check is untested; `newTmuxClient` is used by four commands and belongs in `common.go`.
 - Task 8: each `Apply` re-lists all live sessions; `seen` stops at the first failing window.
 - Task 9: `internal/ui` duplicates `ls.go`'s text cleaner and `age`; the kill confirmation does not re-check that the row is still live; the filter matches the full repo path while the cell shows the basename; `ls` table should show the repo basename too (Ruling 22).
+- Task 11: SessionStart starts three processes (tmux and two git commands) and takes 15 to 20 ms at the median, close to the 20 ms budget; its tail is the main risk to the e2e latency gate on a loaded machine.
