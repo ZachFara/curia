@@ -27,7 +27,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 | 3 | State machine | Sonnet (confirmed: one pure function, full rule table in the plan) | `state.Apply` pure (no I/O, no clock), one switch on `ev.Kind`, every rule in the plan's table; `TestApplyTransitions`, `TestEndedIgnoresEventsExceptSessionStart`, `TestSubagentCountNeverNegative`, `TestStopWithOpenDecision`, `TestLastUpdateTruncatedTo80Runes` pass. | merged (PR #3) |
 | 4 | Transcript reader | Sonnet (confirmed: one function, exact rules and tests in the plan) | `transcript.Read` with the plan's rules (usage lines only, synthetic and malformed skipped, partial trailing line not consumed, missing file, shrunk file re-read from 0); fixtures in `internal/transcript/testdata/`; `TestReadsLatestUsage`, `TestIncrementalOffset`, `TestPartialTrailingLine`, `TestMissingFile`, `TestShrunkFileRereadsFromZero`, `TestSkipsSyntheticAndMalformed`, `TestLastAssistantTextFirstLine` pass. | merged (PR #4) |
 | 6 | tmux adapter | Sonnet (confirmed: thin exec wrapper with exact signatures; the process boundary is one CLI call per method) | `tmux.Pane`, `tmux.Client` (6 methods), `tmux.NewExec(socket)`, `tmux.Fake` with `Panes` and `Calls`; `TestParseListPanes` passes; `TestExecAgainstRealTmux` runs (not skipped) locally and in CI against `tmux -L curia-test`, and kills its server in `t.Cleanup`. | merged (PR #5) |
-| 10 | Install and uninstall | Sonnet (confirmed: file merge logic with exact rules and tests, no concurrency) | `install.Hooks`, `Unhooks`, `WriteTmux`, `RemoveTmux` per the plan's rules (backup before write, user entries preserved, invalid JSON writes nothing, fence added once); `TestHooksMergePreservesUserHooks`, `TestHooksIdempotent`, `TestHooksBackupWritten`, `TestInvalidJSONUntouched`, `TestMissingSettingsCreated`, `TestUnhooksRemovesOnlyOurs`, `TestTmuxFenceAddedOnceAndRemoved` pass; `curia install` / `uninstall` in `cmd/curia/install.go`. | in progress |
+| 10 | Install and uninstall | Sonnet (confirmed: file merge logic with exact rules and tests, no concurrency) | `install.Hooks`, `Unhooks`, `WriteTmux`, `RemoveTmux` per the plan's rules (backup before write, user entries preserved, invalid JSON writes nothing, fence added once); `TestHooksMergePreservesUserHooks`, `TestHooksIdempotent`, `TestHooksBackupWritten`, `TestInvalidJSONUntouched`, `TestMissingSettingsCreated`, `TestUnhooksRemovesOnlyOurs`, `TestTmuxFenceAddedOnceAndRemoved` pass; `curia install` / `uninstall` in `cmd/curia/install.go`. | merged (PR #6) |
 
 ### Wave 3
 
@@ -88,7 +88,7 @@ One line per task: wave, worktree, branch, status.
 - Task 3: wave 2, `.worktrees/plan1-t3-state`, `feat/plan1-t3-state`, merged (PR #3), Sonnet, 0 fix rounds.
 - Task 4: wave 2, `.worktrees/plan1-t4-transcript`, `feat/plan1-t4-transcript`, merged (PR #4), Sonnet, 1 fix rounds.
 - Task 6: wave 2, `.worktrees/plan1-t6-tmux`, `feat/plan1-t6-tmux`, merged (PR #5), Sonnet, 1 fix rounds.
-- Task 10: wave 2, `.worktrees/plan1-t10-install`, `feat/plan1-t10-install`, in progress.
+- Task 10: wave 2, `.worktrees/plan1-t10-install`, `feat/plan1-t10-install`, merged (PR #6), Sonnet, 1 fix rounds.
 
 ## Next steps
 
