@@ -23,7 +23,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 2 | Store | Opus (confirmed: concurrent writers, WAL and busy_timeout behaviour) | `store.Open` (WAL, `busy_timeout=2000`, embedded migrations recorded in `schema_migrations`), Upsert as one `INSERT ... ON CONFLICT` statement, Get, List with `ListFilter`, AppendEvent, MarkSeen, EndOthersInPane; `0001_init.sql` matches spec section 5 with the two stated differences; `TestOpenCreatesSchemaAndWAL`, `TestOpenIsIdempotent`, `TestUpsertRoundTrip`, `TestListFiltersEndedAndOldStale`, `TestMarkSeen`, `TestEndOthersInPane`, `TestConcurrentUpserts` pass under `-race`. | in progress |
+| 2 | Store | Opus (confirmed: concurrent writers, WAL and busy_timeout behaviour) | `store.Open` (WAL, `busy_timeout=2000`, embedded migrations recorded in `schema_migrations`), Upsert as one `INSERT ... ON CONFLICT` statement, Get, List with `ListFilter`, AppendEvent, MarkSeen, EndOthersInPane; `0001_init.sql` matches spec section 5 with the two stated differences; `TestOpenCreatesSchemaAndWAL`, `TestOpenIsIdempotent`, `TestUpsertRoundTrip`, `TestListFiltersEndedAndOldStale`, `TestMarkSeen`, `TestEndOthersInPane`, `TestConcurrentUpserts` pass under `-race`. | merged (PR #7) |
 | 3 | State machine | Sonnet (confirmed: one pure function, full rule table in the plan) | `state.Apply` pure (no I/O, no clock), one switch on `ev.Kind`, every rule in the plan's table; `TestApplyTransitions`, `TestEndedIgnoresEventsExceptSessionStart`, `TestSubagentCountNeverNegative`, `TestStopWithOpenDecision`, `TestLastUpdateTruncatedTo80Runes` pass. | merged (PR #3) |
 | 4 | Transcript reader | Sonnet (confirmed: one function, exact rules and tests in the plan) | `transcript.Read` with the plan's rules (usage lines only, synthetic and malformed skipped, partial trailing line not consumed, missing file, shrunk file re-read from 0); fixtures in `internal/transcript/testdata/`; `TestReadsLatestUsage`, `TestIncrementalOffset`, `TestPartialTrailingLine`, `TestMissingFile`, `TestShrunkFileRereadsFromZero`, `TestSkipsSyntheticAndMalformed`, `TestLastAssistantTextFirstLine` pass. | merged (PR #4) |
 | 6 | tmux adapter | Sonnet (confirmed: thin exec wrapper with exact signatures; the process boundary is one CLI call per method) | `tmux.Pane`, `tmux.Client` (6 methods), `tmux.NewExec(socket)`, `tmux.Fake` with `Panes` and `Calls`; `TestParseListPanes` passes; `TestExecAgainstRealTmux` runs (not skipped) locally and in CI against `tmux -L curia-test`, and kills its server in `t.Cleanup`. | merged (PR #5) |
@@ -84,7 +84,7 @@ Format: Ruling: what — why — cost if wrong.
 One line per task: wave, worktree, branch, status.
 
 - Task 1: wave 1, `.worktrees/plan1-t1-scaffold`, `feat/plan1-t1-scaffold`, merged (PR #2), Sonnet, 0 fix rounds.
-- Task 2: wave 2, `.worktrees/plan1-t2-store`, `feat/plan1-t2-store`, in progress.
+- Task 2: wave 2, `.worktrees/plan1-t2-store`, `feat/plan1-t2-store`, merged (PR #7), Opus, 1 fix rounds.
 - Task 3: wave 2, `.worktrees/plan1-t3-state`, `feat/plan1-t3-state`, merged (PR #3), Sonnet, 0 fix rounds.
 - Task 4: wave 2, `.worktrees/plan1-t4-transcript`, `feat/plan1-t4-transcript`, merged (PR #4), Sonnet, 1 fix rounds.
 - Task 6: wave 2, `.worktrees/plan1-t6-tmux`, `feat/plan1-t6-tmux`, merged (PR #5), Sonnet, 1 fix rounds.
