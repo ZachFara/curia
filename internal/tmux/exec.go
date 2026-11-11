@@ -71,9 +71,8 @@ func (c *execClient) SetWindowOption(ctx context.Context, window, name, value st
 }
 
 func (c *execClient) DisplayMessage(ctx context.Context, text string) error {
-	// display-message expands #{...} formats; doubling # makes text literal.
 	// "--" stops text starting with "-" from being read as a flag.
-	_, err := c.run(ctx, "display-message", "--", strings.ReplaceAll(text, "#", "##"))
+	_, err := c.run(ctx, "display-message", "--", escapeMessage(text))
 	return err
 }
 
@@ -98,4 +97,13 @@ func parsePanes(out string) ([]Pane, error) {
 		panes = append(panes, Pane{ID: f[0], Session: f[1], WindowID: f[2], WindowName: f[3]})
 	}
 	return panes, nil
+}
+
+// messageEscaper doubles the characters display-message expands: # starts
+// formats and style codes, % starts strftime conversions.
+var messageEscaper = strings.NewReplacer("#", "##", "%", "%%")
+
+// escapeMessage makes text display literally in display-message.
+func escapeMessage(text string) string {
+	return messageEscaper.Replace(text)
 }

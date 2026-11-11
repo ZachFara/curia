@@ -2,6 +2,8 @@ package tmux
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -31,6 +33,20 @@ func TestParsePanesMalformed(t *testing.T) {
 	}
 	if _, err := parsePanes("\t\t\t\n"); err == nil {
 		t.Fatal("want error for empty pane id")
+	}
+}
+
+func TestEscapeMessage(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain":        "plain",
+		"#{pane_id}":   "##{pane_id}",
+		"%H:%M 100%":   "%%H:%%M 100%%",
+		"#[fg=red] -x": "##[fg=red] -x",
+		"":             "",
+	} {
+		if got := escapeMessage(in); got != want {
+			t.Errorf("escapeMessage(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -66,6 +82,10 @@ func TestFake(t *testing.T) {
 	}
 }
 
+// realSocket is per run, so concurrent test runs (several worktrees running
+// make check) never kill each other's servers.
+var realSocket = fmt.Sprintf("curia-test-%d", os.Getpid())
+
 // realTmux starts a throwaway server on its own socket (never the default
 // server) and returns a helper that runs raw tmux commands against it.
 func realTmux(ctx context.Context, t *testing.T) func(args ...string) (string, error) {
@@ -85,8 +105,6 @@ func realTmux(ctx context.Context, t *testing.T) func(args ...string) (string, e
 	}
 	return tm
 }
-
-const realSocket = "curia-test"
 
 func TestExecAgainstRealTmux(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -131,12 +149,19 @@ func checkHeadlessAndKill(ctx context.Context, t *testing.T, c Client, tm func(.
 	if err := c.SwitchTo(ctx, p.ID); err == nil {
 		t.Fatal("SwitchTo without a client should fail")
 	}
-	if err := c.DisplayMessage(ctx, "-x #{pane_id}"); err != nil {
+	const text = "-x #{pane_id} %H:%M %1 100% #"
+	if err := c.DisplayMessage(ctx, text); err != nil {
 		t.Fatalf("DisplayMessage: %v", err)
+	}
+	// (-p leaves #[style] sequences unprocessed, so they are only unit-tested.)
+	// Round trip: the escaped text must render back as the original.
+	out, err := tm("display-message", "-p", "--", escapeMessage(text))
+	if err != nil || strings.TrimSuffix(out, "\n") != text {
+		t.Fatalf("rendered %q (%v), want %q", out, err, text)
 	}
 
 	// A second window so killing its pane leaves the server alive.
-	if out, err := tm("new-window", "-d", "-t", "t"); err != nil {
+	if out, err = tm("new-window", "-d", "-t", "t"); err != nil {
 		t.Fatalf("new-window: %v: %s", err, out)
 	}
 	panes, err := c.ListPanes(ctx)
