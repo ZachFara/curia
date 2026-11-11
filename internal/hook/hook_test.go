@@ -2,6 +2,7 @@ package hook_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,7 +22,13 @@ var t0 = time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
 
 func fixture(t *testing.T, kind model.EventKind) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", string(kind)+".json"))
+	return fixtureFile(t, string(kind))
+}
+
+// fixtureFile reads testdata/<name>.json.
+func fixtureFile(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Clean(filepath.Join("testdata", name+".json")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +50,9 @@ func TestParseFixtures(t *testing.T) {
 		with(model.UserPromptSubmit, nil),
 		with(model.PreToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Edit", "src/api.ts" }),
 		with(model.PostToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Grep", "func Parse" }),
-		with(model.Notification, func(e *model.Event) { e.Message = "Claude needs your permission to use Bash" }),
+		with(model.Notification, func(e *model.Event) {
+			e.Message, e.NotificationType = "Claude needs your permission to use Bash", "permission_prompt"
+		}),
 		with(model.Stop, nil),
 		with(model.SubagentStop, nil),
 		with(model.SessionEnd, nil),
@@ -59,6 +68,60 @@ func TestParseFixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseNotificationTypes(t *testing.T) {
+	for file, want := range map[string]string{
+		"NotificationIdlePrompt":  "idle_prompt",
+		"NotificationAuthSuccess": "auth_success",
+	} {
+		ev, err := hook.Parse(model.Notification, fixtureFile(t, file), "%3", t0)
+		if err != nil || ev.NotificationType != want {
+			t.Errorf("%s: NotificationType = %q, %v, want %q", file, ev.NotificationType, err, want)
+		}
+	}
+}
+
+// Ruling 31: the idle reminder and auth_success are not a request for input.
+func TestInformationalNotificationChangesNothing(t *testing.T) {
+	for _, file := range []string{"NotificationIdlePrompt", "NotificationAuthSuccess"} {
+		t.Run(file, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "curia.db")
+			st, err := store.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = st.Close() }()
+			env := (&fakeEnv{}).env("%3")
+			run(t, st, env, model.SessionStart, payload("sess-1", "/p/t.jsonl", ""))
+			idle := run(t, st, env, model.Stop, payload("sess-1", "", ""))
+			later := env
+			later.Now = func() time.Time { return t0.Add(time.Minute) }
+			if got := run(t, st, later, model.Notification, fixtureFile(t, file)); got != idle {
+				t.Errorf("after %s:\n %+v\nwant unchanged\n %+v", file, got, idle)
+			}
+			// The raw event is still recorded.
+			if n := countEvents(t, path); n != 3 {
+				t.Errorf("events = %d, want 3", n)
+			}
+		})
+	}
+}
+
+// countEvents counts the raw events in the database at path. The sqlite
+// driver is registered by the store package.
+func countEvents(t *testing.T, path string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func TestParseToolTarget(t *testing.T) {

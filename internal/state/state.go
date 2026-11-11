@@ -12,7 +12,7 @@ const maxLastUpdateRunes = 80
 // SessionEnd and is returned unchanged (see Ignores); any other event is
 // applied as usual and brings it back.
 func Apply(s model.Session, ev model.Event, openDecision bool) model.Session {
-	if Ignores(s, ev.Kind) {
+	if Ignores(s, ev) {
 		return s
 	}
 	if s.ID == "" && ev.Kind != model.SessionStart {
@@ -36,6 +36,12 @@ func Apply(s model.Session, ev model.Event, openDecision bool) model.Session {
 		s.State = model.StateWorking
 		s.LastUpdate = toolUpdate(ev)
 	case model.Notification:
+		if informational(ev) {
+			// Only for a session first seen now (Ignores covers stored
+			// ones): it sits at its prompt.
+			s.State = model.StateIdle
+			break
+		}
 		s.State = model.StateWaiting
 		s.LastUpdate = truncate(ev.Message)
 	case model.Stop:
@@ -50,12 +56,24 @@ func Apply(s model.Session, ev model.Event, openDecision bool) model.Session {
 	return s
 }
 
-// Ignores reports whether Apply returns s unchanged for an event of kind: an
-// ended session ignores SubagentStop and SessionEnd. Any other event means
-// the session is alive, for example one ended by a nested session's
-// SessionStart in its pane, so it is applied.
-func Ignores(s model.Session, kind model.EventKind) bool {
-	return s.State == model.StateEnded && (kind == model.SubagentStop || kind == model.SessionEnd)
+// Ignores reports whether Apply returns s unchanged for ev. An ended session
+// ignores SubagentStop and SessionEnd; any other event means the session is
+// alive (for example one ended by a nested session's SessionStart in its
+// pane), so it is applied. A stored session also ignores an informational
+// Notification (see informational).
+func Ignores(s model.Session, ev model.Event) bool {
+	if s.ID != "" && informational(ev) {
+		return true
+	}
+	return s.State == model.StateEnded && (ev.Kind == model.SubagentStop || ev.Kind == model.SessionEnd)
+}
+
+// informational reports whether ev is a Notification that asks nothing of
+// the user: idle_prompt, sent when the prompt has sat idle for about a
+// minute, and auth_success (Ruling 31). Any other type, or none, means the
+// session waits for input.
+func informational(ev model.Event) bool {
+	return ev.Kind == model.Notification && (ev.NotificationType == "idle_prompt" || ev.NotificationType == "auth_success")
 }
 
 func countSubagent(s *model.Session, ev model.Event) {

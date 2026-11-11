@@ -110,7 +110,7 @@ func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store)
 // git and tmux said, or nil when they were not asked. It must not call the
 // store.
 func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config) (model.Session, error) {
-	if state.Ignores(s, ev.Kind) {
+	if state.Ignores(s, ev) {
 		return s, nil // the transcript is not read either
 	}
 	switch {

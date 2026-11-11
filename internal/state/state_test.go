@@ -188,10 +188,10 @@ func TestIgnores(t *testing.T) {
 	}
 	for _, k := range kinds {
 		want := k == model.SubagentStop || k == model.SessionEnd
-		if got := state.Ignores(ended, k); got != want {
+		if got := state.Ignores(ended, model.Event{Kind: k}); got != want {
 			t.Errorf("Ignores(ended, %s) = %v, want %v", k, got, want)
 		}
-		if state.Ignores(live, k) {
+		if state.Ignores(live, model.Event{Kind: k}) {
 			t.Errorf("Ignores(idle, %s) = true", k)
 		}
 	}
@@ -221,6 +221,35 @@ func TestPostToolUseTaskDoesNotCountSubagent(t *testing.T) {
 	got := state.Apply(base(), model.Event{Kind: model.PostToolUse, SessionID: "s1", ToolName: "Task", At: t1}, false)
 	if got.SubagentsActive != 0 {
 		t.Errorf("SubagentsActive = %d, want 0 (only PreToolUse counts)", got.SubagentsActive)
+	}
+}
+
+// Ruling 31: idle_prompt (the prompt has sat idle about a minute) and
+// auth_success are not a request for input.
+func TestInformationalNotificationChangesNothing(t *testing.T) {
+	for _, typ := range []string{"idle_prompt", "auth_success"} {
+		for _, st := range []model.State{model.StateIdle, model.StateWorking, model.StateEnded} {
+			s := base()
+			s.State, s.LastUpdate = st, "done"
+			ev := model.Event{Kind: model.Notification, SessionID: "s1", Message: "waiting", NotificationType: typ, At: t1}
+			if got := state.Apply(s, ev, false); got != s {
+				t.Errorf("%s on %s changed the session: %+v", typ, st, got)
+			}
+			if !state.Ignores(s, ev) {
+				t.Errorf("Ignores(%s, %s) = false", st, typ)
+			}
+		}
+	}
+	// A session first seen on one gets a row, at its prompt, with no message.
+	ev := model.Event{Kind: model.Notification, SessionID: "n", Message: "waiting", NotificationType: "idle_prompt", At: t1}
+	if got := state.Apply(model.Session{}, ev, false); got.ID != "n" || got.State != model.StateIdle || got.LastUpdate != "" {
+		t.Errorf("first seen on idle_prompt = %+v, want idle with no LastUpdate", got)
+	}
+	for _, typ := range []string{"", "permission_prompt", "elicitation_dialog"} {
+		ev := model.Event{Kind: model.Notification, SessionID: "s1", Message: "m", NotificationType: typ, At: t1}
+		if got := state.Apply(base(), ev, false); got.State != model.StateWaiting {
+			t.Errorf("Notification %q: state %s, want waiting", typ, got.State)
+		}
 	}
 }
 

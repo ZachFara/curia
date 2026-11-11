@@ -40,9 +40,10 @@ type Session struct {
 	StartedAt, UpdatedAt, SeenAt                                                                   time.Time
 }
 
-// Event is a parsed hook payload.
+// Event is a parsed hook payload. NotificationType is a Notification's
+// notification_type (for example "permission_prompt" or "idle_prompt").
 type Event struct {
-	Kind                                                                EventKind
-	SessionID, Pane, Cwd, TranscriptPath, ToolName, ToolTarget, Message string
-	At                                                                  time.Time
+	Kind                                                                                  EventKind
+	SessionID, Pane, Cwd, TranscriptPath, ToolName, ToolTarget, Message, NotificationType string
+	At                                                                                    time.Time
 }
