@@ -2,14 +2,21 @@
 // Curia can be tested without a tmux server.
 package tmux
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Pane identifies one tmux pane and the window and session that hold it.
 type Pane struct {
-	ID         string
-	Session    string
-	WindowID   string
-	WindowName string
+	ID       string
+	Session  string
+	WindowID string
+	// ServerStart is when the tmux server holding the pane started, to the
+	// second. A restarted server numbers its panes from %0 again, so a pane
+	// id names the same pane only for sessions started after this.
+	ServerStart time.Time
+	WindowName  string
 }
 
 // Client is everything Curia needs from tmux.

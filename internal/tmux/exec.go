@@ -5,11 +5,15 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 )
 
-// paneFormat is the tmux format string that parsePanes expects.
-const paneFormat = "#{pane_id}\t#{session_name}\t#{window_id}\t#{window_name}"
+// paneFormat is the tmux format string that parsePanes expects. start_time
+// is the server's start in unix seconds. The window name comes last because
+// it may hold tabs.
+const paneFormat = "#{pane_id}\t#{session_name}\t#{window_id}\t#{start_time}\t#{window_name}"
 
 type execClient struct {
 	socket string
@@ -89,12 +93,18 @@ func parsePanes(out string) ([]Pane, error) {
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, "\t", 4)
+		f := strings.SplitN(line, "\t", 5)
 		// An unknown -t target expands to empty fields, so an empty id is malformed too.
-		if len(f) != 4 || f[0] == "" {
+		if len(f) != 5 || f[0] == "" {
 			return nil, fmt.Errorf("tmux: malformed pane line %q", line)
 		}
-		panes = append(panes, Pane{ID: f[0], Session: f[1], WindowID: f[2], WindowName: f[3]})
+		start, err := strconv.ParseInt(f[3], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("tmux: bad server start time in pane line %q", line)
+		}
+		panes = append(panes, Pane{
+			ID: f[0], Session: f[1], WindowID: f[2], ServerStart: time.Unix(start, 0), WindowName: f[4],
+		})
 	}
 	return panes, nil
 }
