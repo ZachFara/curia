@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ZachFara/curia/internal/attention"
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/hook"
 	"github.com/ZachFara/curia/internal/model"
@@ -30,6 +31,10 @@ var (
 	hookExit = os.Exit
 	hookRun  = hook.Run
 )
+
+// newTmuxClient builds the tmux client every command uses; tests replace it
+// with a tmux.Fake.
+var newTmuxClient = func() tmux.Client { return tmux.NewExec("") }
 
 func init() {
 	rootCmd.AddCommand(&cobra.Command{
@@ -88,7 +93,15 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	_, err = hookRun(ctx, model.EventKind(args[0]), payload, hookEnv(ctx, logger), st, cfg)
+	client := newTmuxClient()
+	sess, err := hookRun(ctx, model.EventKind(args[0]), payload, hookEnv(ctx, client, logger), st, cfg)
+	if sess.TmuxWindow != "" {
+		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
+		defer cancel()
+		if aerr := attention.Apply(actx, client, st, sess.TmuxWindow); aerr != nil {
+			logger.Error("hook attention marker", "window", sess.TmuxWindow, "err", aerr.Error())
+		}
+	}
 	return err
 }
 
@@ -106,8 +119,7 @@ func readPayload(r io.Reader) ([]byte, error) {
 }
 
 // hookEnv is the real environment: $TMUX_PANE, the wall clock, git, tmux.
-func hookEnv(ctx context.Context, logger *slog.Logger) hook.Env {
-	client := tmux.NewExec("")
+func hookEnv(ctx context.Context, client tmux.Client, logger *slog.Logger) hook.Env {
 	return hook.Env{
 		Pane: os.Getenv("TMUX_PANE"),
 		Now:  time.Now,
