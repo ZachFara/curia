@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/ZachFara/curia/internal/hook"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/tmux"
 )
 
 // hookResult is what one in-process run of `curia hook` produced.
@@ -219,5 +222,211 @@ func TestHookLogCannotBeForged(t *testing.T) {
 	assertQuietExitZero(t, res)
 	if len(res.log) != 1 {
 		t.Errorf("log = %q, want the untrusted text kept on one line", res.log)
+	}
+}
+
+// markerCalls returns the SetWindowOption calls the fake recorded.
+func markerCalls(f *tmux.Fake) []string {
+	var out []string
+	for _, c := range f.Calls {
+		if strings.HasPrefix(c, "SetWindowOption") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// markerHook is a hook run in pane %1 of window @7 against a fake tmux.
+type markerHook struct {
+	t    *testing.T
+	db   string
+	fake *tmux.Fake
+}
+
+func newMarkerHook(t *testing.T) *markerHook {
+	t.Helper()
+	db := hookHome(t)
+	t.Setenv("TMUX_PANE", "%1")
+	fake := useFakeTmux(t)
+	fake.Panes = []tmux.Pane{{ID: "%1", Session: "s", WindowID: "@7"}}
+	return &markerHook{t: t, db: db, fake: fake}
+}
+
+// event runs one hook event for session id and returns the marker calls it made.
+func (m *markerHook) event(kind, id string) []string {
+	m.t.Helper()
+	m.fake.Calls = nil
+	body := `{"session_id":"` + id + `","cwd":"` + m.t.TempDir() + `","message":"needs you"}`
+	assertQuietExitZero(m.t, runHookCmd(m.t, strings.NewReader(body), "hook", kind))
+	return markerCalls(m.fake)
+}
+
+func (m *markerHook) seen() {
+	m.t.Helper()
+	dbPath := m.db
+	st, err := store.Open(dbPath)
+	if err != nil {
+		m.t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	if err := st.MarkSeen(context.Background(), "%1", time.Now()); err != nil {
+		m.t.Fatal(err)
+	}
+}
+
+func wantCalls(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Errorf("marker calls = %q, want %q", got, want)
+	}
+}
+
+func TestHookToolEventsOnWorkingSessionMakeNoCall(t *testing.T) {
+	m := newMarkerHook(t)
+	wantCalls(t, m.event("SessionStart", "A"))
+	wantCalls(t, m.event("PreToolUse", "A"))
+	wantCalls(t, m.event("PostToolUse", "A"))
+}
+
+func TestHookNotificationOnSeenSessionSetsRed(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.seen()
+	wantCalls(t, m.event("Notification", "A"), "SetWindowOption @7 @curia_marker red")
+}
+
+func TestHookPostToolUseClearsRed(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	wantCalls(t, m.event("PostToolUse", "A"), "SetWindowOption @7 @curia_marker ")
+}
+
+func TestHookSessionEndClearsRed(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	wantCalls(t, m.event("SessionEnd", "A"), "SetWindowOption @7 @curia_marker ")
+}
+
+func TestHookSessionStartEndingRedSessionClearsIt(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	// B takes over pane %1; A is ended inside hook.Run while red.
+	wantCalls(t, m.event("SessionStart", "B"), "SetWindowOption @7 @curia_marker ")
+}
+
+// useFakeTmux makes the commands use a tmux.Fake and returns it.
+func useFakeTmux(t *testing.T) *tmux.Fake {
+	t.Helper()
+	fake := &tmux.Fake{}
+	prev := newTmuxClient
+	newTmuxClient = func() tmux.Client { return fake }
+	t.Cleanup(func() { newTmuxClient = prev })
+	return fake
+}
+
+func TestHookAppliesMarker(t *testing.T) {
+	hookHome(t)
+	fake := useFakeTmux(t)
+	prev := hookRun
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (model.Session, error) {
+		return model.Session{ID: "A", TmuxWindow: "@7", State: model.StateWaiting, UpdatedAt: time.Now()}, nil
+	}
+	t.Cleanup(func() { hookRun = prev })
+
+	res := runHookCmd(t, strings.NewReader(`{}`), "hook", "Stop")
+	assertQuietExitZero(t, res)
+	want := []string{"SetWindowOption @7 @curia_marker "}
+	if !slices.Equal(fake.Calls, want) {
+		t.Errorf("calls = %q, want %q", fake.Calls, want)
+	}
+}
+
+func TestHookWithoutWindowAppliesNothing(t *testing.T) {
+	hookHome(t)
+	fake := useFakeTmux(t)
+	res := runHookCmd(t, strings.NewReader(`{"session_id":"A","cwd":"`+t.TempDir()+`"}`), "hook", "SessionStart")
+	assertQuietExitZero(t, res)
+	if len(fake.Calls) != 0 {
+		t.Errorf("calls = %q, want none", fake.Calls)
+	}
+}
+
+// failingTmux fails every marker write.
+type failingTmux struct{ tmux.Fake }
+
+func (f *failingTmux) SetWindowOption(context.Context, string, string, string) error {
+	return errors.New("no server")
+}
+
+func TestHookAttentionFailureIsLoggedExitZero(t *testing.T) {
+	hookHome(t)
+	prevC := newTmuxClient
+	newTmuxClient = func() tmux.Client { return &failingTmux{} }
+	t.Cleanup(func() { newTmuxClient = prevC })
+	prev := hookRun
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (model.Session, error) {
+		return model.Session{ID: "A", TmuxWindow: "@7", State: model.StateWaiting, UpdatedAt: time.Now()}, nil
+	}
+	t.Cleanup(func() { hookRun = prev })
+
+	res := runHookCmd(t, strings.NewReader(`{}`), "hook", "Stop")
+	assertQuietExitZero(t, res)
+	if len(res.log) != 1 || !strings.Contains(res.log[0], "no server") {
+		t.Errorf("log = %q, want one line with the failure", res.log)
+	}
+}
+
+func TestHookSessionEndOfNonRedSessionMakesNoCall(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	wantCalls(t, m.event("SessionEnd", "A"))
+}
+
+func TestHookMovedSessionAppliesBothWindows(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	// The pane is now in window @9; A starts again (resume) there.
+	m.fake.Panes = []tmux.Pane{{ID: "%1", Session: "s", WindowID: "@9"}}
+	wantCalls(t, m.event("SessionStart", "A"),
+		"SetWindowOption @9 @curia_marker ", "SetWindowOption @7 @curia_marker ")
+}
+
+func TestHookFailedBeforeReadIsLoggedAndApplies(t *testing.T) {
+	db := hookHome(t)
+	fake := useFakeTmux(t)
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = raw.Exec(`DROP TABLE sessions`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+	prev := hookRun
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (model.Session, error) {
+		return model.Session{ID: "A", TmuxWindow: "@7"}, nil
+	}
+	t.Cleanup(func() { hookRun = prev })
+
+	res := runHookCmd(t, strings.NewReader(`{"session_id":"A"}`), "hook", "Stop")
+	assertQuietExitZero(t, res)
+	// Both the read before the event and the marker update (which reads the
+	// same table) fail and are logged; the marker update was attempted.
+	if len(res.log) != 2 || !strings.Contains(res.log[0], "before event") || !strings.Contains(res.log[1], "attention marker") {
+		t.Errorf("log = %q, want the failed read, then the failed marker update", res.log)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("calls = %q, want none (update failed before tmux)", fake.Calls)
 	}
 }
