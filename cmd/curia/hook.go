@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -34,6 +35,9 @@ var (
 	hookRun  = hook.Run
 )
 
+// hookDeadline bounds a whole hook run; tests shorten it.
+var hookDeadline = 5 * time.Second
+
 // newTmuxClient builds the tmux client every command uses; tests replace it
 // with a tmux.Fake.
 var newTmuxClient = func() tmux.Client { return tmux.NewExec("") }
@@ -52,26 +56,32 @@ func init() {
 }
 
 // runHook records the event and exits 0 on every path, panics included.
-// Nothing is written to stdout or stderr, which belong to Claude Code.
+// Nothing is written to stdout or stderr, which belong to Claude Code. A
+// watchdog exits after hookDeadline, logging it: stdin has no deadline of its
+// own, and the transcript is read inside the store's write transaction.
 func runHook(cmd *cobra.Command, args []string) {
-	logger := slog.New(slog.DiscardHandler)
-	closeLog := func() error { return nil }
 	event := strings.Join(args, " ")
+	end := &hookEnd{logger: slog.New(slog.DiscardHandler), closeLog: func() error { return nil }}
+	watchdog := time.AfterFunc(hookDeadline, func() {
+		end.finish(func(l *slog.Logger) {
+			l.Error("hook timed out", "event", event, "after", hookDeadline.String())
+		})
+	})
 	defer func() {
-		if r := recover(); r != nil {
-			logger.Error("hook panicked", "event", event, "panic", fmt.Sprint(r))
-		}
-		_ = closeLog()
-		hookExit(0)
+		watchdog.Stop()
+		r := recover()
+		end.finish(func(l *slog.Logger) {
+			if r != nil {
+				l.Error("hook panicked", "event", event, "panic", fmt.Sprint(r))
+			}
+		})
 	}()
 
 	cfg, cfgErr := loadConfig()
 	if cfgErr != nil {
 		cfg = config.Default() // still log to the default log file
 	}
-	if l, c, err := openLog(cfg.LogPath); err == nil {
-		logger, closeLog = l, c
-	}
+	logger := end.openLog(cfg.LogPath)
 	err := cfgErr
 	if err == nil {
 		err = recordEvent(cmd.Context(), args, cmd.InOrStdin(), cfg, logger)
@@ -79,6 +89,46 @@ func runHook(cmd *cobra.Command, args []string) {
 	if err != nil {
 		logger.Error("hook failed", "event", event, "err", err.Error())
 	}
+}
+
+// hookEnd ends a hook run exactly once, from the watchdog or from runHook
+// returning, whichever comes first.
+type hookEnd struct {
+	mu       sync.Mutex
+	ended    bool
+	logger   *slog.Logger
+	closeLog func() error
+}
+
+// openLog opens the log file at path for the rest of the run and returns
+// its logger, or the discarding one when the file cannot be opened or the
+// run has already ended.
+func (h *hookEnd) openLog(path string) *slog.Logger {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	l, c, err := openLog(path)
+	switch {
+	case err != nil:
+	case h.ended:
+		_ = c()
+	default:
+		h.logger, h.closeLog = l, c
+	}
+	return h.logger
+}
+
+// finish runs last with the run's logger, closes the log and exits 0, the
+// first time it is called; later calls do nothing.
+func (h *hookEnd) finish(last func(*slog.Logger)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.ended {
+		return
+	}
+	h.ended = true
+	last(h.logger)
+	_ = h.closeLog()
+	hookExit(0)
 }
 
 // recordEvent reads the payload and runs the hook against the store.

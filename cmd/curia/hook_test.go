@@ -103,6 +103,47 @@ func TestMalformedPayloadExitsZero(t *testing.T) {
 	}
 }
 
+// TestHookWatchdogExitsZero: stdin has no deadline, so a payload that never
+// ends must not keep the hook (and Claude Code waiting on it) forever.
+func TestHookWatchdogExitsZero(t *testing.T) {
+	hookHome(t)
+	prevDeadline, prevExit := hookDeadline, hookExit
+	hookDeadline = 100 * time.Millisecond
+	exits := make(chan int, 2)
+	hookExit = func(code int) { exits <- code }
+	stdin, writer := io.Pipe()
+	rootCmd.SetIn(stdin)
+	rootCmd.SetArgs([]string{"hook", "Stop"})
+	t.Cleanup(func() {
+		hookDeadline, hookExit = prevDeadline, prevExit
+		rootCmd.SetIn(nil)
+		rootCmd.SetArgs(nil)
+	})
+	done := make(chan error, 1)
+	go func() { done <- rootCmd.Execute() }()
+
+	select {
+	case code := <-exits:
+		if code != 0 {
+			t.Errorf("exit code %d, want 0", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("hook still running 5s after its 100ms deadline")
+	}
+	_ = writer.Close() // a real hook is gone by now; let this one return
+	if err := <-done; err != nil {
+		t.Errorf("Execute returned %v", err)
+	}
+	select {
+	case <-exits:
+		t.Error("hook exited a second time")
+	default:
+	}
+	if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "timed out") || !strings.Contains(log[0], "Stop") {
+		t.Errorf("log = %q, want one line saying the Stop hook timed out", log)
+	}
+}
+
 func TestHookExitsZeroWhenStoreLocked(t *testing.T) {
 	db := hookHome(t)
 	st, err := store.Open(db) // create the file in WAL mode first
