@@ -52,7 +52,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 11 | End-to-end replay of five sessions | Opus (confirmed: cross-process test of the built binary with timing and concurrency) | Hand-written fixtures in `testdata/replay/` and golden `e2e/testdata/ls.golden.json` (never generated from program output); `TestReplayFiveSessions` passes (every run exits 0, p95 < 50 ms per process, `ls --json` order S2, S3, S1, S5, `status` prints `W1`); `go test -race ./...` passes; the live check in Step 5 done by hand and reported. **Plan-level criterion:** the orchestrator runs `deadcode ./...` (without `-test`) on `plan-1`; every reported symbol is either a deliberate test double (`tmux.Fake`) or fixed before the PR to main (Ruling 1). | in progress |
+| 11 | End-to-end replay of five sessions | Opus (confirmed: cross-process test of the built binary with timing and concurrency) | Hand-written fixtures in `testdata/replay/` and golden `e2e/testdata/ls.golden.json` (never generated from program output); `TestReplayFiveSessions` passes (every run exits 0, p95 < 50 ms per process, `ls --json` order S2, S3, S1, S5, `status` prints `W1`); `go test -race ./...` passes; the live check in Step 5 done by hand and reported. **Plan-level criterion:** the orchestrator runs `deadcode ./...` (without `-test`) on `plan-1`; every reported symbol is either a deliberate test double (`tmux.Fake`) or fixed before the PR to main (Ruling 1). | merged (PR #12) |
 
 ## Open Questions
 
@@ -106,7 +106,7 @@ Format: Ruling: what — why — cost if wrong.
 One line per task: wave, worktree, branch, status.
 
 - Task 1: wave 1, `.worktrees/plan1-t1-scaffold`, `feat/plan1-t1-scaffold`, merged (PR #2), Sonnet, 0 fix rounds.
-- Task 11: wave 6, `.worktrees/plan1-t11-replay`, `feat/plan1-t11-replay`, in progress.
+- Task 11: wave 6, `.worktrees/plan1-t11-replay`, `feat/plan1-t11-replay`, merged (PR #12), Opus, 1 fix rounds.
 - Task 9: wave 5, `.worktrees/plan1-t9-ui`, `feat/plan1-t9-ui`, merged (PR #11), Opus, 1 fix rounds.
 - Task 7: wave 4, `.worktrees/plan1-t7-fleet`, `feat/plan1-t7-fleet`, merged (PR #10), Opus, 0 fix rounds.
 - Task 8: wave 4, `.worktrees/plan1-t8-attention`, `feat/plan1-t8-attention`, merged (PR #9), Sonnet, 1 fix rounds.
