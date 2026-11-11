@@ -1,0 +1,13 @@
+# Git hooks (docs/decisions/0005). Install once per clone with `lefthook install`.
+# pre-commit runs exactly `make check`, the same command CI runs
+# (docs/decisions/0007). Never bypass with --no-verify.
+
+pre-commit:
+  jobs:
+    - name: make check
+      run: make check
+
+commit-msg:
+  jobs:
+    - name: conventional commit
+      run: scripts/check-commit-msg.sh {1}
