@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -211,6 +212,34 @@ func TestGitInfoDetachedHead(t *testing.T) {
 	}
 	if lines := logLines(buf); lines != nil {
 		t.Errorf("log = %q, want none", lines)
+	}
+}
+
+// A HEAD that is a FIFO (a hostile or broken checkout) must not block the
+// hook: opening or reading it would wait for a writer that never comes.
+func TestGitInfoHeadFIFODoesNotBlock(t *testing.T) {
+	gitDir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(gitDir, "HEAD"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, _ := useFakeGit(t, "printf '/fake/repo\\n%s\\n' '"+gitDir+"'\n")
+	logger, buf := testLogger()
+	start := time.Now()
+	done := make(chan [2]string, 1)
+	go func() {
+		repo, branch := gitInfo(context.Background(), cwd, logger)
+		done <- [2]string{repo, branch}
+	}()
+	select {
+	case got := <-done:
+		if got != [2]string{"/fake/repo", ""} {
+			t.Errorf("gitInfo = %q, want /fake/repo and no branch", got)
+		}
+	case <-time.After(subprocessTimeout + time.Second):
+		t.Fatalf("gitInfo still blocked on a FIFO HEAD after %v", time.Since(start))
+	}
+	if lines := logLines(buf); len(lines) != 1 || !strings.Contains(lines[0], "HEAD") {
+		t.Errorf("log = %q, want one line about HEAD", lines)
 	}
 }
 

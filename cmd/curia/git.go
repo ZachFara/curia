@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -58,25 +59,46 @@ func gitInfo(ctx context.Context, cwd string, logger *slog.Logger) (repo, branch
 }
 
 // headBranch returns the branch the HEAD file in gitDir names, or "" when
-// HEAD is detached.
+// HEAD is detached. HEAD is untrusted: anything but a regular file (a FIFO
+// would block the open or the read forever) is an error, checked before the
+// open and again on the open handle, and the open does not block.
 func headBranch(gitDir string) (string, error) {
-	f, err := os.Open(filepath.Clean(filepath.Join(gitDir, "HEAD")))
+	path := filepath.Clean(filepath.Join(gitDir, "HEAD"))
+	if err := requireRegular(os.Stat(path)); err != nil {
+		return "", err
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
+	if err = requireRegular(f.Stat()); err != nil {
+		return "", err
+	}
 	b, err := io.ReadAll(io.LimitReader(f, maxHeadBytes+1))
 	if err != nil {
 		return "", err
 	}
 	if len(b) > maxHeadBytes {
-		return "", fmt.Errorf("%s/HEAD exceeds %d bytes", gitDir, maxHeadBytes)
+		return "", fmt.Errorf("%s exceeds %d bytes", path, maxHeadBytes)
 	}
 	ref, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "ref: refs/heads/")
 	if !ok {
 		return "", nil
 	}
 	return ref, nil
+}
+
+// requireRegular passes on a stat error, or reports one when fi is not a
+// regular file.
+func requireRegular(fi os.FileInfo, err error) error {
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file (%v)", fi.Name(), fi.Mode().Type())
+	}
+	return nil
 }
 
 // gitResult is the outcome of one git call.
