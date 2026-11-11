@@ -196,11 +196,12 @@ func (m Model) reselect() Model {
 	return m.moveTo(m.cursor)
 }
 
-// matches reports whether s's repo, branch or last update contains filter,
-// ignoring case.
+// matches reports whether the repo cell as shown ("repo@branch", the repo
+// as its basename), the branch or the last update contains filter, ignoring
+// case.
 func matches(s model.Session, filter string) bool {
 	f := strings.ToLower(filter)
-	for _, field := range []string{s.Repo, s.Branch, s.LastUpdate} {
+	for _, field := range []string{repoText(s), s.Branch, s.LastUpdate} {
 		if strings.Contains(strings.ToLower(field), f) {
 			return true
 		}
