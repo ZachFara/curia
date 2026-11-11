@@ -5,7 +5,7 @@ This file mirrors the plan for humans; it does not replace it. Task order, inter
 ## Status
 
 - **Phase 1 (setup): merged** to `main` as PR #1. `main` is protected (PRs required, `check` required, no force pushes, admins included).
-- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 (Task 5) dispatched.
+- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 merged (Task 5, PR #8). Wave 4 (Tasks 7 and 8) dispatched in parallel.
 
 ## Plan 1 waves
 
@@ -39,8 +39,8 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 7 | Fleet ranking, badge, ls, status, next | Sonnet (expected, confirmed at dispatch) | `fleet.Reconcile`, `Rank`, `Counts`/`Count`, `Badge`, `Next`; `curia ls [--json]`, `curia status`, `curia next` in their own files; `TestReconcileMarksMissingPanesStale`, `TestReconcileIgnoresSessionsWithoutPane`, `TestRankOrder`, `TestRankOldestFirstWithinGroup`, `TestBadge`, `TestNextSkipsSessionsWithoutPane`, `TestNextNoneWhenAllWorking`, `TestLsJSONGolden` pass. | not started |
-| 8 | Attention markers and mark-seen | Sonnet (expected, confirmed at dispatch) | `attention.Marker`, `WindowMarker`, `Apply`; `curia seen <pane>`; `cmd/curia/hook.go` calls `attention.Apply` after `hook.Run` and a tmux failure never changes the exit code; `TestMarkerByState`, `TestWindowMarkerStrongestWins`, `TestApplySetsWindowOption`, `TestSeenClearsMarker` pass. | not started |
+| 7 | Fleet ranking, badge, ls, status, next | Opus (changed from Sonnet: seven files across `fleet` and three commands, plus a cross-process reconcile under Ruling 14) | `fleet.Reconcile`, `Rank`, `Counts`/`Count`, `Badge`, `Next`; `curia ls [--json]`, `curia status`, `curia next` in their own files; `TestReconcileMarksMissingPanesStale`, `TestReconcileIgnoresSessionsWithoutPane`, `TestRankOrder`, `TestRankOldestFirstWithinGroup`, `TestBadge`, `TestNextSkipsSessionsWithoutPane`, `TestNextNoneWhenAllWorking`, `TestLsJSONGolden` pass. | in progress |
+| 8 | Attention markers and mark-seen | Sonnet (confirmed: one small package and one command, exact signatures and tests) | `attention.Marker`, `WindowMarker`, `Apply`; `curia seen <pane>`; `cmd/curia/hook.go` calls `attention.Apply` after `hook.Run` and a tmux failure never changes the exit code; `TestMarkerByState`, `TestWindowMarkerStrongestWins`, `TestApplySetsWindowOption`, `TestSeenClearsMarker` pass. | in progress |
 
 ### Wave 5
 
@@ -88,11 +88,17 @@ Format: Ruling: what — why — cost if wrong.
 14. Ruling: the store gains `UpdateSession(ctx, id, fn)`, which runs load, `fn` and upsert in one `BEGIN IMMEDIATE` transaction; every read-modify-write (the hook, `fleet.Reconcile`) uses it, and `UpsertSession` stays the plan's single blind statement — the plan's constraint is "no lost updates" and its own hook flow is a cross-process read-modify-write — hooks serialise on the write lock while `fn` runs; one method beyond the plan's interface.
 15. Ruling: store timestamps use a fixed-width UTC layout with 9 fractional digits — `SeenAt` before `UpdatedAt` comparisons lose alerts that land in the same second as a mark-seen — longer text timestamps.
 
+16. Ruling: `curia ls --json` keys are the store's column names for the fields `model.Session` has (`id`, `agent`, `tmux_pane`, `tmux_session`, `tmux_window`, `cwd`, `repo`, `branch`, `state`, `model`, `context_used`, `context_max`, `subagents_active`, `last_update`, `seen_at`, `transcript_path`, `started_at`, `updated_at`); times are RFC 3339 UTC and a zero time is `null`; `transcript_offset` is internal and omitted — the plan says only "snake_case keys" and agents will script against this output — renaming a key later breaks scripts.
+17. Ruling: `curia seen` and `curia next` log their errors and exit 0 — tmux runs them from a hook and a key binding, where a failing command prints noise into the status line — a broken install is visible only in the log.
+18. Ruling: `attention.Apply` runs after every hook event whose session has a window, as the plan says, and Task 8 reports what that adds to hook latency — the plan is explicit; a cheaper rule (only on state changes) is a later optimisation if the 20 ms budget is at risk — one extra tmux call per hook event.
+
 ## Ledger
 
 One line per task: wave, worktree, branch, status.
 
 - Task 1: wave 1, `.worktrees/plan1-t1-scaffold`, `feat/plan1-t1-scaffold`, merged (PR #2), Sonnet, 0 fix rounds.
+- Task 7: wave 4, `.worktrees/plan1-t7-fleet`, `feat/plan1-t7-fleet`, in progress.
+- Task 8: wave 4, `.worktrees/plan1-t8-attention`, `feat/plan1-t8-attention`, in progress.
 - Task 5: wave 3, `.worktrees/plan1-t5-hook`, `feat/plan1-t5-hook`, merged (PR #8), Opus, 1 fix rounds.
 - Task 2: wave 2, `.worktrees/plan1-t2-store`, `feat/plan1-t2-store`, merged (PR #7), Opus, 1 fix rounds.
 - Task 3: wave 2, `.worktrees/plan1-t3-state`, `feat/plan1-t3-state`, merged (PR #3), Sonnet, 0 fix rounds.
@@ -102,8 +108,8 @@ One line per task: wave, worktree, branch, status.
 
 ## Next steps
 
-1. Review and merge Task 5 into `plan-1`.
-2. Dispatch Wave 4 (Tasks 7 and 8).
+1. Review and merge Tasks 7 and 8 into `plan-1`.
+2. Dispatch Wave 5 (Task 9).
 
 ## Deferred minors (for the final review)
 
@@ -113,3 +119,4 @@ One line per task: wave, worktree, branch, status.
 - Task 4: first read of a 50 MB transcript measured 16.2 ms warm, close to the 20 ms budget (lever: smaller tail window).
 - Task 6: the real-tmux round trip checks `escapeMessage` through raw tmux, not `DisplayMessage` end to end.
 - Task 10: a dangling symlink target is still replaced by a regular file; rewritten files get mode 0600 whatever they had; a binary path with a space or quote goes unquoted into the hook command and tmux snippet.
+- Task 5: a payload over 1 MiB drops the event; stdin read has no deadline; whole-process hook latency was only measured on a loaded machine (check in Task 11).

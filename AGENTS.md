@@ -82,6 +82,10 @@ Rules for the toolchain:
 - **Tests that start a real tmux server use a per-run socket** (`curia-test-<pid>`), because several worktrees run `make check` at the same time.
 - **Files the user owns may be symlinks into a dotfiles repo.** `internal/install` resolves symlinks before its atomic rename and never overwrites an existing backup.
 
+- **Command wiring lives in `cmd/curia/common.go`** (load config, open the store, open the log file) and git plumbing in `cmd/curia/git.go`. Reuse them; do not write a second copy in a new command.
+- **Any test or code that runs `git` must drop git's repository-local `GIT_*` variables** (`gitEnv` in `cmd/curia/git.go`). lefthook's pre-commit exports `GIT_DIR`, so an unguarded `git init` in a test acts on the real repository.
+- **GitHub Actions outages happen.** If a PR shows no checks for a long time, look at githubstatus.com before suspecting the code; never merge without the check.
+
 ## Owner's rules (verbatim)
 
 The sections below are copied verbatim from the owner's orchestrator prompt. In them, "you" is the orchestrator and "me" is the owner.
