@@ -1,0 +1,341 @@
+# golangci-lint v2 configuration. Strict by design; see
+# docs/decisions/0002 (linters and thresholds) and docs/decisions/0003
+# (depguard package boundaries). Thresholds are never raised and no
+# exclusions are added after setup (AGENTS.md, ENGINEERING).
+version: "2"
+
+run:
+  tests: true
+  modules-download-mode: readonly
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: none
+  enable:
+    # correctness
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - errorlint
+    - bodyclose
+    - nilerr
+    - rowserrcheck
+    - sqlclosecheck
+    - gosec
+    # unused code
+    - unused
+    - unparam
+    # complexity limits (run by `make complexity`)
+    - gocyclo
+    - gocognit
+    - funlen
+    - nestif
+    # package boundaries (run by `make boundaries`)
+    - depguard
+    # style
+    - revive
+    - misspell
+    - unconvert
+    - gocritic
+    # suppression hygiene
+    - nolintlint
+
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        # Struct field order follows the plan's documented types, not memory layout.
+        - fieldalignment
+
+    errcheck:
+      check-type-assertions: true
+
+    gocyclo:
+      min-complexity: 15
+
+    gocognit:
+      min-complexity: 20
+
+    funlen:
+      lines: 60
+      statements: 40
+      ignore-comments: true
+
+    nestif:
+      min-complexity: 4
+
+    misspell:
+      locale: US
+
+    nolintlint:
+      # Any //nolint must name the linter and say why. `make suppressions`
+      # additionally rejects every suppression outright.
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+
+    gosec:
+      excludes:
+        # G204: tmux, git and the e2e test run fixed programs with argv
+        # arguments by design, never through a shell (docs/decisions/0002).
+        - G204
+
+    depguard:
+      # Package boundaries from the plan's File structure table: each package
+      # may import the standard library, the third-party modules it needs, and
+      # only the internal packages ABOVE it in the table. Every rule is strict
+      # (fail closed): an import not on the allow list is rejected.
+      # Order of the table: model, config, store, state, transcript, hook,
+      # tmux, fleet, attention, ui, install, cmd/curia.
+      rules:
+        model:
+          list-mode: strict
+          files:
+            - "**/internal/model/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/model imports the standard library only (docs/decisions/0003)"
+
+        config:
+          list-mode: strict
+          files:
+            - "**/internal/config/**"
+          allow:
+            - $gostd
+            - github.com/BurntSushi/toml
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/config may import only internal packages above it: model (docs/decisions/0003)"
+
+        store:
+          list-mode: strict
+          files:
+            - "**/internal/store/**"
+          allow:
+            - $gostd
+            - modernc.org/sqlite
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/store$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/store may import only internal packages above it: model, config (docs/decisions/0003)"
+
+        state:
+          list-mode: strict
+          files:
+            - "**/internal/state/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/state may import only internal packages above it: model, config, store (docs/decisions/0003)"
+
+        transcript:
+          list-mode: strict
+          files:
+            - "**/internal/transcript/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+            - github.com/ZachFara/curia/internal/transcript$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/transcript may import only internal packages above it: model, config, store, state (docs/decisions/0003)"
+
+        hook:
+          list-mode: strict
+          files:
+            - "**/internal/hook/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+            - github.com/ZachFara/curia/internal/transcript$
+            - github.com/ZachFara/curia/internal/hook$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/hook may import only internal packages above it: model, config, store, state, transcript (docs/decisions/0003)"
+
+        tmux:
+          list-mode: strict
+          files:
+            - "**/internal/tmux/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+            - github.com/ZachFara/curia/internal/transcript$
+            - github.com/ZachFara/curia/internal/hook$
+            - github.com/ZachFara/curia/internal/tmux$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/tmux may import only internal packages above it: model to hook (docs/decisions/0003)"
+
+        fleet:
+          list-mode: strict
+          files:
+            - "**/internal/fleet/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+            - github.com/ZachFara/curia/internal/transcript$
+            - github.com/ZachFara/curia/internal/hook$
+            - github.com/ZachFara/curia/internal/tmux$
+            - github.com/ZachFara/curia/internal/fleet$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/fleet may import only internal packages above it: model to tmux (docs/decisions/0003)"
+
+        attention:
+          list-mode: strict
+          files:
+            - "**/internal/attention/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+            - github.com/ZachFara/curia/internal/transcript$
+            - github.com/ZachFara/curia/internal/hook$
+            - github.com/ZachFara/curia/internal/tmux$
+            - github.com/ZachFara/curia/internal/fleet$
+            - github.com/ZachFara/curia/internal/attention$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/attention may import only internal packages above it: model to fleet (docs/decisions/0003)"
+
+        ui:
+          list-mode: strict
+          files:
+            - "**/internal/ui/**"
+          allow:
+            - $gostd
+            - github.com/charmbracelet/bubbletea
+            - github.com/charmbracelet/lipgloss
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+            - github.com/ZachFara/curia/internal/transcript$
+            - github.com/ZachFara/curia/internal/hook$
+            - github.com/ZachFara/curia/internal/tmux$
+            - github.com/ZachFara/curia/internal/fleet$
+            - github.com/ZachFara/curia/internal/attention$
+            - github.com/ZachFara/curia/internal/ui$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/ui may import only internal packages above it: model to attention (docs/decisions/0003)"
+
+        install:
+          list-mode: strict
+          files:
+            - "**/internal/install/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+            - github.com/ZachFara/curia/internal/transcript$
+            - github.com/ZachFara/curia/internal/hook$
+            - github.com/ZachFara/curia/internal/tmux$
+            - github.com/ZachFara/curia/internal/fleet$
+            - github.com/ZachFara/curia/internal/attention$
+            - github.com/ZachFara/curia/internal/ui$
+            - github.com/ZachFara/curia/internal/install$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/install may import only internal packages above it: model to ui (docs/decisions/0003)"
+
+        cmd:
+          list-mode: strict
+          files:
+            - "**/cmd/curia/**"
+          allow:
+            - $gostd
+            - github.com/spf13/cobra
+            - github.com/charmbracelet/bubbletea
+            - github.com/charmbracelet/lipgloss
+            - modernc.org/sqlite
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+            - github.com/ZachFara/curia/internal/transcript$
+            - github.com/ZachFara/curia/internal/hook$
+            - github.com/ZachFara/curia/internal/tmux$
+            - github.com/ZachFara/curia/internal/fleet$
+            - github.com/ZachFara/curia/internal/attention$
+            - github.com/ZachFara/curia/internal/ui$
+            - github.com/ZachFara/curia/internal/install$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "cmd/curia may import only the internal packages in the plan's File structure table (docs/decisions/0003)"
+
+        e2e:
+          list-mode: strict
+          files:
+            - "**/e2e/**"
+          allow:
+            - $gostd
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "e2e drives the built binary only and imports no internal package (docs/decisions/0003)"
+
+        # Fail closed for any Go file outside the packages above (a new
+        # directory the table does not list): it may not import this module.
+        unlisted:
+          list-mode: lax
+          files:
+            - $all
+            - "!**/internal/model/**"
+            - "!**/internal/config/**"
+            - "!**/internal/store/**"
+            - "!**/internal/state/**"
+            - "!**/internal/transcript/**"
+            - "!**/internal/hook/**"
+            - "!**/internal/tmux/**"
+            - "!**/internal/fleet/**"
+            - "!**/internal/attention/**"
+            - "!**/internal/ui/**"
+            - "!**/internal/install/**"
+            - "!**/cmd/curia/**"
+            - "!**/e2e/**"
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "this directory is not in the plan's File structure table; add a depguard rule first (docs/decisions/0003)"
+
+  exclusions:
+    generated: strict
+    rules:
+      # Table-driven tests are long by nature; length limits apply to
+      # production code. Complexity limits (gocyclo, gocognit, nestif) still
+      # apply to tests.
+      - path: _test\.go
+        linters:
+          - funlen
