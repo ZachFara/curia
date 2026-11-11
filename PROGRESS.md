@@ -5,7 +5,7 @@ This file mirrors the plan for humans; it does not replace it. Task order, inter
 ## Status
 
 - **Phase 1 (setup): merged** to `main` as PR #1. `main` is protected (PRs required, `check` required, no force pushes, admins included).
-- **Phase 2: in progress** on integration branch `plan-1`. Wave 1 merged (Task 1, PR #2). Wave 2 (Tasks 2, 3, 4, 6, 10) dispatched in parallel.
+- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 (Task 5) dispatched.
 
 ## Plan 1 waves
 
@@ -33,7 +33,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 5 | Hook command | Opus (expected, confirmed at dispatch) | `hook.Parse`, `hook.Env`, `hook.Run` in the plan's order; one payload fixture per event kind; `curia hook <Event>` exits 0 on every path and logs errors; `TestParseFixtures`, `TestRunSessionStartRecordsSession`, `TestSessionStartEndsPriorSessionInPane`, `TestHookWithoutTmuxPane`, `TestStopReadsTranscript`, `TestHookLatency` (p95 < 20 ms), `TestMalformedPayloadExitsZero`, `TestHookExitsZeroWhenStoreLocked` pass under `-race`. | not started |
+| 5 | Hook command | Opus (confirmed: integrates four packages, cross-process locking, latency budget) | `hook.Parse`, `hook.Env`, `hook.Run` in the plan's order; one payload fixture per event kind; `curia hook <Event>` exits 0 on every path and logs errors; `TestParseFixtures`, `TestRunSessionStartRecordsSession`, `TestSessionStartEndsPriorSessionInPane`, `TestHookWithoutTmuxPane`, `TestStopReadsTranscript`, `TestHookLatency` (p95 < 20 ms), `TestMalformedPayloadExitsZero`, `TestHookExitsZeroWhenStoreLocked` pass under `-race`. | in progress |
 
 ### Wave 4
 
@@ -62,6 +62,8 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 4. Resolved by Ruling 5.
 5. `go.mod` says `go 1.26.0` plus `toolchain go1.26.11` rather than bare `go 1.26` (decision 0001).
 6. Task 11's golden `ls --json` file is hand-written but real runs produce real timestamps; decide at Task 11 dispatch how time fields are compared.
+8. `curia uninstall` only removes entries for the current binary path (Ruling 13); entries from a moved or rebuilt binary stay behind and fire against a missing file. Decide whether uninstall should also match older paths.
+9. Under sustained heavy write load a waiting SQLite writer can time out (SQLite polls for the lock rather than queueing). Hooks are short so this is unlikely in practice; revisit if the log shows busy errors.
 7. No LICENSE file yet although the repo is public; the spec leaves AGPL-3.0 or MIT open. Owner to decide.
 
 ## Rulings
@@ -79,11 +81,19 @@ Format: Ruling: what — why — cost if wrong.
 8. Ruling: an ended session receiving any event except SessionStart is returned unchanged, including `UpdatedAt` — "ignores every event" is the more specific rule — an ended row's `updated_at` does not advance.
 9. Ruling: `Session.TmuxWindow` stores the tmux window id (for example `@7`) — Task 8 sets window options by that value — the dashboard must resolve a readable window name another way, decided at Task 9.
 
+10. Ruling: `transcript.Read` takes `LastAssistantText` from the last non-empty text block among all counted assistant lines in the bytes read; model and context still come from the last counted line — Claude Code writes one JSONL line per content block, so the final line is often a tool call with no text — Stop may show text from an earlier message in the same read window.
+11. Ruling: when the unread part of a transcript exceeds 1 MiB, `transcript.Read` starts at the first complete line inside the last 1 MiB — the 20 ms hook budget, and resumed sessions have transcripts of tens of MB — a usage line older than the window is missed until the next assistant line.
+12. Ruling: the real-tmux test socket is `curia-test-<pid>`, not the plan's fixed `curia-test` — parallel worktrees run `make check` at once and a fixed name lets one run kill another's server — none beyond the literal name.
+13. Ruling: Task 10 keeps the plan's rule that only entries starting with the current `<bin> hook ` are ours — the spec says uninstall removes only what it added — stale entries from an old binary path survive an uninstall (Open Question 8).
+14. Ruling: the store gains `UpdateSession(ctx, id, fn)`, which runs load, `fn` and upsert in one `BEGIN IMMEDIATE` transaction; every read-modify-write (the hook, `fleet.Reconcile`) uses it, and `UpsertSession` stays the plan's single blind statement — the plan's constraint is "no lost updates" and its own hook flow is a cross-process read-modify-write — hooks serialise on the write lock while `fn` runs; one method beyond the plan's interface.
+15. Ruling: store timestamps use a fixed-width UTC layout with 9 fractional digits — `SeenAt` before `UpdatedAt` comparisons lose alerts that land in the same second as a mark-seen — longer text timestamps.
+
 ## Ledger
 
 One line per task: wave, worktree, branch, status.
 
 - Task 1: wave 1, `.worktrees/plan1-t1-scaffold`, `feat/plan1-t1-scaffold`, merged (PR #2), Sonnet, 0 fix rounds.
+- Task 5: wave 3, `.worktrees/plan1-t5-hook`, `feat/plan1-t5-hook`, in progress.
 - Task 2: wave 2, `.worktrees/plan1-t2-store`, `feat/plan1-t2-store`, merged (PR #7), Opus, 1 fix rounds.
 - Task 3: wave 2, `.worktrees/plan1-t3-state`, `feat/plan1-t3-state`, merged (PR #3), Sonnet, 0 fix rounds.
 - Task 4: wave 2, `.worktrees/plan1-t4-transcript`, `feat/plan1-t4-transcript`, merged (PR #4), Sonnet, 1 fix rounds.
@@ -92,9 +102,14 @@ One line per task: wave, worktree, branch, status.
 
 ## Next steps
 
-1. Review and merge each Wave 2 task into `plan-1` as it reports.
-2. Dispatch Wave 3 (Task 5) once all five are merged.
+1. Review and merge Task 5 into `plan-1`.
+2. Dispatch Wave 4 (Tasks 7 and 8).
 
 ## Deferred minors (for the final review)
 
 - Task 1: `config.Default` and `expandHome` discard `os.UserHomeDir` errors; unknown TOML keys are silently ignored.
+- Task 2: `TestUpdateSessionLosesNoUpdates` depends on timing (about 2.5x margin); retry `SQLITE_BUSY` inside the test loop. A failed `COMMIT` could return a connection mid-transaction (theoretical).
+- Task 3: `SessionStart` on an empty-ID session calls `start` twice; a few untested edges.
+- Task 4: first read of a 50 MB transcript measured 16.2 ms warm, close to the 20 ms budget (lever: smaller tail window).
+- Task 6: the real-tmux round trip checks `escapeMessage` through raw tmux, not `DisplayMessage` end to end.
+- Task 10: a dangling symlink target is still replaced by a regular file; rewritten files get mode 0600 whatever they had; a binary path with a space or quote goes unquoted into the hook command and tmux snippet.

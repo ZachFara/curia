@@ -72,6 +72,16 @@ Rules for the toolchain:
 - **Commits**: conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`, `build:`, `ci:`, `refactor:` ...), subject at most 72 characters; enforced by the commit-msg hook. Branches: `feat/`, `fix/`, `chore/`, `docs/`; Plan 1 task branches are `feat/plan1-tN-<slug>`.
 - **PRs** use `.github/pull_request_template.md`: what changed, why, how it was tested.
 
+## Things learned while building
+
+- **Read-modify-write on a session goes through `store.UpdateSession`.** It loads the row, calls your function and upserts in one `BEGIN IMMEDIATE` transaction. Never pair `GetSession` with `UpsertSession` to change a row another process may be writing; `UpsertSession` is a blind overwrite. The function passed to `UpdateSession` must not call the store.
+- **Timestamps in the store are fixed-width UTC text with 9 fractional digits.** Compare times as `time.Time` in Go; never write a timestamp with another layout.
+- **An empty pane is stored as NULL.** `MarkSeen("")` and `EndOthersInPane("", ...)` change nothing, by design: a session started outside tmux is in no pane.
+- **SQLite WAL on a fresh file:** several processes opening a new database at once get `SQLITE_BUSY` from the WAL switch without waiting for `busy_timeout`; `store.Open` handles it. Do not set `journal_mode` anywhere else.
+- **tmux `display-message` expands both `#` formats and `%` strftime sequences.** `tmux.Client.DisplayMessage` escapes both; never call tmux with untrusted text any other way. With an unknown `-t` target, tmux can exit 0 with empty fields.
+- **Tests that start a real tmux server use a per-run socket** (`curia-test-<pid>`), because several worktrees run `make check` at the same time.
+- **Files the user owns may be symlinks into a dotfiles repo.** `internal/install` resolves symlinks before its atomic rename and never overwrites an existing backup.
+
 ## Owner's rules (verbatim)
 
 The sections below are copied verbatim from the owner's orchestrator prompt. In them, "you" is the orchestrator and "me" is the owner.
