@@ -131,7 +131,7 @@ layout:
 ## test: all tests under the race detector
 test:
 	@echo "==> go test -race ./..."
-	go test -race ./...
+	@scripts/with-test-lock.sh go test -race ./...
 
 ## build: build the curia binary into ./curia
 build:
