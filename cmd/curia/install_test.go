@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -23,7 +27,122 @@ func runRoot(t *testing.T, args ...string) (string, error) {
 	return out.String(), err
 }
 
+// installUnexpectedRunner is claudeRunner under test: no test may run the
+// real claude, so a test that reaches the runner without installing a
+// recorder fails.
+func installUnexpectedRunner(_ context.Context, args ...string) ([]byte, error) {
+	panic("claudeRunner called without a recorder: claude " + strings.Join(args, " "))
+}
+
+func init() {
+	claudeRunner = installUnexpectedRunner
+}
+
+// installRecorder is a claudeRunner that records each call's arguments and
+// succeeds.
+type installRecorder struct {
+	mu    sync.Mutex
+	calls [][]string
+}
+
+func (r *installRecorder) run(_ context.Context, args ...string) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, slices.Clone(args))
+	return nil, nil
+}
+
+func (r *installRecorder) joined() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, c := range r.calls {
+		out = append(out, strings.Join(c, " "))
+	}
+	return out
+}
+
+// installRecord replaces claudeRunner with a recorder for the test.
+func installRecord(t *testing.T) *installRecorder {
+	t.Helper()
+	r := &installRecorder{}
+	claudeRunner = r.run
+	t.Cleanup(func() { claudeRunner = installUnexpectedRunner })
+	return r
+}
+
+// installRun runs curia with args and resets the install flag afterwards,
+// because cobra keeps a flag's value between runs.
+func installRun(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	t.Cleanup(func() { installAllowMCPTools = false })
+	return runRoot(t, args...)
+}
+
+// installHome is a temp HOME and CLAUDE_CONFIG_DIR and the paths in them.
+type installHome struct {
+	home, settings, skill, config, bin string
+}
+
+func installSetup(t *testing.T, settings string) installHome {
+	t.Helper()
+	home := t.TempDir()
+	configDir := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	bin, err := executablePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := installHome{
+		home:     home,
+		settings: filepath.Join(home, ".claude", "settings.json"),
+		skill:    filepath.Join(home, ".claude", "skills", "curia-decisions", "SKILL.md"),
+		config:   filepath.Join(configDir, ".claude.json"),
+		bin:      bin,
+	}
+	if settings != "" {
+		if err := os.MkdirAll(filepath.Dir(h.settings), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(h.settings, []byte(settings), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return h
+}
+
+// installAllow returns the settings file's permissions.allow list.
+func installAllow(t *testing.T, path string) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m.Permissions.Allow
+}
+
+var installToolRules = []string{
+	"mcp__curia__search_decisions", "mcp__curia__request_decision",
+	"mcp__curia__check_decision", "mcp__curia__withdraw_decision",
+}
+
+const installWantToolsHint = "MCP tools not allowed without a prompt; to allow the four curia tools run: curia install --allow-mcp-tools"
+
+func installAddCall(bin string) string {
+	return "mcp add --scope user curia -- " + bin + " mcp"
+}
+
 func TestInstallAndUninstallRoundTrip(t *testing.T) {
+	installRecord(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	settings := filepath.Join(home, ".claude", "settings.json")
@@ -40,7 +159,7 @@ func TestInstallAndUninstallRoundTrip(t *testing.T) {
 		}
 	}
 
-	out, err := runRoot(t, "install")
+	out, err := installRun(t, "install")
 	if err != nil {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
@@ -60,7 +179,7 @@ func TestInstallAndUninstallRoundTrip(t *testing.T) {
 		t.Errorf("backups = %v", baks)
 	}
 
-	if out, err := runRoot(t, "uninstall"); err != nil {
+	if out, err := installRun(t, "uninstall"); err != nil {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
 	gotConf, _ := os.ReadFile(filepath.Clean(conf))
@@ -79,12 +198,13 @@ func TestInstallAndUninstallRoundTrip(t *testing.T) {
 // Re-sourcing ~/.tmux.conf unsets nothing in a running server, so uninstall
 // says how to undo the snippet instead.
 func TestUninstallSaysHowToUndoTmux(t *testing.T) {
+	installRecord(t)
 	t.Setenv("HOME", t.TempDir())
-	out, err := runRoot(t, "uninstall")
+	out, err := installRun(t, "uninstall")
 	if err != nil {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
-	for _, want := range []string{"Restart tmux", "tmux set-hook -gu pane-focus-in; tmux unbind a; tmux unbind N"} {
+	for _, want := range []string{"Restart tmux", "tmux set-hook -gu pane-focus-in; tmux unbind a; tmux unbind N; tmux unbind A"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("uninstall output missing %q:\n%s", want, out)
 		}
@@ -95,6 +215,7 @@ func TestUninstallSaysHowToUndoTmux(t *testing.T) {
 }
 
 func TestInstallRefusesInvalidSettings(t *testing.T) {
+	rec := installRecord(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	settings := filepath.Join(home, ".claude", "settings.json")
@@ -104,10 +225,198 @@ func TestInstallRefusesInvalidSettings(t *testing.T) {
 	if err := os.WriteFile(settings, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runRoot(t, "install"); err == nil {
+	if _, err := installRun(t, "install"); err == nil {
 		t.Fatal("want error")
 	}
 	if _, err := os.Stat(filepath.Join(home, ".tmux.conf")); !os.IsNotExist(err) {
 		t.Errorf("tmux conf touched after settings failure: %v", err)
+	}
+	if calls := rec.joined(); len(calls) != 0 {
+		t.Errorf("claude calls after settings failure = %q", calls)
+	}
+}
+
+func TestInstallWritesSkillAndRegistersMCP(t *testing.T) {
+	rec := installRecord(t)
+	h := installSetup(t, "")
+	out, err := installRun(t, "install")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if b, err := os.ReadFile(filepath.Clean(h.skill)); err != nil || !strings.Contains(string(b), "<!-- curia:managed -->") {
+		t.Errorf("skill file = %q, %v", b, err)
+	}
+	if calls := rec.joined(); !slices.Equal(calls, []string{installAddCall(h.bin)}) {
+		t.Errorf("claude calls = %q, want only the add", calls)
+	}
+	for _, want := range []string{"Hooks:", "tmux snippet:", "Skill:", "MCP server:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("install output does not name %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, h.skill) {
+		t.Errorf("install output does not say where the skill went:\n%s", out)
+	}
+	if _, err := os.Stat(h.config); !os.IsNotExist(err) {
+		t.Errorf("install wrote the Claude config: %v", err)
+	}
+}
+
+// TestInstallThroughStubClaude runs the real claudeRunner against a stub:
+// "claude" on PATH is a symlink to /bin/sh, so `claude mcp add ...` runs the
+// script ./mcp from the working directory, which records its arguments.
+func TestInstallThroughStubClaude(t *testing.T) {
+	h := installSetup(t, "")
+	stubDir, work := t.TempDir(), t.TempDir()
+	if err := os.Symlink("/bin/sh", filepath.Join(stubDir, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(work, "calls")
+	script := "printf '%s\\n' \"$@\" >> '" + calls + "'\n"
+	if err := os.WriteFile(filepath.Join(work, "mcp"), []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stubDir)
+	t.Chdir(work)
+	claudeRunner = installRunClaude
+	t.Cleanup(func() { claudeRunner = installUnexpectedRunner })
+
+	out, err := installRun(t, "install")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(filepath.Clean(calls))
+	if err != nil {
+		t.Fatalf("stub claude not run: %v\n%s", err, out)
+	}
+	want := strings.Join([]string{"add", "--scope", "user", "curia", "--", h.bin, "mcp"}, "\n") + "\n"
+	if string(got) != want {
+		t.Errorf("stub claude got arguments %q, want %q", got, want)
+	}
+}
+
+func TestInstallReportsMissingClaude(t *testing.T) {
+	h := installSetup(t, "")
+	t.Setenv("PATH", t.TempDir())
+	claudeRunner = installRunClaude
+	t.Cleanup(func() { claudeRunner = installUnexpectedRunner })
+	out, err := installRun(t, "install")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if want := "claude mcp add --scope user curia -- " + h.bin + " mcp"; !strings.Contains(out, want) {
+		t.Errorf("install output does not say to run %q by hand:\n%s", want, out)
+	}
+}
+
+func TestUninstallReversesPlan2Items(t *testing.T) {
+	rec := installRecord(t)
+	h := installSetup(t, `{"permissions":{"allow":["Bash(ls:*)"]}}`)
+	if out, err := installRun(t, "install", "--allow-mcp-tools"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if got := installAllow(t, h.settings); len(got) != 5 {
+		t.Fatalf("allow after install = %q", got)
+	}
+	// What claude mcp add writes, which the recorder does not.
+	entry := `{"mcpServers":{"curia":{"type":"stdio","command":` + installJSONString(h.bin) + `,"args":["mcp"],"env":{}}}}`
+	if err := os.WriteFile(h.config, []byte(entry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := installRun(t, "uninstall")
+	if err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Dir(h.skill)); !os.IsNotExist(err) {
+		t.Errorf("skill dir still there: %v", err)
+	}
+	if got := installAllow(t, h.settings); !slices.Equal(got, []string{"Bash(ls:*)"}) {
+		t.Errorf("allow after uninstall = %q, want as before", got)
+	}
+	want := []string{installAddCall(h.bin), "mcp remove --scope user curia"}
+	if calls := rec.joined(); !slices.Equal(calls, want) {
+		t.Errorf("claude calls = %q, want %q", calls, want)
+	}
+	if b, _ := os.ReadFile(filepath.Clean(h.config)); string(b) != entry {
+		t.Errorf("uninstall wrote the Claude config: %s", b)
+	}
+}
+
+// installJSONString returns s as a JSON string.
+func installJSONString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func TestInstallAllowsToolsOnlyWithFlag(t *testing.T) {
+	installRecord(t)
+	h := installSetup(t, `{"permissions":{"allow":["Bash(ls:*)"]}}`)
+	out, err := installRun(t, "install")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if got := installAllow(t, h.settings); !slices.Equal(got, []string{"Bash(ls:*)"}) {
+		t.Errorf("allow without the flag = %q, want unchanged", got)
+	}
+	if strings.Count(out, installWantToolsHint+"\n") != 1 {
+		t.Errorf("install output lacks the hint line %q:\n%s", installWantToolsHint, out)
+	}
+
+	out, err = installRun(t, "install", "--allow-mcp-tools")
+	if err != nil {
+		t.Fatalf("install --allow-mcp-tools: %v\n%s", err, out)
+	}
+	if got := installAllow(t, h.settings); !slices.Equal(got, append([]string{"Bash(ls:*)"}, installToolRules...)) {
+		t.Errorf("allow with the flag = %q", got)
+	}
+	if strings.Contains(out, installWantToolsHint) || !strings.Contains(out, "without a prompt") {
+		t.Errorf("install --allow-mcp-tools output:\n%s", out)
+	}
+}
+
+func TestInstallForeignSkillContinues(t *testing.T) {
+	rec := installRecord(t)
+	h := installSetup(t, "")
+	if err := os.MkdirAll(filepath.Dir(h.skill), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	foreign := "my own skill\n"
+	if err := os.WriteFile(h.skill, []byte(foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := installRun(t, "install")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, h.skill) || !strings.Contains(out, "left alone") {
+		t.Errorf("foreign skill not reported:\n%s", out)
+	}
+	if b, _ := os.ReadFile(filepath.Clean(h.skill)); string(b) != foreign {
+		t.Errorf("foreign skill changed: %q", b)
+	}
+	if calls := rec.joined(); !slices.Equal(calls, []string{installAddCall(h.bin)}) {
+		t.Errorf("claude calls = %q, want the add", calls)
+	}
+}
+
+func TestInstallForeignMCPEntryContinues(t *testing.T) {
+	rec := installRecord(t)
+	h := installSetup(t, "")
+	foreign := `{"mcpServers":{"curia":{"command":"/elsewhere/curia","args":["mcp"]}}}`
+	if err := os.WriteFile(h.config, []byte(foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"install"}, {"uninstall"}} {
+		out, err := installRun(t, args...)
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", args[0], err, out)
+		}
+		if !strings.Contains(out, h.config) || !strings.Contains(out, "left alone") {
+			t.Errorf("%s: foreign MCP entry not reported:\n%s", args[0], out)
+		}
+	}
+	if calls := rec.joined(); len(calls) != 0 {
+		t.Errorf("claude calls = %q, want none", calls)
 	}
 }
