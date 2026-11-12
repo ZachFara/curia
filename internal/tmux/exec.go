@@ -3,12 +3,18 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // paneFormat is the tmux format string that parsePanes expects. start_time
@@ -18,16 +24,26 @@ const paneFormat = "#{pane_id}\t#{session_name}\t#{window_id}\t#{start_time}\t#{
 
 type execClient struct {
 	socket string
+	// runner runs one tmux command and returns its stdout. NewExec sets it
+	// to execTmux; tests set a recorder.
+	runner func(ctx context.Context, args ...string) (string, error)
 }
 
 // NewExec returns a Client that runs the tmux binary. An empty socket uses
 // the default server; otherwise every command gets -L socket.
 func NewExec(socket string) Client {
-	return &execClient{socket: socket}
+	c := &execClient{socket: socket}
+	c.runner = c.execTmux
+	return c
 }
 
-// run executes tmux with args as separate argv entries (never a shell).
+// run runs one tmux command through the client's runner.
 func (c *execClient) run(ctx context.Context, args ...string) (string, error) {
+	return c.runner(ctx, args...)
+}
+
+// execTmux executes tmux with args as separate argv entries (never a shell).
+func (c *execClient) execTmux(ctx context.Context, args ...string) (string, error) {
 	full := args
 	if c.socket != "" {
 		full = append([]string{"-L", c.socket}, args...)
@@ -107,6 +123,94 @@ func (c *execClient) DisplayMessage(ctx context.Context, text string) error {
 func (c *execClient) KillPane(ctx context.Context, pane string) error {
 	_, err := c.run(ctx, "kill-pane", "-t", pane)
 	return err
+}
+
+// paneIDPattern matches a pane id, the only target SendKeys and Bell accept:
+// a session, window or other target could resolve to a pane nobody chose.
+var paneIDPattern = regexp.MustCompile(`^%[0-9]+$`)
+
+// maxKeysRunes caps SendKeys text. Above about 1,000 characters Claude
+// Code's prompt treats input as a paste and send-keys -l splits it.
+const maxKeysRunes = 800
+
+// checkKeys refuses what SendKeys must never type, whoever calls it.
+func checkKeys(pane, text string) error {
+	if !paneIDPattern.MatchString(pane) {
+		return fmt.Errorf("tmux send-keys: refusing target %q: not a pane id", pane)
+	}
+	if !utf8.ValidString(text) {
+		return errors.New("tmux send-keys: refusing text that is not valid UTF-8")
+	}
+	// One character is refused because at a permission prompt a single
+	// digit selects an option at once.
+	switch n := utf8.RuneCountInString(text); {
+	case n < 2:
+		return fmt.Errorf("tmux send-keys: refusing text of %d characters", n)
+	case n > maxKeysRunes:
+		return fmt.Errorf("tmux send-keys: refusing text of %d characters (limit %d)", n, maxKeysRunes)
+	}
+	for _, r := range text {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return fmt.Errorf("tmux send-keys: refusing text with control character %U", r)
+		}
+	}
+	return nil
+}
+
+// SendKeys leaves any mode the pane is in, types text literally and presses
+// Enter, as three tmux invocations: text and Enter in one invocation make the
+// Enter a newline inside the prompt for long text.
+func (c *execClient) SendKeys(ctx context.Context, pane, text string) error {
+	if err := checkKeys(pane, text); err != nil {
+		return err
+	}
+	// tmux reads a trailing ";" on an argument as a command separator and
+	// drops it; "\;" keeps it as a literal ";".
+	if strings.HasSuffix(text, ";") {
+		text = strings.TrimSuffix(text, ";") + `\;`
+	}
+	steps := [][]string{
+		{"copy-mode", "-q", "-t", pane},
+		{"send-keys", "-t", pane, "-l", "--", text},
+		{"send-keys", "-t", pane, "Enter"},
+	}
+	for _, args := range steps {
+		if _, err := c.run(ctx, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ttyPattern matches a pane's tty as tmux reports it. An unknown pane yields
+// junk with exit 0, so nothing else is ever opened.
+var ttyPattern = regexp.MustCompile(`^/dev/[A-Za-z0-9/]+$`)
+
+// Bell writes BEL to the pane's tty, which sets the window's bell flag.
+func (c *execClient) Bell(ctx context.Context, pane string) error {
+	if !paneIDPattern.MatchString(pane) {
+		return fmt.Errorf("tmux bell: refusing target %q: not a pane id", pane)
+	}
+	out, err := c.run(ctx, "display-message", "-p", "-t", pane, "#{pane_tty}")
+	if err != nil {
+		return err
+	}
+	tty := strings.TrimSuffix(out, "\n")
+	if !ttyPattern.MatchString(tty) {
+		return fmt.Errorf("tmux bell: unexpected tty %q for %q", out, pane)
+	}
+	f, err := os.OpenFile(filepath.Clean(tty), os.O_WRONLY|syscall.O_NOCTTY, 0)
+	if err != nil {
+		return fmt.Errorf("tmux bell: %w", err)
+	}
+	_, err = f.Write([]byte{0x07})
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fmt.Errorf("tmux bell: %w", err)
+	}
+	return nil
 }
 
 // parsePanes parses paneFormat output, one pane per line. Blank lines are

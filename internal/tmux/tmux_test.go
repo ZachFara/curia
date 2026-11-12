@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -327,4 +328,300 @@ func paneID(t *testing.T, tm func(...string) (string, error), target string) str
 	}
 	t.Fatalf("pane id of %s: %q, %v", target, out, err)
 	return ""
+}
+
+// recorder is a runner for execClient that records each tmux invocation
+// instead of running it, and answers every one with out and err.
+type recorder struct {
+	runs [][]string
+	out  string
+	err  error
+}
+
+func (r *recorder) run(_ context.Context, args ...string) (string, error) {
+	r.runs = append(r.runs, slices.Clone(args))
+	return r.out, r.err
+}
+
+func recordingClient() (*execClient, *recorder) {
+	r := &recorder{}
+	return &execClient{runner: r.run}, r
+}
+
+func TestSendKeysRefusesBadInput(t *testing.T) {
+	ctx := context.Background()
+	for _, pane := range []string{"", "%", "1", "%1;kill-server", "t:0", "%1 ", "%1\n", "%-1", "%%1"} {
+		c, r := recordingClient()
+		if err := c.SendKeys(ctx, pane, "hello"); err == nil {
+			t.Errorf("SendKeys(%q, hello): want an error for a bad pane", pane)
+		}
+		if len(r.runs) != 0 {
+			t.Errorf("SendKeys(%q, hello) ran tmux: %v", pane, r.runs)
+		}
+	}
+	texts := []string{
+		"", "a\nb", "a\x1bb", "a\x7f", "a\u009bb", "\xff", "x", strings.Repeat("a", 801),
+		"a\rb", "a\tb", "a\x00b", "a\u0080", "ok\xffok", "é", ";",
+	}
+	for _, text := range texts {
+		c, r := recordingClient()
+		if err := c.SendKeys(ctx, "%5", text); err == nil {
+			t.Errorf("SendKeys(%%5, %q): want an error", text)
+		}
+		if len(r.runs) != 0 {
+			t.Errorf("SendKeys(%%5, %q) ran tmux: %v", text, r.runs)
+		}
+	}
+}
+
+func TestSendKeysIsThreeSeparateInvocations(t *testing.T) {
+	c, r := recordingClient()
+	if err := c.SendKeys(context.Background(), "%5", "use pg; then ship;"); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"copy-mode", "-q", "-t", "%5"},
+		{"send-keys", "-t", "%5", "-l", "--", `use pg; then ship\;`},
+		{"send-keys", "-t", "%5", "Enter"},
+	}
+	if !reflect.DeepEqual(r.runs, want) {
+		t.Fatalf("runs = %q\nwant   %q", r.runs, want)
+	}
+	for _, run := range r.runs {
+		if slices.Contains(run, ";") || slices.Contains(run, `\;`) {
+			t.Errorf("run %q carries a command separator of its own", run)
+		}
+	}
+}
+
+// TestSendKeysStopsAtFirstFailure: if leaving copy mode fails (the pane is
+// gone), nothing is typed; if typing fails, Enter is not sent.
+func TestSendKeysStopsAtFirstFailure(t *testing.T) {
+	c, r := recordingClient()
+	r.err = errors.New("can't find pane: %5")
+	if err := c.SendKeys(context.Background(), "%5", "hello"); err == nil {
+		t.Fatal("want the runner's error")
+	}
+	if len(r.runs) != 1 || r.runs[0][0] != "copy-mode" {
+		t.Fatalf("runs = %q, want only copy-mode", r.runs)
+	}
+}
+
+func TestSendKeysAcceptsEightHundredRunes(t *testing.T) {
+	ctx := context.Background()
+	c, r := recordingClient()
+	text := strings.Repeat("é", 800)
+	if len(text) != 1600 {
+		t.Fatalf("len = %d, want 1600 bytes", len(text))
+	}
+	if err := c.SendKeys(ctx, "%5", text); err != nil {
+		t.Fatalf("800 runes refused: %v", err)
+	}
+	if len(r.runs) != 3 || r.runs[1][5] != text {
+		t.Fatalf("runs = %d, want 3 with the text intact", len(r.runs))
+	}
+	c, r = recordingClient()
+	if err := c.SendKeys(ctx, "%5", text+"é"); err == nil {
+		t.Fatal("801 runes accepted")
+	}
+	if len(r.runs) != 0 {
+		t.Fatalf("801 runes ran tmux: %d runs", len(r.runs))
+	}
+}
+
+func TestBellRefusesBadPane(t *testing.T) {
+	for _, pane := range []string{"", "%", "1", "%1;kill-server", "t:0"} {
+		c, r := recordingClient()
+		if err := c.Bell(context.Background(), pane); err == nil {
+			t.Errorf("Bell(%q): want an error", pane)
+		}
+		if len(r.runs) != 0 {
+			t.Errorf("Bell(%q) ran tmux: %v", pane, r.runs)
+		}
+	}
+}
+
+// TestBellOpensOnlyDevPaths: whatever tmux answers, Bell opens nothing but a
+// plain path under /dev.
+func TestBellOpensOnlyDevPaths(t *testing.T) {
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("untouched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	answers := []string{"", "\n", victim + "\n", "/dev/../" + victim + "\n", "/dev/ttys001 x\n", "/dev/\n", "/dev/tty\x07\n"}
+	for _, out := range answers {
+		c, r := recordingClient()
+		r.out = out
+		if err := c.Bell(context.Background(), "%5"); err == nil {
+			t.Errorf("Bell with tty answer %q: want an error", out)
+		}
+		want := [][]string{{"display-message", "-p", "-t", "%5", "#{pane_tty}"}}
+		if !reflect.DeepEqual(r.runs, want) {
+			t.Errorf("runs = %q, want %q", r.runs, want)
+		}
+	}
+	if b, err := os.ReadFile(filepath.Clean(victim)); err != nil || string(b) != "untouched" {
+		t.Errorf("victim file = %q, %v; want it untouched", b, err)
+	}
+}
+
+func TestFakeRecordsSendKeysAndBell(t *testing.T) {
+	ctx := context.Background()
+	f := &Fake{}
+	var c Client = f
+	if err := c.SendKeys(ctx, "%5", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Bell(ctx, "%5"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"SendKeys %5 hi", "Bell %5"}; !reflect.DeepEqual(f.Calls, want) {
+		t.Fatalf("Calls = %q, want %q", f.Calls, want)
+	}
+	f.SendKeysErr = errors.New("boom")
+	if err := c.SendKeys(ctx, "%6", "again"); !errors.Is(err, f.SendKeysErr) {
+		t.Fatalf("SendKeys = %v, want SendKeysErr", err)
+	}
+	if last := f.Calls[len(f.Calls)-1]; last != "SendKeys %6 again" {
+		t.Fatalf("failed SendKeys not recorded: last call %q", last)
+	}
+}
+
+// catPane opens a background window on the test server whose pane runs
+// `cat > out` (directly, with no shell configuration) and returns its id.
+func catPane(t *testing.T, tm func(...string) (string, error), out string) string {
+	t.Helper()
+	id, err := tm("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "t:", "/bin/sh", "-c", "exec cat > '"+out+"'")
+	if err != nil {
+		t.Fatalf("new-window: %v: %s", err, id)
+	}
+	return strings.TrimSpace(id)
+}
+
+// closeCat ends cat's input with C-d and waits for its pane to close, so
+// everything typed is in the file.
+func closeCat(t *testing.T, tm func(...string) (string, error), pane string) {
+	t.Helper()
+	if out, err := tm("send-keys", "-t", pane, "C-d"); err != nil {
+		t.Fatalf("send-keys C-d: %v: %s", err, out)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, err := tm("list-panes", "-a", "-F", "#{pane_id}")
+		if err != nil {
+			t.Fatalf("list-panes: %v: %s", err, out)
+		}
+		if !slices.Contains(strings.Fields(out), pane) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pane %s still open 5s after C-d", pane)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestSendKeysLiteralInRealTmux(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	c := NewExec(realSocket)
+	out := filepath.Join(t.TempDir(), "out")
+	pane := catPane(t, tm, out)
+	lines := []string{
+		"plain text", "ends with semi;", `ends with backslash-semi\;`, "-l Enter C-c",
+		"#{pane_id} %H $(id) `id`", ";;", "Postgrés ≈ 16",
+	}
+	for _, line := range lines {
+		if err := c.SendKeys(ctx, pane, line); err != nil {
+			t.Fatalf("SendKeys(%q): %v", line, err)
+		}
+	}
+	closeCat(t, tm, pane)
+	got, err := os.ReadFile(filepath.Clean(out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.Join(lines, "\n") + "\n"; string(got) != want {
+		t.Fatalf("cat got %q\nwant    %q", got, want)
+	}
+}
+
+func TestSendKeysUnknownPaneFails(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	realTmux(ctx, t)
+	if err := NewExec(realSocket).SendKeys(ctx, "%99", "hello"); err == nil {
+		t.Fatal("SendKeys(%99): want an error for a missing pane")
+	}
+}
+
+func TestSendKeysLeavesCopyMode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	c := NewExec(realSocket)
+	out := filepath.Join(t.TempDir(), "out")
+	pane := catPane(t, tm, out)
+	inMode := func() string {
+		t.Helper()
+		v, err := tm("display-message", "-p", "-t", pane, "#{pane_in_mode}")
+		if err != nil {
+			t.Fatalf("pane_in_mode: %v: %s", err, v)
+		}
+		return strings.TrimSpace(v)
+	}
+	if v, err := tm("copy-mode", "-t", pane); err != nil {
+		t.Fatalf("copy-mode: %v: %s", err, v)
+	}
+	if m := inMode(); m != "1" {
+		t.Fatalf("pane_in_mode = %q before SendKeys, want 1", m)
+	}
+	if err := c.SendKeys(ctx, pane, "after copy mode"); err != nil {
+		t.Fatal(err)
+	}
+	if m := inMode(); m != "0" {
+		t.Fatalf("pane_in_mode = %q after SendKeys, want 0", m)
+	}
+	closeCat(t, tm, pane)
+	if got, err := os.ReadFile(filepath.Clean(out)); err != nil || string(got) != "after copy mode\n" {
+		t.Fatalf("cat got %q, %v; want the line", got, err)
+	}
+}
+
+func TestBellInRealTmux(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	pane := catPane(t, tm, filepath.Join(t.TempDir(), "out"))
+	flag := func() string {
+		t.Helper()
+		v, err := tm("display-message", "-p", "-t", pane, "#{window_bell_flag}")
+		if err != nil {
+			t.Fatalf("window_bell_flag: %v: %s", err, v)
+		}
+		return strings.TrimSpace(v)
+	}
+	if f := flag(); f != "0" {
+		t.Fatalf("window_bell_flag = %q before Bell, want 0", f)
+	}
+	if err := NewExec(realSocket).Bell(ctx, pane); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for flag() != "1" {
+		if time.Now().After(deadline) {
+			t.Fatal("window_bell_flag not set 2s after Bell")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestBellUnknownPaneFails(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	realTmux(ctx, t)
+	if err := NewExec(realSocket).Bell(ctx, "%99"); err == nil {
+		t.Fatal("Bell(%99): want an error for a missing pane")
+	}
 }

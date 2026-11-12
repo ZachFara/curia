@@ -37,6 +37,13 @@ type Client interface {
 	DisplayMessage(ctx context.Context, text string) error
 	// KillPane closes the pane.
 	KillPane(ctx context.Context, pane string) error
+	// SendKeys types text literally into the pane, then Enter. It is the
+	// only method that types into a pane, and it refuses a pane that is not
+	// a pane id and text that is empty, one character, over 800 characters,
+	// not UTF-8, or holds a control character.
+	SendKeys(ctx context.Context, pane, text string) error
+	// Bell rings the pane's bell.
+	Bell(ctx context.Context, pane string) error
 }
 
 // ErrNoWindow is wrapped by an error for a window that does not exist.
