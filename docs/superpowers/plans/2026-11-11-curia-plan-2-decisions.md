@@ -50,7 +50,7 @@ Every task's requirements include these, and every Plan 1 constraint still holds
 - **Hook output (amends Plan 1's "never writes to stdout").** `curia hook <Event>` writes nothing to stdout or stderr and exits 0 on every path, with one exception: `curia hook Stop` writes exactly one line to stdout, `{"decision":"block","reason":"<text>"}` followed by a newline, when and only when its store transaction claimed at least one queued answer for that session. The exit code is still 0. Nothing is ever written to stderr.
 - **No self-answering (spec section 7).** The MCP server exposes exactly four tools: `search_decisions`, `request_decision`, `check_decision`, `withdraw_decision`. No MCP tool answers, confirms, overrides, rescopes or supersedes. Those writes exist only in `curia decide` and `curia decisions edit`, and both refuse to run when `CLAUDECODE` is set and not empty in their environment.
 - **Everything from outside is data.** Ticket fields, options, rationale, answers, reasons, search queries, hook payloads and MCP arguments are untrusted. They are cleaned by `internal/sanitize` when they enter the store and again wherever they are printed, typed or sent. No such text is ever executed, interpolated into a script, or passed to a shell.
-- **Typing into panes.** Only `tmux.Client.SendKeys` types into a pane. It uses `send-keys -l --`, refuses control characters, and escapes a trailing `;`. The only caller is `internal/deliver`, which types only text produced by `sanitize.Keys`, only into the pane of a session that is live in the store and on the tmux server, and only when that session is `idle` or `needs_decision`.
+- **Typing into panes.** Only `tmux.Client.SendKeys` types into a pane. It runs `copy-mode -q`, `send-keys -l --` and `send-keys Enter` as three separate tmux invocations, refuses control characters, a single character and more than 800 runes, and escapes a trailing `;`. The only caller is `internal/deliver`, which types only text produced by `sanitize.Keys`, only into the pane of a session that is live in the store and on the tmux server, and only when that session is `idle` or `needs_decision`.
 - **One write transaction per read-modify-write.** Every change to a decision that depends on its stored value (create with dedupe and id allocation, answer, withdraw, expire, edit, each delivery claim) is one `BEGIN IMMEDIATE` transaction in `internal/store`. No caller pairs a read with a later write.
 - **Real dependencies in tests.** SQLite files under `t.TempDir()`; a real tmux server on socket `curia-test-<pid>`; the built binary in `e2e/`. The only fakes are `tmux.Fake`, the `ui` source interfaces, and the function seams for `osascript` and `claude`, which cannot run in CI. No test touches the real home, the default tmux server or the network. Tests that run the binary set `HOME`, `CURIA_DB` and `TMUX_TMPDIR` to temp paths and leave `CLAUDECODE` unset.
 - **Commands run by tmux or Claude Code print no noise.** `curia hook`, `curia mcp` (stdout carries protocol messages only), `curia status`, `curia next` and `curia seen` send errors to the log file.
@@ -66,12 +66,12 @@ Nine conditions most likely to bite. Each has a named test in the task that owns
 1. **Concurrent ticket writers.** Several `curia mcp` processes create tickets at the same instant, some of them identical retries. Expected: ids are distinct and contiguous, identical retries collapse to one row, no call fails. Task 9: `TestConcurrentCreatesAllocateDistinctIDs`, `TestConcurrentIdenticalRetriesCollapse`.
 2. **Racing resolutions.** Two `curia decide` processes answer one ticket; an answer races a withdrawal or the expiry sweep. Expected: exactly one transition wins, the losers get `store.ErrNotOpen`, and the row never holds a mix of two outcomes. Task 9: `TestConcurrentAnswersOneWins`, `TestAnswerRacesWithdrawAndExpire`.
 3. **Delivery exactly once.** An answer is queued; two Stop hooks, a `curia decide` retry and a `check_decision` all try to deliver it. Expected: one claim succeeds. Task 11: `TestDeliveryClaimedExactlyOnce`. Task 13: `TestTwoStopHooksOneBlocks`.
-4. **Typing into the wrong place.** The session is at a permission prompt (`waiting`), is working, its pane is gone, its pane id was recycled by a restarted server, or the agent exited and the pane now holds a shell. Expected: nothing is typed unless the session is live and `idle` or `needs_decision`; what is typed cannot do anything in a shell. Task 14: `TestNeverTypesIntoWaitingOrWorking`, `TestPaneGoneLeavesQueued`. Task 1: `TestKeysAlphabet`. Task 3: `TestSendKeysLiteralInRealTmux`.
+4. **Typing into the wrong place.** The session is at a permission prompt (`waiting`), is working, its pane is gone, its pane id was recycled by a restarted server, or the agent exited and the pane now holds a shell. A permission prompt is the dangerous case: a typed Enter approves its highlighted "Yes" and a single digit picks an option at once (live probe B4). Expected: nothing is typed unless the session is live and `idle` or `needs_decision`, read again inside the claim transaction immediately before typing; what is typed cannot do anything in a shell and is never a single character. Task 14: `TestNeverTypesIntoWaitingOrWorking`, `TestStateChangeBeforeClaimIsNotTyped`, `TestPaneGoneLeavesQueued`. Task 1: `TestKeysAlphabet`. Task 3: `TestSendKeysLiteralInRealTmux`.
 5. **Hostile ticket text.** Escape sequences, bidi overrides, newlines, FTS5 query syntax, AppleScript, quotes. Expected: the popup draws plain text, search never returns a syntax error, the notification body is passed as an argument. Task 1: `TestHostileCorpus`. Task 11: `TestSearchHostileQuery`. Task 8: `TestMacOSPassesTextAsArguments`. Task 10: `TestTicketTextCannotDrawEscapes`.
 6. **Self-answering.** Expected: the tool list is exactly four names, an unknown tool name is an error, `curia decide` and `curia decisions edit` refuse inside an agent session. Task 12: `TestToolSurfaceIsExactlyFour`. Task 14: `TestDecideRefusesInsideAgent`. Task 15: `TestEditRefusesInsideAgent`.
 7. **Hook budget and stdout.** Expected: only a Stop that claimed a delivery prints, exactly one JSON line; every other run prints nothing; latency holds with a populated `decisions` table. Task 13: `TestStdoutOnlyOnBlockedStop`, `TestStopLatencyWithDecisions`.
 8. **Expiry with no daemon.** Nothing has run for two days. Expected: an `assume` ticket past its deadline is not listed as open, cannot be confirmed, and is never precedent, even before any sweep has flipped its status. Task 9: `TestPastDeadlineIsNotOpenBeforeTheSweep`.
-9. **Unknown caller.** `curia mcp` runs outside tmux or before its session's first hook. Expected: tickets are still accepted, stored with an empty `session_id`, never delivered by typing, and answered through `check_decision`. Task 12: `TestCallerResolutionOrder`, `TestTicketWithoutSessionIsAccepted`.
+9. **Unknown or changed caller.** `curia mcp` runs outside tmux or before its session's first hook; or the user ran `/clear`, so the same server process now serves a new session id while its `CLAUDE_CODE_SESSION_ID` still names the old one (live probe A). Expected: the caller is resolved on every tool call, never cached; after `/clear` the pane's new session wins; an unknown caller's tickets are still accepted, stored with an empty `session_id`, never delivered by typing, and answered through `check_decision`. Task 12: `TestCallerAfterClear`, `TestCallerResolvedOnEveryCall`, `TestTicketWithoutSessionIsAccepted`.
 
 ## 4. Decided here: schema, ids, statuses, limits, matching, delivery
 
@@ -261,7 +261,7 @@ Delivery is at most once. A process that dies between its claim and its output l
 - `Decision D-118 overridden: use option B, Postgres, not your assumption. Reasoning: ... Revert work based on the old assumption, then continue.`
 - `Decision D-118 overridden: use the existing queue, not your assumption. Reasoning: ... Revert work based on the old assumption, then continue.` (free text)
 
-Label is cut to 60 runes, free text and reasoning to 200 each. A trailing `.` on a label, answer or reasoning is dropped before the template adds its own. When `sanitize.Keys` removed or cut anything, ` Exact wording: call check_decision D-117.` is appended after the last sentence. The whole line is at most 600 runes.
+Label is cut to 60 runes, free text and reasoning to 200 each. A trailing `.` on a label, answer or reasoning is dropped before the template adds its own. When `sanitize.Keys` removed or cut anything, ` Exact wording: call check_decision D-117.` is appended after the last sentence. The whole line is at most 600 runes, which keeps it under `SendKeys`' 800-rune cap and below the prompt's paste threshold, which lies between 800 and 1,000 characters (live probe B6).
 
 **Stop reason** (`decision.StopReason`). All answers claimed in one `Stop` go into one reason, so one stop is blocked once however many answers were waiting (Claude Code ends the turn after 8 consecutive blocked stops). First line `Curia: decisions answered while you were working.`, then one line per decision in the wording above but with the full label in brackets and the full reasoning, cleaned by `sanitize.Text` rather than `sanitize.Keys` (this text goes to Claude as JSON, not to a terminal). At most 4000 runes; decisions that do not fit are named in a last line `Also answered: D-120, D-121. Call check_decision for each.`
 
@@ -466,7 +466,7 @@ Each task runs on its own branch and worktree and merges by PR into `plan-2`. A 
 
 | Wave | Task | Creates | Modifies existing files |
 | --- | --- | --- | --- |
-| Before wave 1 | orchestrator | the three live checks of section 14; record results as Rulings and amend T3, T5, T12 before dispatch | none |
+| Before wave 1 | orchestrator | the three live checks of section 14; record results as Rulings and amend T3, T5, T12 before dispatch. **Done 2026-11-11** against Claude Code 2.1.322 and tmux 3.8: results in decisions 36 to 41; T3, T4, T5, T12, T13, T14 and T17 amended | none |
 | 1 | 1 Sanitiser | `internal/sanitize/` | none |
 | 1 | 2 Types and config | `internal/model/decision.go` | `internal/model/model.go`, `internal/config/config.go`, `internal/config/config_test.go` |
 | 1 | 3 tmux: typing and bell | none | `internal/tmux/tmux.go`, `exec.go`, `fake.go`, `tmux_test.go` |
@@ -684,22 +684,24 @@ func TestNonPositiveAssumeExpiryRejected(t *testing.T) // assume_expiry = "0s" o
 
 Rules for the exec client:
 
-- `SendKeys` refuses, before running tmux, a `pane` that does not match `^%[0-9]+$`, and a `text` that is empty, longer than 2400 bytes, not valid UTF-8, or holds any rune below `0x20`, `0x7f`, or `0x80` to `0x9f`. This guard is independent of `sanitize`: the adapter is safe whoever calls it.
-- It runs three tmux commands: `copy-mode -q -t <pane>` (leaves copy mode or any other mode; does nothing otherwise), `send-keys -t <pane> -l -- <text>`, `send-keys -t <pane> Enter`. If `text` ends in `;`, that last `;` is sent as `\;` (tmux reads a trailing `;` on the last argument as a command separator and drops it; verified against tmux 3.8).
+- `SendKeys` refuses, before running tmux, a `pane` that does not match `^%[0-9]+$`, and a `text` that is empty, a single rune, longer than 800 runes (so at most 3,200 bytes), not valid UTF-8, or holds any rune below `0x20`, `0x7f`, or `0x80` to `0x9f`. This guard is independent of `sanitize`: the adapter is safe whoever calls it.
+- It runs three separate tmux processes, in this order, never joined with `\;` into one invocation: `copy-mode -q -t <pane>` (leaves copy mode or any other mode; does nothing otherwise), `send-keys -t <pane> -l -- <text>`, `send-keys -t <pane> Enter`. Text and Enter in one invocation turn the Enter into a newline inside the prompt for long text; as separate invocations they submitted 5 times of 5 with no pause (live probe B1). Above about 1,000 characters the prompt treats input as a paste and `send-keys -l` splits it, hence the 800-rune cap (probe B6). A single character is refused because at a permission prompt one digit selects an option at once (probe B4). If `text` ends in `;`, that last `;` is sent as `\;` (tmux reads a trailing `;` on the last argument as a command separator and drops it; verified against tmux 3.8).
 - `Bell` runs `display-message -p -t <pane> '#{pane_tty}'`, requires the output to match `^/dev/[A-Za-z0-9/]+$` (an unknown pane yields junk with exit 0), opens that path write-only with `O_NOCTTY`, and writes the single byte `0x07`. `Bell` refuses a pane that does not match `^%[0-9]+$` before running tmux.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```go
 func TestSendKeysRefusesBadInput(t *testing.T)
-// table: pane "", "%", "1", "%1;kill-server", "t:0"; text "", "a\nb", "a\x1bb", "a\x7f", "a\u009bb", "\xff", 2401 bytes
+// table: pane "", "%", "1", "%1;kill-server", "t:0"; text "", "a\nb", "a\x1bb", "a\x7f", "a\u009bb", "\xff", "x" (one rune), 801 runes
 // -> error each time; with a recording runner, tmux is never run
 func TestSendKeysLiteralInRealTmux(t *testing.T)
 // real server on curia-test-<pid>; pane runs `cat > <tmp>/out`; SendKeys each of:
-//   "plain text", "ends with semi;", "ends with backslash-semi\\;", "-l Enter C-c", "#{pane_id} %H $(id) `id`", ";", "Postgrés ≈ 16"
+//   "plain text", "ends with semi;", "ends with backslash-semi\\;", "-l Enter C-c", "#{pane_id} %H $(id) `id`", ";;", "Postgrés ≈ 16"
 // then close the pane's stdin -> the file holds exactly those 7 lines, byte for byte
 func TestSendKeysUnknownPaneFails(t *testing.T) // real server, pane "%99" -> error
 func TestSendKeysLeavesCopyMode(t *testing.T) // real server; pane in copy-mode; SendKeys -> the line reaches cat, #{pane_in_mode} is 0
+func TestSendKeysIsThreeSeparateInvocations(t *testing.T) // recording runner -> exactly three runs, in order: [copy-mode -q -t %5], [send-keys -t %5 -l -- <text>], [send-keys -t %5 Enter]; no run carries a ";" argument of its own
+func TestSendKeysAcceptsEightHundredRunes(t *testing.T)   // 800 runes of "é" (1,600 bytes) -> accepted; 801 -> refused
 func TestBellInRealTmux(t *testing.T)
 // real server with two windows; #{window_bell_flag} of the second is "0"; Bell(its pane) -> within 2s it reads "1"
 func TestBellUnknownPaneFails(t *testing.T)     // real server, "%99" -> error; no file outside /dev is opened
@@ -752,15 +754,15 @@ Protocol surface. Transport: one JSON-RPC 2.0 message per line on `in`, one per 
 
 | Method | Kind | Response |
 | --- | --- | --- |
-| `initialize` | request | `{"protocolVersion": V, "capabilities": {"tools": {}}, "serverInfo": {"name": Name, "version": Version}, "instructions": Instructions}`. `V` is the client's `params.protocolVersion` when it is one of `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`; otherwise `2025-11-25`. |
+| `initialize` | request | `{"protocolVersion": V, "capabilities": {"tools": {}}, "serverInfo": {"name": Name, "version": Version}, "instructions": Instructions}`. `V` is the client's `params.protocolVersion` when it is one the server knows (`2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`); otherwise the server's newest, `2025-11-25`. Claude Code 2.1.322 asks for `2025-11-25` (live probe A). |
 | `notifications/initialized` | notification | none |
 | `ping` | request | `{}` |
 | `tools/list` | request | `{"tools": [{"name", "description", "inputSchema"}]}` in `Tools` order |
 | `tools/call` | request | see below |
-| any other request | request | error `-32601`, message `method not found: <method>` |
+| any other request | request | error `-32601`, message `method not found: <method>`, sent at once; the server never stays silent and never exits on an unknown method. Claude Code 2.1.322 opens with `server/discover` (protocol 2026-07-28) and falls back to `initialize` only after this error (live probe A, decision 37). |
 | any other notification (no `id`) | notification | none; ignored |
 
-`tools/call` with `params.name` naming a tool and `params.arguments` an object (or absent, read as `{}`) calls it. A result is `{"content": [{"type": "text", "text": <compact JSON of result>}], "isError": false}`. A `*ToolError` is `{"content": [{"type": "text", "text": <compact JSON of {"error": terr}>}], "isError": true}`: the model reads it and can correct itself. A panic in `Call` is recovered, logged, and returned as a `ToolError` with code `internal`.
+`tools/call` with `params.name` naming a tool and `params.arguments` an object (or absent, read as `{}`) calls it. `params._meta` (Claude Code sends `claudecode/toolUseId` and `progressToken`) is accepted and ignored; so is `_meta` on any request. A result is `{"content": [{"type": "text", "text": <compact JSON of result>}], "isError": false}`. A `*ToolError` is `{"content": [{"type": "text", "text": <compact JSON of {"error": terr}>}], "isError": true}`: the model reads it and can correct itself. A panic in `Call` is recovered, logged, and returned as a `ToolError` with code `internal`.
 
 Protocol errors use JSON-RPC error objects `{"jsonrpc": "2.0", "id": <id or null>, "error": {"code", "message"}}`:
 
@@ -776,7 +778,10 @@ All JSON is written with HTML escaping off. Nothing but protocol messages is wri
 - [ ] **Step 1: Write the failing tests.** Every test drives `Serve` through real pipes (`os.Pipe` for both directions) from a goroutine, writing request lines and reading response lines.
 
 ```go
-func TestInitializeNegotiatesVersion(t *testing.T) // "2025-06-18" -> echoed; "1999-01-01" -> "2025-11-25"; instructions and serverInfo present
+func TestInitializeNegotiatesVersion(t *testing.T) // "2025-11-25" and "2025-06-18" -> echoed; "1999-01-01" and "2026-07-28" -> "2025-11-25"; instructions and serverInfo present
+func TestDiscoverThenInitialize(t *testing.T)    // Claude Code's opening: server/discover (id "server-discover-1", params with _meta) -> -32601 at once;
+// then initialize "2025-11-25", notifications/initialized, tools/list -> all answered; Serve has not returned
+func TestToolCallWithMeta(t *testing.T)          // tools/call with params._meta {"claudecode/toolUseId":"toolu_x","progressToken":2} -> the tool runs, normal result
 func TestToolsListInOrder(t *testing.T)            // two tools -> names in order, each with its schema object
 func TestToolCallResultAndError(t *testing.T)
 // a tool returning map{"ok":true} -> content[0].text == `{"ok":true}`, isError false
@@ -814,7 +819,8 @@ func TestEOFEndsServe(t *testing.T)                // close the input pipe -> Se
   - `install.WriteSkill(skillsDir string) error` and `install.RemoveSkill(skillsDir string) error`
   - `install.Runner` = `func(ctx context.Context, args ...string) (out []byte, err error)`: runs `claude <args>`.
   - `install.MCPState` with `MCPAdded`, `MCPAlreadyOurs`, `MCPForeign`, `MCPAbsent`, `MCPRemoved`, `MCPNoClaude`
-  - `install.AddMCP(ctx context.Context, run Runner, bin string) (MCPState, error)` and `install.RemoveMCP(ctx context.Context, run Runner, bin string) (MCPState, error)`
+  - `install.ClaudeConfigPath(home, configDir string) string`: `<configDir>/.claude.json` when `configDir` is not empty, else `<home>/.claude.json`; the command passes `CLAUDE_CONFIG_DIR` and the home directory.
+  - `install.AddMCP(ctx context.Context, run Runner, configPath, bin string) (MCPState, error)` and `install.RemoveMCP(ctx context.Context, run Runner, configPath, bin string) (MCPState, error)`
   - `install.Hooks` keeps its signature and adds no permission rule. `install.AllowTools(settingsPath string, now time.Time) error` adds the four tool rules (below), each only if absent, in one write with the usual backup, and writes nothing when all four are there. `install.Unhooks` keeps its signature and also removes the four tool rules, in the same single write and backup.
   - `install.ErrForeignSkill`: `WriteSkill`'s error when `SKILL.md` exists without the marker line.
 
@@ -823,9 +829,11 @@ What `curia install` adds and `curia uninstall` removes, beyond Plan 1:
 | What | Install | Uninstall | Reversible because |
 | --- | --- | --- | --- |
 | Skill | writes `~/.claude/skills/curia-decisions/SKILL.md` (mode 0600, directories as `writeAtomic` creates them, atomic). If the file exists without the marker line it is left alone and install reports it. | removes the file only if it holds the marker line `<!-- curia:managed -->`, then the directory if empty | the marker identifies ours |
-| MCP server | `claude mcp get curia`; if absent, `claude mcp add --scope user curia -- <bin> mcp`. If present and its output names `<bin>`, nothing. If present and not ours, nothing, and install reports the conflict. | `claude mcp get curia`; only if its output names `<bin>`, `claude mcp remove --scope user curia` | Claude Code owns `~/.claude.json`; Curia never edits it |
+| MCP server | reads the Claude config JSON (below). No `curia` entry: `claude mcp add --scope user curia -- <bin> mcp` through the runner. Ours (`mcpServers.curia.command` equals `<bin>` and `args` equals `["mcp"]`): nothing. Any other `curia` entry, or a file that is not valid JSON: foreign, left alone and reported. | reads the same file; only when the entry is ours: `claude mcp remove --scope user curia` | Claude Code owns the file; Curia only reads it, never writes it, and never runs `claude mcp get` or `claude mcp list` |
 | Tool permission rules (opt-in) | only with `curia install --allow-mcp-tools`: adds `mcp__curia__search_decisions`, `mcp__curia__request_decision`, `mcp__curia__check_decision`, `mcp__curia__withdraw_decision` to `permissions.allow` in `~/.claude/settings.json`, each only if absent. Without the flag nothing is added and install prints one line: `MCP tools not allowed without a prompt; to allow the four curia tools run: curia install --allow-mcp-tools` | removes those four exact strings, whether or not install added them (section 13, decision 35); leaves every other rule, including a hand-written `mcp__curia`, and the (possibly empty) array | four exact strings |
 | Key binding | the snippet gains `bind A display-popup -E -w 90% -h 80% '<bin> decide'` (quoted as the `a` binding is) | the snippet file is removed as before; the uninstall message adds `tmux unbind A` | as Plan 1 |
+
+**The Claude config JSON** is `$CLAUDE_CONFIG_DIR/.claude.json` when `CLAUDE_CONFIG_DIR` is set and not empty, else `$HOME/.claude.json`: that is where `claude mcp add --scope user` writes `mcpServers.<name>` as `{"type":"stdio","command":"<path>","args":["mcp"],"env":{}}`, with spaces in the path kept in one string (live probe C). It is read only, never written; a missing file or a missing `mcpServers` or `curia` key means absent. `claude mcp add` exits 1 with `already exists` when the name is taken; that is an error. Install never runs `claude mcp get` or `claude mcp list`: both start the server to health-check it, wait 30 seconds on a silent one, exit 0 even on failure, pass on the caller's whole environment, and print the command ambiguously when the path has spaces (probe C, decision 40).
 
 `claude` missing from `PATH` (the runner returns `exec.ErrNotFound`) is not an error: the state is `MCPNoClaude` and `curia install` prints the command to run by hand. A `permissions` or `allow` value of an unexpected type is an error and nothing is written, as for hooks. `curia install` prints one line per item saying what it did, including, with `--allow-mcp-tools`, that it allowed the four tools without a prompt, or, without it, the line above.
 
@@ -911,12 +919,15 @@ func TestRemoveSkillOnlyOurs(t *testing.T)          // ours -> file and empty di
 func TestRemoveSkillKeepsOtherFilesInDir(t *testing.T) // a second file in the dir -> SKILL.md removed, dir and the other file kept
 func TestSkillSymlinkedDirSurvives(t *testing.T)    // ~/.claude/skills is a symlink into another dir -> written through it, link intact
 func TestAddMCPSequence(t *testing.T)
-// fake Runner: get fails -> calls are exactly ["mcp get curia", "mcp add --scope user curia -- /opt/curia/bin/curia mcp"], state MCPAdded
-func TestAddMCPAlreadyOurs(t *testing.T)            // get prints a line holding the bin path -> no add; MCPAlreadyOurs
-func TestAddMCPForeign(t *testing.T)                // get prints another command -> no add, no remove; MCPForeign
+// config JSON missing, or without mcpServers.curia -> runner calls are exactly ["mcp add --scope user curia -- /opt/curia/bin/curia mcp"], state MCPAdded
+func TestAddMCPAlreadyOurs(t *testing.T)            // entry {"type":"stdio","command":"/opt/curia/bin/curia","args":["mcp"],"env":{}} -> no runner call; MCPAlreadyOurs
+func TestAddMCPForeign(t *testing.T)                // another command, args other than ["mcp"], or a file that is not valid JSON -> no runner call; MCPForeign
 func TestAddMCPNoClaude(t *testing.T)               // Runner returns exec.ErrNotFound -> MCPNoClaude, nil error
-func TestRemoveMCPOnlyOurs(t *testing.T)            // ours -> "mcp remove --scope user curia"; foreign -> no remove; absent -> MCPAbsent
-func TestBinWithSpacesIsOneArgument(t *testing.T)   // bin "/my tools/curia" -> the add call's argument after "--" is that exact string
+func TestRemoveMCPOnlyOurs(t *testing.T)            // ours -> exactly ["mcp remove --scope user curia"]; foreign -> no call; absent -> MCPAbsent
+func TestBinWithSpacesIsOneArgument(t *testing.T)   // bin "/my tools/curia" -> the add call's argument after "--" is that exact string; an entry with that command is ours
+func TestNeverRunsMCPGetOrList(t *testing.T)        // across every case above, no runner call starts with "mcp get" or "mcp list"
+func TestConfigJSONNeverWritten(t *testing.T)       // after AddMCP and RemoveMCP in every case the config file's bytes and mode are unchanged
+func TestClaudeConfigPath(t *testing.T)             // ("/h", "/c") -> "/c/.claude.json"; ("/h", "") -> "/h/.claude.json"
 func TestHooksAddNoPermissionRule(t *testing.T)     // allow ["Bash(ls:*)"] -> Hooks leaves it unchanged
 func TestAllowToolsAddsFourOnce(t *testing.T)       // allow ["Bash(ls:*)","mcp__curia__check_decision"] -> the other three appended once each; AllowTools twice -> no second write, one backup
 func TestUnhooksRemovesTheFourToolRules(t *testing.T) // allow ["Bash(ls:*)","mcp__curia", the four] -> ["Bash(ls:*)","mcp__curia"]; a user's deny list untouched
@@ -927,7 +938,7 @@ func TestPermissionsOfWrongTypeUntouched(t *testing.T) // AllowTools and Unhooks
 // claudeRunner defaults to a stub that fails the test; TestInstallAndUninstallRoundTrip, TestUninstallSaysHowToUndoTmux
 // and TestInstallRefusesInvalidSettings replace it with a recorder
 func TestInstallWritesSkillAndRegistersMCP(t *testing.T)
-// HOME = temp; claudeRunner = a recorder -> skill file exists; recorder saw get then add; stdout names each of the four items
+// HOME and CLAUDE_CONFIG_DIR = temp; claudeRunner = a recorder -> skill file exists; recorder saw exactly one call, the add; stdout names each of the four items
 func TestInstallThroughStubClaude(t *testing.T)
 // claudeRunner runs a stub: a symlink named claude to /bin/sh in a temp dir whose cwd holds a script named "mcp"
 // that appends its arguments to a file (the AGENTS.md fake-executable trick) -> the file holds the add arguments
@@ -936,7 +947,9 @@ func TestInstallAllowsToolsOnlyWithFlag(t *testing.T) // no flag -> allow list u
 func TestInstallForeignSkillContinues(t *testing.T) // foreign SKILL.md -> reported, MCP still registered, exit 0
 ```
 
-- [ ] **Step 2: Run them and confirm they fail.** Run: `go test ./internal/install/ ./cmd/curia/ -run 'Skill|MCP|Permission|Plan2|Install|Hooks|AllowTools|Unhooks' -v`. Expected: FAIL, undefined `install.WriteSkill`.
+Tests point `CLAUDE_CONFIG_DIR` at a temp dir and use the stub runner; none reads or runs anything in the real config directory.
+
+- [ ] **Step 2: Run them and confirm they fail.** Run: `go test ./internal/install/ ./cmd/curia/ -run 'Skill|MCP|Permission|Plan2|Install|Hooks|AllowTools|Unhooks|Config' -v`. Expected: FAIL, undefined `install.WriteSkill`.
 - [ ] **Step 3: Implement.** Reuse `loadSettings`, `saveSettings`, `writeAtomic` and the symlink handling already in the package; `skill.go` embeds the file with `//go:embed skill/SKILL.md`.
 - [ ] **Step 4: Run and confirm they pass.** Run: `go test -race ./internal/install/ ./cmd/curia/ -v`. Expected: PASS.
 - [ ] **Step 5: Commit.** `git commit -m "feat: install the decisions skill, MCP server and decide key"`
@@ -1544,15 +1557,16 @@ Curia decision tickets. When you face a judgment call the user should make or co
 
 **`curia mcp`** (`cmd/curia/mcp.go`): loads the config, opens the log and the store, prunes old events (`PruneEvents(now - 7 days, 1000)`, at most 10 batches, stopping at the first batch that deletes fewer than 1000, errors logged), then serves on stdin and stdout until end of input. It prints nothing but protocol messages. If the store cannot be opened it logs and exits 1.
 
-**Who is calling.** Resolved on every tool call, first match wins:
+**Who is calling.** Resolved on every tool call, never cached when the server starts, first match wins (decision 36):
 
-1. `CURIA_SESSION_ID` in the server's environment (set by tests, and by `curia spawn` in Plan 3).
-2. `CLAUDE_CODE_SESSION_ID` in the server's environment.
-3. `TMUX_PANE` in the server's environment: the session in that pane that is neither `ended` nor `stale`, the most recently updated if several.
-4. The project directory (`CLAUDE_PROJECT_DIR`, else the server's working directory): the session with that `cwd` that is neither `ended` nor `stale`, only if there is exactly one.
-5. Unknown: `SessionID` is empty.
+1. `CURIA_SESSION_ID` in the server's environment, when set and not empty (tests and scripting; `curia spawn` in Plan 3). Used as is, even with no row yet.
+2. `TMUX_PANE` set: the session in the store bound to that pane that is not `ended`; the most recently updated if more than one.
+3. `CLAUDE_CODE_SESSION_ID`, when a row with that id exists and is not `ended`.
+4. Unknown: `SessionID` is empty.
 
-`Repo` is the resolved session's repo when it has one, else `gitInfo` of the project directory (the helper in `cmd/curia/git.go`), else empty. `TaskID` is empty until Plan 3. `Pane` is the resolved session's pane. A session id from 1 or 2 with no row yet is used as is.
+Why this order (live probe A): a stdio server inherits `claude`'s environment, and `TMUX_PANE` and `TMUX` are correct for the life of the process. `CLAUDE_CODE_SESSION_ID` is correct at start but goes stale after `/clear`: the same server process keeps running while hooks report a new session id, so the pane, which hooks keep bound to the current session, comes first. `CLAUDE_PROJECT_DIR` and the server's working directory are the session's cwd, which two sessions can share, so neither identifies a session. Nothing in `initialize` or `tools/call` identifies the session.
+
+`Repo` is the resolved session's repo when it has one, else `gitInfo` of `CLAUDE_PROJECT_DIR` (else the server's working directory; the helper in `cmd/curia/git.go`), else empty. `TaskID` is empty until Plan 3. `Pane` is the resolved session's pane.
 
 `Notify` (in `cmd/curia/mcp.go`): returns at once when both config flags are off; else `Store.ClaimNotifySlot(now, 30 * time.Second)` and, when it wins, `notify.Blocking` with a 2 second timeout. Errors are logged.
 
@@ -1587,9 +1601,14 @@ func TestStoreErrorIsInternal(t *testing.T)         // closed store -> ToolError
 func TestMCPOverPipes(t *testing.T)
 // initialize -> serverInfo.name "curia", instructions == mcp.Instructions; tools/list -> 4 tools;
 // tools/call request_decision -> content text parses to {"id":"D-1",...}; stdout holds only JSON lines; closing stdin ends the command
-func TestCallerResolutionOrder(t *testing.T)
-// table with a seeded store: CURIA_SESSION_ID wins over everything; then CLAUDE_CODE_SESSION_ID; then TMUX_PANE (ended and stale sessions in
-// the pane skipped, newest live one chosen); then project dir with exactly one live session; two sessions in that dir -> unknown
+func TestCallerFromCuriaSessionID(t *testing.T)     // CURIA_SESSION_ID set, with TMUX_PANE and CLAUDE_CODE_SESSION_ID naming other live sessions -> CURIA_SESSION_ID wins, even with no row
+func TestCallerFromTmuxPane(t *testing.T)           // TMUX_PANE %3: an ended session and two live ones in %3 -> the most recently updated live one
+func TestCallerFromClaudeCodeSessionID(t *testing.T) // no TMUX_PANE; CLAUDE_CODE_SESSION_ID names a live row -> it; names an ended row or no row -> unknown
+func TestCallerUnknown(t *testing.T)                // none of the three variables match -> SessionID ""; Repo from CLAUDE_PROJECT_DIR, else the cwd
+func TestCallerAfterClear(t *testing.T)
+// /clear: pane %3 now bound to S2 (S1 ended by SessionEnd reason clear); CLAUDE_CODE_SESSION_ID still S1 -> S2
+func TestCallerResolvedOnEveryCall(t *testing.T)    // one server: a tool call as S1, then the store rebinds the pane to S2, the next call -> S2
+func TestProjectDirDoesNotIdentifyACaller(t *testing.T) // no TMUX_PANE, no session-id variables; one live session with cwd == CLAUDE_PROJECT_DIR -> unknown
 func TestRepoFallsBackToGit(t *testing.T)           // no session; working dir inside a temp git repo (GIT_* dropped) -> Repo is its top level
 func TestNotifyRateLimited(t *testing.T)            // two blocking tickets 1s apart with notify_bell on and a tmux.Fake -> one "Bell" call
 func TestMCPStartupPrunesEvents(t *testing.T)       // 5 events 8 days old, 5 new -> after start only the new remain
@@ -1626,6 +1645,8 @@ Rules for `hook.Run`:
 - When `claimed` is not empty, `Result.Stdout` is the JSON encoding of `{"decision":"block","reason": decision.StopReason(claimed)}` (HTML escaping off) and one `\n`: one line, because JSON escapes the reason's own line breaks.
 - `ClaimDeliveries` runs inside a savepoint; on error the savepoint is rolled back, nothing is claimed, and the error is returned beside the result. An error from `OpenBlocking` does not stop the session update: it is treated as none and the error is returned beside the result, as a transcript read error is today.
 
+The hook does not treat `stop_hook_active` specially: each `Stop` claims what is queued, so a `Stop` that follows a blocked one (it arrives with `stop_hook_active: true`, live probe A) prints nothing unless a new answer was queued in between. A turn that used a background subagent produces two `Stop`s for one request, the subagent's result arriving as its own turn; each claims independently (decision 39).
+
 Rules for `cmd/curia/hook.go`: after `hookRun` returns, `Result.Stdout` (when not empty) is written to the command's stdout through a new `hookEnd.emit`, under the same mutex as `finish`, so the watchdog and the normal path cannot both act. `emit` is called immediately after `hookRun` returns, before `markerWindows` and any tmux call. If the run has already ended, nothing is written. Marker handling (`snapshotBefore`, `markerWindows`) is unchanged and uses `Result.Session`. The exit code stays 0 on every path.
 
 Latency: `TestStopLatencyWithDecisions` times `hook.Run` only, in-process, sequentially: one untimed warm-up, then 200 `Stop` runs on a store holding 500 decisions (50 of them for the stopping session, none queued), appending one transcript line before each run as `TestHookLatency` does. p95 under 20 ms. It runs under `-race` in `make check` like the existing test; on failure it logs p50, p95, max and the load average. The method is exactly Plan 1's `TestHookLatency`: one pass of 200 samples after the warm-up, p95 under 20 ms, always enforced, with no retry and no skip. The implementer also measures p50 and p95 with and without `-race` and reports the four numbers.
@@ -1644,10 +1665,13 @@ func TestStopClaimsQueuedAndBlocks(t *testing.T)
 // session working, D-1 answered and queued -> Stdout == `{"decision":"block","reason":"Curia: decisions answered while you were working.\nDecision D-1 answered: option A (Postgres table). Reasoning: we already run it. Continue."}` + "\n";
 // state working; D-1 delivered via stop_hook
 func TestSecondStopDoesNotBlock(t *testing.T)          // the next Stop -> Stdout nil, state idle
+func TestStopHookActiveIsNotSpecial(t *testing.T)
+// two consecutive Stops, the second with "stop_hook_active": true; only the first has a queued answer -> first prints one line, second prints nothing;
+// a third Stop with stop_hook_active true after a new answer was queued -> prints it
 func TestStopDeliversSeveralInOneBlock(t *testing.T)   // 3 queued -> one Stdout line naming all three; all delivered
 func TestTwoStopHooksOneBlocks(t *testing.T)
 // 100 rounds, two Store handles, two goroutines run Stop for one session with one queued answer -> exactly one Result has Stdout
-func TestOtherEventsNeverPrintOrClaim(t *testing.T)    // each of the 7 other kinds with a queued answer present -> Stdout nil, still queued
+func TestOtherEventsNeverPrintOrClaim(t *testing.T)    // each other event kind the hook handles, with a queued answer present -> Stdout nil, still queued
 func TestStopOutputSurvivesHostileText(t *testing.T)
 // label and reasoning hold quotes, "</script>", "\x1b[2J", newlines, U+202E -> Stdout is one line, valid JSON, with exactly the keys
 // decision and reason; the reason holds no control rune except "\n"
@@ -1701,6 +1725,8 @@ Package-level names you add in `cmd/curia` start with your command's name.
    | `waiting` | `agent is at a prompt of its own; queued until it next stops` |
    | `stale`, `ended`, no pane, or no row | `pane gone; the agent gets it from check_decision` |
 
+   `ClaimTyping` re-reads the session's state inside its transaction, immediately before typing, so a session that became `waiting` or `working` after steps 3 and 4 is not typed into. A permission prompt is the dangerous case: a typed Enter approves its highlighted "Yes" (live probe B4). Text typed into a running turn is not lost but absorbed into that turn at its next tool boundary (probe B3); the rule still holds so an answer always starts its own turn.
+
    Claimed: `tm.SendKeys(pane, decision.TypedMessage(d))`. If that fails, `st.RequeueDelivery` and note `typing failed; queued for the Stop hook`.
 6. Re-apply the attention marker (`attention.Apply`) for the asking session's window and for every window `Reconcile` returned. Failures here are logged at WARN, not returned.
 7. Return the outcome with the row as now stored.
@@ -1731,6 +1757,9 @@ func TestIdleSessionGetsTypedLine(t *testing.T)
 // session needs_decision in live pane %5, blocking ticket -> Calls include `SendKeys %5 Decision D-1 answered: option A, Postgres table. Reasoning: we already run it. Continue.`;
 // row delivered via send_keys; session idle
 func TestNeverTypesIntoWaitingOrWorking(t *testing.T)  // session waiting, then working -> no SendKeys call; row queued; the two notes
+func TestStateChangeBeforeClaimIsNotTyped(t *testing.T)
+// session idle when listed; a tmux client whose ListPanes, after returning the live panes, sets the session to waiting (then, second case,
+// working) in the store as a hook would -> no SendKeys call; row still queued; the waiting (working) note
 func TestPaneGoneLeavesQueued(t *testing.T)            // pane not in Panes -> no SendKeys; session stale; row queued; note "pane gone..."
 func TestRecycledPaneIsNotTyped(t *testing.T)          // pane id present but ServerStart after the session's StartedAt -> stale, no SendKeys
 func TestSessionOutsideTmuxLeavesQueued(t *testing.T)  // Pane "" -> no SendKeys
@@ -1885,7 +1914,7 @@ Plan 1's `TestBadge` and `fleet.Count` tests are updated for the new parameter; 
 **Script.**
 
 1. Hooks: `SessionStart` for S1 in `%0`; `SessionStart` then `PreToolUse` for S2 in `%1`; `SessionStart` for S3 in `%2`.
-2. Client A (pane `%0`): `initialize`; `tools/list` (equals `tools_list.golden.json`: four tools); `search_decisions` "postgres events" (no decisions); `request_decision` blocking, "Store webhook events in Postgres or Redis?", options `A` Postgres table and `B` Redis stream, recommendation `A` (result: `D-1`, open, no precedent); the same request again (`D-1`, `duplicate` true).
+2. Client A (pane `%0`): `server/discover` (answered with `-32601`, as Claude Code's real opening is); `initialize`; `tools/list` (equals `tools_list.golden.json`: four tools); `search_decisions` "postgres events" (no decisions); `request_decision` blocking, "Store webhook events in Postgres or Redis?", options `A` Postgres table and `B` Redis stream, recommendation `A` (result: `D-1`, open, no precedent); the same request again (`D-1`, `duplicate` true).
 3. `curia status` prints `D1`. `curia hook Stop` for S1 prints nothing; `curia ls --json` shows S1 as `needs_decision`.
 4. With `CLAUDECODE=1`: `curia decide D-1 --accept` exits 1; `curia decisions ls --json` still shows `D-1` open.
 5. `curia decide D-1 --option A --reason "Replays need 30 days of history; we already run Postgres (see ops)." --scope repo` prints a line ending `delivered (send_keys)`. Within 2 seconds `pane_s1.txt` equals the first line of `pane_s1.golden.txt`: `Decision D-1 answered: option A, Postgres table. Reasoning: Replays need 30 days of history we already run Postgres see ops. Continue. Exact wording: call check_decision D-1.` `curia status` prints nothing.
@@ -1911,7 +1940,7 @@ func TestStopHookLatencyWithTickets(t *testing.T) // step 12
 - [ ] **Step 2: Run and confirm it fails.** Run: `go test ./e2e/ -run Decisions -v`. Expected: FAIL until the fixtures and golden files exist.
 - [ ] **Step 3: Write the fixtures and golden files** from the script and from sections 4.9 and 11, by hand, never from the program's output.
 - [ ] **Step 4: Run the whole suite.** Run: `make check`. Expected: every gate passes.
-- [ ] **Step 5: Whole-plan checks (orchestrator).** `deadcode ./...` without `-test` on `plan-2` reports only deliberate test doubles (`tmux.Fake`). The isolated live check follows Ruling 33: real Claude Code with the real `HOME` for its own login; Curia's hooks only through `claude --settings <temp file> --setting-sources project`; Curia's state through a wrapper that sets `HOME` and `CURIA_DB` to a temp dir; a private tmux server. How the MCP server is loaded in that check (for example `--mcp-config <temp file>`) is settled by the pre-wave-1 live checks (section 7). Raise one blocking and one `assume` ticket and answer both. It must confirm the items section 14 marks for the live check.
+- [ ] **Step 5: Whole-plan checks (orchestrator).** `deadcode ./...` without `-test` on `plan-2` reports only deliberate test doubles (`tmux.Fake`). The isolated live check follows Ruling 33: real Claude Code with the real `HOME` for its own login; Curia's hooks only through `claude --settings <temp file> --setting-sources project`; Curia's state through a wrapper that sets `HOME` and `CURIA_DB` to a temp dir; a private tmux server. The MCP server is loaded with `--mcp-config <temp file> --strict-mcp-config` next to `--settings <temp file> --setting-sources project`, the MCP config's command being the same wrapper (decision 41; the live probes ran this way). Raise one blocking and one `assume` ticket and answer both. It must confirm the items section 14 marks for the live check.
 - [ ] **Step 6: Commit.** `git commit -m "test: end-to-end decisions acceptance"`
 
 ## 13. Decisions made in this plan
@@ -1940,9 +1969,9 @@ Each is: what — why — cost if wrong.
 20. **F17: a cold cache sorts with unknown ones, by age** — once the cache is cold there is nothing left to save by hurrying; the spec's "soonest first" read literally would put expired caches at the very top — if the owner wants cold-first, it is one comparison in `Triage`.
 21. **F17 ships the queue order and the ticket's stakes line; the dashboard's cache column waits for Plan 5** — until values exist it would be an always-empty ninth column in a table that already truncates — one column to add later.
 22. **`cache_expires_at` and `cache_rebuild_usd` are added to `sessions` now** — the F17 sort then reads real columns, and Plan 5 only has to write them — two columns stay NULL until Plan 5.
-23. **The caller is found from the environment and the store on every call** (section 11, Task 12) — Claude Code gives a stdio server no session id that is documented; the pane maps to one live session by Plan 1's rules — see open question 1.
+23. **The caller is found from the environment and the store on every call** (section 11, Task 12; the order is replaced by decision 36) — Claude Code gives a stdio server no session id that is documented; the pane maps to one live session by Plan 1's rules — see open question 1.
 24. **Agent instructions are a skill plus the MCP `instructions` string; no `CLAUDE.md` block** — the string is in context whenever the server is connected, the skill holds the long form, and `CLAUDE.md` is the user's file (here managed by chezmoi) — if agents ignore both, Plan 3's spawn preamble is the next lever.
-25. **`curia install` registers the server by running `claude mcp add --scope user`**, never by editing `~/.claude.json` — Claude Code rewrites that file constantly and it holds credentials and history — install needs `claude` on `PATH`; without it the user runs one printed command.
+25. **`curia install` registers the server by running `claude mcp add --scope user`**, never by editing `~/.claude.json` (it recognises its own entry by reading that file: decision 40) — Claude Code rewrites that file constantly and it holds credentials and history — install needs `claude` on `PATH`; without it the user runs one printed command.
 26. **Allowing the four tools without a prompt is opt-in: `curia install --allow-mcp-tools` adds their four exact names to `permissions.allow`** (orchestrator ruling while the owner is away; the review narrowed the wildcard `mcp__curia` to exact names, and the orchestrator made it opt-in) — relaxing a permission in a user-owned file is security-sensitive, and the wildcard would also cover tools added later and a project-scoped server named `curia` that shadows ours — without the flag, every first use of a tool in every project stops at a permission prompt, which shows as `waiting`; install prints the one command that allows them.
 27. **The decide popup is bound to `prefix + A`** — next to `a` for the dashboard and unbound in stock tmux; `D` would replace tmux's own client chooser — a user with their own `A` binding loses it until they edit the snippet.
 28. **Answer keys act at once on `assume` tickets; on a `blocking` ticket with no staged reasoning they first open the reasoning input, where `Enter` on an empty line sends without; `irreversible` tickets also ask for `y`** — the spec wants an answer in under 30 seconds and a confirmation in one key — a slip of the finger answers a cheap or costly ticket wrongly; `curia decisions edit --supersede` is the remedy.
@@ -1954,33 +1983,49 @@ Each is: what — why — cost if wrong.
 34. **The `meta` table is new** (section 4.1; spec section 5 has no such table) — the notification rate limit spans processes and needs one shared row — one small table.
 35. **`curia uninstall` removes the four exact tool rules whether or not install added them** — a permission rule is a plain string, so unlike a hook command it carries no mark of who wrote it, and Curia keeps no record outside the file — a rule the user wrote by hand is removed too; harmless once the server is unregistered, but the user must re-add it if they keep a foreign `curia` server.
 
+Decisions 36 to 41 come from the pre-wave-1 live probes (2026-11-11, Claude Code 2.1.322, tmux 3.8, in an isolated setup: private tmux server, `--settings`, `--mcp-config`, a temp `CLAUDE_CONFIG_DIR`).
+
+36. **The caller is resolved on every tool call in the order `CURIA_SESSION_ID`, then the live session bound to `TMUX_PANE`, then `CLAUDE_CODE_SESSION_ID` when its row exists and is not ended, then unknown** (Task 12) — probe A: a stdio server inherits `claude`'s environment; `TMUX_PANE` and `TMUX` were correct; `CLAUDE_CODE_SESSION_ID` was correct at start but stale after `/clear`, because the same server process kept running while hooks got a new session id; `CLAUDE_PROJECT_DIR` and the cwd are the session cwd, shared by sessions in one directory; nothing in `initialize` or `tools/call` names the session — a session outside tmux whose server outlives a `/clear` is attributed to its old, ended id and so becomes unknown: its tickets still work through `check_decision` but are never typed.
+37. **The MCP server answers every unknown request with `-32601` at once, ignores unknown notifications and `_meta`, and negotiates the client's version when it knows it, else its newest (`2025-11-25`)** (Task 4) — probe A: Claude Code 2.1.322 opens with `server/discover` and falls back to `initialize` with `2025-11-25` only after a `-32601`; `tools/call` carries `_meta` (`claudecode/toolUseId`, `progressToken`); the `instructions` string reached the model — if a later Claude Code stops falling back when `server/discover` fails, the server must implement it; a server that hung or exited on it would never connect.
+38. **`SendKeys` is three separate tmux invocations (`copy-mode -q`, `send-keys -l --`, `send-keys Enter`), never joined with `\;`, refusing text over 800 runes or of a single rune; the session's state is read again inside the claim transaction immediately before typing** (Tasks 3, 6, 14) — probe B: as separate invocations text and Enter submitted 5 of 5 with no pause, while in one invocation a 300-character line got its Enter as a newline (0 of 5); 600 and 800 characters submitted exactly and about 1,000 became a paste that `send-keys -l` splits; a trailing `;` is dropped unless sent as `\;`; `copy-mode -q` fixed copy mode and is harmless otherwise; at a permission prompt a typed Enter approved "Yes" and one digit picked an option at once; text typed mid-turn is absorbed into that turn — a few milliseconds remain between the claim's commit and the keystrokes, and the permission Notification arrives about 6 seconds after the prompt opens (section 14).
+39. **The Stop hook does not treat `stop_hook_active` specially** (Task 13) — probe A: a block with exit 0 continued the same turn, and the next `Stop` arrived with `stop_hook_active: true`; a turn that used a background subagent produced two `Stop`s, the subagent's result arriving as its own turn; each `Stop` claims only what is queued, so nothing loops — an answer queued between the two `Stop`s of one request is delivered at the second, inside the subagent's turn.
+40. **`curia install` recognises its MCP entry by reading the Claude config JSON, read-only, and never runs `claude mcp get` or `claude mcp list`** (Task 5) — probe C: `claude mcp add --scope user` writes `mcpServers.curia` as `{"type":"stdio","command":"<path>","args":["mcp"],"env":{}}` into `.claude.json` in `$CLAUDE_CONFIG_DIR` or the home directory, and exits 1 with `already exists` when the name is taken; `get` and `list` start the server to health-check it (30 s on a silent one, exit 0 on failure, the caller's whole environment passed on) and print paths with spaces ambiguously — if Claude Code moves or reshapes that file, install sees no entry and runs `claude mcp add`, which then fails with `already exists` and install reports it.
+41. **The isolated live check loads the MCP server with `--mcp-config <temp file> --strict-mcp-config` next to `--settings <temp file> --setting-sources project`** (Task 17) — the probes ran exactly this way and touched no real Claude config — none beyond the trust dialog, which writes the probe directory into the real `~/.claude.json`.
+
 **Code changed after this plan was drafted.** Plan 1's live check changed the code on `main` after this plan was written: new hook event kinds may exist, `SessionStart` now yields `idle`, `Stop` reads `last_assistant_message`, and `tmux.Client` has `PaneFocused`. Where a task section's description of existing code differs from the code on `plan-2`, the code wins and the implementer reports the difference.
 
 ## 14. Open questions for the owner
 
 Each has a default, so execution is not blocked.
 
-1. **Does Claude Code pass its environment to a stdio MCP server?** The docs state only that `CLAUDE_PROJECT_DIR` is set. If `TMUX_PANE` or `CLAUDE_CODE_SESSION_ID` (which Claude Code 2.1.322 does set for Bash commands) is not inherited, the caller falls back to matching the project directory, which fails when two sessions share a directory. Default: the five-step order of Task 12. Live check: confirm which step resolves a real session; if none does reliably, Plan 3's `curia spawn` must set `CURIA_SESSION_ID` and manual sessions need another channel.
+1. **Settled 2026-11-11 (live probe A, decision 36).** Yes: the server inherits `claude`'s environment; `TMUX_PANE` and `TMUX` are correct; `CLAUDE_CODE_SESSION_ID` goes stale after `/clear`; `CLAUDE_PROJECT_DIR` is the session cwd. Task 12's order is now `CURIA_SESSION_ID`, the pane, `CLAUDE_CODE_SESSION_ID`, unknown. The question as first asked: **Does Claude Code pass its environment to a stdio MCP server?** The docs state only that `CLAUDE_PROJECT_DIR` is set. If `TMUX_PANE` or `CLAUDE_CODE_SESSION_ID` (which Claude Code 2.1.322 does set for Bash commands) is not inherited, the caller falls back to matching the project directory, which fails when two sessions share a directory. Default: the five-step order of Task 12. Live check: confirm which step resolves a real session; if none does reliably, Plan 3's `curia spawn` must set `CURIA_SESSION_ID` and manual sessions need another channel.
 2. **How hard should the "no self-answering" boundary be?** The spec keeps answers off the MCP surface, but an agent with a shell can run `curia decide`, or write to the SQLite file. Default: the `CLAUDECODE` guard plus `answered_via = cli` on every flag-form answer, so such answers are visible. A real boundary needs something an agent cannot reach (a second OS user, or a secret typed by me). Is the guard enough for V1?
 3. **Spec section 7 against a pane that has become a shell.** Section 7 asks for the literal flag, stripped control characters and a length cap. That does not stop `$(...)` in an option label from running if the agent has exited. Default: the restricted alphabet of decision 5, at the cost of lossy typed text. The alternative is to type only `Decision D-117 answered. Call check_decision D-117.` and nothing else.
 4. **Spec section 5 against the schema here.** Extra columns and `n` as the primary key (section 4.1). Default: as written; should `docs/DESIGN.md` be updated to match?
-5. **Plan 1's hook rule against F7.** "The hook never writes to stdout" cannot hold with Stop-hook delivery. Default: the amended rule in section 2.
+5. **Confirmed by live probe A (decision 39):** a block with exit 0 continues the same turn. **Plan 1's hook rule against F7.** "The hook never writes to stdout" cannot hold with Stop-hook delivery. Default: the amended rule in section 2.
 6. **Badge meaning.** Spec F4 says `D2` is "decisions"; Plan 1 counted sessions in `needs_decision`. Default: open blocking tickets (decision 19).
 7. **F17 "soonest first" for cold caches.** Default: decision 20.
 8. **Repo identity across worktrees.** `sessions.repo` is the worktree's top-level path, so two worktrees of one repository are two repos for precedent. Plan 2 has no worktrees of its own, so the default is to leave it; Plan 3 must store the main repository (git's common directory) before it spawns worktrees, or repo-scoped precedent will not cross tasks.
 9. **Auto-allowing the tools** (decision 26). Default: off; `curia install --allow-mcp-tools` adds the four exact tool names, and install without it prints how. Should install allow them by default, and is the server-wide `mcp__curia` ever wanted?
-10. **Stop reads the transcript for the last assistant text**, but Claude Code's docs say the transcript may not yet hold the final message at Stop and that the payload's `last_assistant_message` should be used. Not a Plan 2 change; default: leave it and record it in `PROGRESS.md` for a small fix PR.
+10. **Settled:** the Stop payload carries `last_assistant_message` (live probe A), and Plan 1's live-check fix reads it. **Stop reads the transcript for the last assistant text**, but Claude Code's docs say the transcript may not yet hold the final message at Stop and that the payload's `last_assistant_message` should be used. Not a Plan 2 change; default: leave it and record it in `PROGRESS.md` for a small fix PR.
 11. **`curia install` path problems inherited from Plan 1** (Open Questions 8, 14, 16): the MCP registration and the `A` binding record the same resolved binary path as the hooks, so a moved binary orphans them too. Default: same behaviour as the hooks.
 12. **The key for the decide popup** (decision 27). Default: `prefix + A`.
 
 Could not be settled from the desk, and are items for the isolated live check:
 
-- Whether Claude Code's prompt accepts typed text followed at once by Enter as one submitted message, or needs a pause between them (a long line may be treated as a paste). `SendKeys` sends them as two tmux commands with no delay.
-- Whether a `Stop` with subagents or background tasks still running delivers reliably (the spec's own open question). Stop fires for the main agent only; the payload's `background_tasks` is not read.
-- Whether `claude mcp get <name>` prints the configured command in a form that contains the binary path, which is how install recognises its own entry. If not, install falls back to treating any server named `curia` as foreign and prints the manual command.
-- Whether the installed Claude Code shows the `instructions` string to the model in full (about 800 characters).
+- **Settled (probe B, decision 38):** typed text followed by a separate Enter submits with no pause, up to at least 800 characters; text and Enter in one tmux invocation do not. Whether Claude Code's prompt accepts typed text followed at once by Enter as one submitted message.
+- **Partly settled (probe A, decision 39):** with a background subagent running, the block worked and the subagent's result came as its own turn with its own `Stop`. A foreground subagent was not observed (this version backgrounded it). Whether a `Stop` with subagents or background tasks still running delivers reliably (the spec's own open question). Stop fires for the main agent only; the payload's `background_tasks` is not read.
+- **Settled (probe C, decision 40):** `claude mcp get` starts the server and prints paths with spaces ambiguously, so install no longer uses it; it reads the config JSON. Whether `claude mcp get <name>` prints the configured command in a form that contains the binary path.
+- **Partly settled (probe A):** a short `instructions` string reached the model verbatim; the full string (about 800 characters) is confirmed in Task 17's live check. Whether the installed Claude Code shows the `instructions` string to the model in full.
 
-Three of these run before Wave 1 (section 7), in the isolated setup the owner authorised: (a) which of `TMUX_PANE`, `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PROJECT_DIR` a stdio MCP server receives (open question 1), using a server that writes its environment to a file; (b) whether a 300-character line and Enter, sent with two `send-keys` commands, submit in a real Claude Code prompt; (c) what `claude mcp get <name>` prints. Their results are recorded as Rulings and T3, T5 and T12 are amended before dispatch.
+Three of these run before Wave 1 (section 7), in the isolated setup the owner authorised: (a) which of `TMUX_PANE`, `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PROJECT_DIR` a stdio MCP server receives (open question 1), using a server that writes its environment to a file; (b) whether a 300-character line and Enter, sent with two `send-keys` commands, submit in a real Claude Code prompt; (c) what `claude mcp get <name>` prints. Their results are recorded as Rulings and T3, T5 and T12 are amended before dispatch. **Done 2026-11-11:** decisions 36 to 41.
+
+Remaining risks after the probes:
+
+- The `permission_prompt` Notification arrives about 6 seconds after a permission prompt opens (probe B4), so for those seconds the store can still say `working` (never `idle`); the rule "type only into `idle` or `needs_decision`" already covers it. The Plan 1 live-check fix (`fix/live-check`) registers a `PermissionRequest` hook that sets `waiting` when the dialog opens; once it is on `plan-2`, it closes this window.
+- Copy mode was tested only with no client attached; with an attached client, copy-mode keys may act differently.
+- The paste threshold lies somewhere between 800 and 1,000 characters; the 800-rune cap is the largest tested value.
+- A user who runs `claude mcp get` or `claude mcp list` starts `curia mcp` for a health check with that shell's environment, so it prunes old events then and sees another session's variables; it makes no tool call, so no ticket is attributed.
 
 ## 15. Out of scope
 
