@@ -22,9 +22,14 @@ const answerTimeout = 5 * time.Second
 // on screen changed.
 const noticeChanged = "queue changed; press again"
 
-// quietPeriod is how long after one's own answer answer keys are ignored,
-// so a key pressed twice or held never answers the next ticket unread
-// (Ruling 63). Each ignored key restarts it.
+// quietPeriod is how long answer keys are ignored after one's own answer
+// (Ruling 63) and after an answer key refused for a change the user did not
+// cause (Ruling 68), so a key pressed twice or held never answers the next
+// ticket unread. Each ignored key restarts it. A terminal sends no key-up,
+// so a held key is told from presses by time alone: the period is longer
+// than the usual delay before a held key starts repeating (375 to 660 ms).
+// Accepted residue: a keyboard set to a repeat delay above 750 ms can still
+// get a repeat through.
 const quietPeriod = 750 * time.Millisecond
 
 // dwell is how long a ticket must have been on screen before an answer key
@@ -414,10 +419,10 @@ func (m DecideModel) answerRecommended() (DecideModel, tea.Cmd) {
 }
 
 // guard reports whether an answer may start now. It refuses while an answer
-// is in flight; during the quiet period after one's own answer, restarting
-// it; once after a refresh changed the ticket on screen, using up the flag;
-// and before the ticket on screen has been there for the dwell. Every
-// refusal restarts the dwell (refuse).
+// is in flight; during the quiet period, restarting it; once after a refresh
+// changed the ticket on screen, using up the flag and starting the quiet
+// period (refuseChanged); and before the ticket on screen has been there
+// for the dwell. Every refusal restarts the dwell (refuse).
 func (m DecideModel) guard() (DecideModel, bool) {
 	now := m.now()
 	switch {
@@ -427,8 +432,7 @@ func (m DecideModel) guard() (DecideModel, bool) {
 		m.quietUntil = now.Add(quietPeriod)
 		return m.refuse(noticeChanged), false
 	case m.changed:
-		m.changed = false
-		return m.refuse(noticeChanged), false
+		return m.refuseChanged(), false
 	case now.Sub(m.shownSince) < dwell:
 		return m.refuse(noticeChanged), false
 	}
@@ -441,6 +445,15 @@ func (m DecideModel) guard() (DecideModel, bool) {
 func (m DecideModel) refuse(notice string) DecideModel {
 	m.notice, m.shownSince = notice, m.now()
 	return m
+}
+
+// refuseChanged ignores an answer key that ran into a change the user did
+// not cause. It uses up the change flag and starts the quiet period, so the
+// repeats of a held key are ignored however late the first one comes
+// (Ruling 68; see quietPeriod for what is left).
+func (m DecideModel) refuseChanged() DecideModel {
+	m.changed, m.quietUntil = false, m.now().Add(quietPeriod)
+	return m.refuse(noticeChanged)
 }
 
 // startAnswer begins answering t with a's key. A blocking ticket with no
@@ -522,7 +535,7 @@ func (m DecideModel) submitInput() (DecideModel, tea.Cmd) {
 	switch m.input {
 	case inputReason:
 		if t, ok := m.current(); !ok || !sameTicket(t, p.ticket) {
-			m = m.refuse(noticeChanged) // typed for a ticket no longer on screen
+			m = m.refuseChanged() // typed for a ticket no longer on screen
 			break
 		}
 		m.reasoning = text
@@ -570,8 +583,7 @@ func (m DecideModel) confirmKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cm
 // screen; otherwise the answer is dropped with the queue-change notice.
 func (m DecideModel) send(p pendingAnswer) (DecideModel, tea.Cmd) {
 	if t, ok := m.current(); !ok || !sameTicket(t, p.ticket) {
-		m.changed = false
-		return m.refuse(noticeChanged), nil
+		return m.refuseChanged(), nil
 	}
 	m.sending = true
 	src, tk, a := m.src, p.ticket, p.a

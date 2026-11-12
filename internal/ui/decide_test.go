@@ -1189,7 +1189,7 @@ func TestRefreshChangeDuringQuietNeedsOwnPress(t *testing.T) {
 		t.Errorf("status line = %q, want the notice:\n%s", s, m.View())
 	}
 	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
-	decideClock.advance(250 * time.Millisecond) // the ignored press restarted the dwell (Ruling 67)
+	decideClock.advance(750 * time.Millisecond) // the ignored press started a quiet period (Ruling 68)
 	send(t, m, dkey("1"))
 	if got := src.calls(); len(got) != 2 || got[1].id != "D-3" {
 		t.Errorf("calls = %+v, want D-3 answered", got)
@@ -1363,18 +1363,22 @@ func TestProseCannotPassForOption(t *testing.T) {
 	}
 }
 
-// holdKey presses k every interval for d, the auto-repeat of a held key.
-func holdKey(t *testing.T, m tea.Model, k string, interval, d time.Duration) tea.Model {
+// repeatEvery is the gap between the repeats of a held key.
+const repeatEvery = 30 * time.Millisecond
+
+// holdEnter presses Enter every repeatEvery for d, the auto-repeat of a
+// held key.
+func holdEnter(t *testing.T, m tea.Model, d time.Duration) tea.Model {
 	t.Helper()
-	for held := time.Duration(0); held < d; held += interval {
-		decideClock.advance(interval)
-		m = send(t, m, dkey(k))
+	for held := time.Duration(0); held < d; held += repeatEvery {
+		decideClock.advance(repeatEvery)
+		m = send(t, m, dkey("enter"))
 	}
 	return m
 }
 
-// Ruling 67: a key held across a refresh-caused change never answers the
-// new ticket; it must be released for the dwell first.
+// Rulings 67 and 68: a key held across a refresh-caused change never
+// answers the new ticket; it must be released for the quiet period first.
 func TestHeldKeyAcrossRefreshChangeNeverAnswers(t *testing.T) {
 	for _, mode := range []model.Mode{model.ModeAssume, model.ModeBlocking} {
 		src := &fakeDecideSource{}
@@ -1384,12 +1388,18 @@ func TestHeldKeyAcrossRefreshChangeNeverAnswers(t *testing.T) {
 		src.set(ts[1]) // D-1 withdrawn
 		m = reload(t, m)
 		decideClock.advance(10 * time.Millisecond)
-		m = holdKey(t, m, "enter", 30*time.Millisecond, 2*time.Second)
+		m = holdEnter(t, m, 2*time.Second)
 		wantCalls(t, src)
 		if s := lastLine(m); s != "queue changed; press again" {
 			t.Errorf("%s: status line = %q after the hold, want the notice", mode, s)
 		}
 		decideClock.advance(250 * time.Millisecond)
+		m = send(t, m, dkey("enter")) // past the dwell, inside the quiet period
+		wantCalls(t, src)
+		if s := lastLine(m); s != "queue changed; press again" {
+			t.Errorf("%s: status line = %q 250ms after the hold, want the notice", mode, s)
+		}
+		decideClock.advance(750 * time.Millisecond)
 		m = send(t, m, dkey("enter"))
 		if mode == model.ModeBlocking {
 			if s := lastLine(m); s != "reasoning for B (enter sends): _" {
@@ -1413,7 +1423,7 @@ func TestDroppedSubmissionRestartsDwell(t *testing.T) {
 	src.set(ts[1])
 	m = reload(t, m)
 	decideClock.advance(keyGap)
-	m = holdKey(t, m, "enter", 30*time.Millisecond, time.Second)
+	m = holdEnter(t, m, time.Second)
 	wantCalls(t, src)
 	if s := lastLine(m); s != "queue changed; press again" {
 		t.Errorf("status line = %q, want the notice and no prompt", s)
@@ -1459,4 +1469,123 @@ func TestEdgeMoveKeepsGuards(t *testing.T) {
 	decideClock.advance(300 * time.Millisecond)
 	send(t, m, dkey("1"))
 	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+}
+
+// Ruling 68: a key held across a refresh-caused change never answers the
+// new ticket, whatever the delay before the key starts repeating: the press
+// that uses up the change starts the quiet period.
+func TestHeldKeyWithRepeatDelayAcrossRefreshChange(t *testing.T) {
+	for _, delay := range []time.Duration{375, 500, 660} {
+		for _, mode := range []model.Mode{model.ModeAssume, model.ModeBlocking} {
+			name := fmt.Sprintf("%s, first repeat at %dms", mode, delay)
+			src := &fakeDecideSource{}
+			ts := []model.Ticket{ticket(1, mode, model.ReversCheap), ticket(2, mode, model.ReversCheap)}
+			src.set(ts...)
+			m := newDecide(t, src, popup)
+			src.set(ts[1]) // D-1 withdrawn
+			m = reload(t, m)
+			decideClock.advance(10 * time.Millisecond)
+			m = send(t, m, dkey("enter")) // the key goes down
+			decideClock.advance(delay*time.Millisecond - repeatEvery)
+			m = holdEnter(t, m, 2*time.Second)
+			if got := src.calls(); len(got) != 0 {
+				t.Errorf("%s: answered during the hold: %+v", name, got)
+			}
+			if s := lastLine(m); s != "queue changed; press again" {
+				t.Errorf("%s: status line = %q after the hold, want the notice", name, s)
+			}
+		}
+	}
+}
+
+// Ruling 68: after a refresh-caused change, an answer is accepted only
+// after a pause of the quiet period; a press sooner restarts it.
+func TestRefreshChangeStartsQuietPeriod(t *testing.T) {
+	changedQueue := func() (*fakeDecideSource, tea.Model) {
+		src := &fakeDecideSource{}
+		ts := assumeTickets(2)
+		src.set(ts...)
+		m := newDecide(t, src, popup)
+		src.set(ts[1]) // D-1 withdrawn
+		m = reload(t, m)
+		decideClock.advance(keyGap)
+		return src, send(t, m, dkey("1")) // ignored: uses up the change
+	}
+	d2 := answerCall{"D-2", model.Answer{Key: "A", Via: model.AnsweredPopup}}
+
+	src, m := changedQueue()
+	wantCalls(t, src)
+	decideClock.advance(750 * time.Millisecond)
+	send(t, m, dkey("1"))
+	wantCalls(t, src, d2)
+
+	src, m = changedQueue()
+	for _, d := range []time.Duration{300, 500} { // the second lands after the first period would have ended
+		decideClock.advance(d * time.Millisecond)
+		m = send(t, m, dkey("1"))
+		if s := lastLine(m); s != "queue changed; press again" {
+			t.Errorf("+%dms: status line = %q, want the notice", d, s)
+		}
+	}
+	wantCalls(t, src)
+	decideClock.advance(750 * time.Millisecond)
+	send(t, m, dkey("1"))
+	wantCalls(t, src, d2)
+}
+
+// Ruling 68: the Enter that would stage reasoning typed for a replaced
+// ticket uses up the change, so one press after the quiet period acts.
+func TestDroppedStagingEnterUsesUpChange(t *testing.T) {
+	src := &fakeDecideSource{}
+	ts := assumeTickets(2)
+	src.set(ts...)
+	m := newDecide(t, src, popup)
+	m = dpress(t, m, "r", "for D-1")
+	src.set(ts[1])
+	m = reload(t, m)
+	m = dpress(t, m, "enter")
+	if s := lastLine(m); s != "queue changed; press again" {
+		t.Errorf("status line = %q, want the notice", s)
+	}
+	decideClock.advance(300 * time.Millisecond)
+	m = send(t, m, dkey("1")) // in the quiet period the dropped Enter started
+	wantCalls(t, src)
+	decideClock.advance(750 * time.Millisecond)
+	send(t, m, dkey("1"))
+	wantCalls(t, src, answerCall{"D-2", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+
+	src = &fakeDecideSource{}
+	src.set(ts...)
+	m = newDecide(t, src, popup)
+	m = dpress(t, m, "r", "for D-1")
+	src.set(ts[1])
+	m = reload(t, m)
+	m = dpress(t, m, "enter")
+	decideClock.advance(750 * time.Millisecond)
+	send(t, m, dkey("1")) // two presses in all
+	wantCalls(t, src, answerCall{"D-2", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+}
+
+// Ruling 68: a submission dropped for a replaced ticket starts the quiet
+// period, so the repeats of the Enter that submitted it neither open a
+// prompt for the new ticket nor send.
+func TestDroppedSubmissionStartsQuietPeriod(t *testing.T) {
+	for _, delay := range []time.Duration{375, 500, 660} {
+		src := &fakeDecideSource{}
+		ts := []model.Ticket{ticket(1, model.ModeBlocking, model.ReversCheap), ticket(2, model.ModeBlocking, model.ReversCheap)}
+		src.set(ts...)
+		m := newDecide(t, src, popup)
+		m = dpress(t, m, "1") // the reasoning prompt for D-1
+		src.set(ts[1])
+		m = reload(t, m)
+		m = dpress(t, m, "enter") // dropped; the key stays down
+		decideClock.advance(delay*time.Millisecond - repeatEvery)
+		m = holdEnter(t, m, 2*time.Second)
+		if got := src.calls(); len(got) != 0 {
+			t.Errorf("first repeat at %dms: answered during the hold: %+v", delay, got)
+		}
+		if s := lastLine(m); s != "queue changed; press again" {
+			t.Errorf("first repeat at %dms: status line = %q, want the notice and no prompt", delay, s)
+		}
+	}
 }
