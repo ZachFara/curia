@@ -86,6 +86,13 @@ Rules for the toolchain:
 - **Any test or code that runs `git` must drop git's repository-local `GIT_*` variables** (`gitEnv` in `cmd/curia/git.go`). lefthook's pre-commit exports `GIT_DIR`, so an unguarded `git init` in a test acts on the real repository.
 - **GitHub Actions outages happen.** If a PR shows no checks for a long time, look at githubstatus.com before suspecting the code; never merge without the check.
 
+- **An ended session comes back on real activity** (prompt, tool, notification, stop); only `SubagentStop` and `SessionEnd` are ignored while ended. A session's first event of any kind gets SessionStart's treatment. `idle_prompt` and `auth_success` notifications change no state.
+- **Reconcile compares a session's start with the tmux server's start** (`tmux.Pane.ServerStart`), because a restarted server reuses pane ids.
+- **tmux only runs `pane-focus-in` when `focus-events` is on**; the snippet turns it on. `display-message -p` never starts `#()` jobs (only an attached client does). `set-hook -R` runs a hook at once, which is useful in headless tests. Double-quoted tmux strings expand `$VAR` and treat `\` as an escape; single-quoted strings have no escapes.
+- **gosec G302/G306 apply to tests too**: use a 0400 fixture, or the `/bin/sh` symlink trick for a fake executable.
+- **cobra keeps `--help` set on a command after a test runs it**; reset it in cleanup.
+- **Latency gates** are measured over a sequential pass with hundreds of samples and file handles (not pipes) for the child's stdio, so they measure the binary and not the test harness.
+
 ## Owner's rules (verbatim)
 
 The sections below are copied verbatim from the owner's orchestrator prompt. In them, "you" is the orchestrator and "me" is the owner.

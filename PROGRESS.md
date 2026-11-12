@@ -4,8 +4,10 @@ This file mirrors the plan for humans; it does not replace it. Task order, inter
 
 ## Status
 
-- **Phase 1 (setup): merged** to `main` as PR #1. `main` is protected (PRs required, `check` required, no force pushes, admins included).
-- **Phase 2: in progress** on integration branch `plan-1`. Waves 1 and 2 merged (Tasks 1, 2, 3, 4, 6, 10; PRs #2 to #7). Wave 3 merged (Task 5, PR #8). Wave 4 merged (Tasks 7 and 8, PRs #10 and #9). Wave 5 merged (Task 9, PR #11). Wave 6 merged (Task 11, PR #12). All eleven tasks are in `plan-1`. `deadcode ./...` without `-test` reports only `tmux.Fake` (the deliberate test double). The final whole-branch review (Fable) found the branch ready after one fix wave: 2 Critical and 6 Important cross-task findings, all reproduced with the built binary on an isolated tmux server. The fix wave is in progress on `fix/plan1-final-review`.
+- **Plan 1 (Foundation): complete.** All eleven tasks, the final whole-branch review and its fix wave are merged into `plan-1` (PRs #2 to #13). The fix-wave re-review found every finding addressed and nothing new at Critical or Important level.
+- `deadcode ./...` without `-test` reports only `tmux.Fake`, the deliberate test double.
+- The owner (2026-11-11) authorised the orchestrator to merge its own PRs, including `plan-1` into `main`, and to write and execute Plan 2 and later plans. An isolated live check (private tmux server, temp HOME) is authorised; the real `curia install` stays with the owner.
+- Not yet proven against a live Claude Code and tmux setup on the owner's machine.
 
 ## Plan 1 waves
 
@@ -70,7 +72,10 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 13. Two tmux servers on different sockets can both have a `%1`; telling them apart needs a `tmux_server` column (restore plan).
 14. `curia install` records the resolved binary path; an upgrade that changes the path orphans the old hook entries (see Ruling 13). Decide at packaging time whether to match any `curia hook <Event>` entry.
 15. SQLite runs with the default `synchronous=FULL`; unmeasured on Linux. Consider `NORMAL` if hook latency is a problem there.
-7. No LICENSE file yet although the repo is public; the spec leaves AGPL-3.0 or MIT open. Owner to decide.
+16. A `#` or `%` in the binary path is not escaped for tmux formats in the snippet (hooks in `settings.json` are unaffected). `curia install` should refuse or warn on such a path.
+17. A session waiting on a permission prompt is ended and hidden when a background `claude -p` starts in its pane, until its next event (Ruling 27 restores it only then).
+18. `SubagentStop` on an ended session is ignored, so `subagents_active` can read high after a resume.
+7. No LICENSE file: the owner chose to leave it undecided (2026-11-11).
 
 ## Rulings
 
@@ -115,6 +120,8 @@ Format: Ruling: what — why — cost if wrong.
 31. Ruling (amends the spec's F1 table): a Notification whose `notification_type` is `idle_prompt` or `auth_success` changes no state — Claude Code also notifies after about 60 seconds of idle, which would turn every finished session red — if the field differs in the installed Claude Code the old behaviour remains; the owner confirms in the live check.
 32. Ruling: the fix wave is one Opus agent on `fix/plan1-final-review` with a PR into `plan-1` and one scoped re-review on Fable — the skill's single fix wave — none.
 
+31a. Ruling (addition to 31): a session first seen on an `idle_prompt` or `auth_success` Notification is recorded as idle with no last update — a row needs a state and idle is what such a session is — none.
+
 ## Ledger
 
 One line per task: wave, worktree, branch, status.
@@ -133,9 +140,32 @@ One line per task: wave, worktree, branch, status.
 
 ## Next steps
 
-1. Finish the fix wave, one scoped re-review, merge into `plan-1`.
-2. Open the PR from `plan-1` to `main` with the full list of rulings.
-3. Owner: run the live check from Task 11 Step 5 (`curia install`, three real sessions) before merging to `main`. Confirm in it: the window marker clears on focus; a nested `claude -p` does not hide its parent; an idle session does not turn `waiting` after a minute. `curia install` edits `~/.tmux.conf`, which chezmoi manages, so run `chezmoi re-add` afterwards.
+1. Merge `plan-1` into `main` (owner-authorised).
+2. Isolated live check; fix what it finds through reviewed PRs.
+3. Write Plan 2 (Decisions), merge it as a docs PR, make the shared-file setup changes, execute it in waves on `plan-2`.
+4. Owner: run `curia install` on the real machine and the three-session check; add Go 1.26 to PATH.
+
+## Plan 1 results by task
+
+Cost is given as subagent tokens (implementer plus its reviewers, thousands), from the harness's own counts; cost-lens was not run.
+
+| Task | Implementer | Reviewer | Fix rounds | Tokens (k) | Notes |
+| --- | --- | --- | --- | --- | --- |
+| 1 Scaffold, types, config | Sonnet | Sonnet | 0 | 91 | clean first time |
+| 2 Store | Opus | Opus | 1 | 300 | review found the lost-update gap; Rulings 14, 15 |
+| 3 State machine | Sonnet | Sonnet | 0 | 95 | clean first time |
+| 4 Transcript reader | Sonnet | Sonnet | 1 | 160 | text-across-lines and tail window; Rulings 10, 11 |
+| 5 Hook command | Opus | Opus | 1 | 357 | git errors unlogged; test hit the real repo once |
+| 6 tmux adapter | Sonnet | Sonnet | 1 | 151 | `%` strftime expansion in display-message |
+| 7 Fleet, ls, status, next | Opus (was Sonnet) | Opus | 0 | 232 | clean; pre-review rebase and Ruling 20 |
+| 8 Attention markers | Sonnet | Sonnet | 1 | 190 | plus a pre-review change (Ruling 19) |
+| 9 Dashboard | Opus | Opus | 1 | 345 | stale rows could be killed |
+| 10 Install | Sonnet | Sonnet | 1 | 179 | symlink clobber, backup overwrite |
+| 11 End-to-end replay | Opus | Opus | 1 | 354 | blocked once on the latency gate (Ruling 26) |
+| Setup (Phase 1) | Opus | orchestrator | 0 | 165 | |
+| Final review, fix wave, re-review | Opus fixer | Fable | 1 wave | 712 | 2 Critical, 6 Important, all cross-task |
+
+What this suggests for the next plan: Sonnet was enough for single-package tasks with exact signatures (1, 3, 4, 6, 8, 10), but four of those six needed a fix round for behaviour the plan did not spell out. Every Opus task except 7 also needed one. The findings that mattered most (focus-events, nested sessions, restart ghosts) were cross-task and only the whole-branch review with a live binary found them, so the next plan should run a live smoke check per wave, not only at the end.
 
 ## Deferred minors (for the final review)
 
@@ -150,3 +180,4 @@ One line per task: wave, worktree, branch, status.
 - Task 8: each `Apply` re-lists all live sessions; `seen` stops at the first failing window.
 - Task 9: `internal/ui` duplicates `ls.go`'s text cleaner and `age`; the kill confirmation does not re-check that the row is still live; the filter matches the full repo path while the cell shows the basename; `ls` table should show the repo basename too (Ruling 22).
 - Task 11: SessionStart starts three processes (tmux and two git commands) and takes 15 to 20 ms at the median, close to the 20 ms budget; its tail is the main risk to the e2e latency gate on a loaded machine.
+- Final fix wave: a server already carrying the old unmarked badge gets one duplicate on the first re-source after upgrade; a failed keyed read in `hook.Run` drops that event's session update; a watchdog that fires before the log opens exits without a log line.
