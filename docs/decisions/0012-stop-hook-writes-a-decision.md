@@ -23,5 +23,6 @@ Plan 1's hook never wrote to stdout. Spec F7 delivers an answer to an agent that
 ## Consequences
 
 - A duplicate blocked stop or a line typed twice cannot happen; a rare lost delivery can, and the agent can recover it.
-- `cmd/curia/hook.go` prints the line under the same mutex as its watchdog; a claim made after the watchdog fired is logged as `delivery claimed but not printed`.
+- `cmd/curia/hook.go` prints the line immediately after `hook.Run` returns, before any tmux call, under the same mutex as its watchdog; if the watchdog has already ended the run, nothing is printed and that delivery is lost (`check_decision` still returns the answer).
+- The Stop hook's claim runs inside a savepoint: if it fails, nothing is claimed and the session update still commits.
 - Claude Code ends the turn after 8 consecutive blocked stops; one Stop blocks at most once however many answers were waiting.
