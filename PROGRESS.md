@@ -101,7 +101,7 @@ Dependencies (plan section 7): 6 and 7 need 1 and 2; 8 needs 1, 2, 3; 9 needs 2,
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 17 | End-to-end acceptance (runs after Tasks 16, 18 and 19) | Opus (expected, confirmed at dispatch) | Hand-written fixtures in `testdata/decisions/` and golden files in `e2e/testdata/decisions/` (never generated from program output); `TestDecisionsEndToEnd` (script steps 1 to 11, private tmux server, MCP clients over real pipes) and `TestStopHookLatencyWithTickets` (at least 400 sequential processes, p95 < 50 ms) pass; `make check` passes. **Plan-level criteria (orchestrator):** `deadcode ./...` without `-test` on `plan-2` reports only deliberate test doubles (`tmux.Fake`); the isolated live check confirms the items plan section 14 marks for it. | not started; after 16, 18 and 19 |
+| 17 | End-to-end acceptance (runs after Tasks 16, 18 and 19) | Opus (expected, confirmed at dispatch) | Hand-written fixtures in `testdata/decisions/` and golden files in `e2e/testdata/decisions/` (never generated from program output); `TestDecisionsEndToEnd` (script steps 1 to 11, private tmux server, MCP clients over real pipes) and `TestStopHookLatencyWithTickets` (at least 400 sequential processes, p95 < 50 ms) pass; `make check` passes. **Plan-level criteria (orchestrator):** `deadcode ./...` without `-test` on `plan-2` reports only deliberate test doubles (`tmux.Fake`); the isolated live check confirms the items plan section 14 marks for it. | merged (PR #36), Opus, 0 fix rounds |
 
 ## Plan 2 smoke checks
 
