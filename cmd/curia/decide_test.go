@@ -38,9 +38,15 @@ func decideHome(t *testing.T, specs ...decisionsSpec) (string, *tmux.Fake) {
 	seedSessions(t, db, decideSessionS1())
 	fake := useFakeTmux(t)
 	fake.Panes = []tmux.Pane{{ID: "%1", Session: "work", WindowID: "@1", ServerStart: at(8, 0)}}
+	fake.Screen = decideIdleScreen
 	decideResetFlags(t)
 	return db, fake
 }
+
+// decideIdleScreen is the bottom of Claude Code's screen with its input
+// prompt empty, the only screen an answer is typed into (Ruling 85).
+var decideIdleScreen = "✻ Cooked for 7s\n\n" + strings.Repeat("─", 80) + "\n❯\u00a0\n" +
+	strings.Repeat("─", 80) + "\n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
 
 // decideResetFlags restores the decide flag variables after the test.
 func decideResetFlags(t *testing.T) {
@@ -481,6 +487,7 @@ func decidePartialTmux(t *testing.T) *tmux.Fake {
 	fake := useFakeTmux(t)
 	fake.Panes = []tmux.Pane{{ID: "%1", Session: "work", WindowID: "@1", ServerStart: at(8, 0)}}
 	fake.SendKeysErr = tmux.ErrPartialSend
+	fake.Screen = decideIdleScreen
 	return fake
 }
 

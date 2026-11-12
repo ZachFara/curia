@@ -123,8 +123,9 @@ type delivery struct {
 // An answer is typed only into the pane of a session that, after
 // reconciling with the live panes and inside store.ClaimTyping's
 // transaction, is idle or needs_decision with no subagent running and no
-// earlier typed line that may be unsubmitted; the only text typed is
-// decision.TypedMessage. A SendKeys error wrapping tmux.ErrPartialSend
+// earlier typed answer unconfirmed, and then only when a capture of the pane
+// taken just before typing shows Claude Code's empty input prompt (Ruling
+// 85); the only text typed is decision.TypedMessage. A SendKeys error wrapping tmux.ErrPartialSend
 // leaves the claim in place, since the line may be in the prompt; any other
 // SendKeys error requeues the answer. Then the attention markers of the
 // asking session's window and of every window Reconcile changed are
@@ -174,8 +175,41 @@ func (r *delivery) deliver(ctx context.Context, d model.Decision) model.Outcome 
 	return r.typeLine(ctx, claimed, sess)
 }
 
-// typeLine types claimed answer d into the pane of sess.
+// promptNotes say why a capture of the agent's pane refused typing
+// (Ruling 85). Nothing was typed in any of these cases.
+var promptNotes = map[promptState]string{
+	promptUnknown:   "prompt not recognized (Claude Code's screen may have changed); nothing typed",
+	promptDraft:     "prompt has a draft; nothing typed",
+	promptDialog:    "a dialog or menu is open in the agent's pane; nothing typed",
+	promptBusy:      "agent's pane shows a running turn; nothing typed",
+	promptSubagents: "agent is waiting for background subagents; nothing typed",
+}
+
+// paneRefusal captures the pane of sess just before typing and returns why
+// it must not be typed into, or "" when it shows Claude Code's empty input
+// prompt (Ruling 85).
+func (r *delivery) paneRefusal(ctx context.Context, d model.Decision, sess model.Session) string {
+	cctx, cancel := context.WithTimeout(ctx, tmuxTimeout)
+	screen, err := r.tm.CapturePane(cctx, sess.Pane)
+	cancel()
+	if err != nil {
+		r.log.Warn("deliver: could not read the agent's pane; not typing", "id", d.ID, "pane", sess.Pane, "err", err.Error())
+		return "could not read the agent's pane; nothing typed"
+	}
+	state := readPrompt(screen)
+	if state == promptEmpty {
+		return ""
+	}
+	r.log.Info("deliver: not typing into the agent's pane", "id", d.ID, "pane", sess.Pane, "why", promptNotes[state])
+	return promptNotes[state]
+}
+
+// typeLine types claimed answer d into the pane of sess, once a capture of
+// the pane shows an empty input prompt.
 func (r *delivery) typeLine(ctx context.Context, d model.Decision, sess model.Session) model.Outcome {
+	if why := r.paneRefusal(ctx, d, sess); why != "" {
+		return r.requeue(ctx, d, why)
+	}
 	err := r.tm.SendKeys(ctx, sess.Pane, decision.TypedMessage(d))
 	switch {
 	case err == nil:
@@ -187,13 +221,18 @@ func (r *delivery) typeLine(ctx context.Context, d model.Decision, sess model.Se
 		return model.Outcome{Decision: d, Note: partialNote(d, sess)}
 	}
 	r.log.Warn("deliver: typing failed", "id", d.ID, "pane", sess.Pane, "err", err.Error())
-	// Nothing was typed: undo the claim even if ctx ran out while typing,
-	// or the answer would read as delivered and no path would deliver it.
+	return r.requeue(ctx, d, "typing failed")
+}
+
+// requeue undoes the typing claim of d, after which nothing was typed, for
+// the reason why. It runs even if ctx ran out, or the answer would read as
+// delivered and no path would deliver it.
+func (r *delivery) requeue(ctx context.Context, d model.Decision, why string) model.Outcome {
 	qctx, cancel := settled(ctx, settleTimeout)
 	defer cancel()
 	if rerr := r.st.RequeueDelivery(qctx, d.ID); rerr != nil {
 		r.log.Warn("deliver: requeue failed; the answer reads as delivered", "id", d.ID, "err", rerr.Error())
-		return model.Outcome{Decision: d, Note: "typing failed and the answer could not be queued again; " + askCheck(d.ID)}
+		return model.Outcome{Decision: d, Note: why + " and the answer could not be queued again; " + askCheck(d.ID)}
 	}
 	r.log.Info("deliver: answer queued again", "id", d.ID)
 	stored, found, err := r.st.GetDecision(qctx, d.ID)
@@ -201,9 +240,9 @@ func (r *delivery) typeLine(ctx context.Context, d model.Decision, sess model.Se
 		r.log.Warn("deliver: re-read after requeue", "id", d.ID, "found", found, "err", errText(err))
 		// The requeue went through: report the row it wrote.
 		d.Delivery, d.DeliveredVia, d.DeliveredAt = model.DeliveryQueued, "", time.Time{}
-		return model.Outcome{Decision: d, Note: queuedNote("typing failed", d)}
+		return model.Outcome{Decision: d, Note: queuedNote(why, d)}
 	}
-	return model.Outcome{Decision: stored, Note: queuedNote("typing failed", d)}
+	return model.Outcome{Decision: stored, Note: queuedNote(why, d)}
 }
 
 // errText is err's text, or "" for nil.

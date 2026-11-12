@@ -36,6 +36,12 @@ const (
 	maxSocketPath = 100
 )
 
+// claudePrompt is the bottom of Claude Code's screen with its input prompt
+// empty (as captured from Claude Code 2.1.323): a rule, "❯" and a no-break
+// space, a rule and the permission mode line.
+var claudePrompt = "✻ Cooked for 7s\n\n" + strings.Repeat("─", 80) + "\n❯\u00a0\n" +
+	strings.Repeat("─", 80) + "\n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+
 // The sessions of the script, one per pane, and the one of the latency pass.
 const (
 	sessionS1      = "11111111-1111-4111-8111-111111111111"
@@ -570,9 +576,17 @@ func startTmux(t *testing.T, home string, paneFiles ...string) *tmuxServer {
 		t.Fatalf("tmux socket path %s is %d bytes, over %d", sock, len(sock), maxSocketPath)
 	}
 	t.Cleanup(func() { _, _ = s.run("kill-server") })
-	// argv after -- runs with no shell; the file is an argument, never
-	// part of the script.
-	pane := func(file string) []string { return []string{"--", "/bin/sh", "-c", `exec cat > "$1"`, "sh", file} }
+	// argv after -- runs with no shell; the file and the screen are
+	// arguments, never part of the script. Each pane draws Claude Code's
+	// empty input prompt, the only screen curia decide types into (Ruling
+	// 85), and draws it again after each line it records.
+	pane := func(file string) []string {
+		return []string{
+			"--", "/bin/sh", "-c",
+			`: > "$1"; while :; do printf '\033[H\033[2J%s' "$2"; IFS= read -r line || exit 0; printf '%s\n' "$line" >> "$1"; done`,
+			"sh", file, claudePrompt,
+		}
+	}
 	s.mustRun(t, append([]string{"new-session", "-d", "-s", "curia", "-x", "200", "-y", "50"}, pane(paneFiles[0])...)...)
 	for _, f := range paneFiles[1:] {
 		s.mustRun(t, append([]string{"new-window", "-d", "-t", "curia"}, pane(f)...)...)

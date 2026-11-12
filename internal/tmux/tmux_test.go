@@ -842,3 +842,42 @@ func TestBellUnknownPaneFails(t *testing.T) {
 		t.Fatal("Bell(%99): want an error for a missing pane")
 	}
 }
+
+func TestCapturePaneRefusesBadPane(t *testing.T) {
+	for _, pane := range []string{"", "%", "1", "%1;kill-server", "t:0"} {
+		c, r := recordingClient()
+		if _, err := c.CapturePane(context.Background(), pane); err == nil {
+			t.Errorf("CapturePane(%q): want an error", pane)
+		}
+		if len(r.runs) != 0 {
+			t.Errorf("CapturePane(%q) ran tmux: %v", pane, r.runs)
+		}
+	}
+}
+
+func TestCapturePaneInRealTmux(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	id, err := tm("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "t:", "/bin/sh", "-c", `printf '%s\n' "$1"; exec cat`, "sh", "❯ draft #{pane_id} %H")
+	if err != nil {
+		t.Fatalf("new-window: %v: %s", err, id)
+	}
+	pane := strings.TrimSpace(id)
+	c := NewExec(realSocket)
+	var screen string
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(screen, "❯ draft"); time.Sleep(20 * time.Millisecond) {
+		if screen, err = c.CapturePane(ctx, pane); err != nil {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("CapturePane = %q, want the printed line", screen)
+		}
+	}
+	if !strings.Contains(screen, "❯ draft #{pane_id} %H\n") || strings.Contains(screen, "\x1b") {
+		t.Errorf("CapturePane = %q, want the line as printed, with no escapes", screen)
+	}
+	if _, err := c.CapturePane(ctx, "%99"); err == nil {
+		t.Error("CapturePane(%99): want an error for a missing pane")
+	}
+}

@@ -45,6 +45,9 @@ type Client interface {
 	// submitted; the caller must not retry by typing again. Any other error
 	// means nothing was typed, as far as tmux reported.
 	SendKeys(ctx context.Context, pane, text string) error
+	// CapturePane returns the visible text of the pane, one line per row
+	// and no escape sequences. It refuses a pane that is not a pane id.
+	CapturePane(ctx context.Context, pane string) (string, error)
 	// Bell rings the pane's bell.
 	Bell(ctx context.Context, pane string) error
 }

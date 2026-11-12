@@ -226,6 +226,13 @@ func (c *execClient) runFor(ctx context.Context, timeout time.Duration, args ...
 	return err
 }
 
+func (c *execClient) CapturePane(ctx context.Context, pane string) (string, error) {
+	if !paneIDPattern.MatchString(pane) {
+		return "", fmt.Errorf("tmux capture-pane: refusing target %q: not a pane id", pane)
+	}
+	return c.run(ctx, "capture-pane", "-p", "-t", pane)
+}
+
 // ttyPattern matches a pane's tty as tmux reports it: a pty, named
 // /dev/ttysN on macOS and /dev/pts/N on Linux. An unknown pane yields junk
 // with exit 0, so nothing else is ever opened (Ruling 55).
