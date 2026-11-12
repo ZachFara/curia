@@ -33,10 +33,14 @@ BOUNDARY_LINTERS   := depguard
 # Every tracked or untracked-but-not-ignored Go file (skips .scratch/ etc.).
 GO_FILES = $$(git ls-files --cached --others --exclude-standard -- '*.go')
 
-.PHONY: check tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout test build clean
+.PHONY: check check-gates tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout test build clean
 
 ## check: run every gate, in order. This is what the hook and CI run.
-check: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout test
+check:
+	@scripts/with-test-lock.sh $(MAKE) --no-print-directory check-gates
+
+## check-gates: the gates themselves; `check` runs them under the worktree lock
+check-gates: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout test
 	@echo "==> make check: all gates passed"
 
 ## tools: install the pinned tool versions into .bin/
