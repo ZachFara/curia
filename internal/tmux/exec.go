@@ -64,6 +64,22 @@ func (c *execClient) PaneInfo(ctx context.Context, pane string) (Pane, error) {
 	return panes[0], nil
 }
 
+// focusFormat is what PaneFocused asks about a pane. The pane id tells a real
+// pane from an unknown target, which tmux expands to empty fields.
+const focusFormat = "#{pane_id}\t#{pane_active}\t#{window_active}\t#{session_attached}"
+
+func (c *execClient) PaneFocused(ctx context.Context, pane string) (bool, error) {
+	out, err := c.run(ctx, "display-message", "-p", "-t", pane, focusFormat)
+	if err != nil {
+		return false, err
+	}
+	f := strings.Split(strings.TrimSuffix(out, "\n"), "\t")
+	if len(f) != 4 || f[0] == "" {
+		return false, fmt.Errorf("tmux pane focus: unexpected answer %q for %q", out, pane)
+	}
+	return f[1] == "1" && f[2] == "1" && f[3] != "0", nil
+}
+
 func (c *execClient) SwitchTo(ctx context.Context, pane string) error {
 	_, err := c.run(ctx, "switch-client", "-t", pane)
 	return err

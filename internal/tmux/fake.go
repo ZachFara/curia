@@ -7,10 +7,12 @@ import (
 )
 
 // Fake is an in-memory Client for tests of packages that use tmux. Set Panes
-// before use; every call is appended to Calls as "Method arg arg ...".
+// before use, and Focused for PaneFocused's answer; every call is appended to
+// Calls as "Method arg arg ...".
 type Fake struct {
-	Panes []Pane
-	Calls []string
+	Panes   []Pane
+	Focused bool
+	Calls   []string
 }
 
 var _ Client = (*Fake)(nil)
@@ -34,6 +36,12 @@ func (f *Fake) PaneInfo(_ context.Context, pane string) (Pane, error) {
 		}
 	}
 	return Pane{}, fmt.Errorf("fake tmux: no pane %q", pane)
+}
+
+// PaneFocused records the call and returns Focused.
+func (f *Fake) PaneFocused(_ context.Context, pane string) (bool, error) {
+	f.record("PaneFocused %s", pane)
+	return f.Focused, nil
 }
 
 // SwitchTo records the call.

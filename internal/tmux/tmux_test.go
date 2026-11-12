@@ -76,6 +76,13 @@ func TestFake(t *testing.T) {
 	if _, err := c.PaneInfo(ctx, "%9"); err == nil {
 		t.Fatal("want error for unknown pane")
 	}
+	if focused, err := c.PaneFocused(ctx, "%0"); err != nil || focused {
+		t.Fatalf("PaneFocused = %v, %v; want the unset answer, false", focused, err)
+	}
+	f.Focused = true
+	if focused, _ := c.PaneFocused(ctx, "%1"); !focused {
+		t.Fatal("PaneFocused = false after setting Focused")
+	}
 	_ = c.SwitchTo(ctx, "%0")
 	_ = c.SetWindowOption(ctx, "@0", "@curia", "busy")
 	_ = c.DisplayMessage(ctx, "hi")
@@ -84,7 +91,7 @@ func TestFake(t *testing.T) {
 		t.Fatalf("Panes after kill = %v", f.Panes)
 	}
 	want := []string{
-		"ListPanes", "PaneInfo %1", "PaneInfo %9", "SwitchTo %0",
+		"ListPanes", "PaneInfo %1", "PaneInfo %9", "PaneFocused %0", "PaneFocused %1", "SwitchTo %0",
 		"SetWindowOption @0 @curia busy", "DisplayMessage hi", "KillPane %0",
 	}
 	if !reflect.DeepEqual(f.Calls, want) {
@@ -188,4 +195,96 @@ func checkHeadlessAndKill(ctx context.Context, t *testing.T, c Client, tm func(.
 	if panes, _ = c.ListPanes(ctx); len(panes) != 1 {
 		t.Fatalf("after kill panes = %+v", panes)
 	}
+}
+
+// focusServers starts a server with no configuration on its own socket and,
+// when attach is called, a second one whose only pane runs a client attached
+// to the first, so the client has a real pty. Neither reads ~/.tmux.conf, so
+// no user hook (such as Curia's own pane-focus-in) runs. It returns a helper
+// for raw tmux commands against the first server and the attach func.
+func focusServers(ctx context.Context, t *testing.T) (tm func(args ...string) (string, error), attach func()) {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH")
+	}
+	inner, outer := realSocket+"-focus", realSocket+"-outer"
+	on := func(socket string, args ...string) (string, error) {
+		out, err := exec.CommandContext(ctx, "tmux", append([]string{"-L", socket, "-f", os.DevNull}, args...)...).CombinedOutput()
+		return string(out), err
+	}
+	t.Cleanup(func() {
+		for _, s := range []string{outer, inner} {
+			_ = exec.Command("tmux", "-L", s, "kill-server").Run()
+		}
+	})
+	for _, s := range []string{outer, inner} {
+		_, _ = on(s, "kill-server") // a leftover from an aborted run
+	}
+	if out, err := on(inner, "new-session", "-d", "-s", "t"); err != nil {
+		t.Fatalf("new-session: %v: %s", err, out)
+	}
+	tm = func(args ...string) (string, error) { return on(inner, args...) }
+	attach = func() {
+		t.Helper()
+		// The outer pane sets TMUX, which makes tmux refuse to attach.
+		client := "env -u TMUX tmux -L " + inner + " attach -t t"
+		if out, err := on(outer, "new-session", "-d", "-x", "80", "-y", "24", client); err != nil {
+			t.Fatalf("outer new-session: %v: %s", err, out)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if out, _ := tm("list-clients", "-F", "#{client_name}"); strings.TrimSpace(out) != "" {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("no client attached after 5s")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	return tm, attach
+}
+
+// TestPaneFocusedAgainstRealTmux: a pane is focused when it is the active
+// pane of the active window of a session with an attached client.
+func TestPaneFocusedAgainstRealTmux(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm, attach := focusServers(ctx, t)
+	c := NewExec(realSocket + "-focus")
+	first := paneID(t, tm, "t")
+	if out, err := tm("new-window", "-d", "-t", "t:"); err != nil {
+		t.Fatalf("new-window: %v: %s", err, out)
+	}
+	background := paneID(t, tm, "t:1")
+	focused := func(pane string, want bool) {
+		t.Helper()
+		if got, err := c.PaneFocused(ctx, pane); err != nil || got != want {
+			t.Errorf("PaneFocused(%s) = %v, %v; want %v", pane, got, err, want)
+		}
+	}
+
+	focused(first, false) // no client attached
+	attach()
+	focused(first, true)
+	focused(background, false) // not the active window
+	if out, err := tm("split-window", "-t", first); err != nil {
+		t.Fatalf("split-window: %v: %s", err, out)
+	}
+	focused(first, false) // no longer the active pane
+	focused(paneID(t, tm, "t:0"), true)
+	if _, err := c.PaneFocused(ctx, "%999"); err == nil {
+		t.Error("PaneFocused(%999): want an error for a missing pane")
+	}
+}
+
+// paneID returns the id of the active pane of target.
+func paneID(t *testing.T, tm func(...string) (string, error), target string) string {
+	t.Helper()
+	out, err := tm("display-message", "-p", "-t", target, "#{pane_id}")
+	if id := strings.TrimSpace(out); err == nil && id != "" {
+		return id
+	}
+	t.Fatalf("pane id of %s: %q, %v", target, out, err)
+	return ""
 }

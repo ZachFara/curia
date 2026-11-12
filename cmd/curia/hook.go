@@ -148,6 +148,7 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	if err != nil && sess.ID == "" {
 		return err // nothing was written
 	}
+	sess = seenIfFocused(ctx, client, st, before, sess, logger)
 	for _, w := range markerWindows(before, sess) {
 		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 		if aerr := attention.Apply(actx, client, st, w); aerr != nil {
@@ -156,6 +157,34 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 		cancel()
 	}
 	return err
+}
+
+// seenIfFocused marks sess's pane seen, and returns sess seen, when the event
+// is about to turn its window red while the user is looking at its pane
+// (Ruling 38): there is nothing to draw their attention to. It asks tmux only
+// then, so other events cost no tmux call. A failed check is logged and
+// counts as not focused.
+func seenIfFocused(ctx context.Context, client tmux.Client, st *store.Store, before beforeEvent, sess model.Session, logger *slog.Logger) model.Session {
+	if sess.Pane == "" || sess.TmuxWindow == "" || attention.Marker(sess) == "" || attention.Marker(before.prev) != "" {
+		return sess
+	}
+	fctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
+	defer cancel()
+	focused, err := client.PaneFocused(fctx, sess.Pane)
+	if err != nil {
+		logger.Warn("tmux pane focus", "pane", sess.Pane, "err", err.Error())
+		return sess
+	}
+	if !focused {
+		return sess
+	}
+	now := time.Now()
+	if err := st.MarkSeen(ctx, sess.Pane, now); err != nil {
+		logger.Error("hook mark focused pane seen", "pane", sess.Pane, "err", err.Error())
+		return sess
+	}
+	sess.SeenAt = now
+	return sess
 }
 
 // beforeEvent is what the store held, before hook.Run, about the windows an
