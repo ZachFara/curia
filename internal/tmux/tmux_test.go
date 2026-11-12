@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -104,15 +105,17 @@ func TestFake(t *testing.T) {
 // make check) never kill each other's servers.
 var realSocket = fmt.Sprintf("curia-test-%d", os.Getpid())
 
-// realTmux starts a throwaway server on its own socket (never the default
-// server) and returns a helper that runs raw tmux commands against it.
+// realTmux starts a throwaway server with no configuration on its own socket
+// (never the default server) and returns a helper that runs raw tmux commands
+// against it. -f /dev/null keeps the user's ~/.tmux.conf, which may hold
+// Curia's own hooks, out of the test server.
 func realTmux(ctx context.Context, t *testing.T) func(args ...string) (string, error) {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not on PATH")
 	}
 	tm := func(args ...string) (string, error) {
-		out, err := exec.CommandContext(ctx, "tmux", append([]string{"-L", realSocket}, args...)...).CombinedOutput()
+		out, err := exec.CommandContext(ctx, "tmux", append([]string{"-L", realSocket, "-f", os.DevNull}, args...)...).CombinedOutput()
 		return string(out), err
 	}
 	// Cleanup runs after the caller's deferred cancel, so it must not use ctx.
@@ -122,6 +125,30 @@ func realTmux(ctx context.Context, t *testing.T) func(args ...string) (string, e
 		t.Fatalf("new-session: %v: %s", err, out)
 	}
 	return tm
+}
+
+// TestRealTmuxReadsNoConfig: the test server must not read the user's tmux
+// configuration, which may hold Curia's own hooks pointing at the real store.
+// HOME and XDG_CONFIG_HOME point at a temp dir whose config would set an
+// option; it must stay unset.
+func TestRealTmuxReadsNoConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	for _, p := range []string{filepath.Join(home, ".tmux.conf"), filepath.Join(home, "tmux", "tmux.conf")} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("set -g @curia_conf_read yes\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	if out, _ := tm("show", "-gqv", "@curia_conf_read"); strings.TrimSpace(out) != "" {
+		t.Errorf("test server read a tmux config: @curia_conf_read = %q", out)
+	}
 }
 
 func TestExecAgainstRealTmux(t *testing.T) {
