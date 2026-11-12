@@ -70,7 +70,7 @@ func (f *fakeDecideSource) Answer(_ context.Context, id string, a model.Answer) 
 func (f *fakeDecideSource) set(ts ...model.Ticket) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.tickets = ts
+	f.tickets = slices.Clone(ts) // Answer deletes in place
 }
 
 func (f *fakeDecideSource) calls() []answerCall {
@@ -116,10 +116,39 @@ func assumeTickets(n int) []model.Ticket {
 
 var popup = ui.DecideOptions{Via: model.AnsweredPopup}
 
+// testClock is the clock of the model under test.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = t
+}
+
+func (c *testClock) advance(d time.Duration) { c.set(c.now().Add(d)) }
+
+// decideClock is the clock of every model newDecide returns; newDecide
+// sets it to decideNow.
+var decideClock testClock
+
+// keyGap is how far dpress moves the clock before each key: the pace of a
+// person reading, longer than the quiet period after an answer.
+const keyGap = time.Second
+
 // newDecide returns a decide view over src after its first refresh.
 func newDecide(t *testing.T, src *fakeDecideSource, opts ui.DecideOptions) tea.Model {
 	t.Helper()
-	m := ui.NewDecide(src, func() time.Time { return decideNow }, opts)
+	decideClock.set(decideNow)
+	m := ui.NewDecide(src, decideClock.now, opts)
 	return reload(t, m)
 }
 
@@ -194,10 +223,11 @@ func drive(t *testing.T, m tea.Model, cmd tea.Cmd) tea.Model {
 	return m
 }
 
-// dpress sends keys (see dkey) through send.
+// dpress sends keys (see dkey) through send, keyGap apart.
 func dpress(t *testing.T, m tea.Model, keys ...string) tea.Model {
 	t.Helper()
 	for _, k := range keys {
+		decideClock.advance(keyGap)
 		m = send(t, m, dkey(k))
 	}
 	return m
@@ -213,6 +243,18 @@ func wantCalls(t *testing.T, src *fakeDecideSource, want ...answerCall) {
 	if got := src.calls(); !slices.Equal(got, want) {
 		t.Errorf("Answer calls = %+v, want %+v", got, want)
 	}
+}
+
+// markedOptions are the lines of view drawn as the recommended option: a
+// number, a space and the mark.
+func markedOptions(view string) []string {
+	var out []string
+	for _, l := range strings.Split(view, "\n") {
+		if len(l) > 2 && l[0] >= '1' && l[0] <= '4' && l[1] == ' ' && l[2] == '*' {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func TestDecideListsTicketsInSourceOrder(t *testing.T) {
@@ -252,7 +294,7 @@ func TestDecideShowsSelectedTicket(t *testing.T) {
 		"answer within 12m to keep cache warm (rebuild ≈ $1.68)",
 		"costly · blocking · scope repo",
 		"The worker restarts often.",
-		"1  A  Postgres table", "2  B  Redis queue", "3  C  Files on disk",
+		"1  A  Postgres table", "2 *B  Redis queue", "3  C  Files on disk",
 		"one more table to migrate", "a new service to run",
 		"Redis is already deployed for caching.",
 	} {
@@ -260,10 +302,11 @@ func TestDecideShowsSelectedTicket(t *testing.T) {
 			t.Errorf("view lacks %q:\n%s", want, view)
 		}
 	}
-	for _, l := range strings.Split(view, "\n") {
-		if strings.Contains(l, "(recommended)") != strings.Contains(l, "Redis queue") {
-			t.Errorf("line %q: (recommended) must mark exactly the Redis queue option", l)
-		}
+	if got := markedOptions(view); !slices.Equal(got, []string{"2 *B  Redis queue"}) {
+		t.Errorf("marked options = %q, want only B", got)
+	}
+	if s := lastLine(newDecide(t, src, popup)); !strings.Contains(s, "enter=B recommended") {
+		t.Errorf("keys line %q does not name the key Enter sends", s)
 	}
 	if strings.Contains(view, "assumes:") {
 		t.Errorf("blocking ticket shows an assumption:\n%s", view)
@@ -378,9 +421,8 @@ func TestMovingDropsStaged(t *testing.T) {
 }
 
 func TestIrreversibleNeedsConfirmation(t *testing.T) {
-	tk := ticket(9, model.ModeBlocking, model.ReversIrreversible)
 	src := &fakeDecideSource{}
-	src.set(tk, tk) // the second copy stays queued after the first answer
+	src.set(ticket(9, model.ModeBlocking, model.ReversIrreversible), ticket(8, model.ModeBlocking, model.ReversIrreversible))
 	m := newDecide(t, src, popup)
 	m = dpress(t, m, "2", "enter")
 	wantCalls(t, src)
@@ -413,9 +455,9 @@ func TestIrreversibleFreeTextNeedsConfirmation(t *testing.T) {
 }
 
 func TestBlockingAnswerPromptsForReasoning(t *testing.T) {
-	tk := ticket(1, model.ModeBlocking, model.ReversCostly)
 	src := &fakeDecideSource{}
-	src.set(tk, tk, tk)
+	src.set(ticket(1, model.ModeBlocking, model.ReversCostly), ticket(2, model.ModeBlocking, model.ReversCostly),
+		ticket(3, model.ModeBlocking, model.ReversCostly))
 	m := newDecide(t, src, popup)
 	m = dpress(t, m, "1")
 	wantCalls(t, src)
@@ -427,7 +469,7 @@ func TestBlockingAnswerPromptsForReasoning(t *testing.T) {
 	wantCalls(t, src, want...)
 
 	m = dpress(t, m, "1", "enter")
-	want = append(want, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+	want = append(want, answerCall{"D-2", model.Answer{Key: "A", Via: model.AnsweredPopup}})
 	wantCalls(t, src, want...)
 
 	m = dpress(t, m, "1", "esc")
@@ -438,7 +480,7 @@ func TestBlockingAnswerPromptsForReasoning(t *testing.T) {
 
 	// Reasoning staged first: the answer is sent at once.
 	dpress(t, m, "r", "staged", "enter", "3")
-	want = append(want, answerCall{"D-1", model.Answer{Key: "C", Reasoning: "staged", Via: model.AnsweredPopup}})
+	want = append(want, answerCall{"D-3", model.Answer{Key: "C", Reasoning: "staged", Via: model.AnsweredPopup}})
 	wantCalls(t, src, want...)
 }
 
@@ -561,9 +603,6 @@ func TestOutcomeShownAndQueueRefreshed(t *testing.T) {
 		t.Errorf("answered ticket still queued:\n%s", m.View())
 	}
 
-	// The next ticket was never on screen when the key was pressed.
-	m = dpress(t, m, "1")
-	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "B", Via: model.AnsweredPopup}})
 	src.note = ""
 	m = dpress(t, m, "1")
 	if s := lastLine(m); s != "D-2 answered: A · delivered" {
@@ -608,21 +647,17 @@ func TestDecideSourceErrorKeepsTickets(t *testing.T) {
 func TestDecideTickRefreshes(t *testing.T) {
 	src := &fakeDecideSource{}
 	src.set(assumeTickets(2)...)
-	m := ui.NewDecide(src, func() time.Time { return decideNow }, popup)
+	m := ui.NewDecide(src, decideClock.now, popup)
 	m2, tick := m.Update(m.Init()())
 	if tick == nil {
 		t.Fatal("refresh scheduled no tick")
 	}
 	src.set(assumeTickets(1)...)
-	start := time.Now()
-	m2, refresh := m2.Update(tick())
+	m2, refresh := m2.Update(ui.DecideTick)
 	if refresh == nil {
 		t.Fatal("tick started no refresh")
 	}
 	m2, _ = m2.Update(refresh())
-	if d := time.Since(start); d < 900*time.Millisecond {
-		t.Errorf("tick fired after %v, want about a second", d)
-	}
 	if strings.Contains(m2.View(), "D-2") {
 		t.Errorf("tick did not re-read the source:\n%s", m2.View())
 	}
@@ -775,7 +810,7 @@ func TestDecideNarrowWidth(t *testing.T) {
 	m := newDecide(t, src, popup)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 30})
 	view := m.View()
-	for _, want := range []string{"1  A  label", "2  B  Redis queue (recommended)", "3  C  Files on disk", "4  superlon  x"} {
+	for _, want := range []string{"1  A  label", "2 *B  Redis queue", "3  C  Files on disk", "4  superlon  x"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("at 40x30 the options are not readable; lacks %q:\n%s", want, view)
 		}
@@ -907,4 +942,287 @@ func TestNoSecondAnswerWhileSending(t *testing.T) {
 	}
 	drive(t, m, answer)
 	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+}
+
+// Item 1: the answered ticket leaves the queue when its answer returns, not
+// when the next read lands.
+func TestAnsweredTicketLeavesAtOnce(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(assumeTickets(2)...)
+	m := newDecide(t, src, popup)
+	m, answer := m.Update(dkey("1"))
+	m, _ = m.Update(answer()) // the refresh it starts has not landed
+	if lines := strings.Split(m.View(), "\n"); lines[0] != "1 open · 0 blocking" || !strings.Contains(lines[1], "> D-2") {
+		t.Errorf("answered ticket still on screen:\n%s", m.View())
+	}
+	decideClock.advance(keyGap)
+	m, answer = m.Update(dkey("1"))
+	if answer == nil {
+		t.Fatal("no answer for D-2")
+	}
+	drive(t, m, answer)
+	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}},
+		answerCall{"D-2", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+}
+
+// Item 1: a read started before an answer returned, landing after it, does
+// not put the answered ticket back.
+func TestReadIssuedBeforeAnswerDropped(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(assumeTickets(2)...)
+	m := newDecide(t, src, popup)
+	m, read := m.Update(ui.DecideTick)
+	stale := read() // D-1 still open when read
+	m, answer := m.Update(dkey("1"))
+	m, _ = m.Update(answer())
+	m, _ = m.Update(stale)
+	if lines := strings.Split(m.View(), "\n"); lines[0] != "1 open · 0 blocking" || strings.Contains(lines[1], "D-1") {
+		t.Errorf("stale read put D-1 back:\n%s", m.View())
+	}
+}
+
+// Item 2: a confirmation is never given by a "y" in the same key message
+// that opened it.
+func TestBurstNeverConfirms(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(ticket(9, model.ModeAssume, model.ReversIrreversible))
+	m := newDecide(t, src, popup)
+	m = send(t, m, dkey("1y"))
+	wantCalls(t, src)
+	if s := lastLine(m); s != "answer D-9 with A? y sends, any other key cancels" {
+		t.Errorf("status line = %q, want the confirmation still asked", s)
+	}
+	m = send(t, m, dkey("yy")) // a burst while the prompt is open cancels it
+	wantCalls(t, src)
+	if s := lastLine(m); s != "answer canceled" {
+		t.Errorf("status line = %q, want the cancel", s)
+	}
+	m = dpress(t, m, "1")
+	dpress(t, m, "y")
+	wantCalls(t, src, answerCall{"D-9", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+}
+
+// Item 2: once a rune of a burst opens a prompt, the rest of the burst is
+// dropped.
+func TestBurstStopsAtPrompt(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(ticket(1, model.ModeBlocking, model.ReversCostly), ticket(2, model.ModeAssume, model.ReversCheap))
+	m := newDecide(t, src, popup)
+	m = send(t, m, dkey("1because"))
+	if s := lastLine(m); s != "reasoning for A (enter sends): _" {
+		t.Errorf("status line = %q, want an empty reasoning prompt", s)
+	}
+	m = dpress(t, m, "esc")
+	m = send(t, m, dkey("wj2"))
+	if s := lastLine(m); s != "answer (enter sends): _" {
+		t.Errorf("status line = %q, want an empty answer prompt", s)
+	}
+	wantCalls(t, src)
+}
+
+// longTicket has four options and more prose than fits a phone.
+func longTicket() model.Ticket {
+	tk := ticket(1, model.ModeAssume, model.ReversCheap)
+	tk.Question = strings.Repeat("Should the queue live in a much longer named place? ", 3)
+	tk.Context = strings.Repeat("context words go on and on here. ", 30)
+	tk.Rationale = strings.Repeat("because reasons ", 40)
+	tk.Options[1].Tradeoffs = strings.Repeat("tradeoff ", 30)
+	tk.Options = append(tk.Options, model.Option{Key: "D", Label: "Something else", Tradeoffs: "unknown"})
+	return tk
+}
+
+// Item 3: at 40x14 every option's line, with the mark, is drawn.
+func TestShortWindowKeepsOptions(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(longTicket(), ticket(2, model.ModeAssume, model.ReversCheap))
+	m := newDecide(t, src, popup)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 14})
+	view := m.View()
+	if n := len(strings.Split(view, "\n")); n > 14 {
+		t.Errorf("%d lines at height 14", n)
+	}
+	for _, want := range []string{"1  A  Postgres table", "2 *B  Redis queue", "3  C  Files on disk", "4  D  Something else"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("at 40x14 lacks %q:\n%s", want, view)
+		}
+	}
+	dpress(t, m, "4")
+	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "D", Via: model.AnsweredPopup}})
+}
+
+// Item 3: an option not drawn cannot be answered by its number, nor the
+// recommendation by Enter when it is not drawn.
+func TestOptionNotDrawnRefused(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(longTicket())
+	m := newDecide(t, src, popup)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 6}) // room for the question and option 1
+	view := m.View()
+	if !strings.Contains(view, "1  A  Postgres table") || strings.Contains(view, "2 *B") {
+		t.Fatalf("want only option 1 drawn:\n%s", view)
+	}
+	m = dpress(t, m, "2")
+	if s := lastLine(m); s != "option 2 not shown: window too short" {
+		t.Errorf("status line = %q", s)
+	}
+	m = dpress(t, m, "enter")
+	if s := lastLine(m); s != "enter=B not shown: window too short" {
+		t.Errorf("status line = %q", s)
+	}
+	wantCalls(t, src)
+	dpress(t, m, "1")
+	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+}
+
+// Item 4: a label cannot draw a second recommendation mark.
+func TestRecommendationMarkCannotBeForged(t *testing.T) {
+	tk := ticket(3, model.ModeAssume, model.ReversCheap)
+	tk.Options[0].Label = "Postgres (recommended) *A"
+	tk.Options[2].Label = "2 *C  (recommended)"
+	src := &fakeDecideSource{}
+	src.set(tk)
+	for _, w := range []int{0, 40} {
+		m := newDecide(t, src, popup)
+		if w > 0 {
+			m, _ = m.Update(tea.WindowSizeMsg{Width: w, Height: 30})
+		}
+		view := m.View()
+		if got := markedOptions(view); len(got) != 1 || !strings.HasPrefix(got[0], "2 *B  ") {
+			t.Errorf("width %d: marked options = %q, want only B", w, got)
+		}
+		if s := lastLine(m); !strings.Contains(s, "enter=B") {
+			t.Errorf("width %d: keys line %q does not name B", w, s)
+		}
+	}
+}
+
+// Item 5: a close asked for during an answer that fails is dropped, so the
+// refusal is seen.
+func TestCloseAfterFailedAnswerStaysOpen(t *testing.T) {
+	src := &fakeDecideSource{answerErr: errors.New("store: decision is not open")}
+	src.set(assumeTickets(1)...)
+	m := newDecide(t, src, popup)
+	m, answer := m.Update(dkey("1"))
+	m, _ = m.Update(dkey("q"))
+	m, cmd := m.Update(answer())
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Fatal("quit after a failed answer")
+		}
+	}
+	if s := lastLine(m); !strings.Contains(s, "store: decision is not open") {
+		t.Errorf("status line = %q, want the error", s)
+	}
+	if _, cmd = m.Update(dkey("q")); cmd == nil {
+		t.Error("q after the error did not quit")
+	}
+}
+
+// Ruling 63: after one's own answer, answer keys within the quiet period
+// are ignored, each restarting it.
+func TestOwnAnswerQuietPeriod(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(assumeTickets(2)...)
+	m := newDecide(t, src, popup)
+	m = send(t, m, dkey("1"))
+	decideClock.advance(800 * time.Millisecond)
+	send(t, m, dkey("1"))
+	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}},
+		answerCall{"D-2", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+
+	src = &fakeDecideSource{}
+	src.set(assumeTickets(2)...)
+	m = newDecide(t, src, popup)
+	m = send(t, m, dkey("1"))
+	for _, d := range []time.Duration{300, 700} { // the second lands after the first period would have ended
+		decideClock.advance(d * time.Millisecond)
+		m = send(t, m, dkey("1"))
+		if s := lastLine(m); s != "queue changed; press again" {
+			t.Errorf("+%dms: status line = %q, want the notice", d, s)
+		}
+	}
+	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+	decideClock.advance(800 * time.Millisecond)
+	send(t, m, dkey("1"))
+	if got := src.calls(); len(got) != 2 || got[1].id != "D-2" {
+		t.Errorf("calls = %+v, want D-2 answered after the quiet period", got)
+	}
+}
+
+// Ruling 63: a held, auto-repeating Enter answers only the first ticket.
+func TestHeldEnterAnswersOnlyFirst(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(assumeTickets(3)...)
+	m := newDecide(t, src, popup)
+	for range 6 {
+		m = send(t, m, dkey("enter"))
+		decideClock.advance(100 * time.Millisecond)
+	}
+	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "B", Via: model.AnsweredPopup}})
+}
+
+// Ruling 63: a change the user did not cause, during the quiet period,
+// still needs its own ignored press after the period.
+func TestRefreshChangeDuringQuietNeedsOwnPress(t *testing.T) {
+	src := &fakeDecideSource{}
+	ts := assumeTickets(3)
+	src.set(ts...)
+	m := newDecide(t, src, popup)
+	m = send(t, m, dkey("1")) // D-2 now shown
+	decideClock.advance(100 * time.Millisecond)
+	src.set(ts[2]) // D-2 withdrawn
+	m = reload(t, m)
+	decideClock.advance(100 * time.Millisecond)
+	m = send(t, m, dkey("1")) // in the quiet period: ignored, restarts it
+	decideClock.advance(800 * time.Millisecond)
+	m = send(t, m, dkey("1")) // after it: ignored for the change
+	if s := lastLine(m); s != "queue changed; press again" {
+		t.Errorf("status line = %q, want the notice:\n%s", s, m.View())
+	}
+	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+	decideClock.advance(100 * time.Millisecond)
+	send(t, m, dkey("1"))
+	if got := src.calls(); len(got) != 2 || got[1].id != "D-3" {
+		t.Errorf("calls = %+v, want D-3 answered", got)
+	}
+}
+
+// Minor: a refused answer keeps what was typed.
+func TestRefusedAnswerKeepsTyping(t *testing.T) {
+	src := &fakeDecideSource{answerErr: errors.New("database is locked")}
+	src.set(ticket(1, model.ModeBlocking, model.ReversCostly))
+	m := newDecide(t, src, popup)
+	m = dpress(t, m, "1", "because", "enter")
+	if !strings.Contains(m.View(), "staged reasoning: because") {
+		t.Errorf("reasoning not kept after the refusal:\n%s", m.View())
+	}
+	m = dpress(t, m, "w", "my words", "enter")
+	m = dpress(t, m, "w")
+	if s := lastLine(m); !strings.Contains(s, "my words") {
+		t.Errorf("status line = %q, want the refused text back", s)
+	}
+	src.answerErr = nil
+	dpress(t, m, "esc", "1") // reasoning still staged: sent at once
+	got := src.calls()
+	if last := got[len(got)-1]; last.a.Key != "A" || last.a.Reasoning != "because" {
+		t.Errorf("last call = %+v, want A with the kept reasoning", last)
+	}
+}
+
+// Minor: at 40 columns the confirmation leads with what y does, and the
+// keys line shows r, s and q.
+func TestNarrowStatusLines(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(ticket(9, model.ModeAssume, model.ReversIrreversible))
+	m := newDecide(t, src, popup)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 30})
+	for _, want := range []string{"enter=B", "r:", "s:", "q:"} {
+		if s := lastLine(m); !strings.Contains(s, want) {
+			t.Errorf("keys line %q lacks %q", s, want)
+		}
+	}
+	m = dpress(t, m, "2")
+	if s := lastLine(m); !strings.HasPrefix(s, "y sends: D-9 B") {
+		t.Errorf("confirmation = %q, want it to lead with y sends", s)
+	}
 }

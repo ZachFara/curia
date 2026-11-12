@@ -30,17 +30,24 @@ var (
 	recStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
 )
 
-// detailLimits cap the long parts of the selected ticket, in lines; 0 is
-// no cap.
-type detailLimits struct{ context, tradeoffs, rationale int }
+// detailPlan says how much of the selected ticket is drawn. Line caps are
+// 0 for no cap and -1 for none of it.
+type detailPlan struct {
+	question, context, tradeoffs, rationale int
+	oneLine                                 bool // options and the lines around them one line each
+	bare                                    bool // the question and the options only
+}
 
-var (
-	// fullDetail is the layout of section 3 of the view.
-	fullDetail = detailLimits{context: 6}
-	// compactDetail is used when the full one does not fit the window, so
-	// the options stay on screen.
-	compactDetail = detailLimits{context: 2, tradeoffs: 1, rationale: 2}
-)
+// detailPlans are tried in order until one fits the window. Context and
+// rationale go first, then trade-offs; the question shrinks to two lines,
+// then one; the first line of every option, with its mark, goes last.
+var detailPlans = []detailPlan{
+	{context: 6},
+	{context: 2, tradeoffs: 1, rationale: 2},
+	{question: 2, context: -1, tradeoffs: 1, rationale: -1, oneLine: true},
+	{question: 2, context: -1, tradeoffs: -1, rationale: -1, oneLine: true},
+	{question: 1, context: -1, tradeoffs: -1, rationale: -1, oneLine: true, bare: true},
+}
 
 // View renders the header, the queue, the selected ticket and the status
 // line, every line at most the window width and the whole at most its
@@ -48,9 +55,10 @@ var (
 func (m DecideModel) View() string {
 	w := m.textWidth()
 	queue := m.renderQueue(w)
+	detail, _ := m.detail(w, m.detailRoom(len(queue)))
 	lines := append([]string{m.renderHeader()}, queue...)
 	lines = append(lines, "")
-	lines = append(lines, m.renderDetail(w, m.detailRoom(len(queue)))...)
+	lines = append(lines, detail...)
 	for m.height > 0 && len(lines) < m.height-1 {
 		lines = append(lines, "")
 	}
@@ -60,6 +68,14 @@ func (m DecideModel) View() string {
 		lines[i] = clip.Render(l)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// optionsShown is how many of the selected ticket's options View draws, so
+// that a key never answers with an option that is not on screen.
+func (m DecideModel) optionsShown() int {
+	first, last := m.queueSpan()
+	_, n := m.detail(m.textWidth(), m.detailRoom(max(last-first, 1)))
+	return n
 }
 
 // textWidth is the window width, or defaultWidth before it is known.
@@ -88,16 +104,22 @@ func (m DecideModel) renderHeader() string {
 	return headerStyle.Render(fmt.Sprintf("%d open · %d blocking", len(m.tickets), blocking))
 }
 
+// queueSpan is the range of tickets on screen in the queue.
+func (m DecideModel) queueSpan() (first, last int) {
+	first, last = m.offset, len(m.tickets)
+	if n := m.queueRows(); n > 0 {
+		last = min(last, first+n)
+	}
+	return first, last
+}
+
 // renderQueue is one line per ticket on screen: selection mark, id, mode,
 // age, repo and the question cut to fit.
 func (m DecideModel) renderQueue(w int) []string {
 	if len(m.tickets) == 0 {
 		return []string{"no open decisions"}
 	}
-	first, last := m.offset, len(m.tickets)
-	if n := m.queueRows(); n > 0 {
-		last = min(last, first+n)
-	}
+	first, last := m.queueSpan()
 	idW, repoW := 0, 0
 	for _, t := range m.tickets[first:last] {
 		idW = max(idW, lipgloss.Width(ticketID(t)))
@@ -140,88 +162,120 @@ func ticketRepo(t model.Ticket) string {
 	return "-"
 }
 
-// renderDetail draws the selected ticket in room lines (0: no limit): in
-// full when it fits, else compact, else cut with a last line of "…".
-func (m DecideModel) renderDetail(w, room int) []string {
+// detail draws the selected ticket in room lines (0: no limit) with the
+// first plan that fits, and says how many of its options it drew. When not
+// even the last plan fits, it keeps the question's line and as many option
+// lines as there is room for.
+func (m DecideModel) detail(w, room int) ([]string, int) {
 	t, ok := m.current()
 	if !ok {
-		return nil
+		return nil, 0
 	}
-	lines := m.detailLines(t, w, fullDetail)
-	if room <= 0 || len(lines) <= room {
-		return lines
+	var lines []string
+	for _, p := range detailPlans {
+		lines = m.detailLines(t, w, p)
+		if room <= 0 || len(lines) <= room {
+			return lines, len(t.Options)
+		}
 	}
-	if lines = m.detailLines(t, w, compactDetail); len(lines) > room {
-		lines = append(lines[:room-1:room-1], ellipsis)
-	}
-	return lines
+	return lines[:room], room - 1 // the bare plan: one question line, one line per option
 }
 
-func (m DecideModel) detailLines(t model.Ticket, w int, lim detailLimits) []string {
-	out := styled(questionStyle, wrap(sanitize.Text(t.Question, decision.MaxQuestion), w))
-	if s := decision.Stakes(t, m.now()); s != "" {
-		out = append(out, styled(stakesStyle, wrap(s, w))...)
+func (m DecideModel) detailLines(t model.Ticket, w int, p detailPlan) []string {
+	question := wrap(sanitize.Text(t.Question, decision.MaxQuestion), w)
+	if len(question) == 0 {
+		question = []string{""}
 	}
-	meta := strings.Join([]string{
-		sanitize.Line(string(t.Reversibility), maxWordCells),
-		sanitize.Line(string(t.Mode), maxWordCells),
-		"scope " + sanitize.Line(string(t.Scope), maxWordCells),
-	}, " · ")
-	out = append(out, styled(helpStyle, wrap(meta, w))...)
-	out = append(out, capLines(wrap(sanitize.Text(t.Context, decision.MaxContext), w), lim.context, w)...)
-	out = append(out, optionLines(t, w, lim.tradeoffs)...)
-	return append(out, m.tailLines(t, w, lim.rationale)...)
+	out := styled(questionStyle, capLines(question, p.question, w))
+	if !p.bare {
+		out = append(out, styled(stakesStyle, para(decision.Stakes(t, m.now()), w, p.oneLine))...)
+		meta := strings.Join([]string{
+			sanitize.Line(string(t.Reversibility), maxWordCells),
+			sanitize.Line(string(t.Mode), maxWordCells),
+			"scope " + sanitize.Line(string(t.Scope), maxWordCells),
+		}, " · ")
+		out = append(out, styled(helpStyle, para(meta, w, p.oneLine))...)
+		if p.context >= 0 {
+			out = append(out, capLines(wrap(sanitize.Text(t.Context, decision.MaxContext), w), p.context, w)...)
+		}
+	}
+	out = append(out, optionLines(t, w, p)...)
+	if !p.bare {
+		out = append(out, m.tailLines(t, w, p)...)
+	}
+	return out
 }
 
 // maxWordCells bounds a drawn one-word field such as the mode.
 const maxWordCells = 16
 
-// optionLines are the options as "1  A  Postgres table", trade-offs
-// indented beneath, the recommended one highlighted and marked.
-func optionLines(t model.Ticket, w, tradeoffs int) []string {
+// optionLines are the options as "1  A  Postgres table" with trade-offs
+// indented beneath. The recommended one is "2 *B  Redis queue": the mark
+// sits in its own column between the number and the key, where no label
+// can reach, and the line is highlighted.
+func optionLines(t model.Ticket, w int, p detailPlan) []string {
 	var out []string
 	inner := max(w-len(optionIndent), 1)
 	for i, o := range t.Options {
-		prefix := fmt.Sprintf("%d  %s  ", i+1, sanitize.Line(o.Key, decision.MaxKey))
-		label := sanitize.Line(o.Label, decision.MaxLabel)
 		rec := o.Key == t.Recommendation
+		mark := " "
 		if rec {
-			label += " (recommended)"
+			mark = "*"
 		}
-		// The label hangs under itself, so the prefix keeps its spacing.
-		lines := wrap(label, w-lipgloss.Width(prefix))
-		for j := range lines {
-			lead := prefix
-			if j > 0 {
-				lead = strings.Repeat(" ", lipgloss.Width(prefix))
-			}
-			lines[j] = lead + lines[j]
+		prefix := fmt.Sprintf("%d %s%s  ", i+1, mark, sanitize.Line(o.Key, decision.MaxKey))
+		label := sanitize.Line(o.Label, decision.MaxLabel)
+		lines := []string{truncate(prefix+label, w)}
+		if !p.oneLine {
+			lines = hang(prefix, label, w)
 		}
 		if rec {
 			lines = styled(recStyle, lines)
 		}
 		out = append(out, lines...)
-		tr := capLines(wrap(sanitize.Text(o.Tradeoffs, decision.MaxTradeoffs), inner), tradeoffs, inner)
-		for _, l := range tr {
-			out = append(out, optionIndent+l)
+		if p.tradeoffs >= 0 {
+			tr := capLines(wrap(sanitize.Text(o.Tradeoffs, decision.MaxTradeoffs), inner), p.tradeoffs, inner)
+			for _, l := range tr {
+				out = append(out, optionIndent+l)
+			}
 		}
 	}
 	return out
 }
 
+// hang wraps text in w cells after prefix, its later lines indented to
+// line up under its first.
+func hang(prefix, text string, w int) []string {
+	pw := lipgloss.Width(prefix)
+	lines := wrap(text, w-pw)
+	if len(lines) == 0 {
+		return []string{prefix}
+	}
+	for j := range lines {
+		lead := prefix
+		if j > 0 {
+			lead = strings.Repeat(" ", pw)
+		}
+		lines[j] = lead + lines[j]
+	}
+	return lines
+}
+
 // tailLines are the rationale, the assumption, the precedent it differs
 // from, and the staged reasoning and scope.
-func (m DecideModel) tailLines(t model.Ticket, w, rationale int) []string {
-	out := capLines(wrap(sanitize.Text(t.Rationale, decision.MaxRationale), w), rationale, w)
+func (m DecideModel) tailLines(t model.Ticket, w int, p detailPlan) []string {
+	var out []string
+	if p.rationale >= 0 {
+		out = capLines(wrap(sanitize.Text(t.Rationale, decision.MaxRationale), w), p.rationale, w)
+	}
 	if t.Mode == model.ModeAssume {
-		out = append(out, wrap("assumes: "+sanitize.Text(t.Assumption, decision.MaxAssumption), w)...)
+		out = append(out, para("assumes: "+sanitize.Text(t.Assumption, decision.MaxAssumption), w, p.oneLine)...)
 	}
 	if t.DiffersFrom != "" {
 		why := sanitize.Text(t.DiffersWhy, decision.MaxDiffersWhy)
-		out = append(out, wrap("differs from "+sanitize.Line(t.DiffersFrom, maxIDCells)+": "+why, w)...)
+		out = append(out, para("differs from "+sanitize.Line(t.DiffersFrom, maxIDCells)+": "+why, w, p.oneLine)...)
 	}
 	if m.reasoning != "" {
-		out = append(out, wrap("staged reasoning: "+sanitize.Text(m.reasoning, decision.MaxReasoning), w)...)
+		out = append(out, para("staged reasoning: "+sanitize.Text(m.reasoning, decision.MaxReasoning), w, p.oneLine)...)
 	}
 	if m.scope != "" {
 		out = append(out, "staged scope: "+string(m.scope))
@@ -229,15 +283,24 @@ func (m DecideModel) tailLines(t model.Ticket, w, rationale int) []string {
 	return out
 }
 
+// para is s, already cleaned, wrapped to w, or cut to one line when
+// oneLine is set; empty s has no lines.
+func para(s string, w int, oneLine bool) []string {
+	if s == "" || !oneLine {
+		return wrap(s, w)
+	}
+	return []string{truncate(strings.ReplaceAll(s, "\n", " "), w)}
+}
+
 // renderStatus is the bottom line: the pending confirmation, the text being
 // typed, the last outcome or notice, the last refresh error, or the keys.
 func (m DecideModel) renderStatus(w int) string {
-	style, text := helpStyle, m.helpText()
+	style, text := helpStyle, m.helpText(w)
 	switch {
 	case m.closing:
 		style, text = lipgloss.NewStyle(), "closing once the answer is sent"
 	case m.confirming:
-		style, text = lipgloss.NewStyle(), m.confirmText()
+		style, text = lipgloss.NewStyle(), m.confirmText(w)
 	case m.input != inputNone:
 		return m.inputLine(w)
 	case m.notice != "":
@@ -251,17 +314,33 @@ func (m DecideModel) renderStatus(w int) string {
 	return style.Render(truncate(text, w))
 }
 
-func (m DecideModel) helpText() string {
-	q := "q quit"
+// helpText is the keys line. It names the key Enter sends, and is shorter
+// when the window is too narrow for the long one.
+func (m DecideModel) helpText(w int) string {
+	q := "quit"
 	if m.opts.Embedded {
-		q = "q close"
+		q = "close"
 	}
-	return "1-4 answer  enter recommended  w write  r reason  s scope  " + q
+	t, ok := m.current()
+	if !ok {
+		return "q " + q
+	}
+	rec := sanitize.Line(t.Recommendation, decision.MaxKey)
+	long := "1-4 answer  enter=" + rec + " recommended  w write  r reason  s scope  q " + q
+	if lipgloss.Width(long) <= w {
+		return long
+	}
+	return "1-4 enter=" + rec + " w:text r:why s:scope q:" + q
 }
 
-// confirmText asks to confirm the pending answer to an irreversible ticket.
-func (m DecideModel) confirmText() string {
-	return fmt.Sprintf("answer %s with %s? y sends, any other key cancels", ticketID(m.pending.ticket), answerText(m.pending.a))
+// confirmText asks to confirm the pending answer to an irreversible ticket;
+// when the question does not fit, what "y" does comes first.
+func (m DecideModel) confirmText(w int) string {
+	id, what := ticketID(m.pending.ticket), answerText(m.pending.a)
+	if s := fmt.Sprintf("answer %s with %s? y sends, any other key cancels", id, what); lipgloss.Width(s) <= w {
+		return s
+	}
+	return fmt.Sprintf("y sends: %s %s; other keys cancel", id, what)
 }
 
 // answerText is how an answer is named on the status line: its option key,

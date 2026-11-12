@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -10,15 +11,21 @@ import (
 
 	"github.com/ZachFara/curia/internal/decision"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/sanitize"
 )
 
 // answerTimeout bounds one answer: the store write and, when the session is
 // idle, typing it into the pane.
 const answerTimeout = 5 * time.Second
 
-// noticeChanged is shown when an answer key is ignored because a refresh
-// changed the ticket on screen.
+// noticeChanged is shown when an answer key is ignored because the ticket
+// on screen changed.
 const noticeChanged = "queue changed; press again"
+
+// quietPeriod is how long after one's own answer answer keys are ignored,
+// so a key pressed twice or held never answers the next ticket unread
+// (Ruling 63). Each ignored key restarts it.
+const quietPeriod = 750 * time.Millisecond
 
 // DecideSource is where the decide view reads open tickets, already in queue
 // order, and writes an answer. The command's implementation expires, lists,
@@ -69,12 +76,15 @@ type DecideModel struct {
 	loaded   bool           // a read has succeeded
 	changed  bool           // a refresh changed the ticket on screen: the next answer key is ignored
 
+	quietUntil time.Time // answer keys before this are ignored (after one's own answer)
+
 	issued, applied int // sequence numbers of the last refresh started and applied
 
 	width, height int // 0 until the first WindowSizeMsg: no limit
 
 	reasoning string      // staged for the next answer
 	scope     model.Scope // staged for the next answer; "" keeps the ticket's
+	draft     string      // the free text of a refused answer, offered again by "w"
 
 	input      inputKind
 	buf        []rune
@@ -155,7 +165,7 @@ func (m DecideModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste {
 			return m.updateRunes(msg)
 		}
-		return m.updateKey(msg)
+		return m.updateKey(msg, false)
 	}
 	return m, nil
 }
@@ -179,17 +189,23 @@ func (m DecideModel) applyRefresh(msg decideRefreshMsg) DecideModel {
 			m.tickets = append(m.tickets, t)
 		}
 	}
-	if i := slices.IndexFunc(m.tickets, func(t model.Ticket) bool { return t.ID == m.selected }); i >= 0 {
-		m.cursor = i
-	}
-	m = m.moveTo(m.cursor)
+	m = m.reselect()
 	after, has := m.current()
 	if m.loaded && (had != has || (has && !sameTicket(before, after))) {
 		m.changed = true
-		m.reasoning, m.scope = "", ""
+		m.reasoning, m.scope, m.draft = "", "", ""
 	}
 	m.loaded = true
 	return m
+}
+
+// reselect puts the cursor back on the selected ticket or, when it is
+// gone, on the ticket nearest its old place.
+func (m DecideModel) reselect() DecideModel {
+	if i := slices.IndexFunc(m.tickets, func(t model.Ticket) bool { return t.ID == m.selected }); i >= 0 {
+		m.cursor = i
+	}
+	return m.moveTo(m.cursor)
 }
 
 // ticketFace is what the view shows of a ticket and an answer depends on.
@@ -251,25 +267,38 @@ func (m DecideModel) current() (model.Ticket, bool) {
 }
 
 // updateRunes handles keys typed faster than the program reads them, which
-// arrive as one message with several runes, one rune at a time.
+// arrive as one message with several runes, one rune at a time. A rune that
+// opens or closes a prompt drops the rest: the user has not seen the prompt
+// yet.
 func (m DecideModel) updateRunes(msg tea.KeyMsg) (DecideModel, tea.Cmd) {
 	var cmds []tea.Cmd
 	for _, r := range msg.Runes {
+		was := m.prompting()
 		var cmd tea.Cmd
-		m, cmd = m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}, Alt: msg.Alt})
+		m, cmd = m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}, Alt: msg.Alt}, true)
 		cmds = append(cmds, cmd)
+		if m.prompting() != was {
+			break
+		}
 	}
 	return m, tea.Batch(cmds...)
 }
 
-func (m DecideModel) updateKey(msg tea.KeyMsg) (DecideModel, tea.Cmd) {
+// prompting reports whether a confirmation or an input is open.
+func (m DecideModel) prompting() bool {
+	return m.confirming || m.input != inputNone
+}
+
+// updateKey handles one key; split is set for a rune taken from a message
+// of several.
+func (m DecideModel) updateKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		return m, tea.Quit
 	}
 	m.notice, m.noticeErr = "", false
 	switch {
 	case m.confirming:
-		return m.confirmKey(msg)
+		return m.confirmKey(msg, split)
 	case m.input != inputNone:
 		return m.inputKey(msg)
 	case msg.Paste: // pasted text is never a command
@@ -317,9 +346,9 @@ func (m DecideModel) close() tea.Cmd {
 func (m DecideModel) move(i int) DecideModel {
 	before := m.selected
 	m = m.moveTo(i)
-	m.changed = false
+	m.changed, m.quietUntil = false, time.Time{}
 	if m.selected != before {
-		m.reasoning, m.scope = "", ""
+		m.reasoning, m.scope, m.draft = "", "", ""
 	}
 	return m
 }
@@ -331,28 +360,48 @@ func nextScope(s model.Scope) model.Scope {
 	return scopeCycle[(slices.Index(scopeCycle, s)+1)%len(scopeCycle)]
 }
 
+// answerOption answers with option i, when the ticket has it and it is
+// drawn.
 func (m DecideModel) answerOption(i int) (DecideModel, tea.Cmd) {
 	t, ok := m.current()
 	if !ok || i >= len(t.Options) {
 		return m, nil
 	}
+	if i >= m.optionsShown() {
+		m.notice = fmt.Sprintf("option %d not shown: window too short", i+1)
+		return m, nil
+	}
 	return m.startAnswer(t, model.Answer{Key: t.Options[i].Key})
 }
 
+// answerRecommended answers with the recommended option, when it is drawn.
 func (m DecideModel) answerRecommended() (DecideModel, tea.Cmd) {
 	t, ok := m.current()
-	if !ok || t.Recommendation == "" {
+	if !ok {
+		return m, nil
+	}
+	i := slices.IndexFunc(t.Options, func(o model.Option) bool { return o.Key == t.Recommendation })
+	if i < 0 {
+		return m, nil
+	}
+	if i >= m.optionsShown() {
+		m.notice = "enter=" + sanitize.Line(t.Recommendation, decision.MaxKey) + " not shown: window too short"
 		return m, nil
 	}
 	return m.startAnswer(t, model.Answer{Key: t.Recommendation})
 }
 
 // guard reports whether an answer may start now. It refuses while an answer
-// is in flight, and once after a refresh changed the ticket on screen.
+// is in flight; during the quiet period after one's own answer, restarting
+// it; and once after a refresh changed the ticket on screen.
 func (m DecideModel) guard() (DecideModel, bool) {
+	now := m.now()
 	switch {
 	case m.sending:
 		m.notice = "still sending the last answer"
+		return m, false
+	case now.Before(m.quietUntil):
+		m.quietUntil, m.notice = now.Add(quietPeriod), noticeChanged
 		return m, false
 	case m.changed:
 		m.changed, m.notice = false, noticeChanged
@@ -388,7 +437,7 @@ func (m DecideModel) openText() DecideModel {
 		return m
 	}
 	a := model.Answer{Reasoning: m.reasoning, Scope: m.scope, Via: m.opts.Via}
-	m.pending, m.input, m.buf = pendingAnswer{ticket: t, a: a}, inputText, nil
+	m.pending, m.input, m.buf = pendingAnswer{ticket: t, a: a}, inputText, []rune(m.draft)
 	return m
 }
 
@@ -470,12 +519,13 @@ func (m DecideModel) proceed(p pendingAnswer) (DecideModel, tea.Cmd) {
 	return m.send(p)
 }
 
-// confirmKey sends the pending answer on a typed "y"; any other key, and
-// any paste, cancels it.
-func (m DecideModel) confirmKey(msg tea.KeyMsg) (DecideModel, tea.Cmd) {
+// confirmKey sends the pending answer on a "y" that arrived as a message of
+// its own, so after the prompt was drawn; any other key, a paste, and a "y"
+// within a burst of keys cancel it.
+func (m DecideModel) confirmKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cmd) {
 	p := m.pending
 	m.pending, m.confirming = pendingAnswer{}, false
-	if msg.Paste || msg.String() != "y" {
+	if split || msg.Paste || msg.String() != "y" {
 		m.notice = "answer canceled"
 		return m, nil
 	}
@@ -499,17 +549,32 @@ func (m DecideModel) send(p pendingAnswer) (DecideModel, tea.Cmd) {
 	}
 }
 
-// applyAnswer shows the outcome or the error and re-reads the queue.
+// applyAnswer handles an answer's result. A refused answer is shown, a
+// close asked for meanwhile is dropped, and what was typed is kept. An
+// accepted one closes when asked, or leaves the queue at once, starts the
+// quiet period when the next ticket comes on screen, and re-reads the
+// queue; reads started before it returned are out of date and dropped.
 func (m DecideModel) applyAnswer(msg decideAnsweredMsg) (DecideModel, tea.Cmd) {
 	m.sending = false
+	if msg.err != nil {
+		m.closing = false
+		m.notice, m.noticeErr = "answer failed: "+msg.err.Error(), true
+		if m.selected == msg.id {
+			m.reasoning, m.scope, m.draft = msg.a.Reasoning, msg.a.Scope, msg.a.Text
+		}
+		return m.refresh(false)
+	}
 	if m.closing {
 		return m, m.close()
 	}
-	if msg.err != nil {
-		m.notice, m.noticeErr = "answer failed: "+msg.err.Error(), true
-	} else {
-		m.notice = outcomeText(msg)
-		m.reasoning, m.scope = "", ""
+	m.notice = outcomeText(msg)
+	m.reasoning, m.scope, m.draft = "", "", ""
+	before := m.selected
+	m.tickets = slices.DeleteFunc(slices.Clone(m.tickets), func(t model.Ticket) bool { return t.ID == msg.id })
+	if m = m.reselect(); m.selected != before {
+		m.quietUntil = m.now().Add(quietPeriod)
 	}
-	return m.refresh(false)
+	m, cmd := m.refresh(false)
+	m.applied = m.issued
+	return m, cmd
 }
