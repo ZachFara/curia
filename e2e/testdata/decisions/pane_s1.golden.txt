@@ -1,0 +1,2 @@
+Decision D-1 answered: option A, Postgres table. Reasoning: Replays need 30 days of history we already run Postgres see ops. Continue. Exact wording: call check_decision D-1.
+Decision D-5 overridden: use option B, 3000, not your assumption. Revert work based on the old assumption, then continue.

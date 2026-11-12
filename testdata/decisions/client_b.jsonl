@@ -1,0 +1,7 @@
+{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"claude-code","version":"2.1.322"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"request_decision","arguments":{"question":"Keep the v1 endpoint or remove it in this release?","options":[{"key":"A","label":"Keep v1"},{"key":"B","label":"Remove v1"}],"recommendation":"B","rationale":"Nothing in this repository calls v1 any more.","reversibility":"costly","mode":"blocking"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"request_decision","arguments":{"question":"Use Postgres or Redis to store the webhook events?","options":[{"key":"A","label":"Postgres table"},{"key":"B","label":"Redis stream"}],"recommendation":"A","rationale":"Replays need history, and Postgres is already backed up.","reversibility":"costly","mode":"blocking"}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"withdraw_decision","arguments":{"id":"D-3","reason":"D-1 already settles this.","precedent_id":"D-1"}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_decisions","arguments":{"query":"postgres events"}}}
