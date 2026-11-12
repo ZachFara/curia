@@ -104,6 +104,16 @@ Format: Ruling: what — why — cost if wrong. Rulings 34 to 38 and 48 to 49 ca
 46. Ruling: install never runs `claude mcp get/list`; it reads mcpServers.curia from the Claude config JSON read-only and uses `claude mcp add/remove --scope user` — get/list start the server and hang 30 s on a silent binary — depends on the config file's location and shape. (Plan decision 40.)
 47. Ruling: Stop hook ignores stop_hook_active; each Stop claims what is queued — two Stops per request are normal with subagents — none. (Plan decision 39.)
 
+50. Ruling: `make check` runs all its gates under a lock shared by every worktree of the repository (`scripts/with-test-lock.sh`) — parallel implementers' checks were loading the machine during each other's latency tests and failing them; the gates and thresholds are unchanged — worktrees' checks run one at a time, which costs wall time.
+51. Ruling: `sanitize.Keys` output is never typed on its own; only `decision.TypedMessage`'s sentence, which begins with the fixed words "Decision D-<n>", is typed, and `Keys` keeps Unicode letters as the plan says — the fixed lead means a typed line can never start with `/` or a command word, and ASCII-only would drop non-English answers — in a shell the line is a failed command named "Decision"; look-alike letters can appear in a typed answer.
+52. Ruling: the sanitiser maps Unicode space separators to a plain space before filtering — the plan's rule glued words together across a non-breaking space — none.
+53. Ruling: an ESC followed by a line break consumes only the ESC — the plan's two-byte rule swallowed line breaks in multi-line text — none.
+54. Ruling: `tmux.ErrPartialSend` marks a `SendKeys` failure after which text may be sitting in the prompt; callers must not type again — a retry would append the answer to the leftover text and submit a doubled line — a partial send leaves the answer for the user to see and submit or clear.
+55. Ruling: `Bell` writes only to `/dev/ttysN` or `/dev/pts/N`, checks the handle is a character device, and uses a write deadline — the plan's pattern also accepted `/dev/fd/1`, `/dev/null` and block devices — a platform with other pty names gets no bell.
+56. Ruling (amends Plan 1's settings path): there is one Claude directory, `$CLAUDE_CONFIG_DIR` when set, otherwise `~/.claude`, holding `settings.json` and `skills/` for install and uninstall — otherwise a user with `CLAUDE_CONFIG_DIR` set gets the MCP server registered where Claude looks and everything else where it does not, with install reporting success — it assumes, without a probe, that Claude Code reads settings and skills from that directory.
+57. Ruling: the "tools not allowed" hint is printed only when at least one of the four tool rules is missing — a plain install after `--allow-mcp-tools` said the opposite of the truth — none.
+58. Ruling (extends 54): `ErrPartialSend` means "text may be in the prompt, unsubmitted or even submitted"; it is returned when Enter fails and when the typing step fails with its context already done — a killed `send-keys` client still types its text — a delivery interrupted by a timeout is never retried by typing; it stays reachable through `check_decision` and the Stop hook.
+
 ## Plan 2 Open Questions
 
 Seeded from plan section 14. Each has a default, so execution is not blocked.
@@ -131,6 +141,9 @@ Items for the isolated live check (could not be settled from the desk):
 Remaining risks after the live probes (plan section 14): the `permission_prompt` Notification arrives about 6 seconds after a prompt opens, so the store may still say `working` meanwhile (the typing rule covers it; no hook closes the window, Ruling 48); copy mode with a client attached is untested; the paste threshold lies between 800 and 1,000 characters; `claude mcp get`/`list` run by the user start `curia mcp`, which then prunes old events; Claude Code labels a Stop block's reason "Stop hook error" (cosmetic).
 
 ## Plan 2 Ledger
+
+- Wave 1 merged 2026-11-12: Task 1 (PR #19), Task 2 (PR #17), Task 3 (PR #20), Task 4 (PR #18), Task 5 (PR #21). Smoke check passed: `make check` on `plan-2`; `curia install` and `uninstall` into a temp home with a stub `claude` wrote and removed the skill, the `A` binding and the MCP registration call.
+- Wave 2 dispatched: Task 6 (Opus, raised from Sonnet by the pre-flight review), Task 7 (Sonnet), Task 8 (Sonnet).
 
 One line per task: wave, worktree, branch, status, model, fix rounds.
 
