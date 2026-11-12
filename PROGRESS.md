@@ -114,6 +114,17 @@ Format: Ruling: what — why — cost if wrong. Rulings 34 to 38 and 48 to 49 ca
 57. Ruling: the "tools not allowed" hint is printed only when at least one of the four tool rules is missing — a plain install after `--allow-mcp-tools` said the opposite of the truth — none.
 58. Ruling (extends 54): `ErrPartialSend` means "text may be in the prompt, unsubmitted or even submitted"; it is returned when Enter fails and when the typing step fails with its context already done — a killed `send-keys` client still types its text — a delivery interrupted by a timeout is never retried by typing; it stays reachable through `check_decision` and the Stop hook.
 
+59. Ruling: in the message a stopping agent receives, each decision is one line with the option's label in square brackets after the key (`Decision D-117 answered: option B [Postgres]. Reasoning: ... Continue.`); free text has no bracket; multi-line text is flattened — the plan said "the full label in brackets" without a form, and labels can contain commas — these strings are compared byte for byte by later tests.
+60. Ruling: the notification body omits the repo part when it is empty — tickets from an unidentified caller have no repo and would read "D-7 .: question" — none.
+61. Ruling: a precedent token is a run of letters, marks or numbers — FTS5's tokenizer keeps marks and numbers inside tokens, so the plan's letters-and-digits rule split Indic words and decomposed accents and lost recall — none known.
+62. Ruling: precedent tokens over 64 runes are dropped, and an empty match expression means "do not run the query" — `MATCH ''` is an FTS5 syntax error and a 1 MB word became a 1 MB term — a very long identifier cannot be searched for.
+63. Ruling: after the user's own answer, answer keys are ignored during a 750 ms quiet period that each ignored key restarts — working down a queue should not cost a wasted keypress per ticket, and a double-tap or held key must not answer the next one — the user pauses 750 ms between answers.
+64. Ruling (amends plan 4.5): a superseded decision is not a duplicate; an identical retry after supersession opens a new ticket — supersession is the plan's remedy for a wrongly keyed answer and its way to unblock a re-ask — an agent can re-raise a question the user retired.
+65. Ruling: a non-empty `SupersededBy` implies supersede in the store; a repeated supersede keeps the first timestamp — the CLI flag implies it — none.
+66. Ruling (the dwell rule): an answer key acts only when the displayed ticket has been unchanged for at least 250 ms, and `y` confirms only 250 ms after its prompt opened — Bubble Tea draws on a timer, so keys arriving in one read could answer a ticket or confirm a prompt that never reached the screen — the popup cannot be driven by fast scripted input; the CLI flags are the scripting path.
+67. Ruling: every refused answer key restarts the dwell clock — a held, auto-repeating key otherwise outlasts each gate in turn — impatient repeated pressing is held off until a pause.
+68. Ruling: an answer key refused because of a change the user did not cause starts the same 750 ms quiet period — terminals send no key-up, so a held key's first repeat after the operating system's 375 to 660 ms delay looks like a deliberate press — after any queue change that a key ran into, an answer needs a 750 ms pause; a keyboard with a repeat delay above 750 ms can still get one repeat through.
+
 ## Plan 2 Open Questions
 
 Seeded from plan section 14. Each has a default, so execution is not blocked.
@@ -141,6 +152,10 @@ Items for the isolated live check (could not be settled from the desk):
 Remaining risks after the live probes (plan section 14): the `permission_prompt` Notification arrives about 6 seconds after a prompt opens, so the store may still say `working` meanwhile (the typing rule covers it; no hook closes the window, Ruling 48); copy mode with a client attached is untested; the paste threshold lies between 800 and 1,000 characters; `claude mcp get`/`list` run by the user start `curia mcp`, which then prunes old events; Claude Code labels a Stop block's reason "Stop hook error" (cosmetic).
 
 ## Plan 2 Ledger
+
+- Wave 3 merged 2026-11-12: Task 9 (PR #26), Task 10 (PR #25, four fix rounds, the fourth by a fresh Fable implementer). Smoke check passed: a database created by the new binary is read and written by the old one, and one created by the old binary is migrated and read by the new one, with no error logged.
+- Wave 2 merged 2026-11-12: Task 6 (PR #24), Task 7 (PR #22), Task 8 (PR #23).
+- Wave 4 dispatched: Task 11 (Opus), Task 15 (Sonnet).
 
 - Wave 1 merged 2026-11-12: Task 1 (PR #19), Task 2 (PR #17), Task 3 (PR #20), Task 4 (PR #18), Task 5 (PR #21). Smoke check passed: `make check` on `plan-2`; `curia install` and `uninstall` into a temp home with a stub `claude` wrote and removed the skill, the `A` binding and the MCP registration call.
 - Wave 2 dispatched: Task 6 (Opus, raised from Sonnet by the pre-flight review), Task 7 (Sonnet), Task 8 (Sonnet).
