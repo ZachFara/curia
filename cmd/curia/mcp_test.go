@@ -370,25 +370,31 @@ func TestCallerFromClaudeCodeSessionID(t *testing.T) {
 	}
 }
 
+// mcpResolved is dir with its symlinks resolved (t.TempDir is under a
+// symlink on macOS).
+func mcpResolved(t *testing.T, dir string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func TestCallerUnknown(t *testing.T) {
 	db := mcpEnv(t)
 	st := mcpOpenStore(t, db)
-	root := hermeticGit(t)
-	proj, cwd := filepath.Join(root, "proj"), filepath.Join(root, "cwd")
-	gitInit(t, proj, "main")
-	gitInit(t, cwd, "main")
+	proj, cwd := t.TempDir(), t.TempDir()
 	t.Chdir(cwd)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "NOROW")
 	t.Setenv("TMUX_PANE", "%9")
 	t.Setenv("CLAUDE_PROJECT_DIR", proj)
-	wantProj, _ := filepath.EvalSymlinks(proj)
-	if s, r := mcpCallerOf(t, st, "From the project dir?"); s != "" || r != wantProj {
-		t.Errorf("session %q repo %q, want unknown in %q", s, r, wantProj)
+	if s, r := mcpCallerOf(t, st, "From the project dir?"); s != "" || r != mcpResolved(t, proj) {
+		t.Errorf("session %q repo %q, want unknown in %q", s, r, mcpResolved(t, proj))
 	}
 	t.Setenv("CLAUDE_PROJECT_DIR", "")
-	wantCwd, _ := filepath.EvalSymlinks(cwd)
-	if s, r := mcpCallerOf(t, st, "From the working dir?"); s != "" || r != wantCwd {
-		t.Errorf("session %q repo %q, want unknown in %q", s, r, wantCwd)
+	if s, r := mcpCallerOf(t, st, "From the working dir?"); s != "" || r != mcpResolved(t, cwd) {
+		t.Errorf("session %q repo %q, want unknown in %q", s, r, mcpResolved(t, cwd))
 	}
 }
 
@@ -436,7 +442,10 @@ func TestProjectDirDoesNotIdentifyACaller(t *testing.T) {
 	}
 }
 
-func TestRepoFallsBackToGit(t *testing.T) {
+// TestRepoIsTheDirectoryWithoutGit (was TestRepoFallsBackToGit; Ruling 70):
+// the server never runs git, so a caller started in a subdirectory of a
+// repository gets that subdirectory, not the top level.
+func TestRepoIsTheDirectoryWithoutGit(t *testing.T) {
 	db := mcpEnv(t)
 	st := mcpOpenStore(t, db)
 	dir := filepath.Join(hermeticGit(t), "repo")
@@ -446,7 +455,8 @@ func TestRepoFallsBackToGit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(sub)
-	want, _ := filepath.EvalSymlinks(dir)
+	t.Setenv("PATH", t.TempDir()) // no git to run
+	want := mcpResolved(t, sub)
 	if s, r := mcpCallerOf(t, st, "Which repo?"); s != "" || r != want {
 		t.Errorf("session %q repo %q, want unknown in %q", s, r, want)
 	}
@@ -455,6 +465,42 @@ func TestRepoFallsBackToGit(t *testing.T) {
 	t.Setenv("TMUX_PANE", "%3")
 	if s, r := mcpCallerOf(t, st, "Which repo now?"); s != "NOREPO" || r != want {
 		t.Errorf("session %q repo %q, want NOREPO in %q", s, r, want)
+	}
+}
+
+func TestRepoResolvesSymlinkedDirectory(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_PROJECT_DIR", link+"/./")
+	if _, r := mcpCallerOf(t, st, "Through a symlink?"); r != mcpResolved(t, target) {
+		t.Errorf("repo %q, want %q", r, mcpResolved(t, target))
+	}
+}
+
+func TestRepoRelativeIsEmpty(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("rel", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_PROJECT_DIR", "rel")
+	if _, r := mcpCallerOf(t, st, "A relative project dir?"); r != "" {
+		t.Errorf("repo %q, want none", r)
+	}
+}
+
+func TestRepoMissingPathIsEmpty(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	t.Setenv("CLAUDE_PROJECT_DIR", filepath.Join(t.TempDir(), "missing"))
+	if _, r := mcpCallerOf(t, st, "A missing project dir?"); r != "" {
+		t.Errorf("repo %q, want none", r)
 	}
 }
 
@@ -597,5 +643,30 @@ func TestMCPStartupPruneIsBounded(t *testing.T) {
 	p.close()
 	if older, newer := mcpCountEvents(t, db, now.Add(-7*24*time.Hour)); older != 50 || newer != 3 {
 		t.Errorf("events: %d old, %d new; want 50 left by 10 batches of 1000, and 3", older, newer)
+	}
+}
+
+func TestNotifyWithoutPaneLeavesSlot(t *testing.T) {
+	db := mcpEnv(t)
+	cfgDir := filepath.Join(filepath.Dir(db), ".config", "curia") // db is in HOME
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("notify_bell = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := useFakeTmux(t)
+	start := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	now := mcpFakeClock(t, start)
+	st := mcpOpenStore(t, db)
+	t.Setenv("CURIA_SESSION_ID", "S1") // no row yet: no pane to ring
+	p := mcpStart(t)
+	p.request("Blocking without a pane?")
+	mcpPutSession(t, st, "S1", "%3", model.StateWorking, start)
+	now.Store(start.Add(time.Second).UnixNano())
+	p.request("Blocking with a pane?")
+	p.close()
+	if want := []string{"Bell %3"}; !slices.Equal(fake.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q: a ticket that rings nothing must not take the slot", fake.Calls, want)
 	}
 }

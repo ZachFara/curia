@@ -288,31 +288,24 @@ func (t *tools) request(ctx context.Context, args json.RawMessage, now time.Time
 		ps = decision.Validate(r)
 	}
 	if len(ps) > 0 {
-		out := make([]Problem, len(ps))
-		for i, p := range ps {
-			out[i] = Problem{Field: p.Field, Problem: p.Problem}
-		}
-		return nil, &ToolError{Code: "invalid_ticket", Message: "the ticket was refused: correct every problem listed and call request_decision again", Problems: out}
-	}
-	if terr := t.requireExisting(ctx, r.DiffersFrom); terr != nil {
-		return nil, terr
+		return nil, invalidTicket(ps)
 	}
 	c := t.Caller(ctx)
 	d := decision.New(r, decision.Caller{SessionID: c.SessionID, TaskID: c.TaskID, Repo: c.Repo}, now, t.Cfg.AssumeExpiry)
+	if terr := t.checkDiffersFrom(ctx, d); terr != nil {
+		return nil, terr
+	}
 	stored, dup, err := t.Store.CreateDecision(ctx, d)
 	if err != nil {
 		return nil, t.internal("request_decision", err)
 	}
 	if dup {
-		return duplicateResult(stored), nil
+		return t.duplicate(ctx, stored, c, now)
 	}
 	if stored.Mode == model.ModeBlocking && t.Notify != nil {
 		t.Notify(ctx, stored, c.Pane)
 	}
-	strong, terr := t.strongPrecedent(ctx, stored, c)
-	if terr != nil {
-		return nil, terr
-	}
+	strong := t.strongPrecedent(ctx, stored, c)
 	res := requestResult{ID: stored.ID, Status: stored.Status, Mode: stored.Mode, Precedent: toPrecedents(strong), Instruction: instrBlocking}
 	switch {
 	case len(strong) > 0:
@@ -323,39 +316,76 @@ func (t *tools) request(ctx context.Context, args json.RawMessage, now time.Time
 	return res, nil
 }
 
-// requireExisting returns bad_precedent unless id is empty or names a
-// decision.
-func (t *tools) requireExisting(ctx context.Context, id string) *ToolError {
-	if id == "" {
+// invalidTicket lists every problem of a refused ticket.
+func invalidTicket(ps []decision.Problem) *ToolError {
+	out := make([]Problem, len(ps))
+	for i, p := range ps {
+		out[i] = Problem{Field: p.Field, Problem: p.Problem}
+	}
+	return &ToolError{Code: "invalid_ticket", Message: "the ticket was refused: correct every problem listed and call request_decision again", Problems: out}
+}
+
+// checkDiffersFrom returns bad_precedent when d's differs_from names no
+// decision, or names d's own ticket: a decision with the same session and
+// args hash is this very ticket (a retry would write differs_from onto
+// itself), whatever its status.
+func (t *tools) checkDiffersFrom(ctx context.Context, d model.Decision) *ToolError {
+	if d.DiffersFrom == "" {
 		return nil
 	}
-	_, found, err := t.Store.GetDecision(ctx, id)
+	other, found, err := t.Store.GetDecision(ctx, d.DiffersFrom)
 	if err != nil {
 		return t.internal("request_decision", err)
 	}
-	if !found {
-		return &ToolError{
-			Code: "bad_precedent", Message: "differs_from names no decision",
-			Problems: []Problem{{Field: "differs_from", Problem: "must name an existing decision"}},
+	problem := ""
+	switch {
+	case !found:
+		problem = "must name an existing decision"
+	case other.SessionID == d.SessionID && other.ArgsHash == d.ArgsHash:
+		problem = "must name another decision, not this ticket"
+	default:
+		return nil
+	}
+	return &ToolError{
+		Code: "bad_precedent", Message: "differs_from must name another, existing decision",
+		Problems: []Problem{{Field: "differs_from", Problem: problem}},
+	}
+}
+
+// duplicate answers a retry of the live ticket twin. A decided twin is read
+// through CheckDecision, so the answer returned here is claimed for this
+// caller (when it is the twin's own, known session and the delivery is
+// queued) and no other path delivers it again.
+func (t *tools) duplicate(ctx context.Context, twin model.Decision, c Caller, now time.Time) (any, *ToolError) {
+	if decision.IsDecided(twin.Status) {
+		d, found, err := t.Store.CheckDecision(ctx, twin.ID, c.SessionID, now)
+		if err != nil {
+			return nil, t.internal("request_decision", err)
+		}
+		if found {
+			twin = d
 		}
 	}
-	return nil
+	return duplicateResult(twin), nil
 }
 
 // strongPrecedent is the second checkpoint: decided precedent within the
 // caller's scope whose question strongly matches d's, other than d itself
-// and the decision d says it differs from.
-func (t *tools) strongPrecedent(ctx context.Context, d model.Decision, c Caller) ([]model.Decision, *ToolError) {
+// and the decision d says it differs from. The ticket already exists, so a
+// failed search is logged and counts as no precedent: an internal error
+// would only invite a pointless retry.
+func (t *tools) strongPrecedent(ctx context.Context, d model.Decision, c Caller) []model.Decision {
 	ds, err := t.Store.SearchDecisions(ctx, store.PrecedentQuery{
 		Text: d.Question, Repo: c.Repo, TaskID: c.TaskID, SessionID: c.SessionID, ExcludeID: d.ID, Limit: precedentPool,
 	})
 	if err != nil {
-		return nil, t.internal("request_decision", err)
+		t.Log.Error("mcp: precedent search after create", "tool", "request_decision", "decision", d.ID, "err", err.Error())
+		return nil
 	}
 	if d.DiffersFrom != "" {
 		ds = slices.DeleteFunc(ds, func(p model.Decision) bool { return p.ID == d.DiffersFrom })
 	}
-	return precedent.Strong(d.Question, ds), nil
+	return precedent.Strong(d.Question, ds)
 }
 
 // duplicateResult answers a retry of a live ticket: open, or decided with
@@ -429,6 +459,10 @@ type withdrawResult struct {
 	Status model.DecisionStatus `json:"status"`
 }
 
+// notYours refuses a withdrawal by anyone but the ticket's own, known
+// session.
+var notYours = ToolError{Code: "not_yours", Message: "you can withdraw only a ticket your own session raised"}
+
 // withdrawErrors maps the store's refusals to tool errors.
 var withdrawErrors = []struct {
 	err error
@@ -436,7 +470,7 @@ var withdrawErrors = []struct {
 }{
 	{store.ErrNotFound, ToolError{Code: "not_found", Message: "no decision has this id"}},
 	{store.ErrNotOpen, ToolError{Code: "not_open", Message: "the decision is no longer open"}},
-	{store.ErrNotOwner, ToolError{Code: "not_yours", Message: "another session raised this decision; you can withdraw only your own"}},
+	{store.ErrNotOwner, notYours},
 	{store.ErrBadPrecedent, ToolError{Code: "bad_precedent", Message: "precedent_id must name another decision that is already decided"}},
 }
 
@@ -451,6 +485,12 @@ func (t *tools) withdraw(ctx context.Context, args json.RawMessage, now time.Tim
 		return nil, invalidArguments(ps)
 	}
 	c := t.Caller(ctx)
+	if c.SessionID == "" {
+		// Every unknown caller shares the empty session id, so none of them
+		// may withdraw: the ticket stays open until answered or expired.
+		te := notYours
+		return nil, &te
+	}
 	d, err := t.Store.WithdrawDecision(ctx, a.ID, c.SessionID, reason, a.PrecedentID, now)
 	for _, m := range withdrawErrors {
 		if errors.Is(err, m.err) {

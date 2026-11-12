@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
@@ -31,6 +32,7 @@ type notified struct {
 type fixture struct {
 	t        *testing.T
 	st       *store.Store
+	db       string
 	now      time.Time
 	caller   Caller
 	notified []notified
@@ -40,12 +42,13 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "curia.db"))
+	db := filepath.Join(t.TempDir(), "curia.db")
+	st, err := store.Open(db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	f := &fixture{t: t, st: st, now: toolsT0, caller: Caller{SessionID: "S1", Repo: "/r/a", Pane: "%3"}}
+	f := &fixture{t: t, st: st, db: db, now: toolsT0, caller: Caller{SessionID: "S1", Repo: "/r/a", Pane: "%3"}}
 	f.tools = Tools(Deps{
 		Store:  st,
 		Cfg:    config.Default(),
@@ -790,5 +793,100 @@ func TestStoreErrorIsInternal(t *testing.T) {
 				t.Errorf("log = %q, want the cause", f.log.String())
 			}
 		})
+	}
+}
+
+func TestRequestRetryClaimsDecidedDuplicate(t *testing.T) {
+	f := newFixture(t)
+	f.mustCall("request_decision", ticket(webhookQ))
+	f.answer("D-1", "B", "we already run Redis")
+	m := f.mustCall("request_decision", ticket(webhookQ))
+	if m["duplicate"] != true || m["answer_key"] != "B" || m["answer"] != "B: Redis" || m["instruction"] != "Decided. Follow the answer." {
+		t.Errorf("decided retry = %v", m)
+	}
+	if d := f.get("D-1"); d.Delivery != model.DeliveryDelivered || d.DeliveredVia != model.ViaCheck {
+		t.Errorf("after the retry delivery = %s via %q, want delivered via check", d.Delivery, d.DeliveredVia)
+	}
+
+	// An unknown caller's decided twin is returned, and nothing is claimed.
+	f.caller = Caller{}
+	f.mustCall("request_decision", ticket("Which queue for retries?"))
+	f.answer("D-2", "A", "")
+	m = f.mustCall("request_decision", ticket("Which queue for retries?"))
+	if m["id"] != "D-2" || m["duplicate"] != true || m["answer_key"] != "A" {
+		t.Errorf("unknown caller's decided retry = %v", m)
+	}
+	if d := f.get("D-2"); d.Delivery != model.DeliveryNone || d.DeliveredVia != "" {
+		t.Errorf("unknown caller's twin delivery = %s via %q, want none", d.Delivery, d.DeliveredVia)
+	}
+}
+
+func TestUnknownCallerCannotWithdraw(t *testing.T) {
+	f := newFixture(t)
+	f.caller = Caller{}
+	f.mustCall("request_decision", ticket(webhookQ))
+	f.wantError("withdraw_decision", map[string]any{"id": "D-1", "reason": "not needed"}, "not_yours")
+	f.wantError("withdraw_decision", map[string]any{"id": "D-99", "reason": "not needed"}, "not_yours")
+	if d := f.get("D-1"); d.Status != model.StatusOpen {
+		t.Errorf("D-1 status = %s, want open", d.Status)
+	}
+}
+
+func TestUnknownCallersShareIdenticalTicket(t *testing.T) {
+	f := newFixture(t)
+	f.caller = Caller{Repo: "/r/a", Pane: "%1"}
+	first := f.mustCall("request_decision", ticket(webhookQ))
+	f.caller = Caller{Repo: "/r/b", Pane: "%2"}
+	second := f.mustCall("request_decision", ticket(webhookQ))
+	if first["id"] != "D-1" || second["id"] != "D-1" || second["duplicate"] != true {
+		t.Errorf("first %v, second %v: want the same ticket D-1", first, second)
+	}
+}
+
+func TestDiffersFromSelfIsRefused(t *testing.T) {
+	f := newFixture(t)
+	f.mustCall("request_decision", ticket(webhookQ))
+	terr := f.wantError("request_decision", ticket(webhookQ, set("differs_from", "D-1"), set("differs_why", "it is me")), "bad_precedent")
+	if len(terr.Problems) != 1 || terr.Problems[0].Field != "differs_from" {
+		t.Errorf("problems = %+v", terr.Problems)
+	}
+	if d := f.get("D-1"); d.DiffersFrom != "" || d.DiffersWhy != "" {
+		t.Errorf("D-1 differs = %q %q, want unchanged", d.DiffersFrom, d.DiffersWhy)
+	}
+	// Another session's identical ticket may name D-1.
+	f.caller.SessionID = "S2"
+	m := f.mustCall("request_decision", ticket(webhookQ, set("differs_from", "D-1"), set("differs_why", "mine differs")))
+	if m["id"] != "D-2" || m["duplicate"] != false {
+		t.Errorf("other session's ticket = %v, want a new D-2", m)
+	}
+}
+
+func TestPrecedentSearchFailureKeepsTicket(t *testing.T) {
+	f := newFixture(t)
+	raw, err := sql.Open("sqlite", f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	// Without the index (and its triggers) a ticket is still stored, but
+	// the precedent search fails.
+	for _, stmt := range []string{"DROP TRIGGER decisions_ai", "DROP TRIGGER decisions_au", "DROP TRIGGER decisions_ad", "DROP TABLE decisions_fts"} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	m := f.mustCall("request_decision", ticket(webhookQ))
+	want := map[string]any{
+		"id": "D-1", "status": "open", "mode": "blocking", "duplicate": false, "precedent": []any{},
+		"instruction": "Finish any safe work, then end your turn. The answer will arrive as a message; if it has not when you are next active, call check_decision.",
+	}
+	if !reflect.DeepEqual(m, want) {
+		t.Errorf("result = %v, want %v", m, want)
+	}
+	if len(f.notified) != 1 {
+		t.Errorf("notified %d times, want once", len(f.notified))
+	}
+	if !strings.Contains(f.log.String(), "decisions_fts") {
+		t.Errorf("log = %q, want the search error", f.log.String())
 	}
 }

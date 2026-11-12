@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -113,15 +114,14 @@ func mcpPrune(ctx context.Context, st *store.Store, now time.Time, logger *slog.
 // mcpCaller resolves who is calling, on every tool call (decision 36):
 // CURIA_SESSION_ID as is; else the live session bound to TMUX_PANE; else
 // CLAUDE_CODE_SESSION_ID when its row is live; else unknown. Repo is the
-// session's, else the git top level of CLAUDE_PROJECT_DIR (or of the working
-// directory when it is unset). CLAUDE_CODE_SESSION_ID goes stale after
+// session's, else mcpRepo's directory. CLAUDE_CODE_SESSION_ID goes stale after
 // /clear while this process keeps running, which is why the pane comes first.
 func mcpCaller(st *store.Store, logger *slog.Logger) func(context.Context) mcp.Caller {
 	return func(ctx context.Context) mcp.Caller {
 		sess, id := mcpSession(ctx, st, logger)
 		c := mcp.Caller{SessionID: id, Repo: sess.Repo, Pane: sess.Pane}
 		if c.Repo == "" {
-			c.Repo = mcpRepo(ctx, logger)
+			c.Repo = mcpRepo()
 		}
 		return c
 	}
@@ -164,6 +164,8 @@ func mcpPaneSession(ctx context.Context, st *store.Store, pane string, logger *s
 	}
 	var best model.Session
 	found := false
+	// live is in id order and only a strictly later UpdatedAt replaces
+	// best, so a tie resolves to the lowest id.
 	for _, s := range live {
 		if s.Pane == pane && (!found || s.UpdatedAt.After(best.UpdatedAt)) {
 			best, found = s, true
@@ -172,14 +174,16 @@ func mcpPaneSession(ctx context.Context, st *store.Store, pane string, logger *s
 	return best, found
 }
 
-// mcpRepo is the git top level of CLAUDE_PROJECT_DIR, or of the working
-// directory when that is unset or empty, or "". The directory reaches git
-// only as the argv value of -C, never a shell (decision 0002's reason for
-// excluding G204). It is read with os.LookupEnv because gosec's G702 taint
-// rule counts os.Getenv as a source and knows no sanitizer for argv; this
-// is reported for a ruling (Task 12 report), not a fix of the rule.
-func mcpRepo(ctx context.Context, logger *slog.Logger) string {
-	dir, _ := os.LookupEnv("CLAUDE_PROJECT_DIR")
+// mcpRepo is the repo of a caller with no repo of its own (Ruling 70):
+// CLAUDE_PROJECT_DIR when set, otherwise the working directory, cleaned,
+// required to be absolute and resolved with filepath.EvalSymlinks, because
+// session rows store git's resolved top level and only the string is
+// compared. Any failure means no repo, "". The server never runs git. Known
+// cost: an unidentified caller started in a subdirectory of a repository
+// gets that subdirectory as its repo, so repo-scoped precedent does not
+// cross between it and sessions whose repo is the top level.
+func mcpRepo() string {
+	dir := os.Getenv("CLAUDE_PROJECT_DIR")
 	if dir == "" {
 		wd, err := os.Getwd()
 		if err != nil {
@@ -187,17 +191,29 @@ func mcpRepo(ctx context.Context, logger *slog.Logger) string {
 		}
 		dir = wd
 	}
-	repo, _ := gitInfo(ctx, dir, logger)
-	return repo
+	dir = filepath.Clean(dir)
+	if !filepath.IsAbs(dir) {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return ""
+	}
+	return resolved
 }
 
-// mcpNotify alerts the user to a new blocking ticket: nothing when both
-// notify flags are off; otherwise, when this process wins the shared rate
+// mcpNotify alerts the user to a new blocking ticket: nothing when nothing
+// would be sent (bell off or no pane, and macOS off or not darwin);
+// otherwise, when this process wins the shared rate
 // limit slot, a bell in pane and a macOS notification, bounded by
 // mcpNotifyTimeout. Errors are logged, never returned.
 func mcpNotify(st *store.Store, cfg config.Config, tm tmux.Client, logger *slog.Logger) func(context.Context, model.Decision, string) {
 	return func(ctx context.Context, d model.Decision, pane string) {
-		if !cfg.NotifyBell && !cfg.NotifyMacOS {
+		// Claim the shared slot only when something will be sent, so a
+		// ticket that rings nothing cannot silence the next one.
+		bell := cfg.NotifyBell && pane != ""
+		macOS := cfg.NotifyMacOS && mcpGOOS == "darwin"
+		if !bell && !macOS {
 			return
 		}
 		won, err := st.ClaimNotifySlot(ctx, clock(), mcpNotifyEvery)
