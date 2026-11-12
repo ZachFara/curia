@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ZachFara/curia/internal/model"
 )
@@ -23,7 +24,10 @@ const (
 	StrongMax = 3
 )
 
-const minTokenRunes = 2
+const (
+	minTokenRunes = 2
+	maxTokenRunes = 64
+)
 
 var stopwords = map[string]bool{}
 
@@ -34,14 +38,15 @@ func init() {
 }
 
 // Tokens returns the distinct tokens of s in first-seen order. A token is a
-// lowercased run of Unicode letters and digits, at least 2 runes long, that
-// is not a stopword.
+// lowercased maximal run of Unicode letters, marks and numbers (as FTS5's
+// unicode61 tokenizer sees them), 2 to 64 runes long, that is not a stopword.
 func Tokens(s string) []string {
 	var out []string
 	seen := map[string]bool{}
 	add := func(run string) {
 		tok := strings.ToLower(run)
-		if len([]rune(tok)) < minTokenRunes || stopwords[tok] || seen[tok] {
+		n := utf8.RuneCountInString(tok)
+		if n < minTokenRunes || n > maxTokenRunes || stopwords[tok] || seen[tok] {
 			return
 		}
 		seen[tok] = true
@@ -49,7 +54,7 @@ func Tokens(s string) []string {
 	}
 	start := -1
 	for i, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		if unicode.IsLetter(r) || unicode.IsMark(r) || unicode.IsNumber(r) {
 			if start < 0 {
 				start = i
 			}
@@ -68,8 +73,9 @@ func Tokens(s string) []string {
 
 // MatchExpr turns untrusted text into an FTS5 expression: the first MaxTokens
 // tokens, each in double quotes, joined by " OR ". Tokens hold only letters
-// and digits, so no input reaches FTS5 syntax. It returns "" when s has no
-// tokens, which means no results.
+// letters, marks and numbers, so no input reaches FTS5 syntax. An empty result
+// means there is nothing to search for: do not run MATCH (an empty MATCH
+// argument is an FTS5 syntax error).
 func MatchExpr(s string) string {
 	toks := Tokens(s)
 	if len(toks) > MaxTokens {
@@ -81,10 +87,8 @@ func MatchExpr(s string) string {
 	return strings.Join(toks, " OR ")
 }
 
-// Similarity returns the Jaccard similarity of the token sets of a and b and
-// the number of tokens they share. Two empty sets give 0, 0.
-func Similarity(a, b string) (jaccard float64, shared int) {
-	ta, tb := Tokens(a), Tokens(b)
+// overlap returns how many tokens two token lists share and the size of their union.
+func overlap(ta, tb []string) (shared, union int) {
 	in := make(map[string]bool, len(ta))
 	for _, t := range ta {
 		in[t] = true
@@ -94,7 +98,13 @@ func Similarity(a, b string) (jaccard float64, shared int) {
 			shared++
 		}
 	}
-	union := len(ta) + len(tb) - shared
+	return shared, len(ta) + len(tb) - shared
+}
+
+// Similarity returns the Jaccard similarity of the token sets of a and b and
+// the number of tokens they share. Two empty sets give 0, 0.
+func Similarity(a, b string) (jaccard float64, shared int) {
+	shared, union := overlap(Tokens(a), Tokens(b))
 	if union == 0 {
 		return 0, 0
 	}
@@ -109,11 +119,13 @@ func Strong(question string, candidates []model.Decision) []model.Decision {
 		d model.Decision
 		j float64
 	}
+	tq := Tokens(question)
 	var hits []scored
 	for _, c := range candidates {
-		j, shared := Similarity(question, c.Question)
-		if j >= StrongJaccard && shared >= StrongShared {
-			hits = append(hits, scored{c, j})
+		shared, union := overlap(tq, Tokens(c.Question))
+		// StrongJaccard (3/5) compared in integers so the boundary is exact.
+		if shared >= StrongShared && 5*shared >= 3*union {
+			hits = append(hits, scored{c, float64(shared) / float64(union)})
 		}
 	}
 	sort.SliceStable(hits, func(i, k int) bool { return hits[i].j > hits[k].j })

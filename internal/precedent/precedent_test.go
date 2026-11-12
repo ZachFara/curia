@@ -19,6 +19,12 @@ func TestTokens(t *testing.T) {
 		{"a I É x1 日本語 don't", []string{"x1", "日本語", "don"}},
 		{"Postgres postgres POSTGRES events Events", []string{"postgres", "events"}},
 		{"", nil},
+		{"room² ⅳ", []string{"room²"}}, // ⅳ is one rune
+		{"हिन्दी भाषा", []string{"हिन्दी", "भाषा"}},
+		{"cafe\u0301 au", []string{"cafe\u0301", "au"}},
+		{strings.Repeat("x", 64), []string{strings.Repeat("x", 64)}},
+		{strings.Repeat("x", 65), nil},
+		{strings.Repeat("x", 1<<20), nil},
 	}
 	for _, c := range cases {
 		if got := Tokens(c.in); !reflect.DeepEqual(got, c.want) {
@@ -119,7 +125,7 @@ func TestStrongThreshold(t *testing.T) {
 
 	// Exactly 0.6 passes, just under 0.6 fails.
 	q2 := strings.Join(words("k", 10), " ")
-	atEdge := dec("5", strings.Join(words("k", 6), " ")+" "+strings.Join(words("m", 0), " ")) // 6/10
+	atEdge := dec("5", strings.Join(words("k", 6), " "))                                      // 6/10
 	under := dec("6", strings.Join(words("k", 10), " ")+" "+strings.Join(words("n", 7), " ")) // 10/17 = 0.588
 	got = Strong(q2, []model.Decision{under, atEdge})
 	if ids := idsOf(got); !reflect.DeepEqual(ids, []string{"5"}) {
@@ -159,4 +165,18 @@ func idsOf(ds []model.Decision) []string {
 		out = append(out, d.ID)
 	}
 	return out
+}
+
+func TestStrongRepeatedWordsDoNotInflate(t *testing.T) {
+	// Distinct tokens: {aa bb} vs {aa bb cc}: only 2 shared however often repeated.
+	got := Strong("aa aa aa bb bb", []model.Decision{dec("1", "aa bb cc aa bb")})
+	if len(got) != 0 {
+		t.Errorf("repeats inflated the shared count: %v", idsOf(got))
+	}
+}
+
+func TestMatchExprHugeWordIsEmpty(t *testing.T) {
+	if got := MatchExpr(strings.Repeat("x", 1<<20)); got != "" {
+		t.Errorf("got %d bytes, want empty", len(got))
+	}
 }
