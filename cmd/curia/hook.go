@@ -6,9 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -61,6 +63,11 @@ func init() {
 // no deadline of its own, and the transcript is read inside the store's
 // write transaction.
 func runHook(cmd *cobra.Command, args []string) {
+	// Claude Code may have closed its end of stdout. A write to fd 1 that
+	// hits a closed pipe kills a Go program by SIGPIPE unless SIGPIPE is
+	// ignored; ignored, the write returns EPIPE, which is logged, and the
+	// hook still exits 0.
+	signal.Ignore(syscall.SIGPIPE)
 	event := strings.Join(args, " ")
 	end := &hookEnd{logger: slog.New(slog.DiscardHandler), closeLog: func() error { return nil }}
 	watchdog := time.AfterFunc(hookDeadline, func() {
@@ -122,7 +129,9 @@ func (h *hookEnd) openLog(path string) *slog.Logger {
 
 // emit writes b to out unless the run has already ended, under the same
 // lock as finish, so a watchdog that ends the run and a late result cannot
-// both act.
+// both act. The lock is held across the write, so a stdout that blocks
+// (Claude Code not reading) holds off the watchdog too: such a hook is
+// bounded by Claude Code's own hook timeout, not by hookDeadline.
 func (h *hookEnd) emit(out io.Writer, b []byte) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

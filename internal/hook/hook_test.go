@@ -1053,9 +1053,60 @@ func TestStopDeliversSeveralInOneBlock(t *testing.T) {
 	wantState(t, st, res, model.StateWorking)
 }
 
+// gitBarrier returns env with a Git that waits until two callers have
+// reached it (or 5 seconds have passed, so a racer that failed earlier
+// cannot hang the test).
+func gitBarrier(env hook.Env) hook.Env {
+	var mu sync.Mutex
+	arrived := 0
+	both := make(chan struct{})
+	git := env.Git
+	env.Git = func(cwd string) (string, string) {
+		mu.Lock()
+		if arrived++; arrived == 2 {
+			close(both)
+		}
+		mu.Unlock()
+		select {
+		case <-both:
+		case <-time.After(5 * time.Second):
+		}
+		return git(cwd)
+	}
+	return env
+}
+
+// stopRace runs a Stop for session id through each of handles at once and
+// returns the results.
+func stopRace(t *testing.T, handles [2]*store.Store, env hook.Env, id string) [2]hook.Result {
+	t.Helper()
+	var results [2]hook.Result
+	var errs [2]error
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, st := range handles {
+		wg.Go(func() {
+			<-start
+			results[i], errs[i] = hook.Run(context.Background(), model.Stop, payload(id, "", ""), env, st, config.Default())
+		})
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Stop %d for %s: %v", i, id, err)
+		}
+	}
+	return results
+}
+
 // TestTwoStopHooksOneBlocks runs two Stops for one session at once, each
 // with its own Store as two hook processes would have, with one answer
-// queued: exactly one of them may deliver it.
+// queued: exactly one of them may deliver it. In even rounds the session is
+// new, so both Stops ask git before their transaction, and git holds each
+// until both have asked: both have done everything they do before the
+// transaction (appending the event, looking the session up) before either
+// begins it, on any number of CPUs. In odd rounds the session is stored.
 func TestTwoStopHooksOneBlocks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "curia.db")
 	var handles [2]*store.Store
@@ -1067,36 +1118,26 @@ func TestTwoStopHooksOneBlocks(t *testing.T) {
 		t.Cleanup(func() { _ = st.Close() })
 		handles[i] = st
 	}
-	env := (&fakeEnv{}).env("%3")
-	run(t, handles[0], env, model.SessionStart, payload("A", "", ""))
+	stored := (&fakeEnv{}).env("%3")
+	run(t, handles[0], stored, model.SessionStart, payload("A", "", ""))
 	for round := range 100 {
-		d := queue(t, handles[0], "A", fmt.Sprintf("Which store, round %d?", round), "we already run it")
-		var results [2]hook.Result
-		var errs [2]error
-		start := make(chan struct{})
-		var wg sync.WaitGroup
-		for i, st := range handles {
-			wg.Go(func() {
-				<-start
-				results[i], errs[i] = hook.Run(context.Background(), model.Stop, payload("A", "", ""), env, st, config.Default())
-			})
+		id, env := "A", stored
+		if round%2 == 0 {
+			id, env = fmt.Sprintf("new-%d", round), gitBarrier((&fakeEnv{}).env(""))
 		}
-		close(start)
-		wg.Wait()
+		d := queue(t, handles[0], id, fmt.Sprintf("Which store, round %d?", round), "we already run it")
 		blocked := 0
-		for i := range results {
-			if errs[i] != nil {
-				t.Fatalf("round %d: Stop %d: %v", round, i, errs[i])
+		for _, res := range stopRace(t, handles, env, id) {
+			if res.Stdout == nil {
+				continue
 			}
-			if results[i].Stdout != nil {
-				blocked++
-				if r := blockReason(t, results[i].Stdout); !strings.Contains(r, "Decision "+d.ID+" ") {
-					t.Fatalf("round %d: reason %q does not name %s", round, r, d.ID)
-				}
+			blocked++
+			if r := blockReason(t, res.Stdout); !strings.Contains(r, "Decision "+d.ID+" ") {
+				t.Fatalf("round %d: reason %q does not name %s", round, r, d.ID)
 			}
 		}
 		if blocked != 1 {
-			t.Fatalf("round %d: %d Stops blocked, want exactly 1", round, blocked)
+			t.Fatalf("round %d (%s): %d Stops blocked, want exactly 1", round, id, blocked)
 		}
 		wantDelivered(t, handles[0], d.ID)
 	}

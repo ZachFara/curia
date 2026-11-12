@@ -5,8 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -41,29 +43,11 @@ func hookHome(t *testing.T) string {
 }
 
 // runHookCmd runs `curia <args>` in-process with stdin and a fake exit func.
+// Its output is what was written to stdout, then what was written to stderr.
 func runHookCmd(t *testing.T, stdin io.Reader, args ...string) hookResult {
 	t.Helper()
-	res := hookResult{exitCode: -1}
-	prev := hookExit
-	hookExit = func(code int) { res.exitCode = code; res.exits++ }
-	var out bytes.Buffer
-	rootCmd.SetIn(stdin)
-	rootCmd.SetOut(&out)
-	rootCmd.SetErr(&out)
-	rootCmd.SetArgs(args)
-	t.Cleanup(func() {
-		hookExit = prev
-		rootCmd.SetIn(nil)
-		rootCmd.SetOut(nil)
-		rootCmd.SetErr(nil)
-		rootCmd.SetArgs(nil)
-	})
-	if err := rootCmd.Execute(); err != nil {
-		t.Errorf("Execute returned %v", err)
-	}
-	res.output = out.String()
-	res.log = readLog(t)
-	return res
+	s := hookRunStreams(t, stdin, args...)
+	return hookResult{exitCode: s.exitCode, exits: s.exits, output: s.stdout + s.stderr, log: s.log}
 }
 
 func readLog(t *testing.T) []string {
@@ -815,18 +799,25 @@ func TestHookEmitsBeforeTmux(t *testing.T) {
 	t.Cleanup(func() { hookRun = prev })
 
 	prevExit := hookExit
-	hookExit = func(int) {}
+	var codes []int
+	hookExit = func(code int) { codes = append(codes, code) }
+	var errOut bytes.Buffer
 	rootCmd.SetIn(strings.NewReader(`{"session_id":"A"}`))
 	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&errOut)
 	rootCmd.SetArgs([]string{"hook", "Stop"})
 	t.Cleanup(func() {
 		hookExit = prevExit
 		rootCmd.SetIn(nil)
 		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
 		rootCmd.SetArgs(nil)
 	})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatal(err)
+	}
+	if !slices.Equal(codes, []int{0}) || errOut.Len() != 0 {
+		t.Errorf("exit calls %v, stderr %q; want one exit(0) and no stderr", codes, errOut.String())
 	}
 	want := []string{"PaneFocused:" + line, "SetWindowOption:" + line}
 	if !slices.Equal(order.seen, want) {
@@ -854,5 +845,82 @@ func TestHookCompactMakesNoMarkerCall(t *testing.T) {
 		if s := getSession(t, m.db, id); s.State != model.StateWaiting {
 			t.Errorf("%s = %s, want still waiting", id, s.State)
 		}
+	}
+}
+
+// hookChildHome names the variable that makes TestHookClosedStdoutChild act
+// as the child process of TestHookClosedStdoutExitsZero; its value is the
+// child's HOME.
+const hookChildHome = "CURIA_TEST_HOOK_CHILD_HOME"
+
+// Claude Code may have closed its end of the hook's stdout. Go kills a
+// process whose write to fd 1 hits a closed pipe, unless SIGPIPE is
+// ignored, so this runs the hook in a child process whose stdout is a pipe
+// with no reader: it must log the failed write and exit 0.
+func TestHookClosedStdoutExitsZero(t *testing.T) {
+	home := t.TempDir()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable() // this test binary
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(self, "-test.run=^TestHookClosedStdoutChild$", "-test.count=1")
+	child.Env = append(os.Environ(), hookChildHome+"="+home)
+	child.Stdout = w
+	var stderr bytes.Buffer
+	child.Stderr = &stderr
+	err = child.Run()
+	_ = w.Close()
+	if err != nil {
+		t.Fatalf("child: %v, want exit 0 (stderr %q)", err, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("child wrote to stderr: %q", stderr.String())
+	}
+	b, err := os.ReadFile(filepath.Clean(filepath.Join(home, ".local", "state", "curia", "curia.log")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	if len(log) != 1 || !strings.Contains(log[0], "hook output") || !strings.Contains(log[0], "broken pipe") {
+		t.Errorf("log = %q, want one line with the failed write", log)
+	}
+}
+
+// TestHookClosedStdoutChild is the child of TestHookClosedStdoutExitsZero.
+// Run on its own it does nothing.
+func TestHookClosedStdoutChild(t *testing.T) {
+	home := os.Getenv(hookChildHome)
+	if home == "" {
+		return
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CURIA_DB", filepath.Join(home, "curia.db"))
+	prevRun, prevExit := hookRun, hookExit
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		return hook.Result{
+			Session: model.Session{ID: "A", State: model.StateWorking},
+			Stdout:  []byte(`{"decision":"block","reason":"x"}` + "\n"),
+		}, nil
+	}
+	code := -1
+	hookExit = func(c int) { code = c }
+	rootCmd.SetIn(strings.NewReader(`{"session_id":"A"}`))
+	rootCmd.SetArgs([]string{"hook", "Stop"})
+	t.Cleanup(func() {
+		hookRun, hookExit = prevRun, prevExit
+		rootCmd.SetIn(nil)
+		rootCmd.SetArgs(nil)
+	})
+	if err := rootCmd.Execute(); err != nil || code != 0 {
+		// stdout is the closed pipe: report on stderr.
+		fmt.Fprintf(os.Stderr, "Execute = %v, exit code %d; want nil and 0\n", err, code)
+		t.Fail()
 	}
 }
