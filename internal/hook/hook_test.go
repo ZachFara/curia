@@ -54,7 +54,10 @@ func TestParseFixtures(t *testing.T) {
 		with(model.Notification, func(e *model.Event) {
 			e.Message, e.NotificationType = "Claude needs your permission to use Bash", "permission_prompt"
 		}),
-		with(model.Stop, nil),
+		with(model.Stop, func(e *model.Event) {
+			e.LastAssistantMessage = `The file notes.txt contains the text "alpha line 1".`
+		}),
+		// A subagent's closing text is not the session's answer.
 		with(model.SubagentStop, nil),
 		with(model.SessionEnd, nil),
 	}
@@ -450,6 +453,46 @@ func TestStopReadsTranscript(t *testing.T) {
 				t.Errorf("store has %+v, Run returned %+v", stored, got)
 			}
 		})
+	}
+}
+
+// TestStopPrefersLastAssistantMessage: at Stop, Claude Code may not have
+// flushed the final answer to the transcript yet, but the payload carries it
+// (Ruling 36). Its first line is the Stop message; model and context still
+// come from the transcript.
+func TestStopPrefersLastAssistantMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name, extra, want string
+	}{
+		{"first line of the payload's text", `,"last_assistant_message":"Done: notes.txt says alpha.\nSecond line."`, "Done: notes.txt says alpha."},
+		{"CRLF", `,"last_assistant_message":"Done.\r\nMore"`, "Done."},
+		{"absent falls back to the transcript", "", "Fixed the login bug."},
+		{"empty falls back to the transcript", `,"last_assistant_message":""`, "Fixed the login bug."},
+		{"empty first line falls back to the transcript", `,"last_assistant_message":"\nlater"`, "Fixed the login bug."},
+		{"not a string falls back to the transcript", `,"last_assistant_message":7`, "Fixed the login bug."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openStore(t)
+			tr := writeTranscript(t)
+			env := (&fakeEnv{}).env("%3")
+			run(t, st, env, model.SessionStart, payload("A", tr, ""))
+			got := run(t, st, env, model.Stop, payload("A", tr, tc.extra))
+			if got.LastUpdate != tc.want || got.Model != "claude-opus-5-5" || got.ContextUsed != 42000 {
+				t.Errorf("after Stop: LastUpdate %q model %q context %d, want %q from the transcript's opus at 42000",
+					got.LastUpdate, got.Model, got.ContextUsed, tc.want)
+			}
+		})
+	}
+}
+
+// TestStopMessageWithoutTranscript: a Stop whose session has no transcript
+// path still takes the payload's text.
+func TestStopMessageWithoutTranscript(t *testing.T) {
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	run(t, st, env, model.SessionStart, payload("A", "", ""))
+	if got := run(t, st, env, model.Stop, payload("A", "", `,"last_assistant_message":"hi"`)); got.LastUpdate != "hi" {
+		t.Errorf("LastUpdate = %q, want hi", got.LastUpdate)
 	}
 }
 

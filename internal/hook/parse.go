@@ -26,7 +26,7 @@ var knownKinds = map[model.EventKind]bool{
 
 // Parse reads a hook payload into an Event of the given kind, in pane, at
 // now. It reads session_id, cwd, transcript_path, tool_name, message and
-// notification_type;
+// notification_type, and on Stop last_assistant_message;
 // ToolTarget is the first present of tool_input.file_path,
 // tool_input.pattern or tool_input.command, cut to 60 runes. A field that is
 // missing or not a string reads as empty. Parse fails on an unknown kind, a
@@ -53,6 +53,9 @@ func Parse(kind model.EventKind, payload []byte, pane string, now time.Time) (mo
 		Message:          str(fields["message"]),
 		NotificationType: str(fields["notification_type"]),
 		At:               now,
+	}
+	if kind == model.Stop {
+		ev.LastAssistantMessage = str(fields["last_assistant_message"])
 	}
 	if ev.SessionID == "" {
 		return model.Event{}, fmt.Errorf("%s payload has no session_id", kind)

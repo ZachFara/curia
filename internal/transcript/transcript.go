@@ -220,9 +220,15 @@ func lastTextFirstLine(content json.RawMessage) *string {
 	if text == nil {
 		return nil
 	}
-	first, _, _ := strings.Cut(*text, "\n")
-	first = strings.TrimRight(first, "\r")
+	first := FirstLine(*text)
 	return &first
+}
+
+// FirstLine returns text up to its first line break, without a trailing
+// carriage return.
+func FirstLine(text string) string {
+	first, _, _ := strings.Cut(text, "\n")
+	return strings.TrimRight(first, "\r")
 }
 
 func wrap(msg string, err error) error {
