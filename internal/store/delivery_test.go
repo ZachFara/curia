@@ -167,6 +167,51 @@ func TestClaimTypingNothingToClaim(t *testing.T) {
 	}
 }
 
+// Ruling 73: the claim succeeds only when the asking session is the one
+// session row bound to its pane that is neither ended nor stale.
+func TestClaimTypingRefusesSharedPane(t *testing.T) {
+	cases := []struct {
+		name  string
+		other model.State // state of a second row in pane %3; "" for none
+		pane  string      // the second row's pane
+		ok    bool
+	}{
+		{"alone", "", "", true},
+		{"working peer", model.StateWorking, "%3", false},
+		{"waiting peer", model.StateWaiting, "%3", false},
+		{"idle peer", model.StateIdle, "%3", false},
+		{"needs_decision peer", model.StateNeedsDecision, "%3", false},
+		{"ended peer", model.StateEnded, "%3", true},
+		{"stale peer", model.StateStale, "%3", true},
+		{"peer in another pane", model.StateWaiting, "%4", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := open(t, dbPath(t))
+			sess := liveSession(t, s, "s1", "%3", model.StateIdle)
+			if c.other != "" {
+				liveSession(t, s, "s2", c.pane, c.other)
+			}
+			d := queued(t, s, "Type the answer?", "s1")
+			_, gotSess, ok, err := s.ClaimTyping(context.Background(), d.ID, tClaim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok != c.ok {
+				t.Fatalf("ok = %v, want %v", ok, c.ok)
+			}
+			if !reflect.DeepEqual(gotSess, sess) {
+				t.Errorf("session:\n got %+v\nwant %+v", gotSess, sess)
+			}
+			if c.ok {
+				assertDelivered(t, s, d.ID, model.ViaSendKeys, tClaim)
+			} else {
+				assertQueued(t, s, d.ID)
+			}
+		})
+	}
+}
+
 func TestRequeueOnlyUndoesTyping(t *testing.T) {
 	s := open(t, dbPath(t))
 	ctx := context.Background()
