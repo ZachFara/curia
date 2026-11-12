@@ -6,10 +6,12 @@ Read this first. It is the working agreement for every human and agent in this r
 
 `curia` is one Go binary that turns tmux into a control plane for parallel coding agents. Claude Code hooks call `curia hook <Event>`; the hook parses the payload, applies a pure state machine and upserts one row per session in a local SQLite store (WAL mode). Every view reads that store: `curia status` (status-bar badge), window markers, `curia next` (jump to the session that needs you), `curia ls`, and the `curia ui` popup / `curia sidebar`. Nothing scrapes panes. tmux is driven through a small `tmux.Client` interface so logic is testable without tmux.
 
+Plan 2 adds decisions. `curia mcp` is a stdio MCP server, one process per Claude Code session, whose four tools let an agent search precedent and raise, check or withdraw a decision ticket in the store's `decisions` table; no MCP tool can answer one. `curia decide` (a popup, or flags for scripts) is the only place an answer is written, and it refuses to run inside an agent session. An answer is delivered at most once, by one of three paths, each a claim in one write transaction: `curia decide` typing it into the agent's idle pane, `curia hook Stop` blocking the stop with the answer as its reason, or the agent's own `check_decision` (which also returns an answer already delivered).
+
 Sources of truth:
 
 - `docs/DESIGN.md`: the spec, WHAT to build.
-- `docs/superpowers/plans/`: the current implementation plan (Plan 1: `2026-11-11-curia-plan-1-foundation.md`), for task order, interfaces and tests.
+- `docs/superpowers/plans/`: the current implementation plan (Plan 2: `2026-11-11-curia-plan-2-decisions.md`), for task order, interfaces and tests. Plan 1 (`2026-11-11-curia-plan-1-foundation.md`) is complete.
 - `docs/decisions/`: numbered decision records, for HOW.
 - `PROGRESS.md`: status, waves, done criteria, open questions and rulings.
 
@@ -20,9 +22,9 @@ The layout check (`scripts/check-layout.sh`, decision 0006) rejects anything not
 | Path | Contents |
 | --- | --- |
 | `cmd/curia/` | Cobra commands, one file per command (see the convention below). |
-| `internal/<pkg>/` | One package per row of the plan's File structure table: `model`, `config`, `store`, `state`, `transcript`, `hook`, `tmux`, `fleet`, `attention`, `ui`, `install`. Each may import only the packages above it in that table (depguard, decision 0003). |
+| `internal/<pkg>/` | One package per row of the plan's File structure table: `model`, `config`, `sanitize`, `decision`, `precedent`, `store`, `state`, `transcript`, `hook`, `tmux`, `fleet`, `attention`, `notify`, `deliver`, `mcp`, `ui`, `install`. Each may import only the packages above it in that table (depguard, decisions 0003 and 0010). |
 | `e2e/` | End-to-end tests that build and drive the binary; imports no internal package. |
-| `testdata/` | Shared fixtures (`testdata/replay/`). Package-local fixtures live in `internal/<pkg>/testdata/` or `cmd/curia/testdata/`. |
+| `testdata/` | Shared fixtures (`testdata/replay/`, `testdata/decisions/`). Package-local fixtures live in `internal/<pkg>/testdata/` or `cmd/curia/testdata/`. |
 | `docs/` | Spec, plans, decision records. |
 | `scripts/` | Check scripts used by `make check` and the git hooks. |
 | `.github/` | CI workflow and PR template. |
@@ -58,7 +60,7 @@ Commands:
 
 Rules for the toolchain:
 
-- Never run `go mod tidy` during Plan 1. Every Plan 1 dependency is already in `go.mod` and `go.sum`, but only cobra is imported so far, so tidy would strip the others (decision 0009). No task edits `go.mod` or `go.sum`.
+- Never run `go mod tidy` during Plan 1 or Plan 2. Every dependency is already in `go.mod` and `go.sum` (decision 0009) and Plan 2 adds no module (decision 0011). No task edits `go.mod` or `go.sum`.
 - No test-helper modules (testify, teatest and so on): tests use the standard library plus the package's own dependencies. Use real dependencies in temp dirs: SQLite files under `t.TempDir()`, a real tmux server on its own socket (`tmux -L <name>`) where tmux is installed.
 - gosec is on (except G204): `filepath.Clean` paths before opening them, and write files with mode `0o600`.
 - Worktrees live under `.worktrees/` (gitignored). Each one has its own `.bin/`, so its first `make check` builds the tools (about a minute). depguard matches files by absolute path and its `e2e` rule matches any path segment named `e2e`, so no directory on the path to a worktree may be named `e2e`; use the branch slug, e.g. `.worktrees/plan1-t2-store`.
@@ -69,7 +71,7 @@ Rules for the toolchain:
 - **One file per command in `cmd/curia/`.** `main.go` holds only the package-level `rootCmd` and `main`. Every later command lives in its own file in `cmd/curia/` (for example `hook.go`, `ls.go`) and registers itself in that file's `init()` with `rootCmd.AddCommand(...)`, so parallel tasks never edit `main.go`. Tests for a command go in the matching `_test.go` file and drive it through `rootCmd.SetArgs` / `SetOut`.
 - **Shared files belong to the orchestrator alone** (from the owner's PARALLEL EXECUTION rules): "Shared files belong to you alone: PROGRESS.md, AGENTS.md, docs/decisions/, go.mod, go.sum, cmd/curia/main.go, the Makefile and CI config. An implementer that thinks one of these needs a change says so in its report; you make the change on plan-1 between waves." Here "you" is the orchestrator. The same applies to `.golangci.yml`, `lefthook.yml` and `scripts/`, which are part of the check configuration.
 - **`.scratch/` is the only place for throwaway work**: probe programs, experiments, notes, temporary scripts. It is gitignored and invisible to the layout check. Never put throwaway files in the tree. The orchestrator empties `.scratch/` at the end of every wave. Go code in `.scratch/` is not part of the module's `./...` (directories starting with `.` are skipped); to try something against this module's dependencies, copy `go.mod` and `go.sum` into a `.scratch/<name>/` directory and build there.
-- **Commits**: conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`, `build:`, `ci:`, `refactor:` ...), subject at most 72 characters; enforced by the commit-msg hook. Branches: `feat/`, `fix/`, `chore/`, `docs/`; Plan 1 task branches are `feat/plan1-tN-<slug>`.
+- **Commits**: conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`, `build:`, `ci:`, `refactor:` ...), subject at most 72 characters; enforced by the commit-msg hook. Branches: `feat/`, `fix/`, `chore/`, `docs/`; Plan 1 task branches are `feat/plan1-tN-<slug>`. Plan 2 task branches are `feat/plan2-tN-<slug>`, in worktrees `.worktrees/plan2-tN-<slug>`.
 - **PRs** use `.github/pull_request_template.md`: what changed, why, how it was tested.
 
 ## Things learned while building
@@ -92,6 +94,16 @@ Rules for the toolchain:
 - **gosec G302/G306 apply to tests too**: use a 0400 fixture, or the `/bin/sh` symlink trick for a fake executable.
 - **cobra keeps `--help` set on a command after a test runs it**; reset it in cleanup.
 - **Latency gates** are measured over a sequential pass with hundreds of samples and file handles (not pipes) for the child's stdio, so they measure the binary and not the test harness.
+
+- **Hook output (amended in Plan 2):** `curia hook <Event>` writes nothing to stdout or stderr and exits 0 on every path, with one exception: `curia hook Stop` writes exactly one line to stdout, `{"decision":"block","reason":"<text>"}` followed by a newline, when and only when its store transaction claimed at least one queued answer for that session. The exit code is still 0. Nothing is ever written to stderr.
+- **Every decision write is one `BEGIN IMMEDIATE` transaction in `internal/store`.** A function passed to `UpdateSession` or `UpdateSessionTx` uses only the `*store.Tx` it is given.
+- **Untrusted text is cleaned by `internal/sanitize` and nowhere else.** Text typed into a pane goes through `sanitize.Keys` and `tmux.Client.SendKeys`.
+- **tmux drops a trailing `;` from the last argument of `send-keys`** (it reads it as a command separator); `\;` keeps it. `display-message -p -t <unknown pane>` exits 0 with junk, so `#{pane_tty}` must be checked before it is opened.
+- **Writing BEL to a pane's tty sets `#{window_bell_flag}` even on a detached server**, which is how the bell is tested.
+- **A unix socket path is limited to about 100 bytes:** a test that sets `TMUX_TMPDIR` uses a short directory from `os.MkdirTemp("", "ct")`, never `t.TempDir()`.
+- **A test points the built binary at a private tmux server by setting `TMUX` to `<socket_path>,<server pid>,0`** (from `display-message -p '#{socket_path},#{pid},0'`); no flag or variable of Curia's own is needed.
+- **`CLAUDECODE=1` is set in every command Claude Code runs;** tests that run `curia decide` must unset it.
+- **An FTS5 `MATCH` argument is never built from raw text;** use `precedent.MatchExpr`.
 
 ## Owner's rules (verbatim)
 
