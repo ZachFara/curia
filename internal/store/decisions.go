@@ -47,16 +47,20 @@ type DecisionFilter struct {
 	Limit     int                    // 0: no limit; newest first when set
 }
 
-// selectDecisions is the column list every reader of decisions uses, in
-// scanDecision's order, read from the alias d. A query adds
-// "FROM decisions d" after it, or first the columns of a join, which
-// scanDecision scans into its extra destinations.
-const selectDecisions = `
-SELECT d.n, d.id, d.session_id, d.task_id, d.repo, d.question, d.context, d.options,
+// decisionColumns are the columns of a decision in scanDecision's order,
+// read from the alias d.
+const decisionColumns = `
+  d.n, d.id, d.session_id, d.task_id, d.repo, d.question, d.context, d.options,
   d.recommendation, d.rationale, d.reversibility, d.mode, d.assumption, d.scope, d.tags, d.status,
   d.answer_key, d.answer, d.answer_reasoning, d.answered_via, d.precedent_of, d.differs_from,
   d.differs_why, d.withdraw_reason, d.superseded_by, d.args_hash, d.delivery, d.delivered_via,
   d.created_at, d.expires_at, d.answered_at, d.closed_at, d.superseded_at, d.delivered_at`
+
+// selectDecisions is the column list every reader of decisions uses. A
+// query adds "FROM decisions d" after it, or first the columns of a join,
+// which scanDecision scans into its extra destinations.
+const selectDecisions = `
+SELECT` + decisionColumns
 
 // openAt is what "open" means at a time, its one parameter (plan section
 // 4.7): status open and not past the deadline, whether or not a sweep has

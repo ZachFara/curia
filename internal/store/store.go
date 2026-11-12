@@ -222,28 +222,12 @@ func (s *Store) UpsertSession(ctx context.Context, sess model.Session) error {
 //
 // fn must not call the Store: the transaction holds the write lock, so a
 // write from fn would wait on it until busy_timeout. If fn returns a Session
-// whose ID is not id, nothing is written and an error is returned.
+// whose ID is not id, nothing is written and an error is returned. It is
+// UpdateSessionTx with an fn that neither uses the Tx nor fails.
 func (s *Store) UpdateSession(ctx context.Context, id string, fn func(s model.Session, found bool) model.Session) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("store: update session %s: %w", id, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	cur, found, err := getSession(ctx, tx, id)
-	if err != nil {
-		return fmt.Errorf("store: update session %s: %w", id, err)
-	}
-	next := fn(cur, found)
-	if next.ID != id {
-		return fmt.Errorf("store: update session %s: fn returned a session with ID %q", id, next.ID)
-	}
-	if err = upsert(ctx, tx, next); err != nil {
-		return fmt.Errorf("store: update session %s: %w", id, err)
-	}
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("store: update session %s: commit: %w", id, err)
-	}
-	return nil
+	return s.UpdateSessionTx(ctx, id, func(_ *Tx, cur model.Session, found bool) (model.Session, error) {
+		return fn(cur, found), nil
+	})
 }
 
 // upsert is the single INSERT ... ON CONFLICT statement behind UpsertSession
