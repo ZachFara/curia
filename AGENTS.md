@@ -91,6 +91,11 @@ Rules for the toolchain:
 - **An ended session comes back on real activity** (prompt, tool, notification, stop); only `SubagentStop` and `SessionEnd` are ignored while ended. A session's first event of any kind gets SessionStart's treatment. `idle_prompt` and `auth_success` notifications change no state.
 - **Reconcile compares a session's start with the tmux server's start** (`tmux.Pane.ServerStart`), because a restarted server reuses pane ids.
 - **tmux only runs `pane-focus-in` when `focus-events` is on**; the snippet turns it on. `display-message -p` never starts `#()` jobs (only an attached client does). `set-hook -R` runs a hook at once, which is useful in headless tests. Double-quoted tmux strings expand `$VAR` and treat `\` as an escape; single-quoted strings have no escapes.
+- **No Claude Code hook fires when the user denies a permission prompt or presses Esc to interrupt a turn.** A denied prompt leaves the session `waiting` and an interrupt leaves it `working` until the next prompt (Plan 1 Open Question 19). Approving a prompt fires no hook either, which is why `PermissionRequest` is not registered (Ruling 48).
+- **Stop runs before the transcript is flushed:** take the final message from the payload's `last_assistant_message`, with the transcript as fallback (Ruling 36).
+- **The `permission_prompt` Notification arrives about 6 seconds after the prompt opens;** until then the session still reads `working`.
+- **tmux format comparisons:** `#{<:a,b}` compares text, `#{e|<:a,b}` compares numbers. The default `status-right-length` is 40, too short for the badge after the default status-right (Ruling 35).
+- **Test tmux servers start with `-f /dev/null`,** so the developer's `~/.tmux.conf` never reaches a test.
 - **gosec G302/G306 apply to tests too**: use a 0400 fixture, or the `/bin/sh` symlink trick for a fake executable.
 - **cobra keeps `--help` set on a command after a test runs it**; reset it in cleanup.
 - **Latency gates** are measured over a sequential pass with hundreds of samples and file handles (not pipes) for the child's stdio, so they measure the binary and not the test harness.
