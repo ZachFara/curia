@@ -44,7 +44,7 @@ func init() {
 		Short: "List decision tickets",
 		Long: "Expires assume tickets that are due, then lists tickets by --status: open\n" +
 			"(the default), decided (answered, confirmed, overridden), closed (withdrawn,\n" +
-			"expired) or all, oldest first. --json prints a JSON array.",
+			"expired) or all, in allocation (id) order. --json prints a JSON array.",
 		Args: cobra.NoArgs,
 		RunE: runDecisionsLs,
 	}
@@ -192,17 +192,20 @@ func decisionsPrintJSON(w io.Writer, ds []model.Decision) error {
 	return err
 }
 
-// decisionsPrintTable prints one row per ticket. Every cell is ticket text,
-// which is untrusted, so it goes through sanitize.Line and ui.Cell.
+// decisionsCell makes ticket text, which is untrusted, safe as one table cell.
+func decisionsCell(s string, limit int) string { return ui.Cell(sanitize.Line(s, limit)) }
+
+// decisionsPrintTable prints one row per ticket, in allocation (id) order.
+
 func decisionsPrintTable(w io.Writer, ds []model.Decision, now time.Time) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ID\tSTATUS\tMODE\tAGE\tREPO\tQUESTION\tANSWER\tDELIVERY")
 	for _, d := range ds {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			ui.Cell(sanitize.Line(d.ID, decisionsQuestionLimit)), ui.Cell(string(d.Status)), ui.Cell(string(d.Mode)),
-			ui.Cell(ui.Age(d.CreatedAt, now)), ui.Cell(sanitize.Line(ui.RepoName(d.Repo), decisionsQuestionLimit)),
-			ui.Cell(sanitize.Line(d.Question, decisionsQuestionLimit)),
-			ui.Cell(sanitize.Line(d.Answer, decisionsAnswerLimit)), ui.Cell(string(d.Delivery)))
+			decisionsCell(d.ID, decisionsQuestionLimit), decisionsCell(string(d.Status), decisionsQuestionLimit),
+			decisionsCell(string(d.Mode), decisionsQuestionLimit), decisionsCell(ui.Age(d.CreatedAt, now), decisionsQuestionLimit), decisionsCell(ui.RepoName(d.Repo), decisionsQuestionLimit),
+			decisionsCell(d.Question, decisionsQuestionLimit),
+			decisionsCell(d.Answer, decisionsAnswerLimit), decisionsCell(string(d.Delivery), decisionsQuestionLimit))
 	}
 	return tw.Flush()
 }

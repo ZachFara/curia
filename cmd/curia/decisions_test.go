@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -45,6 +48,8 @@ func decisionsNull(s string) any {
 
 const decisionsNow = "2026-11-11T12:00:00Z"
 
+// decisionsSpecs seeds seven tickets. Their created_at values are not in id
+// order on purpose: ls lists in allocation (id) order, not by age.
 func decisionsSpecs() []decisionsSpec {
 	const z = ".000000000Z"
 	return []decisionsSpec{
@@ -229,8 +234,29 @@ func TestDecisionsLsSweepsExpiry(t *testing.T) {
 	}
 }
 
+// decisionsHostile are texts a hostile agent could store: an escape sequence,
+// a line break, bidi controls and isolates, invisible marks, DEL, and
+// invalid UTF-8.
+const decisionsHostile = "x\x1b[31mred\nnext\u202e\u2066\u2069\u200e\u200f\u061c\x7f\xff\xfey"
+
+// decisionsHostileHome seeds one open ticket whose question, repo, answer and
+// answer reasoning are all decisionsHostile.
+func decisionsHostileHome(t *testing.T) {
+	t.Helper()
+	db := decisionsHome(t, decisionsSpec{decisionsHostile, model.ModeBlocking, "2026-11-11T08:00:00.000000000Z", "", decisionsEnd{}})
+	raw, err := sql.Open("sqlite", db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.Exec(`UPDATE decisions SET repo = ?, answer = ?, answer_reasoning = ? WHERE id = 'D-1'`,
+		"/src/"+decisionsHostile, decisionsHostile, decisionsHostile); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDecisionsLsTableIsSanitised(t *testing.T) {
-	decisionsHome(t, decisionsSpec{"bad\x1b[31m red\nsecond line\u202e", model.ModeBlocking, "2026-11-11T08:00:00.000000000Z", "", decisionsEnd{}})
+	decisionsHostileHome(t)
 	out, err := runRoot(t, "decisions", "ls")
 	if err != nil {
 		t.Fatal(err)
@@ -239,9 +265,17 @@ func TestDecisionsLsTableIsSanitised(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("want header and one row, got %d lines:\n%q", len(lines), out)
 	}
-	for _, bad := range []string{"\x1b", "\u202e"} {
-		if strings.Contains(out, bad) {
-			t.Errorf("table contains %q: %q", bad, out)
+	if !utf8.ValidString(out) {
+		t.Errorf("table is not valid UTF-8: %q", out)
+	}
+	for _, r := range out {
+		if r != '\n' && !unicode.IsPrint(r) {
+			t.Errorf("table contains unprintable %U: %q", r, out)
+		}
+	}
+	for _, residue := range []string{"[31m", "\x1b"} {
+		if strings.Contains(out, residue) {
+			t.Errorf("table contains escape residue %q: %q", residue, out)
 		}
 	}
 	for _, h := range []string{"ID", "STATUS", "MODE", "AGE", "REPO", "QUESTION", "ANSWER", "DELIVERY"} {
@@ -249,7 +283,7 @@ func TestDecisionsLsTableIsSanitised(t *testing.T) {
 			t.Errorf("header %q lacks %s", lines[0], h)
 		}
 	}
-	for _, w := range []string{"D-1", "open", "blocking", "4h", "curia", "second line"} {
+	for _, w := range []string{"D-1", "open", "blocking", "4h", "next", "none"} {
 		if !strings.Contains(lines[1], w) {
 			t.Errorf("row %q lacks %q", lines[1], w)
 		}
@@ -257,19 +291,24 @@ func TestDecisionsLsTableIsSanitised(t *testing.T) {
 }
 
 func TestDecisionsLsJSONEscapesUnprintable(t *testing.T) {
-	decisionsHome(t, decisionsSpec{"a\u202eb\x1bc", model.ModeBlocking, "2026-11-11T08:00:00.000000000Z", "", decisionsEnd{}})
+	decisionsHostileHome(t)
 	out, err := runRoot(t, "decisions", "ls", "--json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range out {
-		if r != '\n' && (r < ' ' || r == 0x7f || r == 0x202e) {
+		if r != '\n' && !unicode.IsPrint(r) {
 			t.Fatalf("raw unprintable %U in %q", r, out)
 		}
 	}
-	var rows []struct{ Question string }
+	var rows []struct{ Question, Repo, Answer, AnswerReasoning string }
 	if err := json.Unmarshal([]byte(out), &rows); err != nil || len(rows) != 1 {
 		t.Fatalf("not valid JSON: %v\n%s", err, out)
+	}
+	// The escapes decode to the same text: the bidi isolate is still there,
+	// as an escape and not as a raw character.
+	if !strings.Contains(rows[0].Question, "\u2066") || !strings.Contains(out, `\u2066`) {
+		t.Errorf("U+2066 not preserved as an escape: %q", out)
 	}
 }
 
@@ -314,19 +353,21 @@ func TestEditErrors(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		args []string
-		id   string
+		id   string // row that must stay unchanged
+		is   error  // errors.Is target, or nil
+		msg  string // substring of the message, or ""
 	}{
-		{"no flag", []string{"D-3"}, "D-3"},
-		{"bad id", []string{"d3", "--supersede"}, ""},
-		{"bad id zero", []string{"D-0", "--supersede"}, ""},
-		{"unknown id", []string{"D-99", "--supersede"}, ""},
-		{"open ticket", []string{"D-1", "--scope", "global"}, "D-1"},
-		{"closed ticket", []string{"D-5", "--supersede"}, "D-5"},
-		{"bad scope", []string{"D-3", "--scope", "planet"}, "D-3"},
-		{"superseded-by itself", []string{"D-3", "--superseded-by", "D-3"}, "D-3"},
-		{"superseded-by open", []string{"D-3", "--superseded-by", "D-1"}, "D-3"},
-		{"superseded-by unknown", []string{"D-3", "--superseded-by", "D-99"}, "D-3"},
-		{"superseded-by malformed", []string{"D-3", "--superseded-by", "x"}, "D-3"},
+		{"no flag", []string{"D-3"}, "D-3", nil, "nothing to change"},
+		{"bad id", []string{"d3", "--supersede"}, "", nil, `invalid decision id "d3"`},
+		{"bad id zero", []string{"D-0", "--supersede"}, "", nil, `invalid decision id "D-0"`},
+		{"unknown id", []string{"D-99", "--supersede"}, "", store.ErrNotFound, "D-99"},
+		{"open ticket", []string{"D-1", "--scope", "global"}, "D-1", store.ErrNotDecided, "D-1"},
+		{"closed ticket", []string{"D-5", "--supersede"}, "D-5", store.ErrNotDecided, "D-5"},
+		{"bad scope", []string{"D-3", "--scope", "planet"}, "D-3", nil, `invalid --scope "planet"`},
+		{"superseded-by itself", []string{"D-3", "--superseded-by", "D-3"}, "D-3", store.ErrBadPrecedent, "D-3"},
+		{"superseded-by open", []string{"D-3", "--superseded-by", "D-1"}, "D-3", store.ErrBadPrecedent, "D-3"},
+		{"superseded-by unknown", []string{"D-3", "--superseded-by", "D-99"}, "D-3", store.ErrBadPrecedent, "D-3"},
+		{"superseded-by malformed", []string{"D-3", "--superseded-by", "x"}, "D-3", nil, `invalid --superseded-by "x"`},
 	} {
 		var before model.Decision
 		if c.id != "" {
@@ -338,6 +379,12 @@ func TestEditErrors(t *testing.T) {
 			t.Errorf("%s: succeeded: %s", c.name, out)
 			continue
 		}
+		if c.is != nil && !errors.Is(err, c.is) {
+			t.Errorf("%s: error %q is not %v", c.name, err, c.is)
+		}
+		if !strings.Contains(err.Error(), c.msg) {
+			t.Errorf("%s: error %q lacks %q", c.name, err, c.msg)
+		}
 		if strings.Contains(out, "D-3 superseded") || strings.Contains(out, "scope repo ->") {
 			t.Errorf("%s: printed success text: %s", c.name, out)
 		}
@@ -346,6 +393,48 @@ func TestEditErrors(t *testing.T) {
 				!after.SupersededAt.Equal(before.SupersededAt) || after.Status != before.Status {
 				t.Errorf("%s: row changed: %+v -> %+v", c.name, before, after)
 			}
+		}
+	}
+}
+
+// decisionsResetFlags restores the flag variables after a test that runs
+// commands without decisionsHome.
+func decisionsResetFlags(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		decisionsStatus, decisionsJSON, decisionsScope = "open", false, ""
+		decisionsSupersede, decisionsSupersededBy = false, ""
+	})
+}
+
+// Every path that reaches runDecisionsEdit refuses first, before any store
+// step: no database file is created.
+func TestEditRefusesInsideAgentBeforeTheStore(t *testing.T) {
+	for _, args := range [][]string{
+		{"D-3", "--scope", "global"},
+		{"D-99", "--supersede"},
+		{"--scope", "global", "D-3"},
+		{"--supersede", "D-3"},
+		{"d3", "--supersede"},
+		{"D-3"},
+		{"D-3", "--scope", "planet"},
+		{"D-3", "--supersede"},
+		{"D-3", "--superseded-by", "D-4"},
+		{"D-3", "--superseded-by", "x"},
+		{"D-3", "--scope", "task", "--supersede", "--superseded-by", "D-4"},
+	} {
+		db := hookHome(t)
+		decisionsResetFlags(t)
+		t.Setenv("CLAUDECODE", "1")
+		out, err := runRoot(t, append([]string{"decisions", "edit"}, args...)...)
+		if err == nil || !strings.Contains(err.Error(), "refusing to run inside an agent session") {
+			t.Errorf("edit %v = %v, %q, want the refusal", args, err, out)
+		}
+		if out != "" && strings.Contains(out, "->") {
+			t.Errorf("edit %v printed %q", args, out)
+		}
+		if _, statErr := os.Stat(db); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("edit %v touched the database: %v", args, statErr)
 		}
 	}
 }
@@ -363,6 +452,26 @@ func TestEditRefusesInsideAgent(t *testing.T) {
 	decisionsScope = ""
 	if got := decisionsIDs(t); strings.Join(got, " ") != "D-1 D-2" {
 		t.Errorf("ls inside agent = %v", got)
+	}
+}
+
+// Ruling 69: help is exempt from the guard. It prints usage, reaches no
+// store step and writes nothing.
+func TestEditHelpInsideAgentIsExempt(t *testing.T) {
+	db := hookHome(t)
+	decisionsResetFlags(t)
+	t.Setenv("CLAUDECODE", "1")
+	t.Cleanup(func() {
+		if c, _, err := rootCmd.Find([]string{"decisions", "edit"}); err == nil {
+			_ = c.Flags().Set("help", "false")
+		}
+	})
+	out, err := runRoot(t, "decisions", "edit", "--help")
+	if err != nil || !strings.Contains(out, "Usage:") {
+		t.Errorf("edit --help = %q, %v, want usage", out, err)
+	}
+	if _, statErr := os.Stat(db); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("help touched the database: %v", statErr)
 	}
 }
 
