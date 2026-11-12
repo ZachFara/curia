@@ -262,7 +262,7 @@ func TestRunSessionStartRecordsSession(t *testing.T) {
 	want := model.Session{
 		ID: "A", Agent: "claude", Pane: "%3", TmuxSession: "work", TmuxWindow: "@7",
 		Cwd: "/src/curia", Repo: "/src/curia", Branch: "feat/hook", TranscriptPath: "/p/a.jsonl",
-		State: model.StateWorking, StartedAt: t0, UpdatedAt: t0,
+		State: model.StateIdle, StartedAt: t0, UpdatedAt: t0, SeenAt: t0,
 	}
 	if stored != want {
 		t.Errorf("stored =\n %+v\nwant\n %+v", stored, want)
@@ -361,11 +361,11 @@ func TestSessionStartEndsPriorSessionInPane(t *testing.T) {
 	if a := get(t, st, "A"); a.State != model.StateEnded || !a.UpdatedAt.Equal(t0.Add(time.Minute)) {
 		t.Errorf("A = %s at %v, want ended at %v", a.State, a.UpdatedAt, t0.Add(time.Minute))
 	}
-	if b := get(t, st, "B"); b.State != model.StateWorking || b.Pane != "%3" {
-		t.Errorf("B = %s in %q, want working in %%3", b.State, b.Pane)
+	if b := get(t, st, "B"); b.State != model.StateIdle || b.Pane != "%3" {
+		t.Errorf("B = %s in %q, want idle in %%3", b.State, b.Pane)
 	}
-	if c := get(t, st, "C"); c.State != model.StateWorking {
-		t.Errorf("C in another pane = %s, want working", c.State)
+	if c := get(t, st, "C"); c.State != model.StateIdle {
+		t.Errorf("C in another pane = %s, want idle (not ended)", c.State)
 	}
 }
 
@@ -381,8 +381,8 @@ func TestHookWithoutTmuxPane(t *testing.T) {
 			t.Errorf("%s: pane %q, tmux %q/%q, want none", id, s.Pane, s.TmuxSession, s.TmuxWindow)
 		}
 		// Without a pane there is nothing to end: B must not end A.
-		if s.State != model.StateWorking {
-			t.Errorf("%s: state %s, want working", id, s.State)
+		if s.State != model.StateIdle {
+			t.Errorf("%s: state %s, want idle", id, s.State)
 		}
 		if s.Repo != "/src/curia" || s.Branch != "feat/hook" {
 			t.Errorf("%s: repo %q branch %q, want them from Git", id, s.Repo, s.Branch)
@@ -576,6 +576,26 @@ func TestNestedSessionDoesNotHideParent(t *testing.T) {
 	}
 	if len(listed) != 1 || listed[0].ID != "OUTER" || listed[0].State != model.StateWaiting {
 		t.Errorf("listed = %+v, want OUTER waiting only", listed)
+	}
+}
+
+// TestHeadlessRunSequence: `claude -p` fires SessionStart, UserPromptSubmit,
+// Stop and SessionEnd (live check), so it is working from its prompt on.
+func TestHeadlessRunSequence(t *testing.T) {
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	for _, step := range []struct {
+		kind model.EventKind
+		want model.State
+	}{
+		{model.SessionStart, model.StateIdle},
+		{model.UserPromptSubmit, model.StateWorking},
+		{model.Stop, model.StateIdle},
+		{model.SessionEnd, model.StateEnded},
+	} {
+		if got := run(t, st, env, step.kind, payload("H", "", "")); got.State != step.want {
+			t.Errorf("after %s: %s, want %s", step.kind, got.State, step.want)
+		}
 	}
 }
 

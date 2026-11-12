@@ -30,6 +30,8 @@ func TestApplyTransitions(t *testing.T) {
 		want func(model.Session) model.Session
 	}{
 		{
+			// Ruling 37: a new or /cleared session sits at an empty prompt,
+			// and the user started it, so it is idle and seen.
 			name: "SessionStart",
 			in:   model.Session{SubagentsActive: 3},
 			ev: model.Event{
@@ -39,7 +41,7 @@ func TestApplyTransitions(t *testing.T) {
 			want: func(model.Session) model.Session {
 				return model.Session{
 					ID: "s1", Agent: "claude", Pane: "%1", Cwd: "/w", TranscriptPath: "/t",
-					State: model.StateWorking, StartedAt: t1, UpdatedAt: t1,
+					State: model.StateIdle, StartedAt: t1, UpdatedAt: t1, SeenAt: t1,
 				}
 			},
 		},
@@ -163,8 +165,8 @@ func TestEndedIgnoresSubagentStopAndSessionEnd(t *testing.T) {
 	}
 	ev := model.Event{Kind: model.SessionStart, SessionID: "s1", Pane: "%2", At: t1}
 	got := state.Apply(ended, ev, false)
-	if got.State != model.StateWorking || got.Pane != "%2" || got.StartedAt != t1 {
-		t.Errorf("SessionStart did not revive ended session: %+v", got)
+	if got.State != model.StateIdle || got.Pane != "%2" || got.StartedAt != t1 || got.SeenAt != t1 {
+		t.Errorf("SessionStart did not revive ended session as idle and seen: %+v", got)
 	}
 }
 

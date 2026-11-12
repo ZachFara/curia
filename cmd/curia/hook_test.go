@@ -200,8 +200,8 @@ func TestHookRecordsSession(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("GetSession = found %v, err %v", found, err)
 	}
-	if sess.State != model.StateWorking || sess.Pane != "" {
-		t.Errorf("session = %+v, want working with no pane", sess)
+	if sess.State != model.StateIdle || sess.Pane != "" {
+		t.Errorf("session = %+v, want idle with no pane", sess)
 	}
 }
 
@@ -319,6 +319,33 @@ func wantCalls(t *testing.T, got []string, want ...string) {
 	t.Helper()
 	if !slices.Equal(got, want) {
 		t.Errorf("marker calls = %q, want %q", got, want)
+	}
+}
+
+// Ruling 37: a session at its empty prompt is listed, but not counted in
+// the badge and not offered by next; its first prompt makes it working.
+func TestHookFreshSessionIsIdleUntilFirstPrompt(t *testing.T) {
+	m := newMarkerHook(t)
+	wantCalls(t, m.event("SessionStart", "A"))
+	if s := getSession(t, m.db, "A"); s.State != model.StateIdle {
+		t.Errorf("A after SessionStart = %s, want idle", s.State)
+	}
+	if out, err := runRoot(t, "status"); err != nil || out != "" {
+		t.Errorf("status = %q, %v, want an empty badge", out, err)
+	}
+	if out, err := runRoot(t, "ls"); err != nil || !strings.Contains(out, "idle") {
+		t.Errorf("ls = %q, %v, want A listed as idle", out, err)
+	}
+	m.fake.Calls = nil
+	if _, err := runRoot(t, "next"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(m.fake.Calls, "DisplayMessage nothing needs you") {
+		t.Errorf("next made calls %q, want nothing needs you", m.fake.Calls)
+	}
+	wantCalls(t, m.event("UserPromptSubmit", "A"))
+	if s := getSession(t, m.db, "A"); s.State != model.StateWorking {
+		t.Errorf("A after UserPromptSubmit = %s, want working", s.State)
 	}
 }
 

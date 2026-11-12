@@ -22,8 +22,11 @@ func Apply(s model.Session, ev model.Event, openDecision bool) model.Session {
 
 	switch ev.Kind {
 	case model.SessionStart:
+		// A new or /cleared session sits at an empty prompt the user just
+		// opened: idle and seen (Ruling 37). Its first prompt makes it working.
 		start(&s, ev)
-		s.State = model.StateWorking
+		s.State = model.StateIdle
+		s.SeenAt = ev.At
 		s.SubagentsActive = 0
 	case model.UserPromptSubmit:
 		s.State = model.StateWorking

@@ -14,7 +14,7 @@
     "context_max": 200000,
     "subagents_active": 0,
     "last_update": "Claude needs your permission",
-    "seen_at": null,
+    "seen_at": "<time>",
     "transcript_path": "<root>/testdata/replay/transcripts/s2.jsonl",
     "started_at": "<time>",
     "updated_at": "<time>"
@@ -34,7 +34,7 @@
     "context_max": 200000,
     "subagents_active": 0,
     "last_update": "Fixed: --verbose now parses after the subcommand.",
-    "seen_at": null,
+    "seen_at": "<time>",
     "transcript_path": "<root>/testdata/replay/transcripts/s3.jsonl",
     "started_at": "<time>",
     "updated_at": "<time>"
@@ -54,7 +54,7 @@
     "context_max": 200000,
     "subagents_active": 0,
     "last_update": "Edit /nonexistent/replay/api/server.go",
-    "seen_at": null,
+    "seen_at": "<time>",
     "transcript_path": "<root>/testdata/replay/transcripts/s1.jsonl",
     "started_at": "<time>",
     "updated_at": "<time>"
@@ -74,7 +74,7 @@
     "context_max": 0,
     "subagents_active": 1,
     "last_update": "Task",
-    "seen_at": null,
+    "seen_at": "<time>",
     "transcript_path": "<root>/testdata/replay/transcripts/s5.jsonl",
     "started_at": "<time>",
     "updated_at": "<time>"
