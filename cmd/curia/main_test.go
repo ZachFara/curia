@@ -112,6 +112,10 @@ func (unreachableTmux) PaneInfo(context.Context, string) (tmux.Pane, error) {
 	return tmux.Pane{}, errTmuxUnreachable
 }
 
+func (unreachableTmux) PaneFocused(context.Context, string) (bool, error) {
+	return false, errTmuxUnreachable
+}
+
 func (unreachableTmux) SwitchTo(context.Context, string) error { return errTmuxUnreachable }
 
 func (unreachableTmux) SetWindowOption(context.Context, string, string, string) error {
