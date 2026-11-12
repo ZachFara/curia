@@ -14,12 +14,13 @@ import (
 	"github.com/ZachFara/curia/internal/model"
 )
 
-// A turn ended by a denial, in the shape Claude Code writes it.
+// A turn ended by a denial, in the shape Claude Code writes it. The marker
+// is at 11:59:58.5, later than every UpdatedAt the tests settle (t0 is 12:00).
 const deniedTranscript = `{"type":"user","message":{"role":"user","content":"Create out.txt"}}
 {"type":"assistant","message":{"model":"m","content":[{"type":"tool_use","id":"t1","name":"Write","input":{}}],"usage":{"input_tokens":1}}}
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use.","is_error":true,"tool_use_id":"t1"}]},"toolUseResult":"User rejected tool use","toolDenialKind":"user-rejected"}
 {"type":"attachment","attachment":{"type":"x"}}
-{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"timestamp":"2026-11-11T11:59:58.500Z"}
 {"type":"system","subtype":"turn_duration","durationMs":1996}
 `
 
@@ -182,5 +183,66 @@ func TestSettleContinuesAfterOneFailure(t *testing.T) {
 	}
 	if got := get(t, st, "a-broken"); !reflect.DeepEqual(got, broken) {
 		t.Errorf("a-broken changed:\n%+v", got)
+	}
+}
+
+// settleMarkerFile is a transcript whose last conversational line is an
+// interrupt marker with the given timestamp field ("" for none), after a
+// PreToolUse's tool_use.
+func settleMarkerFile(t *testing.T, timestamp string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "session.jsonl")
+	content := `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}` + "\n" +
+		`{"type":"user",` + timestamp + `"message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}` + "\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// Ruling 79: the marker must be later than the session's last hook event.
+func TestSettleOnlyMarkerAfterLastHookEvent(t *testing.T) {
+	now := t0
+	ts := func(s string) string { return `"timestamp":"` + s + `",` }
+	for _, tt := range []struct {
+		name    string
+		state   model.State
+		updated time.Time
+		stamp   string
+		want    bool
+	}{
+		// Denial: the permission_prompt Notification set waiting, then the
+		// user denied.
+		{"denial after notification", model.StateWaiting, now.Add(-time.Minute), ts("2026-11-11T11:59:01.329Z"), true},
+		// Interrupt: PreToolUse set working, then Esc during the tool.
+		{"interrupt after pretooluse", model.StateWorking, now.Add(-time.Minute), ts("2026-11-11T11:59:10.887Z"), true},
+		// An old marker, then a new prompt: UserPromptSubmit set working
+		// later, and Claude Code has not written the prompt line for more
+		// than 3 s (a slow hook of another tool holds it).
+		{"old marker then new prompt", model.StateWorking, now.Add(-10 * time.Second), ts("2026-11-11T11:59:40.000Z"), false},
+		{"marker equal to UpdatedAt", model.StateWorking, now.Add(-time.Minute), ts("2026-11-11T11:59:00.000Z"), false},
+		// Compared as times: 12:59:00+01:00 is 11:59:00Z, equal, not later.
+		{"equal in another zone", model.StateWaiting, now.Add(-time.Minute), ts("2026-11-11T12:59:00+01:00"), false},
+		{"later in another zone", model.StateWaiting, now.Add(-time.Minute), ts("2026-11-11T12:59:00.001+01:00"), true},
+		// The stored time has nanoseconds; Claude Code's has milliseconds.
+		{"a nanosecond later than the marker", model.StateWorking, now.Add(-time.Minute).Add(time.Nanosecond), ts("2026-11-11T11:59:00.000Z"), false},
+		{"missing timestamp", model.StateWorking, now.Add(-time.Minute), "", false},
+		{"malformed timestamp", model.StateWorking, now.Add(-time.Minute), ts("11:59:30 yesterday"), false},
+		{"numeric timestamp", model.StateWorking, now.Add(-time.Minute), `"timestamp":1794453708329,`, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := settleSession("s", tt.state, tt.updated, settleMarkerFile(t, tt.stamp))
+			st := openStore(t, s)
+			settled, err := fleet.Settle(context.Background(), st, []model.Session{s}, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(settled) == 1; got != tt.want {
+				t.Errorf("settled = %q, want settled %v", settled, tt.want)
+			}
+			if got := get(t, st, "s"); tt.want != (got.State == model.StateIdle) || (!tt.want && !reflect.DeepEqual(got, s)) {
+				t.Errorf("row = %+v", got)
+			}
+		})
 	}
 }

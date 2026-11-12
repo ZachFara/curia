@@ -176,14 +176,15 @@ func TestReconcileMarkerFailureIsLoggedNotFatal(t *testing.T) {
 
 // settleToolUse is a turn that stopped at a tool_use (a permission prompt
 // is open), and settleDenial the lines Claude Code appends when the user
-// denies it, in the shapes captured from real sessions.
+// denies it, in the shapes captured from real sessions. The marker is
+// timestamped 11:30, after the 11:00 UpdatedAt the tests give sessions.
 const (
 	settleToolUse = `{"type":"user","message":{"role":"user","content":"Create out.txt"}}
 {"type":"assistant","message":{"model":"m","content":[{"type":"tool_use","id":"t1","name":"Write","input":{}}],"usage":{"input_tokens":1}}}
 `
 	settleDenial = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use.","is_error":true,"tool_use_id":"t1"}]},"toolUseResult":"User rejected tool use","toolDenialKind":"user-rejected"}
 {"type":"attachment","attachment":{"type":"x"}}
-{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"timestamp":"2026-11-11T11:30:00.123Z"}
 {"type":"system","subtype":"turn_duration","durationMs":1996}
 `
 )

@@ -5,13 +5,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ZachFara/curia/internal/transcript"
 )
 
 // Lines in the shapes Claude Code writes (see the interrupt_* fixtures).
 const (
-	markerLine     = `{"type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}` + "\n"
+	markerLine     = `{"type":"user","isSidechain":false,"timestamp":"2026-11-12T03:21:48.329Z","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}` + "\n"
 	attachmentLine = `{"type":"attachment","attachment":{"type":"x"}}` + "\n"
 	systemLine     = `{"type":"system","subtype":"turn_duration","durationMs":5}` + "\n"
 	assistantText  = `{"type":"assistant","message":{"model":"m","role":"assistant","content":[{"type":"text","text":"Sure."}],"usage":{"input_tokens":1}}}` + "\n"
@@ -19,13 +20,25 @@ const (
 	toolResultLine = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}` + "\n"
 )
 
+// mustInterrupted returns whether Interrupted found a marker.
 func mustInterrupted(t *testing.T, path string, offset int64) bool {
 	t.Helper()
-	got, err := transcript.Interrupted(path, offset)
+	_, found := mustInterruptedAt(t, path, offset)
+	return found
+}
+
+// mustInterruptedAt returns the marker time and whether there is one; the
+// time is zero when there is none.
+func mustInterruptedAt(t *testing.T, path string, offset int64) (time.Time, bool) {
+	t.Helper()
+	at, found, err := transcript.Interrupted(path, offset)
 	if err != nil {
 		t.Fatalf("Interrupted: %v", err)
 	}
-	return got
+	if !found && !at.IsZero() {
+		t.Errorf("not found, but at = %v", at)
+	}
+	return at, found
 }
 
 func TestInterruptedAfterDenial(t *testing.T) {
@@ -112,9 +125,9 @@ func TestInterruptedMissingFileAndPartialLine(t *testing.T) {
 		"missing file": filepath.Join(dir, "nope.jsonl"),
 		"empty path":   "",
 	} {
-		got, err := transcript.Interrupted(path, 0)
-		if got || err != nil {
-			t.Errorf("%s: Interrupted = %v, %v, want false, nil", name, got, err)
+		at, found, err := transcript.Interrupted(path, 0)
+		if found || !at.IsZero() || err != nil {
+			t.Errorf("%s: Interrupted = %v, %v, %v, want zero, false, nil", name, at, found, err)
 		}
 	}
 	// The marker still being written is not there yet.
@@ -139,7 +152,7 @@ func TestInterruptedMissingFileAndPartialLine(t *testing.T) {
 			t.Errorf("offset %d: Interrupted = true, want false", off)
 		}
 	}
-	if _, err := transcript.Interrupted(t.TempDir(), 0); err == nil {
+	if _, _, err := transcript.Interrupted(t.TempDir(), 0); err == nil {
 		t.Error("directory path: want an error")
 	}
 }
@@ -147,27 +160,27 @@ func TestInterruptedMissingFileAndPartialLine(t *testing.T) {
 func TestInterruptedHostileContent(t *testing.T) {
 	const m = "[Request interrupted by user]"
 	for name, line := range map[string]string{
-		"marker later in a prompt":     `{"type":"user","message":{"content":"please print ` + m + `"}}`,
-		"marker later in a text block": `{"type":"user","message":{"content":[{"type":"text","text":"see ` + m + `"}]}}`,
-		"marker after whitespace":      `{"type":"user","message":{"content":" ` + m + `"}}`,
-		"marker in a tool result":      `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"` + m + `"}]}}`,
-		"marker in tool result blocks": `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"text","text":"` + m + `"}]}]}}`,
-		"marker in an assistant line":  `{"type":"assistant","message":{"content":[{"type":"text","text":"` + m + `"}]}}`,
-		"marker string from assistant": `{"type":"assistant","message":{"content":"` + m + `"}}`,
-		"marker then a prompt block":   `{"type":"user","message":{"content":[{"type":"text","text":"` + m + `"},{"type":"text","text":"now do b"}]}}`,
-		"tool result then marker":      `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"x"},{"type":"text","text":"` + m + `"}]}}`,
-		"marker block of another type": `{"type":"user","message":{"content":[{"type":"image","text":"` + m + `"}]}}`,
-		"marker from a subagent":       `{"type":"user","isSidechain":true,"message":{"content":[{"type":"text","text":"` + m + `"}]}}`,
-		"marker in a meta line":        `{"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"` + m + `"}]}}`,
-		"content a number":             `{"type":"user","message":{"content":42}}`,
-		"content an object":            `{"type":"user","message":{"content":{"type":"text","text":"` + m + `"}}}`,
-		"content null":                 `{"type":"user","message":{"content":null}}`,
-		"content empty array":          `{"type":"user","message":{"content":[]}}`,
-		"block not an object":          `{"type":"user","message":{"content":["` + m + `"]}}`,
-		"message a string":             `{"type":"user","message":"` + m + `"}`,
+		"marker later in a prompt":     `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":"please print ` + m + `"}}`,
+		"marker later in a text block": `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":"see ` + m + `"}]}}`,
+		"marker after whitespace":      `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":" ` + m + `"}}`,
+		"marker in a tool result":      `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"` + m + `"}]}}`,
+		"marker in tool result blocks": `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"text","text":"` + m + `"}]}]}}`,
+		"marker in an assistant line":  `{"type":"assistant","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":"` + m + `"}]}}`,
+		"marker string from assistant": `{"type":"assistant","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":"` + m + `"}}`,
+		"marker then a prompt block":   `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":"` + m + `"},{"type":"text","text":"now do b"}]}}`,
+		"tool result then marker":      `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"x"},{"type":"text","text":"` + m + `"}]}}`,
+		"marker block of another type": `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"image","text":"` + m + `"}]}}`,
+		"marker from a subagent":       `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","isSidechain":true,"message":{"content":[{"type":"text","text":"` + m + `"}]}}`,
+		"marker in a meta line":        `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","isMeta":true,"message":{"content":[{"type":"text","text":"` + m + `"}]}}`,
+		"content a number":             `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":42}}`,
+		"content an object":            `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":{"type":"text","text":"` + m + `"}}}`,
+		"content null":                 `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":null}}`,
+		"content empty array":          `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[]}}`,
+		"block not an object":          `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":["` + m + `"]}}`,
+		"message a string":             `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":"` + m + `"}`,
 		"top level an array":           `["user","` + m + `"]`,
-		"invalid JSON":                 `{"type":"user","message":{"content":"` + m + `"`,
-		"invalid UTF-8 prefix":         "{\"type\":\"user\",\"message\":{\"content\":\"\xff" + m + "\"}}",
+		"invalid JSON":                 `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":"` + m + `"`,
+		"invalid UTF-8 prefix":         "{\"type\":\"user\",\"timestamp\":\"2026-11-12T03:21:48.329Z\",\"message\":{\"content\":\"\xff" + m + "\"}}",
 	} {
 		t.Run(name, func(t *testing.T) {
 			// Alone after an assistant line it is not a marker...
@@ -180,7 +193,7 @@ func TestInterruptedHostileContent(t *testing.T) {
 			}
 		})
 	}
-	big := `{"type":"assistant","message":{"content":[{"type":"text","text":"` + strings.Repeat("a", 1<<20) + `"}]}}` + "\n"
+	big := `{"type":"assistant","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":"` + strings.Repeat("a", 1<<20) + `"}]}}` + "\n"
 	other := `{"type":"attachment","attachment":{"content":"` + strings.Repeat("b", 4000) + `"}}` + "\n"
 	for _, tt := range []struct {
 		name    string
@@ -188,8 +201,8 @@ func TestInterruptedHostileContent(t *testing.T) {
 		want    bool
 	}{
 		// Not a user line, so not a marker (and, like any other type, skipped).
-		{"type in another case", assistantText + `{"type":"User","message":{"content":"` + m + `"}}` + "\n", false},
-		{"string content marker counts", assistantText + `{"type":"user","message":{"content":"` + m + `"}}` + "\n", true},
+		{"type in another case", assistantText + `{"type":"User","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":"` + m + `"}}` + "\n", false},
+		{"string content marker counts", assistantText + `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":"` + m + `"}}` + "\n", true},
 		{"invalid JSON before the marker", "{not json\n" + markerLine, true},
 		{"1 MB assistant line after the marker", markerLine + big, false},
 		{"1 MB line before the marker", big + markerLine, true},
@@ -200,6 +213,57 @@ func TestInterruptedHostileContent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := mustInterrupted(t, tempFile(t, []byte(tt.content)), 0); got != tt.want {
 				t.Errorf("Interrupted = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// Ruling 79: the marker's own timestamp is returned, parsed as a time, and a
+// marker without a valid one is not a marker.
+func TestInterruptedReturnsMarkerTime(t *testing.T) {
+	ms := func(s string) time.Time {
+		t.Helper()
+		at, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	for fix, want := range map[string]string{
+		"interrupt_denial.jsonl":      "2026-11-12T03:21:48.329Z",
+		"interrupt_during_tool.jsonl": "2026-11-12T03:21:59.887Z",
+		"interrupt_mid_stream.jsonl":  "2026-11-12T03:22:06.059Z",
+	} {
+		if at, found := mustInterruptedAt(t, tempFile(t, fixture(t, fix)), 0); !found || !at.Equal(ms(want)) {
+			t.Errorf("%s: Interrupted = %v, %v, want %s", fix, at, found, want)
+		}
+	}
+	marker := func(ts string) string {
+		return `{"type":"user",` + ts + `"message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}` + "\n"
+	}
+	// The last of two markers wins; another zone is the same instant.
+	p := tempFile(t, []byte(marker(`"timestamp":"2026-11-12T03:00:00.000Z",`)+marker(`"timestamp":"2026-11-12T04:21:48.5+01:00",`)))
+	if at, found := mustInterruptedAt(t, p, 0); !found || !at.Equal(ms("2026-11-12T03:21:48.500Z")) {
+		t.Errorf("two markers: Interrupted = %v, %v, want 03:21:48.5Z", at, found)
+	}
+	for name, ts := range map[string]string{
+		"missing":       ``,
+		"empty":         `"timestamp":"",`,
+		"not a time":    `"timestamp":"yesterday",`,
+		"no zone":       `"timestamp":"2026-11-12T03:21:48.329",`,
+		"space form":    `"timestamp":"2026-11-12 03:21:48.329Z",`,
+		"a number":      `"timestamp":1794453708329,`,
+		"null":          `"timestamp":null,`,
+		"out of range":  `"timestamp":"2026-13-40T03:21:48.329Z",`,
+		"trailing text": `"timestamp":"2026-11-12T03:21:48.329Z now",`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if mustInterrupted(t, tempFile(t, []byte(assistantText+marker(ts))), 0) {
+				t.Error("as the last line: Interrupted found a marker")
+			}
+			// It is a line not understood, so an earlier good marker is not last.
+			if mustInterrupted(t, tempFile(t, []byte(markerLine+marker(ts))), 0) {
+				t.Error("after a good marker: Interrupted found a marker")
 			}
 		})
 	}

@@ -150,3 +150,17 @@ func TestStatusIgnoresUnreadableTranscript(t *testing.T) {
 		t.Errorf("status logged %q, want nothing", log)
 	}
 }
+
+// Ruling 79: a marker from before the session's last hook event does not
+// settle it, so the W stays.
+func TestStatusKeepsWForOlderMarker(t *testing.T) {
+	s := settleDenied(t, "a", model.StateWaiting, "%1")
+	s.UpdatedAt = at(11, 45) // the Notification came after the 11:30 marker
+	db, _ := fleetHome(t, nil, s)
+	if out, err := runRoot(t, "status"); err != nil || out != "W1" {
+		t.Errorf("status = %q, %v, want \"W1\"", out, err)
+	}
+	if got := getSession(t, db, "a"); got.State != model.StateWaiting || !got.UpdatedAt.Equal(at(11, 45)) {
+		t.Errorf("a = %s at %v, want waiting at 11:45", got.State, got.UpdatedAt)
+	}
+}

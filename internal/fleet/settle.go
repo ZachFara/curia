@@ -23,12 +23,15 @@ const interruptedUpdate = "interrupted"
 // Settle corrects sessions a denied permission prompt or an interrupt left
 // working or waiting: no hook fires for either (Ruling 77). Each of the
 // given sessions that is working or waiting, whose UpdatedAt is at least 3
-// seconds before now, and whose transcript after its TranscriptOffset ends
-// in a user-interrupt marker (transcript.Interrupted) becomes idle and
-// seen, with LastUpdate "interrupted" and UpdatedAt and SeenAt now; nothing
-// else changes. Each write goes through store.UpdateSession and is skipped
-// if the stored row's state or UpdatedAt is no longer the listed one (a
-// hook event arrived). Sessions in other states, or too recent, are not
+// seconds before now, whose transcript after its TranscriptOffset ends in a
+// user-interrupt marker (transcript.Interrupted), and whose marker is
+// timestamped later than its UpdatedAt (Ruling 79: a marker from before the
+// last hook event, such as the UserPromptSubmit of a new prompt whose line
+// is not written yet, says nothing about now) becomes idle and seen, with
+// LastUpdate "interrupted" and UpdatedAt and SeenAt now; nothing else
+// changes. Each write goes through store.UpdateSession and is skipped
+// unless the stored row still has the listed state and UpdatedAt and the
+// marker is later than that UpdatedAt (a hook event arrived). Sessions in other states, or too recent, are not
 // read at all. One session's failure does not stop the others: Settle
 // returns the ids it settled and the failures joined.
 func Settle(ctx context.Context, st *store.Store, sessions []model.Session, now time.Time) (settled []string, err error) {
@@ -55,10 +58,11 @@ func settleCandidate(s model.Session, now time.Time) bool {
 }
 
 // settleOne settles the listed session if its transcript ends in an
-// interrupt and its stored row is still the listed one.
+// interrupt later than its last hook event and its stored row is still the
+// listed one.
 func settleOne(ctx context.Context, st *store.Store, listed model.Session, now time.Time) (bool, error) {
-	interrupted, err := transcript.Interrupted(listed.TranscriptPath, listed.TranscriptOffset)
-	if err != nil || !interrupted {
+	at, interrupted, err := transcript.Interrupted(listed.TranscriptPath, listed.TranscriptOffset)
+	if err != nil || !interrupted || !at.After(listed.UpdatedAt) {
 		return false, err
 	}
 	done := false
@@ -66,7 +70,7 @@ func settleOne(ctx context.Context, st *store.Store, listed model.Session, now t
 		done = false
 		// Sessions are never deleted; a missing row has an empty ID, which
 		// UpdateSession refuses to write.
-		if cur.State != listed.State || !cur.UpdatedAt.Equal(listed.UpdatedAt) {
+		if cur.State != listed.State || !cur.UpdatedAt.Equal(listed.UpdatedAt) || !at.After(cur.UpdatedAt) {
 			return cur
 		}
 		cur.State, cur.LastUpdate = model.StateIdle, interruptedUpdate
