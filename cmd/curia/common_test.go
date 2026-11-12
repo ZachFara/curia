@@ -200,6 +200,16 @@ func settleTranscript(t *testing.T, content string) string {
 	return p
 }
 
+// settleUnreadable is a transcript file that cannot be opened (mode 0).
+func settleUnreadable(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "locked.jsonl")
+	if err := os.WriteFile(p, []byte(settleToolUse+settleDenial), 0); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // settleDenied is a session in state in pane, window @1, whose transcript
 // ends in a denial and whose last hook event was at 11:00 (fleetNow is 12:00).
 func settleDenied(t *testing.T, id string, state model.State, pane string) model.Session {

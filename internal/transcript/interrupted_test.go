@@ -2,8 +2,11 @@ package transcript_test
 
 import (
 	"bytes"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -152,9 +155,78 @@ func TestInterruptedMissingFileAndPartialLine(t *testing.T) {
 			t.Errorf("offset %d: Interrupted = true, want false", off)
 		}
 	}
-	if _, _, err := transcript.Interrupted(t.TempDir(), 0); err == nil {
-		t.Error("directory path: want an error")
+}
+
+// Both exact marker texts, as one text block, are markers (the fixtures
+// hold them in their real lines too).
+func TestInterruptedExactMarkers(t *testing.T) {
+	for _, text := range []string{"[Request interrupted by user]", "[Request interrupted by user for tool use]"} {
+		line := `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"role":"user","content":[{"type":"text","text":"` + text + `"}]}}` + "\n"
+		if !mustInterrupted(t, tempFile(t, []byte(assistantText+line)), 0) {
+			t.Errorf("%s: Interrupted = false, want true", text)
+		}
 	}
+}
+
+// A path that is not a regular file is not a transcript: not found, no
+// error, and no read that could block or never end.
+func TestInterruptedNotRegularFile(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{
+		"directory":         t.TempDir(),
+		"character device":  os.DevNull,
+		"endless device":    "/dev/zero",
+		"fifo, no writer":   fifo,
+		"symlink to device": symlinkTo(t, "/dev/zero"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			done := make(chan error, 1)
+			go func() {
+				at, found, err := transcript.Interrupted(path, 0)
+				if found || !at.IsZero() {
+					err = fmt.Errorf("found %v at %v", found, at)
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("Interrupted: %v, want zero, false, nil", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Interrupted did not return within 5 s")
+			}
+		})
+	}
+	// A symlink to a regular transcript is still read.
+	if !mustInterrupted(t, symlinkTo(t, tempFile(t, []byte(markerLine))), 0) {
+		t.Error("symlink to a transcript: Interrupted = false, want true")
+	}
+}
+
+// A regular file that cannot be opened is an error, so the caller can
+// report it.
+func TestInterruptedUnreadableFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "locked.jsonl")
+	if err := os.WriteFile(p, []byte(markerLine), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := transcript.Interrupted(p, 0); err == nil {
+		t.Error("want an error for a file that cannot be opened")
+	}
+}
+
+// symlinkTo returns a new symlink to target.
+func symlinkTo(t *testing.T, target string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, p); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 func TestInterruptedHostileContent(t *testing.T) {
@@ -180,7 +252,20 @@ func TestInterruptedHostileContent(t *testing.T) {
 		"message a string":             `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":"` + m + `"}`,
 		"top level an array":           `["user","` + m + `"]`,
 		"invalid JSON":                 `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":"` + m + `"`,
-		"invalid UTF-8 prefix":         "{\"type\":\"user\",\"timestamp\":\"2026-11-12T03:21:48.329Z\",\"message\":{\"content\":\"\xff" + m + "\"}}",
+		// Ruling 80: a plain string is how a typed or pasted prompt is
+		// stored; every real marker is one text block equal to a marker.
+		"typed prompt equal to the marker":  `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":"` + m + `"}}`,
+		"typed prompt starting with it":     `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":"` + m + ` and then what?"}}`,
+		"typed tool-use marker":             `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":"[Request interrupted by user for tool use]"}}`,
+		"text block continuing the marker":  `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":"` + m + ` and more"}]}}`,
+		"text block, tool-use marker cont.": `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use] x"}]}}`,
+		"text block, marker prefix only":    `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":"[Request interrupted by user"}]}}`,
+		"text block, marker then a space":   `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":"` + m + ` "}]}}`,
+		"text block, marker then a newline": `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":"` + m + `\n"}]}}`,
+		"text block, space then the marker": `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":" ` + m + `"}]}}`,
+		"text block, other case":            `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":"[request interrupted by user]"}]}}`,
+		"two blocks, the first the marker":  `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":[{"type":"text","text":"` + m + `"},{"type":"text","text":"` + m + `"}]}}`,
+		"invalid UTF-8 prefix":              "{\"type\":\"user\",\"timestamp\":\"2026-11-12T03:21:48.329Z\",\"message\":{\"content\":\"\xff" + m + "\"}}",
 	} {
 		t.Run(name, func(t *testing.T) {
 			// Alone after an assistant line it is not a marker...
@@ -202,7 +287,6 @@ func TestInterruptedHostileContent(t *testing.T) {
 	}{
 		// Not a user line, so not a marker (and, like any other type, skipped).
 		{"type in another case", assistantText + `{"type":"User","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":"` + m + `"}}` + "\n", false},
-		{"string content marker counts", assistantText + `{"type":"user","timestamp":"2026-11-12T03:21:48.329Z","message":{"content":"` + m + `"}}` + "\n", true},
 		{"invalid JSON before the marker", "{not json\n" + markerLine, true},
 		{"1 MB assistant line after the marker", markerLine + big, false},
 		{"1 MB line before the marker", big + markerLine, true},

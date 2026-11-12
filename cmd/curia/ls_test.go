@@ -307,7 +307,7 @@ func TestLsShowsInterruptedSessionIdle(t *testing.T) {
 // A transcript ls cannot read is logged; the session is listed unchanged.
 func TestLsLogsSettleFailure(t *testing.T) {
 	fleetHome(t, []string{"%1"}, model.Session{
-		ID: "a", Agent: "claude", State: model.StateWorking, Pane: "%1", TranscriptPath: t.TempDir(), UpdatedAt: at(11, 0),
+		ID: "a", Agent: "claude", State: model.StateWorking, Pane: "%1", TranscriptPath: settleUnreadable(t), UpdatedAt: at(11, 0),
 	})
 	out, err := runRoot(t, "ls", "--json")
 	if err != nil || !strings.Contains(out, `"state": "working"`) {

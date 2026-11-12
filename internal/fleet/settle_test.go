@@ -34,6 +34,17 @@ func settleDeniedFile(t *testing.T) string {
 	return p
 }
 
+// settleUnreadableFile is a transcript file that cannot be opened (mode
+// 0), so reading it is an error.
+func settleUnreadableFile(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "locked.jsonl")
+	if err := os.WriteFile(p, []byte(deniedTranscript), 0); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // settleSession is a session in state, last updated at, whose transcript is
 // at path.
 func settleSession(id string, state model.State, updated time.Time, path string) model.Session {
@@ -78,7 +89,7 @@ func TestSettleLeavesRecentSessions(t *testing.T) {
 	denied := settleDeniedFile(t)
 	recent := settleSession("recent", model.StateWaiting, now.Add(-3*time.Second+time.Millisecond), denied)
 	// A transcript that cannot be read proves a recent session is not read.
-	unread := settleSession("unread", model.StateWorking, now.Add(-time.Second), t.TempDir())
+	unread := settleSession("unread", model.StateWorking, now.Add(-time.Second), settleUnreadableFile(t))
 	future := settleSession("future", model.StateWorking, now.Add(time.Minute), denied)
 	edge := settleSession("edge", model.StateWorking, now.Add(-3*time.Second), denied)
 	st := openStore(t, recent, unread, future, edge)
@@ -105,8 +116,8 @@ func TestSettleLeavesIdleAndEnded(t *testing.T) {
 	for _, state := range []model.State{model.StateIdle, model.StateEnded, model.StateStale, model.StateNeedsDecision, "bogus"} {
 		sessions = append(sessions, settleSession(string(state), state, old, denied))
 	}
-	// Neither is read: their transcripts are directories.
-	sessions = append(sessions, settleSession("idle-unread", model.StateIdle, old, t.TempDir()))
+	// Not read: its transcript cannot be opened.
+	sessions = append(sessions, settleSession("idle-unread", model.StateIdle, old, settleUnreadableFile(t)))
 	// No transcript at all: nothing to settle from, and no error.
 	sessions = append(sessions, settleSession("no-transcript", model.StateWaiting, old, ""))
 	st := openStore(t, sessions...)
@@ -166,8 +177,8 @@ func TestSettleContinuesAfterOneFailure(t *testing.T) {
 	now := t0
 	denied := settleDeniedFile(t)
 	old := now.Add(-time.Minute)
-	broken := settleSession("a-broken", model.StateWorking, old, t.TempDir()) // a directory
-	missing := settleSession("b-missing", model.StateWorking, old, denied)    // listed, never stored
+	broken := settleSession("a-broken", model.StateWorking, old, settleUnreadableFile(t))
+	missing := settleSession("b-missing", model.StateWorking, old, denied) // listed, never stored
 	good := settleSession("c-good", model.StateWaiting, old, denied)
 	st := openStore(t, broken, good)
 

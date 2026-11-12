@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/ZachFara/curia/internal/model"
@@ -136,15 +137,23 @@ func TestStatusDropsWAfterDenial(t *testing.T) {
 	}
 }
 
-// Settling is a correction: a transcript status cannot read leaves that
-// session as it is, and the badge is still printed.
+// Settling is a correction: a transcript status cannot read, or a path
+// that is not a regular file (one that never ends, a FIFO that would block
+// an open), leaves that session as it is, and the badge is still printed.
 func TestStatusIgnoresUnreadableTranscript(t *testing.T) {
+	waiting := func(id, path string) model.Session {
+		return model.Session{ID: id, Agent: "claude", State: model.StateWaiting, Pane: "%1", TranscriptPath: path, UpdatedAt: at(11, 0)}
+	}
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	fleetHome(t, nil,
-		model.Session{ID: "a", Agent: "claude", State: model.StateWaiting, Pane: "%1", TranscriptPath: t.TempDir(), UpdatedAt: at(11, 0)},
+		waiting("a", settleUnreadable(t)), waiting("c", "/dev/zero"), waiting("d", t.TempDir()), waiting("e", fifo),
 		settleDenied(t, "b", model.StateWaiting, "%2"),
 	)
-	if out, err := runRoot(t, "status"); err != nil || out != "W1" {
-		t.Errorf("status = %q, %v, want \"W1\"", out, err)
+	if out, err := runRoot(t, "status"); err != nil || out != "W4" {
+		t.Errorf("status = %q, %v, want \"W4\"", out, err)
 	}
 	if log := readLog(t); log != nil {
 		t.Errorf("status logged %q, want nothing", log)
