@@ -44,10 +44,11 @@ type Session struct {
 // Event is a parsed hook payload. NotificationType is a Notification's
 // notification_type (for example "permission_prompt" or "idle_prompt").
 // LastAssistantMessage is a Stop's last_assistant_message: Claude's final
-// answer, which the transcript may not hold yet when Stop fires.
+// answer, which the transcript may not hold yet when Stop fires. Model is a
+// SessionStart's model, empty when the payload has none.
 type Event struct {
 	Kind                                                                                  EventKind
 	SessionID, Pane, Cwd, TranscriptPath, ToolName, ToolTarget, Message, NotificationType string
-	LastAssistantMessage                                                                  string
+	LastAssistantMessage, Model                                                           string
 	At                                                                                    time.Time
 }

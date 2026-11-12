@@ -1,1 +1,1 @@
-{"session_id":"sess-1","transcript_path":"/p/t.jsonl","cwd":"/repo","hook_event_name":"SessionStart","source":"startup"}
+{"session_id":"sess-1","transcript_path":"/p/t.jsonl","cwd":"/repo","scratchpad_dir":"/tmp/scratch","hook_event_name":"SessionStart","source":"startup","model":"claude-haiku-5-5"}

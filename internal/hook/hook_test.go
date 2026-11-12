@@ -46,7 +46,7 @@ func TestParseFixtures(t *testing.T) {
 		return ev
 	}
 	tests := []model.Event{
-		with(model.SessionStart, nil),
+		with(model.SessionStart, func(e *model.Event) { e.Model = "claude-haiku-5-5" }),
 		with(model.UserPromptSubmit, nil),
 		with(model.PreToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Edit", "src/api.ts" }),
 		with(model.PermissionRequest, func(e *model.Event) { e.ToolName, e.ToolTarget = "Write", "/repo/out.txt" }),
@@ -493,6 +493,39 @@ func TestStopMessageWithoutTranscript(t *testing.T) {
 	run(t, st, env, model.SessionStart, payload("A", "", ""))
 	if got := run(t, st, env, model.Stop, payload("A", "", `,"last_assistant_message":"hi"`)); got.LastUpdate != "hi" {
 		t.Errorf("LastUpdate = %q, want hi", got.LastUpdate)
+	}
+}
+
+// TestSessionStartModelKeptUntilTranscriptRead: an interactive SessionStart
+// names the model; the session shows it until a transcript read replaces it.
+func TestSessionStartModelKeptUntilTranscriptRead(t *testing.T) {
+	st := openStore(t)
+	tr := writeTranscript(t)
+	env := (&fakeEnv{}).env("%3")
+	if got := run(t, st, env, model.SessionStart, payload("A", tr, `,"model":"claude-haiku-5-5"`)); got.Model != "claude-haiku-5-5" {
+		t.Errorf("after SessionStart: model %q, want claude-haiku-5-5", got.Model)
+	}
+	if got := run(t, st, env, model.UserPromptSubmit, payload("A", tr, "")); got.Model != "claude-haiku-5-5" {
+		t.Errorf("after UserPromptSubmit: model %q, want it kept", got.Model)
+	}
+	if got := run(t, st, env, model.PostToolUse, payload("A", tr, `,"tool_name":"Read"`)); got.Model != "claude-opus-5-5" {
+		t.Errorf("after a transcript read: model %q, want the transcript's claude-opus-5-5", got.Model)
+	}
+	// A SessionStart without one (a resume, headless, or /clear's new id)
+	// leaves what the session has.
+	if got := run(t, st, env, model.SessionStart, payload("A", tr, "")); got.Model != "claude-opus-5-5" {
+		t.Errorf("after a SessionStart with no model: %q, want claude-opus-5-5 kept", got.Model)
+	}
+}
+
+// TestParseReadsModelOnlyOnSessionStart: no other payload carries the
+// session's model.
+func TestParseReadsModelOnlyOnSessionStart(t *testing.T) {
+	body := []byte(`{"session_id":"s","model":"claude-haiku-5-5"}`)
+	for _, kind := range []model.EventKind{model.UserPromptSubmit, model.PostToolUse, model.Stop, model.SubagentStop} {
+		if ev, err := hook.Parse(kind, body, "", t0); err != nil || ev.Model != "" {
+			t.Errorf("Parse(%s).Model = %q, %v, want empty", kind, ev.Model, err)
+		}
 	}
 }
 

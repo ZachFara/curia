@@ -231,6 +231,22 @@ func TestSessionStartResetsOffsetForNewTranscript(t *testing.T) {
 	}
 }
 
+func TestSessionStartTakesModelWhenNamed(t *testing.T) {
+	s := base()
+	s.Model = "claude-opus-5-5"
+	named := state.Apply(s, model.Event{Kind: model.SessionStart, SessionID: "s1", Model: "claude-haiku-5-5", At: t1}, false)
+	if named.Model != "claude-haiku-5-5" {
+		t.Errorf("SessionStart naming a model: %q, want claude-haiku-5-5", named.Model)
+	}
+	unnamed := state.Apply(s, model.Event{Kind: model.SessionStart, SessionID: "s1", At: t1}, false)
+	if unnamed.Model != "claude-opus-5-5" {
+		t.Errorf("SessionStart naming none: %q, want claude-opus-5-5 kept", unnamed.Model)
+	}
+	if other := state.Apply(s, model.Event{Kind: model.UserPromptSubmit, SessionID: "s1", Model: "x", At: t1}, false); other.Model != "claude-opus-5-5" {
+		t.Errorf("UserPromptSubmit changed the model to %q", other.Model)
+	}
+}
+
 func TestPostToolUseTaskDoesNotCountSubagent(t *testing.T) {
 	got := state.Apply(base(), model.Event{Kind: model.PostToolUse, SessionID: "s1", ToolName: "Task", At: t1}, false)
 	if got.SubagentsActive != 0 {
