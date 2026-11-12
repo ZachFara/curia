@@ -257,3 +257,39 @@ func TestSettleOnlyMarkerAfterLastHookEvent(t *testing.T) {
 		})
 	}
 }
+
+// M5: an interrupted session with an open blocking ticket settles to
+// needs_decision, as a Stop would leave it, so the badge, the markers and
+// curia next still show that it needs the user. An assume ticket, or a
+// blocking one past its deadline, does not count.
+func TestSettleWithOpenBlockingTicketNeedsDecision(t *testing.T) {
+	now := t0
+	denied := settleDeniedFile(t)
+	asking := settleSession("asking", model.StateWaiting, now.Add(-10*time.Second), denied)
+	assuming := settleSession("assuming", model.StateWorking, now.Add(-10*time.Second), denied)
+	st := openStore(t, asking, assuming)
+	ticket := func(session string, mode model.Mode) {
+		t.Helper()
+		d := model.Decision{
+			SessionID: session, Question: "Which store?", Options: []model.Option{{Key: "A", Label: "Postgres"}, {Key: "B", Label: "Redis"}},
+			Recommendation: "A", Rationale: "r", Reversibility: model.ReversCostly, Mode: mode, Scope: model.ScopeRepo,
+			Status: model.StatusOpen, Delivery: model.DeliveryNone, ArgsHash: "h-" + session, CreatedAt: now.Add(-time.Minute),
+		}
+		if mode == model.ModeAssume {
+			d.Assumption, d.ExpiresAt = "Postgres", now.Add(time.Hour)
+		}
+		if _, _, err := st.CreateDecision(context.Background(), d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ticket("asking", model.ModeBlocking)
+	ticket("assuming", model.ModeAssume)
+	if _, err := fleet.Settle(context.Background(), st, []model.Session{asking, assuming}, now); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]model.State{"asking": model.StateNeedsDecision, "assuming": model.StateIdle} {
+		if got := get(t, st, id); got.State != want || got.LastUpdate != "interrupted" {
+			t.Errorf("%s = %s %q, want %s \"interrupted\"", id, got.State, got.LastUpdate, want)
+		}
+	}
+}

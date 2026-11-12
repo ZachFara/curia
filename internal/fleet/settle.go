@@ -27,13 +27,17 @@ const interruptedUpdate = "interrupted"
 // user-interrupt marker (transcript.Interrupted), and whose marker is
 // timestamped later than its UpdatedAt (Ruling 79: a marker from before the
 // last hook event, such as the UserPromptSubmit of a new prompt whose line
-// is not written yet, says nothing about now) becomes idle and seen, with
-// LastUpdate "interrupted" and UpdatedAt and SeenAt now; nothing else
-// changes. Each write goes through store.UpdateSession and is skipped
-// unless the stored row still has the listed state and UpdatedAt and the
-// marker is later than that UpdatedAt (a hook event arrived). Sessions in other states, or too recent, are not
-// read at all. One session's failure does not stop the others: Settle
-// returns the ids it settled and the failures joined.
+// is not written yet, says nothing about now) is settled: it becomes
+// needs_decision when it has an open blocking ticket at now, as a Stop
+// would make it, and idle otherwise, and seen, with LastUpdate
+// "interrupted" and UpdatedAt and SeenAt now; nothing else changes.
+//
+// Each write is one store.UpdateSessionTx transaction, which counts the
+// open blocking tickets, and is skipped unless the stored row still has
+// the listed state and UpdatedAt and the marker is later than that
+// UpdatedAt (no hook event arrived since). Sessions in other states, or too
+// recent, are not read at all. One session's failure does not stop the
+// others: Settle returns the ids it settled and the failures joined.
 func Settle(ctx context.Context, st *store.Store, sessions []model.Session, now time.Time) (settled []string, err error) {
 	var errs []error
 	for _, s := range sessions {
@@ -66,17 +70,24 @@ func settleOne(ctx context.Context, st *store.Store, listed model.Session, now t
 		return false, err
 	}
 	done := false
-	err = st.UpdateSession(ctx, listed.ID, func(cur model.Session, _ bool) model.Session {
+	err = st.UpdateSessionTx(ctx, listed.ID, func(tx *store.Tx, cur model.Session, _ bool) (model.Session, error) {
 		done = false
 		// Sessions are never deleted; a missing row has an empty ID, which
-		// UpdateSession refuses to write.
+		// UpdateSessionTx refuses to write.
 		if cur.State != listed.State || !cur.UpdatedAt.Equal(listed.UpdatedAt) || !at.After(cur.UpdatedAt) {
-			return cur
+			return cur, nil
 		}
-		cur.State, cur.LastUpdate = model.StateIdle, interruptedUpdate
-		cur.SeenAt, cur.UpdatedAt = now, now
+		open, cerr := tx.OpenBlocking(ctx, cur.ID, now)
+		if cerr != nil {
+			return cur, cerr
+		}
+		cur.State = model.StateIdle
+		if open > 0 {
+			cur.State = model.StateNeedsDecision // M5: the badge and markers show it
+		}
+		cur.LastUpdate, cur.SeenAt, cur.UpdatedAt = interruptedUpdate, now, now
 		done = true
-		return cur
+		return cur, nil
 	})
 	if err != nil {
 		return false, err
