@@ -1,0 +1,249 @@
+package sanitize
+
+import (
+	"strings"
+	"testing"
+	"unicode"
+	"unicode/utf8"
+)
+
+func TestLineStripsEscapeSequences(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"csi", "\x1b[31mred\x1b[0m", "red"},
+		{"osc bel", "\x1b]0;title\x07x", "x"},
+		{"osc st", "\x1b]8;;http://e\x1b\\link", "link"},
+		{"dcs", "a\x1bPdcs\x1b\\b", "ab"},
+		{"sos", "a\x1bXsos\x1b\\b", "ab"},
+		{"pm", "a\x1b^pm\x1b\\b", "ab"},
+		{"apc", "a\x1b_apc\x1b\\b", "ab"},
+		{"c1 csi", "a\u009b31mb", "ab"},
+		{"c1 osc", "a\u009d0;t\x07b", "ab"},
+		{"c1 dcs", "a\u0090dcs\x1b\\b", "ab"},
+		{"c1 sos", "a\u0098s\x1b\\b", "ab"},
+		{"c1 pm", "a\u009em\x1b\\b", "ab"},
+		{"c1 apc", "a\u009fp\x1b\\b", "ab"},
+		{"two byte", "a\x1bcb\x1b7c", "abc"},
+		{"unterminated csi", "a\x1b[31", "a"},
+		{"unterminated osc", "a\x1b]0;title", "a"},
+		{"unterminated dcs", "a\x1bPdata\x1b", "a"},
+		{"lone esc", "a\x1b", "a"},
+		{"esc esc", "a\x1b\x1b[31mb", "ab"},
+		{"csi aborted by esc", "a\x1b[31\x1b[0mb", "ab"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Line(c.in, 0); got != c.want {
+				t.Errorf("Line(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestLineOneLine(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"a\r\nb\tc", "a b c"},
+		{"  a   b ", "a b"},
+		{"a\nb\rc", "a b c"},
+		{"\n\t ", ""},
+	}
+	for _, c := range cases {
+		if got := Line(c.in, 0); got != c.want {
+			t.Errorf("Line(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestLineDropsInvisible(t *testing.T) {
+	for _, r := range []rune{0x202E, 0x2066, 0x200B, 0xFEFF, 0x0000, 0x007F, 0x0085} {
+		in := "a" + string(r) + "b"
+		if got := Line(in, 0); got != "ab" {
+			t.Errorf("Line(%q) = %q, want %q", in, got, "ab")
+		}
+	}
+	for _, in := range []string{"é", "\u65e5\u672c", "\u2248"} {
+		if got := Line(in, 0); got != in {
+			t.Errorf("Line(%q) = %q, want it kept", in, got)
+		}
+	}
+}
+
+func TestLineDropsInvalidUTF8(t *testing.T) {
+	if got := Line("a\xff\xfeb", 0); got != "ab" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestLineLimit(t *testing.T) {
+	if got := Line("abcdefghij", 5); got != "abcd\u2026" {
+		t.Errorf("got %q, want %q", got, "abcd\u2026")
+	}
+	if got := Line("\u65e5\u672c\u8a9e\u65e5\u672c\u8a9e\u65e5\u672c\u8a9e\u65e5", 5); got != "\u65e5\u672c\u8a9e\u65e5\u2026" {
+		t.Errorf("multibyte: got %q", got)
+	}
+	if got := Line("abcde", 5); got != "abcde" {
+		t.Errorf("exact fit: got %q", got)
+	}
+	if got := Line("abcdefghij", 0); got != "abcdefghij" {
+		t.Errorf("limit 0: got %q", got)
+	}
+	if got := Line("abcdefghij", -3); got != "abcdefghij" {
+		t.Errorf("negative limit: got %q", got)
+	}
+	if got := Line("abcdefghij", 1); got != "\u2026" {
+		t.Errorf("limit 1: got %q", got)
+	}
+}
+
+func TestTextKeepsParagraphs(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"a\r\n\r\n\r\nb", "a\n\nb"},
+		{"\x1b[2Jx\ny", "x\ny"},
+		{"a\rb", "a\nb"},
+		{"  a \t b  \n  c  ", "a b\nc"},
+		{"a\n \t \n\n\nb", "a\n\nb"},
+	}
+	for _, c := range cases {
+		if got := Text(c.in, 0); got != c.want {
+			t.Errorf("Text(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestTextLimit(t *testing.T) {
+	if got := Text("ab\ncdefgh", 5); got != "ab\nc\u2026" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestKeysAlphabet(t *testing.T) {
+	hostile := "use $(rm -rf ~); `id` | sh > /dev/null & \"q\" 'q' !! * ? ~ # % = \\ ( ) { } [ ] < >"
+	out, lossy := Keys(hostile, 0)
+	if !lossy {
+		t.Error("hostile text: lossy = false")
+	}
+	for _, r := range out {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != ' ' && !strings.ContainsRune(".,:-_/", r) {
+			t.Errorf("rune %q in %q", r, out)
+		}
+	}
+	if strings.Contains(out, "  ") || out != strings.TrimSpace(out) {
+		t.Errorf("spaces not collapsed in %q", out)
+	}
+
+	plain := "Postgres, version 16.2: use it"
+	out, lossy = Keys(plain, 200)
+	if out != plain || lossy {
+		t.Errorf("Keys(%q) = %q, %v", plain, out, lossy)
+	}
+}
+
+func TestKeysLimitIsLossy(t *testing.T) {
+	out, lossy := Keys(strings.Repeat("a", 300), 200)
+	if n := utf8.RuneCountInString(out); n != 200 || !lossy {
+		t.Errorf("got %d runes, lossy %v", n, lossy)
+	}
+	out, lossy = Keys(strings.Repeat("a", 200), 200)
+	if len(out) != 200 || lossy {
+		t.Errorf("exact fit: got %d runes, lossy %v", len(out), lossy)
+	}
+}
+
+func TestKeysTrimsAfterCut(t *testing.T) {
+	out, lossy := Keys("abc def", 4)
+	if out != "abc" || !lossy {
+		t.Errorf("got %q, %v", out, lossy)
+	}
+}
+
+func TestKeysCleaningIsNotLossy(t *testing.T) {
+	out, lossy := Keys("\x1b[31ma\u200bb\x1b[0m\tc\n", 0)
+	if out != "ab c" || lossy {
+		t.Errorf("got %q, %v", out, lossy)
+	}
+}
+
+func TestKeysKeepsNonASCIILetters(t *testing.T) {
+	out, lossy := Keys("café \u65e5\u672c \u0663", 0)
+	if out != "café \u65e5\u672c \u0663" || lossy {
+		t.Errorf("got %q, %v", out, lossy)
+	}
+}
+
+var hostile = []string{
+	"\x1b]0;pwned\x07title",
+	"\x1b]2;title\x1b\\x",
+	"\x1b[2J\x1b[Hscreen",
+	"\x1b[10;20Hmove",
+	"\x1b[A\x1b[B\x1b[C\x1b[D",
+	"\x1b[201~injected",
+	"\x1b[200~paste",
+	"evil\u202etxt.exe",
+	"nul\x00byte",
+	"lone \x1b esc",
+	"\xff\xfe",
+	"\x1b[31",
+	"\x1b]52;c;SGVsbG8=\x07",
+	"\x1bPq#0;2;0;0;0\x1b\\",
+	"\u009b2Jc1",
+	"\u009d0;t\u009cx",
+	"bell\x07 and \x08backspace",
+	"a\u2066b\u2069c\u200bd\ufeffe",
+	"\x7f\x80\x9f del and c1",
+	"line1\r\nline2\rline3\n\n\n\nline4\t\ttab",
+	strings.Repeat("\x1b[", 1<<19),
+}
+
+func TestIdempotent(t *testing.T) {
+	inputs := append([]string{"plain text", "", "a\n\n\nb", "  spaced   out  ", "abc def ghi"}, hostile...)
+	for _, limit := range []int{0, 1, 5, 200} {
+		for _, in := range inputs {
+			if a, b := Line(in, limit), Line(Line(in, limit), limit); a != b {
+				t.Errorf("Line not idempotent at limit %d for %.40q: %q then %q", limit, in, a, b)
+			}
+			if a, b := Text(in, limit), Text(Text(in, limit), limit); a != b {
+				t.Errorf("Text not idempotent at limit %d for %.40q: %q then %q", limit, in, a, b)
+			}
+			a, _ := Keys(in, limit)
+			if b, _ := Keys(a, limit); a != b {
+				t.Errorf("Keys not idempotent at limit %d for %.40q: %q then %q", limit, in, a, b)
+			}
+		}
+	}
+}
+
+func TestHostileCorpus(t *testing.T) {
+	check := func(name, out string, newlineOK bool) {
+		if !utf8.ValidString(out) {
+			t.Errorf("%s: invalid UTF-8 in %.40q", name, out)
+		}
+		for _, r := range out {
+			switch {
+			case r == '\n' && newlineOK:
+			case r < 0x20, r >= 0x7f && r <= 0x9f, r >= 0x202a && r <= 0x202e:
+				t.Errorf("%s: forbidden rune %U in %.40q", name, r, out)
+			}
+		}
+	}
+	for _, in := range hostile {
+		check("Line", Line(in, 0), false)
+		check("Text", Text(in, 0), true)
+		k, _ := Keys(in, 0)
+		check("Keys", k, false)
+	}
+}
+
+func TestHostileExpectations(t *testing.T) {
+	cases := []struct{ in, line string }{
+		{"\x1b]0;pwned\x07title", "title"},
+		{"\x1b[201~injected", "injected"},
+		{"evil\u202etxt.exe", "eviltxt.exe"},
+		{"nul\x00byte", "nulbyte"},
+		{"\xff\xfe", ""},
+		{strings.Repeat("\x1b[", 1<<19), ""},
+	}
+	for _, c := range cases {
+		if got := Line(c.in, 0); got != c.line {
+			t.Errorf("Line(%.30q) = %q, want %q", c.in, got, c.line)
+		}
+	}
+}
