@@ -26,7 +26,7 @@ var knownKinds = map[model.EventKind]bool{
 
 // Parse reads a hook payload into an Event of the given kind, in pane, at
 // now. It reads session_id, cwd, transcript_path, tool_name, message and
-// notification_type, on SessionStart model, and on Stop
+// notification_type, on SessionStart model and source, and on Stop
 // last_assistant_message;
 // ToolTarget is the first present of tool_input.file_path,
 // tool_input.pattern or tool_input.command, cut to 60 runes. A field that is
@@ -57,7 +57,7 @@ func Parse(kind model.EventKind, payload []byte, pane string, now time.Time) (mo
 	}
 	switch kind {
 	case model.SessionStart:
-		ev.Model = str(fields["model"])
+		ev.Model, ev.Source = str(fields["model"]), str(fields["source"])
 	case model.Stop:
 		ev.LastAssistantMessage = str(fields["last_assistant_message"])
 	}

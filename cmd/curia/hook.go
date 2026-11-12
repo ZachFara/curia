@@ -17,6 +17,7 @@ import (
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/hook"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/state"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
 )
@@ -228,8 +229,9 @@ type beforeEvent struct {
 }
 
 // snapshotBefore reads the event's session by id, and, in a pane, on
-// SessionStart or for a session with no row yet (the events where hook.Run
-// ends the pane's other sessions), the pane's other red sessions. It is used
+// SessionStart (other than a compaction's for a stored session) or for a
+// session with no row yet (the events where hook.Run ends the pane's other
+// sessions), the pane's other red sessions. It is used
 // only to decide whether to call tmux. A read that fails is logged and
 // leaves known false.
 func snapshotBefore(ctx context.Context, st *store.Store, kind model.EventKind, payload []byte, logger *slog.Logger) beforeEvent {
@@ -244,7 +246,7 @@ func snapshotBefore(ctx context.Context, st *store.Store, kind model.EventKind, 
 		return beforeEvent{}
 	}
 	b := beforeEvent{prev: prev, known: true}
-	if (found && kind != model.SessionStart) || pane == "" {
+	if (found && (kind != model.SessionStart || state.Compaction(ev))) || pane == "" {
 		return b
 	}
 	live, err := st.ListSessions(ctx, store.ListFilter{})

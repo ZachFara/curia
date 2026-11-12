@@ -51,7 +51,7 @@ func TestParseFixtures(t *testing.T) {
 		return ev
 	}
 	tests := []model.Event{
-		with(model.SessionStart, func(e *model.Event) { e.Model = "claude-haiku-5-5" }),
+		with(model.SessionStart, func(e *model.Event) { e.Model, e.Source = "claude-haiku-5-5", "startup" }),
 		with(model.UserPromptSubmit, nil),
 		with(model.PreToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Edit", "src/api.ts" }),
 		with(model.PostToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Grep", "func Parse" }),
@@ -538,6 +538,81 @@ func TestSessionStartModelKeptUntilTranscriptRead(t *testing.T) {
 	// leaves what the session has.
 	if got := run(t, st, env, model.SessionStart, payload("A", tr, "")); got.Model != "claude-opus-5-5" {
 		t.Errorf("after a SessionStart with no model: %q, want claude-opus-5-5 kept", got.Model)
+	}
+}
+
+func TestParseCompactSessionStart(t *testing.T) {
+	got, err := hook.Parse(model.SessionStart, fixtureFile(t, "SessionStartCompact"), "%3", t0)
+	want := model.Event{
+		Kind: model.SessionStart, SessionID: "sess-1", Pane: "%3", Cwd: "/repo",
+		TranscriptPath: "/p/t.jsonl", Source: "compact", At: t0,
+	}
+	if err != nil || got != want {
+		t.Errorf("Parse = %+v, %v\nwant %+v", got, err, want)
+	}
+}
+
+// TestParseReadsSourceOnlyOnSessionStart: source means something only on a
+// SessionStart; a wrongly typed one reads as empty.
+func TestParseReadsSourceOnlyOnSessionStart(t *testing.T) {
+	body := []byte(`{"session_id":"s","source":"compact"}`)
+	for _, kind := range []model.EventKind{model.UserPromptSubmit, model.PostToolUse, model.Stop, model.SessionEnd} {
+		if ev, err := hook.Parse(kind, body, "", t0); err != nil || ev.Source != "" {
+			t.Errorf("Parse(%s).Source = %q, %v, want empty", kind, ev.Source, err)
+		}
+	}
+	if ev, err := hook.Parse(model.SessionStart, []byte(`{"session_id":"s","source":["compact"]}`), "", t0); err != nil || ev.Source != "" {
+		t.Errorf("Parse with a non-string source: %q, %v, want empty", ev.Source, err)
+	}
+}
+
+// Ruling 74: a compaction in the middle of a turn leaves the session as it
+// was, asks neither git nor tmux, and ends no other session in the pane.
+func TestCompactKeepsSession(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{}
+	env := f.env("%3")
+	run(t, st, env, model.SessionStart, payload("A", "/p/t.jsonl", `,"model":"claude-haiku-5-5"`))
+	run(t, st, env, model.UserPromptSubmit, payload("A", "/p/t.jsonl", ""))
+	before := run(t, st, env, model.PreToolUse, payload("A", "/p/t.jsonl", `,"tool_name":"Task"`))
+	other := model.Session{ID: "B", Agent: "claude", Pane: "%3", State: model.StateWorking, StartedAt: t0, UpdatedAt: t0}
+	if err := st.UpsertSession(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+
+	later := f.env("%3")
+	later.Now = func() time.Time { return t0.Add(time.Minute) }
+	a := run(t, st, later, model.SessionStart, payload("A", "/p/t.jsonl", `,"source":"compact"`))
+	want := before
+	want.UpdatedAt = t0.Add(time.Minute)
+	if a != want || get(t, st, "A") != want {
+		t.Errorf("A after compact:\n %+v\nwant\n %+v", a, want)
+	}
+	if b := get(t, st, "B"); b.State != model.StateWorking {
+		t.Errorf("B in the same pane = %s, want working (not ended)", b.State)
+	}
+	if len(f.gitCalls) != 1 || len(f.paneCalls) != 1 {
+		t.Errorf("Git called %d times, PaneInfo %d times, want once each (the first SessionStart)", len(f.gitCalls), len(f.paneCalls))
+	}
+}
+
+// For a session with no row yet, compact is a first event like any other.
+func TestCompactFirstSeenStartsSession(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{}
+	env := f.env("%3")
+	run(t, st, env, model.SessionStart, payload("OLD", "", ""))
+	got := run(t, st, env, model.SessionStart, fixtureFile(t, "SessionStartCompact"))
+	want := model.Session{
+		ID: "sess-1", Agent: "claude", Pane: "%3", TmuxSession: "work", TmuxWindow: "@7",
+		Cwd: "/repo", Repo: "/src/curia", Branch: "feat/hook", TranscriptPath: "/p/t.jsonl",
+		State: model.StateIdle, StartedAt: t0, UpdatedAt: t0, SeenAt: t0,
+	}
+	if got != want {
+		t.Errorf("first seen at compact:\n %+v\nwant\n %+v", got, want)
+	}
+	if old := get(t, st, "OLD"); old.State != model.StateEnded {
+		t.Errorf("OLD in the pane = %s, want ended", old.State)
 	}
 }
 

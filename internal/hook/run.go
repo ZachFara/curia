@@ -50,8 +50,9 @@ type Result struct {
 
 // Run records one hook event and returns a Result: the session as stored,
 // and on a Stop that claimed answers the line to print. In order it
-// parses the payload, appends the raw event, and on SessionStart, or for a
-// session it has no row for yet (one first seen mid-run, Ruling 29), ends any
+// parses the payload, appends the raw event, and on SessionStart (but not a
+// compaction's, Ruling 74), or for a session it has no row for yet (one
+// first seen mid-run, Ruling 29), ends any
 // other session in the pane and asks git and tmux about it. Then in one store
 // transaction it loads the session, folds in the transcript's new lines
 // (PostToolUse, Notification, Stop), applies the state machine and writes the
@@ -78,7 +79,9 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 	if err = st.AppendEvent(ctx, ev, payload); err != nil {
 		return Result{}, err
 	}
-	starting := kind == model.SessionStart
+	// A compaction's SessionStart (Ruling 74) is not a new start: like any
+	// other event, it starts only a session with no row yet.
+	starting := kind == model.SessionStart && !state.Compaction(ev)
 	if !starting {
 		var found bool
 		if _, found, err = st.GetSession(ctx, ev.SessionID); err != nil {
@@ -206,12 +209,14 @@ func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config,
 		return s, nil // the transcript is not read either
 	}
 	switch {
-	case ev.Kind == model.SessionStart:
+	case start == nil: // git and tmux were not asked
+	case ev.Kind == model.SessionStart && (s.ID == "" || !state.Compaction(ev)):
 		s.Repo, s.Branch = start.repo, start.branch
 		s.TmuxSession, s.TmuxWindow = start.tmuxSession, start.window
-	case start != nil:
-		// First seen mid-run. A SessionStart may have written the row since
-		// Run looked, so fill only what is still empty.
+	default:
+		// First seen mid-run (a compaction's SessionStart included). A
+		// SessionStart may have written the row since Run looked, so fill
+		// only what is still empty.
 		fillEmpty(&s.Repo, start.repo)
 		fillEmpty(&s.Branch, start.branch)
 		fillEmpty(&s.TmuxSession, start.tmuxSession)

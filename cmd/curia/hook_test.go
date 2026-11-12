@@ -833,3 +833,26 @@ func TestHookEmitsBeforeTmux(t *testing.T) {
 		t.Errorf("tmux calls saw stdout %q, want %q", order.seen, want)
 	}
 }
+
+// Ruling 74: a compaction's SessionStart leaves a red session red and ends
+// no other session in the pane, so no marker changes and tmux is not asked.
+func TestHookCompactMakesNoMarkerCall(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	seedSessions(t, m.db, model.Session{
+		ID: "B", Agent: "claude", Pane: "%1", TmuxWindow: "@8", State: model.StateWaiting,
+		StartedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	m.fake.Calls = nil
+	body := `{"session_id":"A","cwd":"` + t.TempDir() + `","source":"compact"}`
+	assertQuietExitZero(t, runHookCmd(t, strings.NewReader(body), "hook", "SessionStart"))
+	if len(m.fake.Calls) != 0 {
+		t.Errorf("tmux calls %q, want none", m.fake.Calls)
+	}
+	for _, id := range []string{"A", "B"} {
+		if s := getSession(t, m.db, id); s.State != model.StateWaiting {
+			t.Errorf("%s = %s, want still waiting", id, s.State)
+		}
+	}
+}
