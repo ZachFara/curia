@@ -52,7 +52,7 @@ func TestParseFixtures(t *testing.T) {
 	}
 	tests := []model.Event{
 		with(model.SessionStart, func(e *model.Event) { e.Model, e.Source = "claude-haiku-5-5", "startup" }),
-		with(model.UserPromptSubmit, nil),
+		with(model.UserPromptSubmit, func(e *model.Event) { e.Prompt = "Fix the login bug" }),
 		with(model.PreToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Edit", "src/api.ts" }),
 		with(model.PostToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Grep", "func Parse" }),
 		with(model.Notification, func(e *model.Event) {
@@ -60,6 +60,7 @@ func TestParseFixtures(t *testing.T) {
 		}),
 		with(model.Stop, func(e *model.Event) {
 			e.LastAssistantMessage = `The file notes.txt contains the text "alpha line 1".`
+			e.BackgroundKnown = true // background_tasks is []
 		}),
 		// A subagent's closing text is not the session's answer.
 		with(model.SubagentStop, nil),
@@ -75,6 +76,44 @@ func TestParseFixtures(t *testing.T) {
 				t.Errorf("Parse =\n %+v\nwant\n %+v", got, want)
 			}
 		})
+	}
+}
+
+// Ruling 87, defect 7: real payloads of Claude Code 2.1.323 (live check
+// 2, paths replaced). A helper agent's SubagentStop has an empty agent_type;
+// an Agent tool subagent's names its type; a Stop lists the background
+// subagents still running.
+func TestParseSubagentPayloads(t *testing.T) {
+	helper, err := hook.Parse(model.SubagentStop, fixtureFile(t, "SubagentStopHelper"), "%3", t0)
+	if err != nil || !helper.HelperAgent {
+		t.Errorf("helper SubagentStop: HelperAgent = %v, %v; want true", helper.HelperAgent, err)
+	}
+	agent, err := hook.Parse(model.SubagentStop, fixtureFile(t, "SubagentStop"), "%3", t0)
+	if err != nil || agent.HelperAgent {
+		t.Errorf("Agent subagent's SubagentStop: HelperAgent = %v, %v; want false", agent.HelperAgent, err)
+	}
+	// A payload with no agent_type at all (an older Claude Code) counts as
+	// an Agent subagent, as before.
+	old, err := hook.Parse(model.SubagentStop, []byte(`{"session_id":"sess-1"}`), "%3", t0)
+	if err != nil || old.HelperAgent {
+		t.Errorf("SubagentStop without agent_type: HelperAgent = %v, %v; want false", old.HelperAgent, err)
+	}
+	stop, err := hook.Parse(model.Stop, fixtureFile(t, "StopBackgroundRunning"), "%3", t0)
+	if err != nil || !stop.BackgroundKnown || stop.RunningSubagents != 1 {
+		t.Errorf("Stop with a running background subagent: known %v, running %d, %v; want true, 1",
+			stop.BackgroundKnown, stop.RunningSubagents, err)
+	}
+	for payload, want := range map[string]bool{
+		`{"session_id":"s","background_tasks":[]}`:                                    true,
+		`{"session_id":"s"}`:                                                          false,
+		`{"session_id":"s","background_tasks":null}`:                                  false,
+		`{"session_id":"s","background_tasks":"x"}`:                                   false,
+		`{"session_id":"s","background_tasks":[{"type":"subagent","status":"done"}]}`: true,
+	} {
+		ev, err := hook.Parse(model.Stop, []byte(payload), "%3", t0)
+		if err != nil || ev.BackgroundKnown != want || ev.RunningSubagents != 0 {
+			t.Errorf("%s: known %v, running %d, %v; want known %v, 0", payload, ev.BackgroundKnown, ev.RunningSubagents, err, want)
+		}
 	}
 }
 

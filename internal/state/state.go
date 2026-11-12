@@ -53,7 +53,8 @@ func Apply(s model.Session, ev model.Event, openDecision bool) model.Session {
 	case model.Stop:
 		stop(&s, ev, openDecision)
 	case model.SubagentStop:
-		if s.SubagentsActive > 0 {
+		// A helper agent's stop matches no counted Agent or Task call.
+		if !ev.HelperAgent && s.SubagentsActive > 0 {
 			s.SubagentsActive--
 		}
 	case model.SessionEnd:
@@ -110,7 +111,7 @@ func sessionStart(s *model.Session, ev model.Event) {
 // stop ends a turn. A Stop the hook blocks to deliver answers does not
 // end it: Claude goes on with the answers, so the session is working.
 // Otherwise an open blocking ticket makes it needs_decision; with none it
-// is idle.
+// is idle. A Stop that lists its background tasks sets the subagent count.
 func stop(s *model.Session, ev model.Event, openDecision bool) {
 	switch {
 	case ev.StopBlocked:
@@ -122,6 +123,11 @@ func stop(s *model.Session, ev model.Event, openDecision bool) {
 	}
 	if ev.Message != "" {
 		s.LastUpdate = truncate(ev.Message)
+	}
+	// The Stop's own list of background subagents is the count's truth: the
+	// turn is over, so only background ones can still run (Ruling 87).
+	if ev.BackgroundKnown {
+		s.SubagentsActive = ev.RunningSubagents
 	}
 }
 
