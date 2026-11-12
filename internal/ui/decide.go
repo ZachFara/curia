@@ -27,6 +27,12 @@ const noticeChanged = "queue changed; press again"
 // (Ruling 63). Each ignored key restarts it.
 const quietPeriod = 750 * time.Millisecond
 
+// dwell is how long a ticket must have been on screen before an answer key
+// acts on it, and a confirmation open before "y" gives it (Ruling 66). The
+// terminal is written on a frame ticker, not after every message, so keys
+// that arrive together are handled before anything new is drawn.
+const dwell = 250 * time.Millisecond
+
 // DecideSource is where the decide view reads open tickets, already in queue
 // order, and writes an answer. The command's implementation expires, lists,
 // sorts and delivers.
@@ -76,7 +82,9 @@ type DecideModel struct {
 	loaded   bool           // a read has succeeded
 	changed  bool           // a refresh changed the ticket on screen: the next answer key is ignored
 
-	quietUntil time.Time // answer keys before this are ignored (after one's own answer)
+	quietUntil  time.Time // answer keys before this are ignored (after one's own answer)
+	shownSince  time.Time // when the selected ticket, as it is now, came on screen
+	promptSince time.Time // when the confirmation opened
 
 	issued, applied int // sequence numbers of the last refresh started and applied
 
@@ -112,10 +120,11 @@ type decideTickMsg struct{}
 
 // decideAnsweredMsg is the result of one answer.
 type decideAnsweredMsg struct {
-	id  string
-	a   model.Answer
-	out model.Outcome
-	err error
+	id     string
+	ticket model.Ticket // as it was on screen when the answer was sent
+	a      model.Answer
+	out    model.Outcome
+	err    error
 }
 
 // NewDecide returns the decide view over src; now is the clock for ages and
@@ -190,12 +199,27 @@ func (m DecideModel) applyRefresh(msg decideRefreshMsg) DecideModel {
 		}
 	}
 	m = m.reselect()
-	after, has := m.current()
-	if m.loaded && (had != has || (has && !sameTicket(before, after))) {
+	if m.loaded && m.isNewOnScreen(before, had) {
 		m.changed = true
 		m.reasoning, m.scope, m.draft = "", "", ""
 	}
 	m.loaded = true
+	return m.markShown(before, had)
+}
+
+// isNewOnScreen reports whether the selected ticket differs from before
+// (had says whether there was one).
+func (m DecideModel) isNewOnScreen(before model.Ticket, had bool) bool {
+	after, has := m.current()
+	return had != has || (has && !sameTicket(before, after))
+}
+
+// markShown restarts the dwell when the selected ticket differs from
+// before, whatever changed it.
+func (m DecideModel) markShown(before model.Ticket, had bool) DecideModel {
+	if m.isNewOnScreen(before, had) {
+		m.shownSince = m.now()
+	}
 	return m
 }
 
@@ -344,13 +368,13 @@ func (m DecideModel) close() tea.Cmd {
 // move selects ticket i. Moving is the user choosing what is on screen, so
 // it clears a queue change; leaving a ticket drops what was staged for it.
 func (m DecideModel) move(i int) DecideModel {
-	before := m.selected
+	before, had := m.current()
 	m = m.moveTo(i)
 	m.changed, m.quietUntil = false, time.Time{}
-	if m.selected != before {
+	if m.selected != before.ID {
 		m.reasoning, m.scope, m.draft = "", "", ""
 	}
-	return m
+	return m.markShown(before, had)
 }
 
 // scopeCycle is the order "s" steps through; "" is the ticket's own scope.
@@ -393,7 +417,8 @@ func (m DecideModel) answerRecommended() (DecideModel, tea.Cmd) {
 
 // guard reports whether an answer may start now. It refuses while an answer
 // is in flight; during the quiet period after one's own answer, restarting
-// it; and once after a refresh changed the ticket on screen.
+// it; before the ticket on screen has been there for the dwell; and once
+// after a refresh changed the ticket on screen.
 func (m DecideModel) guard() (DecideModel, bool) {
 	now := m.now()
 	switch {
@@ -402,6 +427,9 @@ func (m DecideModel) guard() (DecideModel, bool) {
 		return m, false
 	case now.Before(m.quietUntil):
 		m.quietUntil, m.notice = now.Add(quietPeriod), noticeChanged
+		return m, false
+	case now.Sub(m.shownSince) < dwell:
+		m.notice = noticeChanged
 		return m, false
 	case m.changed:
 		m.changed, m.notice = false, noticeChanged
@@ -513,19 +541,20 @@ func (m DecideModel) submitInput() (DecideModel, tea.Cmd) {
 // other at once.
 func (m DecideModel) proceed(p pendingAnswer) (DecideModel, tea.Cmd) {
 	if p.ticket.Reversibility == model.ReversIrreversible {
-		m.pending, m.confirming = p, true
+		m.pending, m.confirming, m.promptSince = p, true, m.now()
 		return m, nil
 	}
 	return m.send(p)
 }
 
 // confirmKey sends the pending answer on a "y" that arrived as a message of
-// its own, so after the prompt was drawn; any other key, a paste, and a "y"
-// within a burst of keys cancel it.
+// its own, the dwell after the prompt opened; any other key, a paste, a "y"
+// within a burst of keys and a "y" too soon cancel it.
 func (m DecideModel) confirmKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cmd) {
 	p := m.pending
 	m.pending, m.confirming = pendingAnswer{}, false
-	if split || msg.Paste || msg.String() != "y" {
+	early := m.now().Sub(m.promptSince) < dwell
+	if split || early || msg.Paste || msg.String() != "y" {
 		m.notice = "answer canceled"
 		return m, nil
 	}
@@ -540,26 +569,27 @@ func (m DecideModel) send(p pendingAnswer) (DecideModel, tea.Cmd) {
 		return m, nil
 	}
 	m.sending = true
-	src, id, a := m.src, p.ticket.ID, p.a
+	src, tk, a := m.src, p.ticket, p.a
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), answerTimeout)
 		defer cancel()
-		out, err := src.Answer(ctx, id, a)
-		return decideAnsweredMsg{id: id, a: a, out: out, err: err}
+		out, err := src.Answer(ctx, tk.ID, a)
+		return decideAnsweredMsg{id: tk.ID, ticket: tk, a: a, out: out, err: err}
 	}
 }
 
 // applyAnswer handles an answer's result. A refused answer is shown, a
-// close asked for meanwhile is dropped, and what was typed is kept. An
-// accepted one closes when asked, or leaves the queue at once, starts the
-// quiet period when the next ticket comes on screen, and re-reads the
-// queue; reads started before it returned are out of date and dropped.
+// close asked for meanwhile is dropped, and what was typed is kept while
+// the same ticket is on screen. An accepted one closes when asked, or
+// leaves the queue at once, starts the quiet period (whatever a read did
+// to the selection meanwhile), and re-reads the queue; reads started
+// before it returned are out of date and dropped.
 func (m DecideModel) applyAnswer(msg decideAnsweredMsg) (DecideModel, tea.Cmd) {
 	m.sending = false
 	if msg.err != nil {
 		m.closing = false
 		m.notice, m.noticeErr = "answer failed: "+msg.err.Error(), true
-		if m.selected == msg.id {
+		if t, ok := m.current(); ok && sameTicket(t, msg.ticket) {
 			m.reasoning, m.scope, m.draft = msg.a.Reasoning, msg.a.Scope, msg.a.Text
 		}
 		return m.refresh(false)
@@ -569,11 +599,10 @@ func (m DecideModel) applyAnswer(msg decideAnsweredMsg) (DecideModel, tea.Cmd) {
 	}
 	m.notice = outcomeText(msg)
 	m.reasoning, m.scope, m.draft = "", "", ""
-	before := m.selected
+	before, had := m.current()
 	m.tickets = slices.DeleteFunc(slices.Clone(m.tickets), func(t model.Ticket) bool { return t.ID == msg.id })
-	if m = m.reselect(); m.selected != before {
-		m.quietUntil = m.now().Add(quietPeriod)
-	}
+	m = m.reselect().markShown(before, had)
+	m.quietUntil = m.now().Add(quietPeriod)
 	m, cmd := m.refresh(false)
 	m.applied = m.issued
 	return m, cmd

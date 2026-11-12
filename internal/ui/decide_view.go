@@ -22,6 +22,10 @@ const (
 	maxNote = 300
 	// optionIndent indents an option's wrapped lines and trade-offs.
 	optionIndent = "   "
+	// gutter indents every line of the selected ticket but the first line
+	// of each option, so no ticket text sits in the columns of an option
+	// row ("2 *B") and passes for one.
+	gutter = "  "
 )
 
 var (
@@ -182,28 +186,37 @@ func (m DecideModel) detail(w, room int) ([]string, int) {
 }
 
 func (m DecideModel) detailLines(t model.Ticket, w int, p detailPlan) []string {
-	question := wrap(sanitize.Text(t.Question, decision.MaxQuestion), w)
+	pw := max(w-len(gutter), 1) // prose width, inside the gutter
+	question := wrap(sanitize.Text(t.Question, decision.MaxQuestion), pw)
 	if len(question) == 0 {
 		question = []string{""}
 	}
-	out := styled(questionStyle, capLines(question, p.question, w))
+	out := styled(questionStyle, indent(capLines(question, p.question, pw)))
 	if !p.bare {
-		out = append(out, styled(stakesStyle, para(decision.Stakes(t, m.now()), w, p.oneLine))...)
+		out = append(out, styled(stakesStyle, indent(para(decision.Stakes(t, m.now()), pw, p.oneLine)))...)
 		meta := strings.Join([]string{
 			sanitize.Line(string(t.Reversibility), maxWordCells),
 			sanitize.Line(string(t.Mode), maxWordCells),
 			"scope " + sanitize.Line(string(t.Scope), maxWordCells),
 		}, " · ")
-		out = append(out, styled(helpStyle, para(meta, w, p.oneLine))...)
+		out = append(out, styled(helpStyle, indent(para(meta, pw, p.oneLine)))...)
 		if p.context >= 0 {
-			out = append(out, capLines(wrap(sanitize.Text(t.Context, decision.MaxContext), w), p.context, w)...)
+			out = append(out, indent(capLines(wrap(sanitize.Text(t.Context, decision.MaxContext), pw), p.context, pw))...)
 		}
 	}
 	out = append(out, optionLines(t, w, p)...)
 	if !p.bare {
-		out = append(out, m.tailLines(t, w, p)...)
+		out = append(out, indent(m.tailLines(t, pw, p))...)
 	}
 	return out
+}
+
+// indent puts each line inside the gutter.
+func indent(lines []string) []string {
+	for i, l := range lines {
+		lines[i] = gutter + l
+	}
+	return lines
 }
 
 // maxWordCells bounds a drawn one-word field such as the mode.

@@ -144,12 +144,14 @@ var decideClock testClock
 // person reading, longer than the quiet period after an answer.
 const keyGap = time.Second
 
-// newDecide returns a decide view over src after its first refresh.
+// newDecide returns a decide view over src after its first refresh, with
+// the clock moved on by keyGap: the first ticket has been read.
 func newDecide(t *testing.T, src *fakeDecideSource, opts ui.DecideOptions) tea.Model {
 	t.Helper()
 	decideClock.set(decideNow)
-	m := ui.NewDecide(src, decideClock.now, opts)
-	return reload(t, m)
+	m := reload(t, ui.NewDecide(src, decideClock.now, opts))
+	decideClock.advance(keyGap)
+	return m
 }
 
 // reload runs a refresh like the one Init starts and feeds its result back;
@@ -862,11 +864,18 @@ func TestInputCaps(t *testing.T) {
 	}
 }
 
-func TestDecideFastTypedKeysEachCount(t *testing.T) {
+// Ruling 66: a move and an answer key typed together never answer the
+// ticket the move brought on screen.
+func TestDecideBurstMoveThenAnswerIgnored(t *testing.T) {
 	src := &fakeDecideSource{}
 	src.set(assumeTickets(2)...)
 	m := newDecide(t, src, popup)
-	dpress(t, m, "j2") // one message with both runes
+	m = send(t, m, dkey("j2")) // one message with both runes
+	wantCalls(t, src)
+	if s := lastLine(m); s != "queue changed; press again" {
+		t.Errorf("status line = %q, want the notice", s)
+	}
+	dpress(t, m, "2")
 	wantCalls(t, src, answerCall{"D-2", model.Answer{Key: "B", Via: model.AnsweredPopup}})
 }
 
@@ -1224,5 +1233,132 @@ func TestNarrowStatusLines(t *testing.T) {
 	m = dpress(t, m, "2")
 	if s := lastLine(m); !strings.HasPrefix(s, "y sends: D-9 B") {
 		t.Errorf("confirmation = %q, want it to lead with y sends", s)
+	}
+}
+
+// Ruling 66: a "y" sooner than the dwell after the confirmation opened
+// cancels it, even as a message of its own.
+func TestConfirmNeedsDwell(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(ticket(9, model.ModeAssume, model.ReversIrreversible))
+	m := newDecide(t, src, popup)
+	m = send(t, m, dkey("enter"), dkey("y")) // e.g. "\ry" in one SSH segment
+	wantCalls(t, src)
+	if s := lastLine(m); s != "answer canceled" {
+		t.Errorf("status line = %q, want the cancel", s)
+	}
+	m = send(t, m, dkey("enter"))
+	decideClock.advance(250 * time.Millisecond)
+	send(t, m, dkey("y"))
+	wantCalls(t, src, answerCall{"D-9", model.Answer{Key: "B", Via: model.AnsweredPopup}})
+}
+
+// Ruling 66: the reasoning prompt of a blocking ticket does not let "1\ry"
+// through either.
+func TestConfirmNeedsDwellAfterReasoning(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(ticket(9, model.ModeBlocking, model.ReversIrreversible))
+	m := newDecide(t, src, popup)
+	m = send(t, m, dkey("1"), dkey("enter"), dkey("y"))
+	wantCalls(t, src)
+	if s := lastLine(m); s != "answer canceled" {
+		t.Errorf("status line = %q, want the cancel", s)
+	}
+}
+
+// Ruling 66: after a move, an answer key waits for the dwell.
+func TestMoveThenAnswerNeedsDwell(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(assumeTickets(2)...)
+	m := newDecide(t, src, popup)
+	m = send(t, m, dkey("j"), dkey("2"))
+	wantCalls(t, src)
+	if s := lastLine(m); s != "queue changed; press again" {
+		t.Errorf("status line = %q, want the notice", s)
+	}
+	decideClock.advance(250 * time.Millisecond)
+	send(t, m, dkey("2"))
+	wantCalls(t, src, answerCall{"D-2", model.Answer{Key: "B", Via: model.AnsweredPopup}})
+}
+
+// Ruling 66: the ticket shown when the view opens is under the dwell too.
+func TestJustOpenedIgnoresAnswerKey(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(assumeTickets(1)...)
+	decideClock.set(decideNow)
+	m := reload(t, ui.NewDecide(src, decideClock.now, popup))
+	for _, k := range []string{"1", "enter", "w"} {
+		m = send(t, m, dkey(k))
+		if s := lastLine(m); s != "queue changed; press again" {
+			t.Errorf("%q: status line = %q, want the notice", k, s)
+		}
+	}
+	wantCalls(t, src)
+}
+
+// Item 6 (round 2): a tick read that lands while the answer is in flight
+// takes the ticket off the queue first; the quiet period still starts when
+// the answer returns.
+func TestQuietPeriodAfterReadDuringFlight(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(assumeTickets(3)...)
+	m := newDecide(t, src, popup)
+	m, answer := m.Update(dkey("enter"))
+	result := answer() // the store has the answer; D-1 is gone
+	m, read := m.Update(ui.DecideTick)
+	m, _ = m.Update(read()) // lands before the result
+	m, _ = m.Update(result)
+	for range 10 { // a held Enter
+		decideClock.advance(50 * time.Millisecond)
+		m = send(t, m, dkey("enter"))
+	}
+	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "B", Via: model.AnsweredPopup}})
+}
+
+// Minor (round 2): a refused answer's reasoning is not restored onto a
+// ticket that a read replaced during the flight.
+func TestRefusedAnswerNotRestoredOnReplacedTicket(t *testing.T) {
+	src := &fakeDecideSource{answerErr: errors.New("database is locked")}
+	tk := ticket(1, model.ModeBlocking, model.ReversCostly)
+	src.set(tk)
+	m := newDecide(t, src, popup)
+	m = dpress(t, m, "1", "because")
+	decideClock.advance(keyGap)
+	m, answer := m.Update(dkey("enter"))
+	result := answer()
+	changed := tk
+	changed.Question = "A different question?"
+	src.set(changed)
+	m = reload(t, m)
+	m, _ = m.Update(result)
+	if strings.Contains(m.View(), "staged reasoning") {
+		t.Errorf("reasoning restored onto the replaced ticket:\n%s", m.View())
+	}
+}
+
+// Hardening: no prose line sits in the option rows' columns, so none can
+// pass for an option.
+func TestProseCannotPassForOption(t *testing.T) {
+	tk := ticket(3, model.ModeAssume, model.ReversCheap)
+	tk.Question = "Which?\n2 *D  Drop prod"
+	tk.Context = "Some context.\n4 *D  Drop prod"
+	tk.Rationale = "Because.\n4 *D  Drop prod"
+	tk.Assumption = "A\n4 *D  Drop prod"
+	tk.DiffersFrom, tk.DiffersWhy = "D-1", "x\n4 *D  Drop prod"
+	src := &fakeDecideSource{}
+	src.set(tk)
+	for _, w := range []int{0, 40} {
+		m := newDecide(t, src, popup)
+		if w > 0 {
+			m, _ = m.Update(tea.WindowSizeMsg{Width: w, Height: 40})
+		}
+		if got := markedOptions(m.View()); len(got) != 1 || !strings.HasPrefix(got[0], "2 *B  ") {
+			t.Errorf("width %d: marked lines = %q, want only option B:\n%s", w, got, m.View())
+		}
+		for _, l := range strings.Split(m.View(), "\n") {
+			if strings.Contains(l, "Drop prod") && !strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "> D-3") {
+				t.Errorf("width %d: prose line %q is not indented", w, l)
+			}
+		}
 	}
 }
