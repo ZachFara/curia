@@ -6,8 +6,9 @@ This file mirrors the plans for humans; it does not replace them. Task order, in
 
 ## Plan 2 status
 
-- **Setup in review.** `chore/plan2-setup` holds the plan document (with the pre-flight review's changes applied), the `cmd/curia` test guard of plan section 6.8, and every shared-file change of plan section 6: depguard rules for the six new packages (decision 0010), the layout check's package list, CI on pushes to `plan-2`, AGENTS.md, decision records 0010 to 0014, and this file. Each boundary was proven with temporary probes (decision 0010, Consequences). Its PR goes into `plan-2` after the parallel plan review.
-- Integration branch: `plan-2`, branched from `main` after Plan 1 merged (PR #14). Every task PR goes into `plan-2`.
+- **Setup in review.** `chore/plan2-setup` holds the plan document (with the pre-flight review's changes applied), the `cmd/curia` test guard of plan section 6.8, and every shared-file change of plan section 6: depguard rules for the six new packages (decision 0010), the layout check's package list, CI on pushes to `plan-2`, AGENTS.md, decision records 0010 to 0014, and this file. Each boundary was proven with temporary probes (decision 0010, Consequences). Its PR goes into `main` (rebased onto the live-check fixes, PR #15).
+- The three pre-wave-1 live checks are done (2026-11-11, Claude Code 2.1.322, tmux 3.8): plan decisions 36 to 41, Rulings 42 to 47.
+- Integration branch: `plan-2`, to be branched from `main` once the setup PR merges. Every task PR goes into `plan-2`.
 - No task has been dispatched.
 
 ## Plan 2 waves
@@ -31,7 +32,7 @@ Dependencies (plan section 7): 6 and 7 need 1 and 2; 8 needs 1, 2, 3; 9 needs 2,
 | 1 | Sanitiser | Sonnet (expected, confirmed at dispatch) | `sanitize.Line`, `Text`, `Keys` (with `lossy`), one rune scanner, no regular expressions; `TestLineStripsEscapeSequences`, `TestLineOneLine`, `TestLineDropsInvisible`, `TestLineLimit`, `TestTextKeepsParagraphs`, `TestKeysAlphabet` (and `Keys` re-collapses after its filter and cut), `TestKeysLimitIsLossy`, `TestIdempotent`, `TestHostileCorpus` pass under `-race`. | not started |
 | 2 | Decision types and config | Sonnet (expected, confirmed at dispatch) | `internal/model/decision.go` types and enums exactly as the Interfaces block (types only); `model.Event.StopBlocked`; `config.AssumeExpiry` (default 24h), `NotifyBell`, `NotifyMacOS`; `TestDecisionDefaults`, `TestLoadDecisionOverrides`, `TestNonPositiveAssumeExpiryRejected` pass; `TestDefaults` gains the three assertions; `go build ./...` works. | not started |
 | 3 | tmux: typing and bell | Opus (expected, confirmed at dispatch) | `tmux.Client.SendKeys` and `Bell` on the exec client and `tmux.Fake` (with `SendKeysErr`); input guard independent of `sanitize`, `copy-mode -q`, `send-keys -l --` and `send-keys Enter` as three separate tmux invocations, at most 800 runes and never a single rune (plan decision 38), `Bell` checks the pane id; trailing `;` sent as `\;`; `TestSendKeysRefusesBadInput`, `TestSendKeysLiteralInRealTmux`, `TestSendKeysUnknownPaneFails`, `TestSendKeysLeavesCopyMode`, `TestSendKeysIsThreeSeparateInvocations`, `TestSendKeysAcceptsEightHundredRunes`, `TestBellInRealTmux`, `TestBellUnknownPaneFails`, `TestFakeRecordsSendKeysAndBell` pass, the real-tmux ones not skipped where tmux is installed. | not started |
-| 4 | MCP protocol server | Sonnet (expected, confirmed at dispatch) | `mcp.Server.Serve` over line-delimited JSON-RPC 2.0 with the plan's five methods and error codes, `-32601` at once for any unknown request (Claude Code opens with `server/discover`), `_meta` ignored, standard library only (decision 0011, plan decision 37); `TestInitializeNegotiatesVersion`, `TestToolsListInOrder`, `TestToolCallResultAndError`, `TestUnknownToolIsInvalidParams`, `TestProtocolErrors`, `TestNotificationsGetNoReply`, `TestOversizedLineSkipped`, `TestPanicInToolIsContained`, `TestOutputIsOneLinePerMessage`, `TestEOFEndsServe`, `TestDiscoverThenInitialize`, `TestToolCallWithMeta` pass through real pipes. | not started |
+| 4 | MCP protocol server | Sonnet (expected, confirmed at dispatch) | `mcp.Server.Serve` over line-delimited JSON-RPC 2.0 with the plan's five methods and error codes, `-32601` at once for any unknown request (Claude Code opens with `server/discover`), `_meta` ignored, standard library only (decision 0011, plan decision 37); `TestInitializeNegotiatesVersion`, `TestToolsListInOrder`, `TestToolCallResultAndError`, `TestUnknownToolIsInvalidParams`, `TestProtocolErrors`, `TestNotificationsGetNoReply`, `TestOversizedLineSkipped`, `TestPanicInToolIsContained`, `TestOutputIsOneLinePerMessage`, `TestEOFEndsServe`, `TestDiscoverThenInitialize`, `TestToolCallWithMeta`, `TestResponseMessageIgnored` pass through real pipes; a message with an `id` and no `method` gets no reply. | not started |
 | 5 | Install additions | Opus (expected, confirmed at dispatch) | `install.WriteSkill`/`RemoveSkill` with the embedded `skill/SKILL.md` (exact content), `AddMCP`/`RemoveMCP` through a `Runner`, recognising the entry by reading the Claude config JSON (`ClaudeConfigPath`) read-only and never running `claude mcp get` or `list` (plan decision 40), `AllowTools` for the four exact tool names only with `curia install --allow-mcp-tools`, `Unhooks` removing them, `ErrForeignSkill`, the order and failure rules, the `A` binding; `claudeRunner` defaults to a failing stub; `TestWriteSkillCreatesFile`, `TestWriteSkillIdempotentAndUpgrades`, `TestWriteSkillLeavesForeignFile`, `TestRemoveSkillOnlyOurs`, `TestRemoveSkillKeepsOtherFilesInDir`, `TestSkillSymlinkedDirSurvives`, `TestAddMCPSequence`, `TestAddMCPAlreadyOurs`, `TestAddMCPForeign`, `TestAddMCPNoClaude`, `TestRemoveMCPOnlyOurs`, `TestBinWithSpacesIsOneArgument`, `TestNeverRunsMCPGetOrList`, `TestConfigJSONNeverWritten`, `TestClaudeConfigPath`, `TestHooksAddNoPermissionRule`, `TestAllowToolsAddsFourOnce`, `TestUnhooksRemovesTheFourToolRules`, `TestPermissionsOfWrongTypeUntouched`, `TestInstallWritesSkillAndRegistersMCP`, `TestInstallThroughStubClaude`, `TestUninstallReversesPlan2Items`, `TestInstallAllowsToolsOnlyWithFlag`, `TestInstallForeignSkillContinues` pass; the real-tmux binding loop checks `A`; no test runs the real `claude`. | not started |
 
 ### Wave 2
@@ -91,9 +92,17 @@ Run by the orchestrator on `plan-2` after each wave, with a temp `HOME`, `CURIA_
 
 ## Plan 2 Rulings
 
-Format: Ruling: what — why — cost if wrong. Numbering continues from Plan 1 (next is 34).
+Format: Ruling: what — why — cost if wrong. Rulings 34 to 38 and 48 to 49 came from Plan 1's live check and are listed under Plan 1; Plan 2 numbering continues from 50.
 
-(none yet)
+39. Ruling: the pre-flight review's items 1-8, 11-13 and 15 are accepted as written (briefs include the cited section-4 parts; TestMain guard in cmd/curia; T15 forward refs cut; expire inside CreateDecision; bounded PruneEvents; copy-mode -q before typing; decide view pins selection; Stop emit first + savepoint; T5 failure rules; wave-5 name prefixes and one-at-a-time merges; small fixes; declared deviations incl. reasoning prompt on blocking answers) — each fixes a text defect that would otherwise cost a fix round — none beyond the plan text.
+40. Ruling (changes review item 9, security-sensitive, owner away): `curia install` adds NO permission rules by default; `--allow-mcp-tools` adds the four exact tool names; without it install prints how to allow them — auto-allowing tools in the owner's settings is a security-sensitive default the owner has not approved — agents hit a permission prompt on first use of each tool until the owner opts in.
+41. Ruling (rejects review item 14): T13's in-process latency gate stays one pass of 200 samples, p95 < 20 ms, no retry, as Plan 1's TestHookLatency — retry-until-pass weakens a gate; Plan 1's margin was large (p95 3-7 ms under race) — a loaded machine could flake it; then measure, do not loosen.
+42. Ruling: the three desk-unsettled checks run before Wave 1 as live probes: MCP server environment, typing+Enter into a real prompt, `claude mcp get` output, plus Stop-hook block behaviour. Results amend T3, T5, T12, T13 before dispatch — each result changes task text, and building six waves on an unverified delivery design is the larger risk — one more step before Wave 1.
+43. Ruling: MCP caller resolved on every tool call: CURIA_SESSION_ID, then the non-ended session bound to TMUX_PANE, then CLAUDE_CODE_SESSION_ID if a live row exists, then unknown — the env session id goes stale after /clear, the pane does not — two live sessions in one pane (nested) resolve to the most recently updated. (Plan decision 36.)
+44. Ruling: MCP server answers any unknown request with -32601 at once and negotiates the protocol version — the real client opens with server/discover — none. (Plan decision 37.)
+45. Ruling: SendKeys = three separate tmux invocations (copy-mode -q, send-keys -l, send-keys Enter), max 800 chars, refuses single characters; state re-read inside the claim transaction before typing — joined commands turn Enter into a newline; 1000+ chars become a paste; Enter approves a permission prompt — a session at a permission prompt whose state still says idle would get its prompt approved; the rule idle/needs_decision-only is the guard. (Plan decision 38.)
+46. Ruling: install never runs `claude mcp get/list`; it reads mcpServers.curia from the Claude config JSON read-only and uses `claude mcp add/remove --scope user` — get/list start the server and hang 30 s on a silent binary — depends on the config file's location and shape. (Plan decision 40.)
+47. Ruling: Stop hook ignores stop_hook_active; each Stop claims what is queued — two Stops per request are normal with subagents — none. (Plan decision 39.)
 
 ## Plan 2 Open Questions
 
@@ -119,7 +128,7 @@ Items for the isolated live check (could not be settled from the desk):
 - **Settled (plan decision 40):** `claude mcp get` starts the server and prints paths with spaces ambiguously; install reads the config JSON instead.
 - **Partly settled:** a short `instructions` string reached the model verbatim; the full one (about 800 characters) is checked in Task 17's live check.
 
-Remaining risks after the live probes (plan section 14): the `permission_prompt` Notification arrives about 6 seconds after a prompt opens, so the store may still say `working` meanwhile (the typing rule covers it; `fix/live-check`'s `PermissionRequest` hook closes the window once on `plan-2`); copy mode with a client attached is untested; the paste threshold lies between 800 and 1,000 characters; `claude mcp get`/`list` run by the user start `curia mcp`, which then prunes old events.
+Remaining risks after the live probes (plan section 14): the `permission_prompt` Notification arrives about 6 seconds after a prompt opens, so the store may still say `working` meanwhile (the typing rule covers it; no hook closes the window, Ruling 48); copy mode with a client attached is untested; the paste threshold lies between 800 and 1,000 characters; `claude mcp get`/`list` run by the user start `curia mcp`, which then prunes old events; Claude Code labels a Stop block's reason "Stop hook error" (cosmetic).
 
 ## Plan 2 Ledger
 
@@ -129,20 +138,22 @@ One line per task: wave, worktree, branch, status, model, fix rounds.
 
 ## Plan 2 Next steps
 
-1. Merge the setup PR (`chore/plan2-setup`) into `plan-2` after the plan review; apply any plan-text changes the review makes.
+1. Merge the setup PR (`chore/plan2-setup`) into `main`, then branch `plan-2` from `main`.
 2. Dispatch Wave 1 (Tasks 1 to 5), confirming each model first; smoke check after the wave.
-3. Carried over from Plan 1: the isolated live check (method of Ruling 33) and its fixes, if not yet done; owner: run `curia install` on the real machine and the three-session check; add Go 1.26 to PATH.
+3. Owner: run `curia install` on the real machine and the three-session check; add Go 1.26 to PATH; choose a remedy for Plan 1 Open Question 19.
 
 # Plan 1 (Foundation): complete
 
-Plan 1's record, kept as it stood when Plan 1 closed. Its waves, done criteria and models are in the Plan 1 plan and in the results table below.
+Plan 1's record, kept as it stood when Plan 1 closed, plus its live check (Rulings 34 to 38, 48, 49; Open Questions 19 to 21). Its waves, done criteria and models are in the Plan 1 plan and in the results table below.
 
 ## Plan 1 status
 
 - **Plan 1 (Foundation): complete.** All eleven tasks, the final whole-branch review and its fix wave are merged into `plan-1` (PRs #2 to #13). The fix-wave re-review found every finding addressed and nothing new at Critical or Important level.
 - `deadcode ./...` without `-test` reports only `tmux.Fake`, the deliberate test double.
 - The owner (2026-11-11) authorised the orchestrator to merge its own PRs, including `plan-1` into `main`, and to write and execute Plan 2 and later plans. An isolated live check (private tmux server, temp HOME) is authorised; the real `curia install` stays with the owner.
-- Not yet proven against a live Claude Code and tmux setup on the owner's machine.
+- Merged to `main` (PR #14).
+- Isolated live check done (method of Ruling 33; real Claude Code sessions on a private tmux server). Its fixes are merged to `main` (PR #15; Rulings 34 to 38, 48, 49).
+- The real `curia install` check on the owner's machine is still the owner's.
 
 ## Plan 1 results by task
 
@@ -185,6 +196,9 @@ What this suggests for the next plan: Sonnet was enough for single-package tasks
 16. A `#` or `%` in the binary path is not escaped for tmux formats in the snippet (hooks in `settings.json` are unaffected). `curia install` should refuse or warn on such a path.
 17. A session waiting on a permission prompt is ended and hidden when a background `claude -p` starts in its pane, until its next event (Ruling 27 restores it only then).
 18. `SubagentStop` on an ended session is ignored, so `subagents_active` can read high after a resume.
+19. A denied permission prompt leaves the session `waiting` (holding `W` and attracting `next`), and an Esc interrupt leaves it `working`, until the next prompt in that session; no Claude Code hook fires for either. The transcript shows a `user-rejected` tool result and "[Request interrupted by user...]" lines about 200 ms after the keypress, so a correction from the transcript when a view refreshes is possible, as is pane scraping. Owner to choose (Ruling 49).
+20. `docs/DESIGN.md`'s F1 table still says SessionStart means `working`; the code follows Ruling 37 (`idle` and seen). The spec is the owner's to update.
+21. A SessionStart with `source: compact` in the middle of a turn shows the session idle until its next tool event.
 7. No LICENSE file: the owner chose to leave it undecided (2026-11-11).
 
 ## Plan 1 Rulings
@@ -232,6 +246,13 @@ Format: Ruling: what — why — cost if wrong.
 
 31a. Ruling (addition to 31): a session first seen on an `idle_prompt` or `auth_success` Notification is recorded as idle with no last update — a row needs a state and idle is what such a session is — none.
 33. Ruling: the isolated live check runs real Claude Code with the real HOME for its own login but loads hooks only through `claude --settings <temp file>` whose hook commands set HOME and CURIA_DB to a temp dir, on a private tmux server — a temp HOME has no credentials — the test sessions' transcripts land in the real `~/.claude/projects`.
+34. Ruling (narrowed by Ruling 48): register whichever extra Claude Code hook events fire on a denied permission or an Esc interrupt; such an event sets the session idle and seen; a plain tool failure keeps working; an event at the moment a permission prompt opens sets waiting at once; if no event exists, leave unfixed and report (no pane scraping, polling or transcript watcher) — live check: denial left `waiting` forever, Esc left `working` forever — more hook entries in settings.json; depends on events Claude Code may change.
+35. Ruling: the snippet raises status-right-length to 80 when below 80 — default length 40 hides the badge — changes a tmux option the user did not ask about.
+36. Ruling: Stop uses the payload's last_assistant_message (first line) for last_update, transcript as fallback — the transcript is not flushed when Stop runs — none.
+37. Ruling (amends spec F1 table): SessionStart sets idle and seen, not working; first prompt makes it working — a fresh or /clear session sits at an empty prompt — goldens and the e2e script expectations change.
+38. Ruling: tmux.Client gains PaneFocused; a marker about to turn red on the focused pane is marked seen instead — red dot on the window being watched never cleared — one tmux call on marker-changing events.
+48. Ruling (narrows Ruling 34): PermissionRequest is NOT registered — approving fires no hook, so an approved long tool would show `waiting` for its whole run; a false alarm for minutes is worse than a 6 s delay — a real prompt is shown up to 6 s late (the Notification).
+49. Ruling: denied-prompt-stuck-waiting and Esc-stuck-working are left unfixed in Plan 1 and recorded as Open Questions for the owner with the options (transcript-based correction during reconcile/status; pane scraping; accept) — no hook exists and both remedies change the architecture ("nothing scrapes panes") — a denied prompt shows W and attracts `next` until the user's next prompt in that session; an interrupted session shows working until then. (Open Question 19.)
 
 ## Plan 1 deferred minors
 
@@ -247,6 +268,13 @@ Format: Ruling: what — why — cost if wrong.
 - Task 9: `internal/ui` duplicates `ls.go`'s text cleaner and `age`; the kill confirmation does not re-check that the row is still live; the filter matches the full repo path while the cell shows the basename; `ls` table should show the repo basename too (Ruling 22).
 - Task 11: SessionStart starts three processes (tmux and two git commands) and takes 15 to 20 ms at the median, close to the 20 ms budget; its tail is the main risk to the e2e latency gate on a loaded machine.
 - Final fix wave: a server already carrying the old unmarked badge gets one duplicate on the first re-source after upgrade; a failed keyed read in `hook.Run` drops that event's session update; a watchdog that fires before the log opens exits without a log line.
+- Live check, not fixed (defect 7): a waiting session's last_update becomes the generic "Claude needs your permission", overwriting the tool and target.
+- Live check, not fixed (defect 10): internal tool names leak into last_update (`SubagentHandback` after a subagent), and subagent tool events overwrite the main session's last_update.
+- Live check, not fixed (defect 12): a stale row's AGE resets to 0s when it is marked stale, so it looks freshly active.
+- Live check, not fixed (defect 13): at about 50 columns every dashboard column truncates and rows cannot be told apart; a narrow layout should drop columns.
+- Live check, not fixed (defect 14): SessionStart p50 27.8 ms, p95 93.6 ms at load average 11.9, over the 20 ms budget; re-measure on an idle machine before acting.
+- Live check, not fixed (defect 15, design limit): a Claude process killed with SIGKILL in a pane that stays open stays `working` forever; a liveness check of the pane's foreground process would catch it.
+- Live-check fixes review: SessionStart with source=compact mid-turn shows idle-seen until the next tool event (Parse should read source; keep state on compact; Open Question 21); MarkSeen on focus uses time.Now() and can cover a concurrent event (use sess.UpdatedAt); PaneFocused means a client is attached, not that the terminal has focus; the focus path adds a second tmux call on red-turning events, unmeasured; the MarkSeen-failure branch is untested; docs/DESIGN.md still says SessionStart -> working (Open Question 20).
 ## Plan 1 ledger
 
 One line per task: wave, worktree, branch, status.
