@@ -23,6 +23,7 @@ const (
 	colModel
 	colContext
 	colSubagents
+	colDecisions
 	colUpdate
 	colAge
 )
@@ -42,12 +43,13 @@ var specs = map[column]colSpec{
 	colModel:     {title: "MODEL", flex: true},
 	colContext:   {title: "CTX", right: true},
 	colSubagents: {title: "SUB", right: true},
+	colDecisions: {title: "DEC", right: true},
 	colUpdate:    {title: "LAST UPDATE", flex: true},
 	colAge:       {title: "AGE", right: true},
 }
 
 var (
-	popupColumns   = []column{colState, colWindow, colRepo, colModel, colContext, colSubagents, colUpdate, colAge}
+	popupColumns   = []column{colState, colWindow, colRepo, colModel, colContext, colSubagents, colDecisions, colUpdate, colAge}
 	sidebarColumns = []column{colState, colWindow, colContext, colAge}
 )
 
@@ -81,6 +83,14 @@ func levelStyle(l Level) lipgloss.Style {
 	}
 }
 
+// decStyle colors a session's open ticket count: red when any is blocking.
+func decStyle(c model.OpenCount) lipgloss.Style {
+	if c.Blocking > 0 {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	}
+	return lipgloss.NewStyle()
+}
+
 // stateIcon is the one-cell icon of a state.
 func stateIcon(s model.State) string {
 	switch s {
@@ -102,8 +112,11 @@ func stateIcon(s model.State) string {
 }
 
 // View renders the header, the rows on screen and the status line, every
-// line at most the window width.
+// line at most the window width; while the decide view is shown, that view.
 func (m Model) View() string {
+	if m.child != nil {
+		return m.child.View()
+	}
 	cols, gap := popupColumns, 2
 	if m.mode == ModeSidebar {
 		cols, gap = sidebarColumns, 1
@@ -151,13 +164,27 @@ func (m Model) titles(cols []column) []string {
 }
 
 // cells are the texts of s's columns. Session text is untrusted, so every
-// cell goes through Cell.
+// cell goes through Cell, except the DEC cell: a number of our own, empty
+// when zero.
 func (m Model) cells(s model.Session, cols []column) []string {
 	out := make([]string, len(cols))
 	for i, c := range cols {
+		if c == colDecisions {
+			out[i] = m.decText(s)
+			continue
+		}
 		out[i] = Cell(m.cellText(s, c))
 	}
 	return out
+}
+
+// decText is the number of s's open tickets of both modes, empty when none.
+func (m Model) decText(s model.Session) string {
+	c := m.counts[s.ID]
+	if n := c.Blocking + c.Assume; n > 0 {
+		return strconv.Itoa(n)
+	}
+	return ""
 }
 
 func (m Model) cellText(s model.Session, c column) string {
@@ -270,8 +297,11 @@ func (m Model) renderRow(s model.Session, cells []string, cols []column, widths 
 	parts := make([]string, len(cols))
 	for i, c := range cols {
 		st := base
-		if c == colContext {
+		switch c {
+		case colContext:
 			st = levelStyle(level).Inherit(base)
+		case colDecisions:
+			st = decStyle(m.counts[s.ID]).Inherit(base)
 		}
 		parts[i] = st.Render(fit(cells[i], widths[i], specs[c].right))
 	}
@@ -312,7 +342,7 @@ func (m Model) helpText() string {
 		text = fmt.Sprintf("%d of %d sessions match /%s", len(m.rows), len(m.sessions), m.filter)
 	}
 	if m.mode == ModePopup {
-		text += "  enter jump  / filter  x kill  q quit"
+		text += "  enter jump  d decisions  / filter  x kill  q quit"
 	}
 	return text
 }
