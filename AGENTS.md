@@ -104,6 +104,11 @@ Rules for the toolchain:
 - **A test points the built binary at a private tmux server by setting `TMUX` to `<socket_path>,<server pid>,0`** (from `display-message -p '#{socket_path},#{pid},0'`); no flag or variable of Curia's own is needed.
 - **`CLAUDECODE=1` is set in every command Claude Code runs;** tests that run `curia decide` must unset it.
 - **An FTS5 `MATCH` argument is never built from raw text;** use `precedent.MatchExpr`.
+- **Claude Code opens an MCP session with `server/discover`, not `initialize`** (2.1.322): it falls back to `initialize` only after a `-32601` error, so a stdio server must answer every unknown request with `-32601` at once and never hang or exit on one.
+- **`claude mcp get` and `claude mcp list` start the server** to health-check it (30 s on a silent one, exit 0 even on failure, the caller's whole environment passed on). Never run them from install or tests; read `mcpServers` in `.claude.json` (`$CLAUDE_CONFIG_DIR` or the home directory) instead.
+- **Type text and Enter as separate tmux invocations.** `send-keys -l -- <text>` and `send-keys Enter` as two tmux processes submit exactly; joined with `\;` in one invocation, a long line's Enter becomes a newline in Claude Code's prompt. From about 1,000 characters the prompt treats input as a paste.
+- **At a Claude Code permission prompt, a typed Enter approves the highlighted "Yes"** and a single digit selects an option at once. Never type into a `waiting` session.
+- **`CLAUDE_CODE_SESSION_ID` in an MCP server's environment goes stale after `/clear`:** the server keeps running while hooks get a new session id. `TMUX_PANE` stays correct.
 - **Every `cmd/curia` test runs behind `TestMain`'s guard** (`cmd/curia/main_test.go`, plan section 6.8): temp `HOME` and `CURIA_DB`, no reachable tmux server, agent variables cleared. A test that needs tmux uses `useFakeTmux`. A new `tmux.Client` method needs one more line on the guard's `unreachableTmux`.
 
 ## Owner's rules (verbatim)
