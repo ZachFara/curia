@@ -163,11 +163,16 @@ func checkKeys(pane, text string) error {
 
 // SendKeys leaves any mode the pane is in, types text literally and presses
 // Enter, as three tmux invocations: text and Enter in one invocation make the
-// Enter a newline inside the prompt for long text. If the Enter step fails
-// (including when ctx ends after the text step), the error wraps
-// ErrPartialSend: the text is in the prompt unsubmitted, and a caller seeing
-// ErrPartialSend must not retry by typing again. A failure of an earlier step
-// typed nothing, as far as tmux reported.
+// Enter a newline inside the prompt for long text.
+//
+// The error wraps ErrPartialSend when the text may have reached the pane:
+// when the Enter step fails for any reason, and when the text step fails
+// while ctx is done (a killed tmux client may already have typed the text).
+// The line may then be in the prompt unsubmitted, or even submitted; a caller
+// seeing ErrPartialSend must not retry by typing again. Plain errors, after
+// which nothing was typed, come from a failed copy-mode step, from ctx being
+// done before the text step starts (it is then never run), and from a text
+// step that tmux itself failed while ctx was live (such as no such pane).
 func (c *execClient) SendKeys(ctx context.Context, pane, text string) error {
 	if err := checkKeys(pane, text); err != nil {
 		return err
@@ -180,7 +185,13 @@ func (c *execClient) SendKeys(ctx context.Context, pane, text string) error {
 	if _, err := c.run(ctx, "copy-mode", "-q", "-t", pane); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := c.run(ctx, "send-keys", "-t", pane, "-l", "--", text); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %w", ErrPartialSend, err)
+		}
 		return err
 	}
 	if _, err := c.run(ctx, "send-keys", "-t", pane, "Enter"); err != nil {
@@ -247,6 +258,9 @@ func ringBell(ctx context.Context, f *os.File) error {
 		deadline = time.Now().Add(bellTimeout)
 	}
 	if err = f.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	if err = ctx.Err(); err != nil {
 		return err
 	}
 	_, err = f.Write([]byte{0x07})

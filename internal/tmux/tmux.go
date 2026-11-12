@@ -41,8 +41,9 @@ type Client interface {
 	// only method that types into a pane, and it refuses a pane that is not
 	// a pane id and text that is empty, one character, over 800 characters,
 	// not UTF-8, or holds a control character. An error wrapping
-	// ErrPartialSend means the text was typed but not submitted; the caller
-	// must not retry by typing again.
+	// ErrPartialSend means the text may be in the prompt, unsubmitted or even
+	// submitted; the caller must not retry by typing again. Any other error
+	// means nothing was typed, as far as tmux reported.
 	SendKeys(ctx context.Context, pane, text string) error
 	// Bell rings the pane's bell.
 	Bell(ctx context.Context, pane string) error
@@ -51,7 +52,8 @@ type Client interface {
 // ErrNoWindow is wrapped by an error for a window that does not exist.
 var ErrNoWindow = errors.New("tmux: no such window")
 
-// ErrPartialSend is wrapped by a SendKeys error when the text was typed but
-// Enter was not sent: the text sits unsubmitted in the pane's prompt, and
-// typing it again would double it.
-var ErrPartialSend = errors.New("tmux: text typed but not submitted")
+// ErrPartialSend is wrapped by a SendKeys error when the text may have
+// reached the pane: the Enter step failed for any reason, or the text step
+// failed while the context was done. The line may be in the prompt
+// unsubmitted, or may even have been submitted; do not type it again.
+var ErrPartialSend = errors.New("tmux: text may have been typed")

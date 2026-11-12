@@ -438,28 +438,65 @@ func TestSendKeysStopsAtFirstFailure(t *testing.T) {
 	}
 }
 
-// TestSendKeysContextEndsBeforeEnter: a context that ends after the text is
-// typed fails the Enter step, which is a partial send.
-func TestSendKeysContextEndsBeforeEnter(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	var runs int
-	c := &execClient{runner: func(ctx context.Context, args ...string) (string, error) {
-		runs++
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		if args[0] == "send-keys" && args[3] == "-l" {
-			cancel()
-		}
-		return "", nil
-	}}
-	err := c.SendKeys(ctx, "%5", "hello")
-	if !errors.Is(err, ErrPartialSend) || !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want ErrPartialSend wrapping context.Canceled", err)
+// TestSendKeysWhenContextEnds: the context ends during step cancelAt (1
+// copy-mode, 2 text, 3 Enter). The runner records every step SendKeys asks
+// for and acts like exec.CommandContext: it refuses to start one once the
+// context is done, and with killed set, the step running when the context
+// ends fails as a killed process would, after tmux may already have typed the
+// text (Ruling 58). SendKeys itself must not ask for the text step once the
+// context is done.
+func TestSendKeysWhenContextEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cancelAt int
+		killed   bool
+		runs     int
+		partial  bool
+	}{
+		{name: "during copy-mode, which fails", cancelAt: 1, killed: true, runs: 1},
+		{name: "after copy-mode, before the text step starts", cancelAt: 1, runs: 1},
+		{name: "during the text step, which is killed", cancelAt: 2, killed: true, runs: 2, partial: true},
+		{name: "after the text step, so Enter never starts", cancelAt: 2, runs: 3, partial: true},
+		{name: "during Enter, which is killed", cancelAt: 3, killed: true, runs: 3, partial: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r := &cancellingRunner{cancel: cancel, cancelAt: tc.cancelAt, killed: tc.killed}
+			err := (&execClient{runner: r.run}).SendKeys(ctx, "%5", "hello")
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("err = %v, want it to wrap context.Canceled", err)
+			}
+			if got := errors.Is(err, ErrPartialSend); got != tc.partial {
+				t.Errorf("errors.Is(err, ErrPartialSend) = %v, want %v (err %v)", got, tc.partial, err)
+			}
+			if len(r.runs) != tc.runs {
+				t.Errorf("asked for %d steps %q, want %d", len(r.runs), r.runs, tc.runs)
+			}
+		})
 	}
-	if runs != 3 {
-		t.Fatalf("runs = %d, want 3", runs)
+}
+
+// cancellingRunner is the runner TestSendKeysWhenContextEnds describes.
+type cancellingRunner struct {
+	cancel   context.CancelFunc
+	cancelAt int
+	killed   bool
+	runs     [][]string
+}
+
+func (r *cancellingRunner) run(ctx context.Context, args ...string) (string, error) {
+	r.runs = append(r.runs, args)
+	if err := ctx.Err(); err != nil {
+		return "", err // never started
 	}
+	if len(r.runs) == r.cancelAt {
+		r.cancel()
+		if r.killed {
+			return "", fmt.Errorf("tmux %s: signal: killed: %w", args[0], ctx.Err())
+		}
+	}
+	return "", nil
 }
 
 func TestSendKeysAcceptsEightHundredRunes(t *testing.T) {
@@ -556,14 +593,26 @@ func TestBellHonoursContextDeadline(t *testing.T) {
 	c := &execClient{runner: r.run, openTTY: openTTY}
 	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancelExpired()
-	if err := c.Bell(expired, pane); !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("Bell with an expired deadline = %v, want os.ErrDeadlineExceeded", err)
+	// A done context is caught before the write.
+	if err := c.Bell(expired, pane); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Bell with a done context = %v, want context.DeadlineExceeded", err)
+	}
+	// A context not yet done whose deadline has passed reaches the write,
+	// which the write deadline stops.
+	if err := c.Bell(pastDeadline{Context: context.Background()}, pane); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("Bell past the write deadline = %v, want os.ErrDeadlineExceeded", err)
 	}
 	time.Sleep(200 * time.Millisecond)
 	if out, _ := tm("display-message", "-p", "-t", pane, "#{window_bell_flag}"); strings.TrimSpace(out) != "0" {
-		t.Fatalf("window_bell_flag = %q after a timed-out Bell, want 0", out)
+		t.Fatalf("window_bell_flag = %q after Bells that should not ring, want 0", out)
 	}
 }
+
+// pastDeadline is a context that is not done but reports a deadline already
+// passed, as a live context does in the moment its deadline arrives.
+type pastDeadline struct{ context.Context }
+
+func (pastDeadline) Deadline() (time.Time, bool) { return time.Now().Add(-time.Second), true }
 
 func TestFakeRecordsSendKeysAndBell(t *testing.T) {
 	ctx := context.Background()
