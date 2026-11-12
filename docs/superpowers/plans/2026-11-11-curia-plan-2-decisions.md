@@ -299,7 +299,7 @@ Module `github.com/ZachFara/curia`. New rows are marked. Each package depends on
 
 ## 6. Setup (orchestrator, before Wave 1)
 
-One PR from `chore/plan2-setup` into `plan-2`, after `plan-1` is merged to `main` and `plan-2` is branched from it. No task touches these files afterwards.
+One PR from `chore/plan2-setup` into `main`, after Plan 1 and its live-check fixes are merged there; `plan-2` is branched from `main` once it merges. No task touches these files afterwards.
 
 ### 6.1 `go.mod`, `go.sum`, `Makefile`, `lefthook.yml`
 
@@ -769,9 +769,11 @@ Protocol errors use JSON-RPC error objects `{"jsonrpc": "2.0", "id": <id or null
 | Code | When |
 | --- | --- |
 | `-32700` | a line is not valid JSON, or is longer than 1 MiB (the rest of that line is skipped and serving continues) |
-| `-32600` | valid JSON that is not a request object: an array (batches are not supported), a missing or wrong `jsonrpc`, a non-string `method` |
+| `-32600` | valid JSON that is not a request object: an array (batches are not supported), a missing or wrong `jsonrpc`, a non-string `method` (a message with an `id` and no `method` is a response and is ignored, below) |
 | `-32601` | unknown method |
 | `-32602` | `tools/call` with an unknown tool name, a missing `name`, or `arguments` that is not an object |
+
+A message with an `id` and no `method` is a JSON-RPC response; the server sends no requests, so none is expected, and it is ignored: no reply, no error, serving continues.
 
 All JSON is written with HTML escaping off. Nothing but protocol messages is written to `out`; diagnostics go to `Log`.
 
@@ -795,6 +797,7 @@ func TestOversizedLineSkipped(t *testing.T)        // a 2 MiB line then a ping -
 func TestPanicInToolIsContained(t *testing.T)      // tool panics -> isError true, code "internal"; next call works
 func TestOutputIsOneLinePerMessage(t *testing.T)   // a result holding "\n" and "<&>" -> one line, "<&>" not escaped as <
 func TestEOFEndsServe(t *testing.T)                // close the input pipe -> Serve returns nil within 1s
+func TestResponseMessageIgnored(t *testing.T)      // {"jsonrpc":"2.0","id":"srv-1","result":{}} then ping -> exactly one line out, the ping result
 ```
 
 - [ ] **Step 2: Run them and confirm they fail.** Run: `go test ./internal/mcp/ -v`. Expected: FAIL, package does not compile.
@@ -1671,7 +1674,7 @@ func TestStopHookActiveIsNotSpecial(t *testing.T)
 func TestStopDeliversSeveralInOneBlock(t *testing.T)   // 3 queued -> one Stdout line naming all three; all delivered
 func TestTwoStopHooksOneBlocks(t *testing.T)
 // 100 rounds, two Store handles, two goroutines run Stop for one session with one queued answer -> exactly one Result has Stdout
-func TestOtherEventsNeverPrintOrClaim(t *testing.T)    // each other event kind the hook handles, with a queued answer present -> Stdout nil, still queued
+func TestOtherEventsNeverPrintOrClaim(t *testing.T)    // each of the 7 other kinds with a queued answer present -> Stdout nil, still queued
 func TestStopOutputSurvivesHostileText(t *testing.T)
 // label and reasoning hold quotes, "</script>", "\x1b[2J", newlines, U+202E -> Stdout is one line, valid JSON, with exactly the keys
 // decision and reason; the reason holds no control rune except "\n"
@@ -1992,7 +1995,7 @@ Decisions 36 to 41 come from the pre-wave-1 live probes (2026-11-11, Claude Code
 40. **`curia install` recognises its MCP entry by reading the Claude config JSON, read-only, and never runs `claude mcp get` or `claude mcp list`** (Task 5) — probe C: `claude mcp add --scope user` writes `mcpServers.curia` as `{"type":"stdio","command":"<path>","args":["mcp"],"env":{}}` into `.claude.json` in `$CLAUDE_CONFIG_DIR` or the home directory, and exits 1 with `already exists` when the name is taken; `get` and `list` start the server to health-check it (30 s on a silent one, exit 0 on failure, the caller's whole environment passed on) and print paths with spaces ambiguously — if Claude Code moves or reshapes that file, install sees no entry and runs `claude mcp add`, which then fails with `already exists` and install reports it.
 41. **The isolated live check loads the MCP server with `--mcp-config <temp file> --strict-mcp-config` next to `--settings <temp file> --setting-sources project`** (Task 17) — the probes ran exactly this way and touched no real Claude config — none beyond the trust dialog, which writes the probe directory into the real `~/.claude.json`.
 
-**Code changed after this plan was drafted.** Plan 1's live check changed the code on `main` after this plan was written: new hook event kinds may exist, `SessionStart` now yields `idle`, `Stop` reads `last_assistant_message`, and `tmux.Client` has `PaneFocused`. Where a task section's description of existing code differs from the code on `plan-2`, the code wins and the implementer reports the difference.
+**Code changed after this plan was drafted.** Plan 1's live check changed the code on `main` (PR #15) after this plan was written: `SessionStart` yields `idle` with `SeenAt` set (Ruling 37); `Stop` takes its message from the payload's `last_assistant_message` (Ruling 36); `tmux.Client` has `PaneFocused(ctx, pane string) (bool, error)` and the hook marks a focused pane seen instead of turning it red (Ruling 38); the snippet raises `status-right-length` to 80 when it is lower (Ruling 35); `hook.Parse` reads `model` on `SessionStart`; `tmux.ErrNoWindow` exists; test tmux servers start with `-f /dev/null`. No hook event kind was added: the installer still registers exactly eight events, and `PermissionRequest` is not one of them (Ruling 48). Where a task section's description of existing code differs from the code on `plan-2`, the code wins and the implementer reports the difference.
 
 ## 14. Open questions for the owner
 
@@ -2022,10 +2025,11 @@ Three of these run before Wave 1 (section 7), in the isolated setup the owner au
 
 Remaining risks after the probes:
 
-- The `permission_prompt` Notification arrives about 6 seconds after a permission prompt opens (probe B4), so for those seconds the store can still say `working` (never `idle`); the rule "type only into `idle` or `needs_decision`" already covers it. The Plan 1 live-check fix (`fix/live-check`) registers a `PermissionRequest` hook that sets `waiting` when the dialog opens; once it is on `plan-2`, it closes this window.
+- The `permission_prompt` Notification arrives about 6 seconds after a permission prompt opens (probe B4), so for those seconds the store can still say `working` (never `idle`); the rule "type only into `idle` or `needs_decision`" already covers it. No hook closes this window: Plan 1 does not register `PermissionRequest`, because approving a prompt fires no hook, so an approved long tool would have shown `waiting` for its whole run (PROGRESS.md, Ruling 48).
 - Copy mode was tested only with no client attached; with an attached client, copy-mode keys may act differently.
 - The paste threshold lies somewhere between 800 and 1,000 characters; the 800-rune cap is the largest tested value.
-- A user who runs `claude mcp get` or `claude mcp list` starts `curia mcp` for a health check with that shell's environment, so it prunes old events then and sees another session's variables; it makes no tool call, so no ticket is attributed.
+- A user who runs `claude mcp get` or `claude mcp list` starts `curia mcp` for a health check with that shell's environment (live probe C), so `curia mcp` prunes old events at that start and sees another session's variables; it makes no tool call, so no ticket is attributed.
+- Claude Code labels a Stop block's reason "Stop hook error" in its UI (live probe A), so a delivered answer appears under that label. Cosmetic, and not Curia's to change.
 
 ## 15. Out of scope
 

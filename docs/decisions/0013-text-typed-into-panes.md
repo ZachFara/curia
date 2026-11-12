@@ -19,4 +19,4 @@ Status: accepted (Plan 2 setup)
 - What is typed cannot do anything in a shell, at the cost of lossy typed text; the agent fetches the exact wording with one extra tool call.
 - The guard is not a boundary: an agent can unset the variable or write to the SQLite file, and an agent with a shell can already run `tmux send-keys`. The guard stops the default path, not a determined one. A real boundary needs something an agent cannot reach (plan section 14, open question 2).
 - Tests that run `curia decide` must unset `CLAUDECODE`.
-- A few milliseconds remain between the claim's commit and the keystrokes, and the `permission_prompt` Notification arrives about 6 seconds after a prompt opens; a `PermissionRequest` hook that sets `waiting` when the dialog opens closes the second window.
+- A few milliseconds remain between the claim's commit and the keystrokes, and the `permission_prompt` Notification arrives about 6 seconds after a prompt opens; for those seconds the store can say `working` (never `idle`), which the typing rule already refuses. No hook closes that window (PROGRESS.md, Ruling 48).
