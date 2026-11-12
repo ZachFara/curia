@@ -456,26 +456,7 @@ func TestClaimDeliveriesConcurrentStopsDeliverEachOnce(t *testing.T) {
 	for k, h := range hs {
 		wg.Go(func() {
 			<-start
-			for {
-				var got []model.Decision
-				err := retryBusy(func() error {
-					var err error
-					got, err = claimStopErr(h, "s1", tClaim)
-					return err
-				}, busyBeforeAnything)
-				if err != nil {
-					errs[k] = err
-					return
-				}
-				if len(got) > store.ClaimCap {
-					errs[k] = fmt.Errorf("one claim took %d, over the cap %d", len(got), store.ClaimCap)
-					return
-				}
-				if len(got) == 0 {
-					return
-				}
-				batches[k] = append(batches[k], got...)
-			}
+			batches[k], errs[k] = drainStops(h, total)
 		})
 	}
 	close(start)
@@ -489,6 +470,32 @@ func TestClaimDeliveriesConcurrentStopsDeliverEachOnce(t *testing.T) {
 	}
 	slices.SortFunc(all, func(a, b model.Decision) int { return cmp.Compare(a.N, b.N) })
 	assertEachOnceInOrder(t, hs[0], all, total)
+}
+
+// drainStops claims session s1's answers through h until a claim finds
+// none, and returns all it claimed. It fails a claim over the cap, and
+// stops once it holds more than total, which only a double claim can do.
+func drainStops(h *store.Store, total int) ([]model.Decision, error) {
+	var all []model.Decision
+	for {
+		var got []model.Decision
+		err := retryBusy(func() error {
+			var err error
+			got, err = claimStopErr(h, "s1", tClaim)
+			return err
+		}, busyBeforeAnything)
+		switch {
+		case err != nil:
+			return all, err
+		case len(got) > store.ClaimCap:
+			return all, fmt.Errorf("one claim took %d, over the cap %d", len(got), store.ClaimCap)
+		case len(got) == 0:
+			return all, nil
+		}
+		if all = append(all, got...); len(all) > total {
+			return all, fmt.Errorf("claimed %d of %d answers: some more than once", len(all), total)
+		}
+	}
 }
 
 // assertEachOnceInOrder fails unless claimed holds each of the total
