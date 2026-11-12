@@ -72,6 +72,27 @@ Rules for the toolchain:
 - **Commits**: conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`, `build:`, `ci:`, `refactor:` ...), subject at most 72 characters; enforced by the commit-msg hook. Branches: `feat/`, `fix/`, `chore/`, `docs/`; Plan 1 task branches are `feat/plan1-tN-<slug>`.
 - **PRs** use `.github/pull_request_template.md`: what changed, why, how it was tested.
 
+## Things learned while building
+
+- **Read-modify-write on a session goes through `store.UpdateSession`.** It loads the row, calls your function and upserts in one `BEGIN IMMEDIATE` transaction. Never pair `GetSession` with `UpsertSession` to change a row another process may be writing; `UpsertSession` is a blind overwrite. The function passed to `UpdateSession` must not call the store.
+- **Timestamps in the store are fixed-width UTC text with 9 fractional digits.** Compare times as `time.Time` in Go; never write a timestamp with another layout.
+- **An empty pane is stored as NULL.** `MarkSeen("")` and `EndOthersInPane("", ...)` change nothing, by design: a session started outside tmux is in no pane.
+- **SQLite WAL on a fresh file:** several processes opening a new database at once get `SQLITE_BUSY` from the WAL switch without waiting for `busy_timeout`; `store.Open` handles it. Do not set `journal_mode` anywhere else.
+- **tmux `display-message` expands both `#` formats and `%` strftime sequences.** `tmux.Client.DisplayMessage` escapes both; never call tmux with untrusted text any other way. With an unknown `-t` target, tmux can exit 0 with empty fields.
+- **Tests that start a real tmux server use a per-run socket** (`curia-test-<pid>`), because several worktrees run `make check` at the same time.
+- **Files the user owns may be symlinks into a dotfiles repo.** `internal/install` resolves symlinks before its atomic rename and never overwrites an existing backup.
+
+- **Command wiring lives in `cmd/curia/common.go`** (load config, open the store, open the log file) and git plumbing in `cmd/curia/git.go`. Reuse them; do not write a second copy in a new command.
+- **Any test or code that runs `git` must drop git's repository-local `GIT_*` variables** (`gitEnv` in `cmd/curia/git.go`). lefthook's pre-commit exports `GIT_DIR`, so an unguarded `git init` in a test acts on the real repository.
+- **GitHub Actions outages happen.** If a PR shows no checks for a long time, look at githubstatus.com before suspecting the code; never merge without the check.
+
+- **An ended session comes back on real activity** (prompt, tool, notification, stop); only `SubagentStop` and `SessionEnd` are ignored while ended. A session's first event of any kind gets SessionStart's treatment. `idle_prompt` and `auth_success` notifications change no state.
+- **Reconcile compares a session's start with the tmux server's start** (`tmux.Pane.ServerStart`), because a restarted server reuses pane ids.
+- **tmux only runs `pane-focus-in` when `focus-events` is on**; the snippet turns it on. `display-message -p` never starts `#()` jobs (only an attached client does). `set-hook -R` runs a hook at once, which is useful in headless tests. Double-quoted tmux strings expand `$VAR` and treat `\` as an escape; single-quoted strings have no escapes.
+- **gosec G302/G306 apply to tests too**: use a 0400 fixture, or the `/bin/sh` symlink trick for a fake executable.
+- **cobra keeps `--help` set on a command after a test runs it**; reset it in cleanup.
+- **Latency gates** are measured over a sequential pass with hundreds of samples and file handles (not pipes) for the child's stdio, so they measure the binary and not the test harness.
+
 ## Owner's rules (verbatim)
 
 The sections below are copied verbatim from the owner's orchestrator prompt. In them, "you" is the orchestrator and "me" is the owner.

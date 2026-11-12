@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":"Validate the request body in the API handler"}}
+{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_read_input_tokens":40000,"cache_creation_input_tokens":1998,"output_tokens":40},"content":[{"type":"text","text":"I'll add the check to the handler."}]}}
+{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_read_input_tokens":40000,"cache_creation_input_tokens":1998,"output_tokens":90},"content":[{"type":"tool_use","id":"toolu_s1_edit","name":"Edit","input":{"file_path":"/nonexistent/replay/api/server.go","old_string":"return nil","new_string":"return validate(body)"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_s1_edit","content":"The file has been updated."}]}}

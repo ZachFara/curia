@@ -1,0 +1,73 @@
+// Package config loads Curia's TOML configuration.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/BurntSushi/toml"
+)
+
+// Config is Curia's runtime configuration.
+type Config struct {
+	DBPath            string         `toml:"db_path"`
+	LogPath           string         `toml:"log_path"`
+	ContextMax        map[string]int `toml:"context_max"`
+	DefaultContextMax int            `toml:"default_context_max"`
+	ContextWarnPct    int            `toml:"context_warn_pct"`
+	ContextCritPct    int            `toml:"context_crit_pct"`
+	StaleHideAfter    time.Duration  `toml:"stale_hide_after"`
+}
+
+// Default returns the configuration used when no file overrides it.
+func Default() Config {
+	home, _ := os.UserHomeDir()
+	return Config{
+		DBPath:            filepath.Join(home, ".local/share/curia/curia.db"),
+		LogPath:           filepath.Join(home, ".local/state/curia/curia.log"),
+		ContextMax:        map[string]int{},
+		DefaultContextMax: 200000,
+		ContextWarnPct:    60,
+		ContextCritPct:    85,
+		StaleHideAfter:    10 * time.Minute,
+	}
+}
+
+// Load reads the TOML file at path over Default(). A missing file yields the
+// defaults. A leading "~" in the paths is expanded, and the CURIA_DB
+// environment variable, when set, overrides DBPath last.
+func Load(path string) (Config, error) {
+	c := Default()
+	data, err := os.ReadFile(filepath.Clean(path))
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return Config{}, fmt.Errorf("read config: %w", err)
+	default:
+		if err := toml.Unmarshal(data, &c); err != nil {
+			return Config{}, fmt.Errorf("parse config %s: %w", path, err)
+		}
+	}
+	c.DBPath = expandHome(c.DBPath)
+	c.LogPath = expandHome(c.LogPath)
+	if env := os.Getenv("CURIA_DB"); env != "" {
+		c.DBPath = env
+	}
+	return c, nil
+}
+
+func expandHome(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	return filepath.Join(home, strings.TrimPrefix(p, "~"))
+}

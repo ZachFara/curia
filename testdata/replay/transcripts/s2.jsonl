@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"Run the web test suite"}}
+{"type":"assistant","message":{"model":"claude-sonnet-5-5","usage":{"input_tokens":4,"cache_read_input_tokens":60000,"cache_creation_input_tokens":996,"output_tokens":30},"content":[{"type":"tool_use","id":"toolu_s2_bash","name":"Bash","input":{"command":"npm test"}}]}}

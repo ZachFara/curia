@@ -1,0 +1,128 @@
+package install
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const (
+	fenceBegin = "# >>> curia >>>"
+	fenceEnd   = "# <<< curia <<<"
+)
+
+// windowFormat shows a red dot before a window whose @curia_marker is red.
+const windowFormat = `'#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'`
+
+// snippet is the tmux configuration Curia installs for the binary at bin.
+// tmux runs pane-focus-in only with focus-events on, which is off by
+// default. The badge is appended to status-right only when it is not there
+// yet: the never-set @curia_badge option expands to nothing and marks it, so
+// sourcing the snippet again adds no second badge. Each command that reaches
+// a shell holds bin as one shell word, wrapped in one tmux quoting layer per
+// tmux parse on the way.
+func snippet(bin string) string {
+	b := shellQuote(bin)
+	return strings.Join([]string{
+		"set -g focus-events on",
+		"set -g status-interval 2",
+		"if -F '#{m:*@curia_badge*,#{status-right}}' '' " +
+			tmuxQuote("set -ag status-right "+tmuxQuote(" #{@curia_badge}#("+b+" status)")),
+		"set -g window-status-format " + windowFormat,
+		"set -g window-status-current-format " + windowFormat,
+		"bind a display-popup -E -w 90% -h 80% " + tmuxQuote(b+" ui"),
+		"bind N run-shell " + tmuxQuote(b+" next"),
+		"set-hook -g pane-focus-in " + tmuxQuote("run-shell -b "+tmuxQuote(b+" seen #{pane_id}")),
+	}, "\n") + "\n"
+}
+
+// tmuxDoubleQuoted escapes what tmux reads specially inside double quotes.
+var tmuxDoubleQuoted = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`)
+
+// tmuxQuote returns s as one tmux configuration word that parses back to s:
+// single-quoted (nothing inside is special) unless s holds a single quote,
+// else double-quoted with backslash, double quote and dollar escaped.
+func tmuxQuote(s string) string {
+	if !strings.Contains(s, "'") {
+		return "'" + s + "'"
+	}
+	return `"` + tmuxDoubleQuoted.Replace(s) + `"`
+}
+
+// WriteTmux writes the Curia tmux snippet to snippetPath and adds one fenced
+// source-file line for it to the tmux configuration at tmuxConfPath, creating
+// either file if missing. If the fence is already there the configuration is
+// left as it is.
+func WriteTmux(snippetPath, tmuxConfPath, bin string) error {
+	snippetPath = filepath.Clean(snippetPath)
+	tmuxConfPath = filepath.Clean(tmuxConfPath)
+	conf, err := readConf(tmuxConfPath)
+	if err != nil {
+		return err
+	}
+	if err := writeAtomic(snippetPath, []byte(snippet(bin))); err != nil {
+		return err
+	}
+	if hasFence(conf) {
+		return nil
+	}
+	if conf != "" && !strings.HasSuffix(conf, "\n") {
+		conf += "\n"
+	}
+	conf += fenceBegin + "\nsource-file '" + snippetPath + "'\n" + fenceEnd + "\n"
+	return writeAtomic(tmuxConfPath, []byte(conf))
+}
+
+// RemoveTmux removes the fenced block, fence lines included, from the tmux
+// configuration at tmuxConfPath. A missing file or one without the block is
+// left alone; a begin fence with no end fence is an error and changes nothing.
+func RemoveTmux(tmuxConfPath string) error {
+	tmuxConfPath = filepath.Clean(tmuxConfPath)
+	conf, err := readConf(tmuxConfPath)
+	if err != nil {
+		return err
+	}
+	lines := strings.SplitAfter(conf, "\n")
+	var out []string
+	inFence, found := false, false
+	for _, line := range lines {
+		switch {
+		case !inFence && strings.TrimRight(line, "\r\n") == fenceBegin:
+			inFence, found = true, true
+		case inFence && strings.TrimRight(line, "\r\n") == fenceEnd:
+			inFence = false
+		case !inFence:
+			out = append(out, line)
+		}
+	}
+	if inFence {
+		return fmt.Errorf("%s: %q has no matching %q; remove the block by hand", tmuxConfPath, fenceBegin, fenceEnd)
+	}
+	if !found {
+		return nil
+	}
+	return writeAtomic(tmuxConfPath, []byte(strings.Join(out, "")))
+}
+
+// hasFence reports whether conf has a begin fence line, with or without a
+// trailing newline.
+func hasFence(conf string) bool {
+	for _, line := range strings.Split(conf, "\n") {
+		if strings.TrimRight(line, "\r") == fenceBegin {
+			return true
+		}
+	}
+	return false
+}
+
+// readConf returns the file's text, or "" when it does not exist.
+func readConf(path string) (string, error) {
+	b, err := os.ReadFile(filepath.Clean(path))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	return string(b), err
+}

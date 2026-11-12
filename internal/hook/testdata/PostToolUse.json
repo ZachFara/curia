@@ -1,0 +1,1 @@
+{"session_id":"sess-1","transcript_path":"/p/t.jsonl","cwd":"/repo","permission_mode":"default","hook_event_name":"PostToolUse","tool_name":"Grep","tool_input":{"pattern":"func Parse","path":"internal"},"tool_response":{"numFiles":1}}
