@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -77,8 +78,8 @@ func installRecord(t *testing.T) *installRecorder {
 // after, because cobra keeps a flag's value between runs.
 func installRun(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	installAllowMCPTools = false
-	t.Cleanup(func() { installAllowMCPTools = false })
+	installNoAllowMCPTools = false
+	t.Cleanup(func() { installNoAllowMCPTools = false })
 	return runRoot(t, args...)
 }
 
@@ -151,7 +152,9 @@ var installToolRules = []string{
 	"mcp__curia__check_decision", "mcp__curia__withdraw_decision",
 }
 
-const installWantToolsHint = "MCP tools not allowed without a prompt; to allow the four curia tools run: curia install --allow-mcp-tools"
+const installWantToolsHint = "MCP tools not allowed without a prompt; to allow the four curia tools, run curia install without --no-allow-mcp-tools"
+
+const installWantAllowedLine = "MCP tools: the four curia tools are allowed without a prompt in %s; to skip this step, run curia install --no-allow-mcp-tools"
 
 func installAddCall(bin string) string {
 	return "mcp add --scope user curia -- " + bin + " mcp"
@@ -191,8 +194,8 @@ func TestInstallAndUninstallRoundTrip(t *testing.T) {
 	if _, err := os.Stat(snippet); err != nil {
 		t.Errorf("snippet not written: %v", err)
 	}
-	if baks, _ := filepath.Glob(settings + ".bak.*"); len(baks) != 1 {
-		t.Errorf("backups = %v", baks)
+	if baks, _ := filepath.Glob(settings + ".bak.*"); len(baks) != 2 {
+		t.Errorf("backups = %v, want one from the hooks step and one from the tool rules", baks)
 	}
 
 	if out, err := installRun(t, "uninstall"); err != nil {
@@ -328,7 +331,7 @@ func TestInstallReportsMissingClaude(t *testing.T) {
 func TestUninstallReversesPlan2Items(t *testing.T) {
 	rec := installRecord(t)
 	h := installSetup(t, `{"permissions":{"allow":["Bash(ls:*)"]}}`)
-	if out, err := installRun(t, "install", "--allow-mcp-tools"); err != nil {
+	if out, err := installRun(t, "install"); err != nil {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
 	if got := installAllow(t, h.settings); len(got) != 5 {
@@ -365,42 +368,116 @@ func installJSONString(s string) string {
 	return string(b)
 }
 
-func TestInstallAllowsToolsOnlyWithFlag(t *testing.T) {
+func TestInstallAllowsToolsByDefault(t *testing.T) {
 	installRecord(t)
-	h := installSetup(t, `{"permissions":{"allow":["Bash(ls:*)"]}}`)
+	h := installSetup(t, "")
 	out, err := installRun(t, "install")
 	if err != nil {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
+	if got := installAllow(t, h.settings); !slices.Equal(got, installToolRules) {
+		t.Errorf("allow = %q, want exactly the four rules", got)
+	}
+	if want := fmt.Sprintf(installWantAllowedLine, h.settings) + "\n"; strings.Count(out, want) != 1 {
+		t.Errorf("install output lacks the line %q:\n%s", want, out)
+	}
+	if strings.Contains(out, installWantToolsHint) {
+		t.Errorf("install printed the hint:\n%s", out)
+	}
+}
+
+func TestInstallNoAllowFlagSkipsRules(t *testing.T) {
+	installRecord(t)
+	h := installSetup(t, `{"permissions":{"allow":["Bash(ls:*)"]}}`)
+	out, err := installRun(t, "install", "--no-allow-mcp-tools")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
 	if got := installAllow(t, h.settings); !slices.Equal(got, []string{"Bash(ls:*)"}) {
-		t.Errorf("allow without the flag = %q, want unchanged", got)
+		t.Errorf("allow with the flag = %q, want unchanged", got)
 	}
 	if strings.Count(out, installWantToolsHint+"\n") != 1 {
 		t.Errorf("install output lacks the hint line %q:\n%s", installWantToolsHint, out)
 	}
+	if out, err = installRun(t, "install", "--allow-mcp-tools"); err == nil {
+		t.Errorf("the removed --allow-mcp-tools flag was accepted:\n%s", out)
+	}
+}
 
-	out, err = installRun(t, "install", "--allow-mcp-tools")
-	if err != nil {
-		t.Fatalf("install --allow-mcp-tools: %v\n%s", err, out)
-	}
-	if got := installAllow(t, h.settings); !slices.Equal(got, append([]string{"Bash(ls:*)"}, installToolRules...)) {
-		t.Errorf("allow with the flag = %q", got)
-	}
-	if strings.Contains(out, installWantToolsHint) || !strings.Contains(out, "without a prompt") {
-		t.Errorf("install --allow-mcp-tools output:\n%s", out)
-	}
-
-	// All four there: a plain install says so instead of the hint (Ruling 57).
-	before, _ := os.ReadFile(filepath.Clean(h.settings))
-	out, err = installRun(t, "install")
-	if err != nil {
+func TestInstallDefaultIsIdempotent(t *testing.T) {
+	installRecord(t)
+	h := installSetup(t, `{"permissions":{"allow":["Bash(ls:*)"]}}`)
+	if out, err := installRun(t, "install"); err != nil {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
-	if strings.Contains(out, installWantToolsHint) || !strings.Contains(out, "already allowed without a prompt in "+h.settings) {
-		t.Errorf("install with the four rules present:\n%s", out)
+	before, _ := os.ReadFile(filepath.Clean(h.settings))
+	out, err := installRun(t, "install")
+	if err != nil {
+		t.Fatalf("second install: %v\n%s", err, out)
 	}
 	if after, _ := os.ReadFile(filepath.Clean(h.settings)); string(after) != string(before) {
-		t.Errorf("plain install rewrote settings:\n%s", after)
+		t.Errorf("second install rewrote settings:\n%s", after)
+	}
+	if !strings.Contains(out, "already allowed without a prompt in "+h.settings) || strings.Contains(out, installWantToolsHint) {
+		t.Errorf("second install output:\n%s", out)
+	}
+}
+
+func TestInstallKeepsUsersOwnRules(t *testing.T) {
+	installRecord(t)
+	h := installSetup(t, `{"permissions":{"allow":["mcp__curia",42,{"a":1},"mcp__curia__check_decision","Bash(ls:*)"]}}`)
+	if out, err := installRun(t, "install"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	read := func() []any {
+		b, err := os.ReadFile(filepath.Clean(h.settings))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m struct {
+			Permissions struct {
+				Allow []any `json:"allow"`
+			} `json:"permissions"`
+		}
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m.Permissions.Allow
+	}
+	got := read()
+	if len(got) != 8 || got[0] != "mcp__curia" || got[1] != float64(42) || got[4] != "Bash(ls:*)" {
+		t.Errorf("allow after install = %v", got)
+	}
+	if out, err := installRun(t, "uninstall"); err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	got = read()
+	if len(got) != 4 || got[0] != "mcp__curia" || got[1] != float64(42) || got[3] != "Bash(ls:*)" {
+		t.Errorf("allow after uninstall = %v", got)
+	}
+}
+
+func TestInstallBadPermissionsShape(t *testing.T) {
+	for _, settings := range []string{`{"permissions":"nope"}`, `{"permissions":{"allow":{"a":1}}}`} {
+		rec := installRecord(t)
+		h := installSetup(t, settings)
+		out, err := installRun(t, "install")
+		if err == nil {
+			t.Fatalf("install with %s succeeded:\n%s", settings, out)
+		}
+		if !strings.Contains(out, "Hooks: registered") || strings.Contains(out, "tmux snippet:") {
+			t.Errorf("install output with %s:\n%s", settings, out)
+		}
+		b, _ := os.ReadFile(filepath.Clean(h.settings))
+		if !strings.Contains(string(b), " hook SessionStart") || strings.Contains(string(b), "mcp__curia") {
+			t.Errorf("settings with %s after install: %s", settings, b)
+		}
+		if baks, _ := filepath.Glob(h.settings + ".bak.*"); len(baks) != 1 {
+			t.Errorf("backups = %v, want only the hooks step's", baks)
+		}
+		if calls := rec.joined(); len(calls) != 0 {
+			t.Errorf("claude calls after the failed step = %q", calls)
+		}
 	}
 }
 
@@ -483,12 +560,12 @@ func TestUninstallReportsSkill(t *testing.T) {
 	}
 }
 
-// installCheckClaudeDir installs with --allow-mcp-tools and uninstalls, and
+// installCheckClaudeDir installs and uninstalls, and
 // checks that hooks, tool rules and the skill land in h.claudeDir and
 // nowhere else under HOME, and that uninstall reverses them.
 func installCheckClaudeDir(t *testing.T, h installHome) {
 	t.Helper()
-	out, err := installRun(t, "install", "--allow-mcp-tools")
+	out, err := installRun(t, "install")
 	if err != nil {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
