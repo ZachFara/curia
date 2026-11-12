@@ -16,6 +16,7 @@ root_files=(
 	AGENTS.md
 	CLAUDE.md
 	Makefile
+	LICENSE
 	PROGRESS.md
 	go.mod
 	go.sum

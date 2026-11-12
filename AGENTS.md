@@ -52,7 +52,7 @@ Commands:
 
 | Command | What it does |
 | --- | --- |
-| `make check` | The only gate. Runs, in order: pinned tool install, gofumpt (fail on diff), golangci-lint, complexity limits, depguard boundaries, the suppression ban, `go vet`, staticcheck, `deadcode -test`, the layout check, `go test -race ./...`. The pre-commit hook and CI run exactly this. |
+| `make check` | The only gate. Runs, in order: pinned tool install, gofumpt (fail on diff), golangci-lint, complexity limits, depguard boundaries, the suppression ban, `go vet`, staticcheck, `deadcode -test`, the layout check, `go test -race -p 1 ./...` (packages one at a time, so latency gates do not measure other packages' load). All gates run under a lock shared by every worktree of the repository, so a check may wait for another worktree's. The pre-commit hook and CI run exactly this. |
 | `make fmt` | Rewrite Go files with gofumpt (convenience; the gate only checks). |
 | `make build` | Build `./curia` (gitignored). |
 | `go test -race ./internal/<pkg>/ -v` | Run one package's tests while iterating. |
