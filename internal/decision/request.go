@@ -77,7 +77,8 @@ type Caller struct{ SessionID, TaskID, Repo string }
 
 // Parse decodes request_decision arguments. Unknown fields are ignored. A
 // value of the wrong JSON type, or arguments that are not a JSON object,
-// give exactly one Problem.
+// give exactly one Problem. A type error names the decoder's path, such as
+// "options.key", while Validate names "options[0].key".
 func Parse(args json.RawMessage) (Request, []Problem) {
 	var r Request
 	err := json.Unmarshal(args, &r)
@@ -108,10 +109,11 @@ func jsonKind(t reflect.Type) string {
 }
 
 // Normalize trims every string, cleans one-line fields with sanitize.Line
-// and prose with sanitize.Text, lowercases, sorts and de-duplicates the
-// tags, and applies the default scope "repo". Each field is cut to one rune
-// past its limit, so the work is bounded and an over-long field still fails
-// Validate. Normalizing twice gives the same request.
+// and prose with sanitize.Text, lowercases, de-duplicates and sorts the
+// tags, and applies the default scope "repo". Each field is trimmed and
+// then cut to one rune past its limit, and the option and tag lists to one
+// item past theirs, so the work is bounded and anything over a limit still
+// fails Validate. Normalizing twice gives the same request.
 func Normalize(r Request) Request {
 	out := Request{
 		Question:       line(r.Question, MaxQuestion),
@@ -124,13 +126,15 @@ func Normalize(r Request) Request {
 		Scope:          line(r.Scope, maxWord),
 		DiffersFrom:    line(r.DiffersFrom, maxIDLen),
 		DiffersWhy:     text(r.DiffersWhy, MaxDiffersWhy),
+		Tags:           tags(r.Tags),
 	}
 	if out.Scope == "" {
 		out.Scope = string(model.ScopeRepo)
 	}
 	if r.Options != nil {
-		out.Options = make([]model.Option, len(r.Options))
-		for i, o := range r.Options {
+		opts := r.Options[:min(len(r.Options), MaxOptions+1)]
+		out.Options = make([]model.Option, len(opts))
+		for i, o := range opts {
 			out.Options[i] = model.Option{
 				Key:       line(o.Key, MaxKey),
 				Label:     line(o.Label, MaxLabel),
@@ -138,14 +142,29 @@ func Normalize(r Request) Request {
 			}
 		}
 	}
-	if r.Tags != nil {
-		out.Tags = make([]string, len(r.Tags))
-		for i, t := range r.Tags {
-			out.Tags[i] = strings.ToLower(line(t, MaxTag))
-		}
-		slices.Sort(out.Tags)
-		out.Tags = slices.Compact(out.Tags)
+	return out
+}
+
+// tags cleans and lowercases raw tags, keeps the first MaxTags+1 distinct
+// ones (so a duplicate never pushes a real tag out) and sorts them.
+func tags(raw []string) []string {
+	if raw == nil {
+		return nil
 	}
+	out := make([]string, 0, min(len(raw), MaxTags+1))
+	seen := make(map[string]bool, cap(out))
+	for _, t := range raw {
+		t = strings.ToLower(line(t, MaxTag))
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+		if len(out) > MaxTags {
+			break
+		}
+	}
+	slices.Sort(out)
 	return out
 }
 
@@ -154,9 +173,29 @@ func line(s string, limit int) string {
 	return sanitize.Line(s, limit+1)
 }
 
-// text cleans prose that may hold paragraphs, cut one rune past limit.
+// text cleans prose that may hold paragraphs, trims it and only then cuts
+// it one rune past limit, so leading blank lines cannot hide a rune too
+// many. sanitize.Text runs uncut here; it is linear and the caller bounds
+// the input (an MCP message is at most MaxMessage bytes).
 func text(s string, limit int) string {
-	return strings.TrimSpace(sanitize.Text(s, limit+1))
+	return clip(strings.TrimSpace(sanitize.Text(s, 0)), limit+1)
+}
+
+// clip cuts s to n runes, the last of them an ellipsis. The ellipsis is
+// never trimmed, so a cut that lands on a line break cannot shrink to the
+// limit when the result is normalized again.
+func clip(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	k := 0
+	for i := range s {
+		if k == n-1 {
+			return s[:i] + "…"
+		}
+		k++
+	}
+	return s // unreachable: s has more than n runes
 }
 
 // Validate checks a normalized request against the limits of plan section
@@ -212,7 +251,7 @@ func checkLine(field, s string, minLen, maxLen int) []Problem {
 func checkOptions(r Request) []Problem {
 	var ps []Problem
 	if n := len(r.Options); n < MinOptions || n > MaxOptions {
-		ps = one("options", fmt.Sprintf("must hold %d to %d options, not %d", MinOptions, MaxOptions, n))
+		ps = one("options", fmt.Sprintf("must hold %d to %d options", MinOptions, MaxOptions))
 	}
 	for i, o := range r.Options {
 		field := fmt.Sprintf("options[%d].", i)
@@ -360,12 +399,20 @@ func ValidID(id string) bool {
 	return true
 }
 
+// hashedOption is one option in the canonical form. It has its own JSON
+// names so a change to model.Option cannot change every stored hash.
+type hashedOption struct {
+	Key       string `json:"key"`
+	Label     string `json:"label"`
+	Tradeoffs string `json:"tradeoffs"`
+}
+
 // hashed is the canonical form ArgsHash encodes, fields in the order of
 // plan section 4.5.
 type hashed struct {
 	Question       string         `json:"question"`
 	Context        string         `json:"context"`
-	Options        []model.Option `json:"options"`
+	Options        []hashedOption `json:"options"`
 	Recommendation string         `json:"recommendation"`
 	Rationale      string         `json:"rationale"`
 	Reversibility  string         `json:"reversibility"`
@@ -388,13 +435,13 @@ type hashed struct {
 func ArgsHash(r Request) string {
 	r = Normalize(r)
 	h := hashed{
-		Question: r.Question, Context: r.Context, Options: r.Options,
+		Question: r.Question, Context: r.Context, Options: make([]hashedOption, len(r.Options)),
 		Recommendation: r.Recommendation, Rationale: r.Rationale,
 		Reversibility: r.Reversibility, Mode: r.Mode, Assumption: r.Assumption,
 		Scope: r.Scope, Tags: r.Tags,
 	}
-	if h.Options == nil {
-		h.Options = []model.Option{}
+	for i, o := range r.Options {
+		h.Options[i] = hashedOption(o)
 	}
 	if h.Tags == nil {
 		h.Tags = []string{}

@@ -95,23 +95,30 @@ func TestResolveTable(t *testing.T) {
 
 func TestResolveRejectsBadAnswers(t *testing.T) {
 	bad := map[string]model.Answer{
-		"both key and text":      {Key: "B", Text: "Redis"},
-		"neither":                {},
-		"key b when option is B": {Key: "b"},
-		"unknown key":            {Key: "Z"},
-		"501-rune text":          {Text: strings.Repeat("x", 501)},
-		"text empty after clean": {Text: " \x1b[2J\n "},
-		"1001-rune reasoning":    {Key: "A", Reasoning: strings.Repeat("r", 1001)},
-		"scope x":                {Key: "A", Scope: "x"},
+		"both key and text":             {Key: "B", Text: "Redis"},
+		"neither":                       {},
+		"key b when option is B":        {Key: "b"},
+		"unknown key":                   {Key: "Z"},
+		"501-rune text":                 {Text: strings.Repeat("x", 501)},
+		"text empty after clean":        {Text: " \x1b[2J\n "},
+		"1001-rune reasoning":           {Key: "A", Reasoning: strings.Repeat("r", 1001)},
+		"scope x":                       {Key: "A", Scope: "x"},
+		"newline + 501-rune text":       {Text: "\n" + strings.Repeat("x", MaxAnswerText+1)},
+		"newline + 900-rune text":       {Text: "\n" + strings.Repeat("x", 900)},
+		"newline + 1001-rune reasoning": {Key: "A", Reasoning: "\n" + strings.Repeat("r", MaxReasoning+1)},
 	}
 	for name, a := range bad {
 		if _, err := Resolve(openDecision(model.ModeBlocking, "s1"), a, time.Unix(0, 0)); !errors.Is(err, ErrBadAnswer) {
 			t.Errorf("%s: err = %v, want ErrBadAnswer", name, err)
 		}
 	}
-	ok := model.Answer{Text: strings.Repeat("x", MaxAnswerText), Reasoning: strings.Repeat("r", MaxReasoning)}
-	if _, err := Resolve(openDecision(model.ModeBlocking, "s1"), ok, time.Unix(0, 0)); err != nil {
-		t.Errorf("answer at the limits: %v", err)
+	ok := model.Answer{Text: "\n" + strings.Repeat("x", MaxAnswerText), Reasoning: "\n\n" + strings.Repeat("r", MaxReasoning)}
+	d, err := Resolve(openDecision(model.ModeBlocking, "s1"), ok, time.Unix(0, 0))
+	if err != nil {
+		t.Fatalf("answer at the limits: %v", err)
+	}
+	if d.Answer != strings.Repeat("x", MaxAnswerText) || d.AnswerReasoning != strings.Repeat("r", MaxReasoning) {
+		t.Errorf("answer at the limits stored as %.20q / %.20q", d.Answer, d.AnswerReasoning)
 	}
 }
 

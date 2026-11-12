@@ -2,12 +2,10 @@ package decision
 
 import (
 	"errors"
-	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/ZachFara/curia/internal/model"
-	"github.com/ZachFara/curia/internal/sanitize"
 )
 
 // ErrBadAnswer is returned by Resolve for an answer that does not fit the
@@ -23,12 +21,13 @@ func IsDecided(s model.DecisionStatus) bool {
 // Resolve applies answer a to ticket d at now and returns the decided row,
 // with Status and Delivery set by plan section 4.3. It checks only the
 // answer; the store checks the status and the deadline inside its
-// transaction. Free text and reasoning are cleaned with sanitize.Text.
+// transaction. Free text and reasoning are cleaned as Normalize cleans
+// prose, so a leading line break cannot hide a rune too many.
 func Resolve(d model.Decision, a model.Answer, now time.Time) (model.Decision, error) {
 	if (a.Key == "") == (a.Text == "") {
 		return model.Decision{}, ErrBadAnswer
 	}
-	reasoning := strings.TrimSpace(sanitize.Text(a.Reasoning, MaxReasoning+1))
+	reasoning := text(a.Reasoning, MaxReasoning)
 	if utf8.RuneCountInString(reasoning) > MaxReasoning || (a.Scope != "" && !validScope(a.Scope)) {
 		return model.Decision{}, ErrBadAnswer
 	}
@@ -39,7 +38,7 @@ func Resolve(d model.Decision, a model.Answer, now time.Time) (model.Decision, e
 		}
 		d.AnswerKey, d.Answer = a.Key, a.Key+": "+d.Options[i].Label
 	} else {
-		t := strings.TrimSpace(sanitize.Text(a.Text, MaxAnswerText+1))
+		t := text(a.Text, MaxAnswerText)
 		if n := utf8.RuneCountInString(t); n < 1 || n > MaxAnswerText {
 			return model.Decision{}, ErrBadAnswer
 		}

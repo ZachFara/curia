@@ -2,7 +2,9 @@ package decision
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +94,23 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 		{"tag starting with -", func(r *Request) { r.Tags = []string{"-x"} }, "tags"},
 		{"differs_from 117", func(r *Request) { r.DiffersFrom, r.DiffersWhy = "117", "new facts" }, "differs_from"},
 		{"differs_from without differs_why", func(r *Request) { r.DiffersFrom = "D-12" }, "differs_why"},
+		// A leading line break must not hide one rune too many (fix round 1).
+		{"newline + 301-rune question", func(r *Request) { r.Question = "\n" + strings.Repeat("q", MaxQuestion+1) }, "question"},
+		{"newline + 2001-rune context", func(r *Request) { r.Context = "\n" + strings.Repeat("c", MaxContext+1) }, "context"},
+		{"newline + 301-rune tradeoffs", func(r *Request) {
+			r.Options[0].Tradeoffs = "\n" + strings.Repeat("t", MaxTradeoffs+1)
+		}, "options[0].tradeoffs"},
+		{"newline + 1201-rune rationale", func(r *Request) { r.Rationale = "\n" + strings.Repeat("r", MaxRationale+1) }, "rationale"},
+		{"newline + 5000-rune rationale", func(r *Request) { r.Rationale = "\n\n" + strings.Repeat("r", 5000) }, "rationale"},
+		{"newline + 301-rune assumption", func(r *Request) {
+			r.Mode, r.Assumption = "assume", "\n"+strings.Repeat("a", MaxAssumption+1)
+		}, "assumption"},
+		{"newline + 301-rune differs_why", func(r *Request) {
+			r.DiffersFrom, r.DiffersWhy = "D-12", "\n"+strings.Repeat("w", MaxDiffersWhy+1)
+		}, "differs_why"},
+		{"over-long prose ending in a line break", func(r *Request) {
+			r.Context = strings.Repeat("c", MaxContext) + "\n\nx"
+		}, "context"},
 		{"301-rune differs_why", func(r *Request) {
 			r.DiffersFrom, r.DiffersWhy = "D-12", strings.Repeat("w", 301)
 		}, "differs_why"},
@@ -152,6 +171,60 @@ func TestValidateAcceptsLimits(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsLimitsAfterLeadingNewline(t *testing.T) {
+	r := goodRequest(t)
+	r.Context = "\n" + strings.Repeat("c", MaxContext)
+	r.Options[0].Tradeoffs = "\n\n" + strings.Repeat("t", MaxTradeoffs) + "\n"
+	r.Rationale = "\n" + strings.Repeat("r", MaxRationale)
+	r.Mode, r.Assumption = "assume", "\n"+strings.Repeat("a", MaxAssumption)
+	r.DiffersFrom, r.DiffersWhy = "D-12", "\n"+strings.Repeat("w", MaxDiffersWhy)
+	n := Normalize(r)
+	if ps := Validate(n); len(ps) != 0 {
+		t.Errorf("Validate = %v, want none", ps)
+	}
+	if n.Context != strings.Repeat("c", MaxContext) || n.Rationale != strings.Repeat("r", MaxRationale) {
+		t.Errorf("leading line break not trimmed: %.20q / %.20q", n.Context, n.Rationale)
+	}
+}
+
+func TestNormalizeBoundsLists(t *testing.T) {
+	r := goodRequest(t)
+	r.Options = make([]model.Option, 100000)
+	for i := range r.Options {
+		r.Options[i] = model.Option{Key: fmt.Sprintf("K%d", i), Label: "x"}
+	}
+	r.Recommendation = "K0"
+	start := time.Now()
+	ps := Validate(Normalize(r))
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("100000 options took %v", d)
+	}
+	if len(ps) != 1 || ps[0].Field != "options" {
+		t.Errorf("100000 options: problems = %v, want one on options", ps)
+	}
+
+	r = goodRequest(t)
+	r.Tags = make([]string, 100000)
+	for i := range r.Tags {
+		r.Tags[i] = fmt.Sprintf("t%d", i)
+	}
+	start = time.Now()
+	ps = Validate(Normalize(r))
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("100000 tags took %v", d)
+	}
+	if len(ps) != 1 || ps[0].Field != "tags" {
+		t.Errorf("100000 tags: problems = %v, want one on tags", ps)
+	}
+}
+
+func TestNormalizeCountsTagsAfterDeduplicating(t *testing.T) {
+	tags := append(slices.Repeat([]string{"a", "A "}, 10), "b")
+	if got := Normalize(Request{Tags: tags}).Tags; !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Errorf("Tags = %q, want [a b]", got)
+	}
+}
+
 func TestNormalizeCleansAndSortsTags(t *testing.T) {
 	r := Normalize(Request{
 		Question: " a\x1b[31m b \n",
@@ -196,6 +269,11 @@ func TestNormalizeIsIdempotent(t *testing.T) {
 		Tags:           []string{"Zed", " zed ", "B", "", "a b"},
 		DiffersFrom:    " D-1 ",
 		DiffersWhy:     " because \n",
+	}
+	cutOnBreak := messy
+	cutOnBreak.Context = strings.Repeat("c", MaxContext) + "\n\nx" // the cut lands on the line break
+	if once, twice := Normalize(cutOnBreak), Normalize(Normalize(cutOnBreak)); !reflect.DeepEqual(once, twice) {
+		t.Errorf("Normalize is not idempotent for a cut on a line break: %q", once.Context[len(once.Context)-8:])
 	}
 	once := Normalize(messy)
 	if twice := Normalize(once); !reflect.DeepEqual(once, twice) {

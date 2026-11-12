@@ -96,8 +96,10 @@ func TypedMessage(d model.Decision) string {
 	lossy := false
 	keys := func(s string, limit int) string {
 		out, l := sanitize.Keys(s, limit)
-		lossy = lossy || l
-		return strings.TrimRight(out, ". ")
+		trimmed := strings.TrimRight(out, ". ")
+		// Periods alone leave nothing to type: point at the exact wording.
+		lossy = lossy || l || (out != "" && trimmed == "")
+		return trimmed
 	}
 	id := idOf(d)
 	var choice string
@@ -118,6 +120,15 @@ func flat(s string, limit int) string {
 	return strings.Join(strings.Fields(sanitize.Text(s, limit)), " ")
 }
 
+// dropPeriod drops the trailing periods of s before the template adds its
+// own, unless they are all there is: then s is the answer as written.
+func dropPeriod(s string) string {
+	if t := strings.TrimRight(s, ". "); t != "" {
+		return t
+	}
+	return s
+}
+
 // stopLine is the line of d in a stop reason: the typed-line wording with
 // the full label in square brackets after the key (kept as is, brackets
 // and all) and the full free text and reasoning, each flattened to one
@@ -130,9 +141,9 @@ func stopLine(d model.Decision) string {
 			choice += " [" + label + "]"
 		}
 	} else {
-		choice = strings.TrimRight(flat(d.Answer, MaxAnswerText), ". ")
+		choice = dropPeriod(flat(d.Answer, MaxAnswerText))
 	}
-	reasoning := strings.TrimRight(flat(d.AnswerReasoning, MaxReasoning), ". ")
+	reasoning := dropPeriod(flat(d.AnswerReasoning, MaxReasoning))
 	return wording(d, choice, reasoning)
 }
 

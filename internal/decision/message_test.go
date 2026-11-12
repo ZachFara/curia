@@ -74,6 +74,10 @@ func TestTypedMessageWording(t *testing.T) {
 			"Decision D-120 answered: option B, " + strings.Repeat("l", 60) +
 				". Continue. Exact wording: call check_decision D-120.",
 		},
+		{ // free text and reasoning that are only periods point at the exact wording
+			decided(122, model.StatusAnswered, "", "", "...", ". ."),
+			"Decision D-122 answered. Continue. Exact wording: call check_decision D-122.",
+		},
 		{ // free text that cleans to nothing
 			decided(121, model.StatusAnswered, "", "", "???", ""),
 			"Decision D-121 answered. Continue. Exact wording: call check_decision D-121.",
@@ -202,6 +206,12 @@ func TestStopReasonJoinsAndCaps(t *testing.T) {
 		if !strings.HasPrefix(l, fmt.Sprintf("Decision D-%d answered: option B [", i+1)) || strings.Contains(l, "Exact wording") {
 			t.Errorf("line %d = %.60q", i+1, l)
 		}
+	}
+
+	// Periods alone are the whole answer: kept as written, not dropped.
+	dots := StopReason([]model.Decision{decided(7, model.StatusAnswered, "", "", "...", "..")})
+	if want := "Curia: decisions answered while you were working.\nDecision D-7 answered: .... Reasoning: ... Continue."; dots != want {
+		t.Errorf("StopReason(dots) = %q, want %q", dots, want)
 	}
 
 	if got := StopReason(nil); got != "" {
