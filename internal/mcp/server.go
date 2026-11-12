@@ -92,13 +92,28 @@ func (s *Server) logger() *slog.Logger {
 
 // Serve reads requests from in and writes responses to out, one at a time,
 // until in ends (nil), ctx is canceled (ctx.Err()), or a write fails.
+//
+// Lines are read by a goroutine that only reads and hands each line over;
+// handling and writing stay strictly sequential in Serve, the only writer to
+// out. Cancellation returns at once even while idle, but a goroutine blocked
+// in a Read of in cannot be interrupted: it stays blocked until in yields or
+// closes, and it exits without touching out or any server state.
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
-	r := bufio.NewReaderSize(in, 64*1024)
+	lines := make(chan lineMsg)
+	stop := make(chan struct{})
+	defer close(stop)
+	go readLines(bufio.NewReaderSize(in, 64*1024), lines, stop)
 	for {
-		line, tooLong, err := readLine(r)
+		var m lineMsg
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case m = <-lines:
+		}
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
+		line, tooLong, err := m.line, m.tooLong, m.err
 		if tooLong {
 			s.logger().Warn("mcp: input line too long, skipped")
 			if werr := writeJSON(out, response{JSONRPC: "2.0", ID: nullID, Error: &rpcError{codeParse, "line too long"}}); werr != nil {
@@ -114,6 +129,28 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 				return nil
 			}
 			return err
+		}
+	}
+}
+
+// lineMsg is one read result handed from the reader goroutine to Serve.
+type lineMsg struct {
+	line    []byte
+	tooLong bool
+	err     error
+}
+
+// readLines reads lines from r until an error or until stop is closed.
+func readLines(r *bufio.Reader, lines chan<- lineMsg, stop <-chan struct{}) {
+	for {
+		line, tooLong, err := readLine(r)
+		select {
+		case lines <- lineMsg{line, tooLong, err}:
+		case <-stop:
+			return
+		}
+		if err != nil {
+			return
 		}
 	}
 }
@@ -164,20 +201,38 @@ func (s *Server) dispatch(ctx context.Context, line []byte) *response {
 		return nil // a response to a request we never sent
 	}
 	id := nullID
-	if hasID && (isString(msg.ID) || isNumber(msg.ID) || string(msg.ID) == "null") {
-		id = msg.ID
-	} else if hasID {
-		return errResponse(nullID, codeInvalidRequest, "invalid request id")
+	if hasID {
+		var ok bool
+		if id, ok = normalizeID(msg.ID); !ok {
+			return errResponse(nullID, codeInvalidRequest, "invalid request id")
+		}
 	}
 	var version, method string
 	if json.Unmarshal(msg.JSONRPC, &version) != nil || version != "2.0" ||
-		json.Unmarshal(msg.Method, &method) != nil {
+		!isString(msg.Method) || json.Unmarshal(msg.Method, &method) != nil {
 		return errResponse(id, codeInvalidRequest, "invalid request")
 	}
 	if !hasID {
 		return nil // notifications are never answered
 	}
 	return s.request(ctx, id, method, msg.Params)
+}
+
+// normalizeID accepts a string, number or null id. A string is round-tripped
+// so the echoed id is always valid UTF-8.
+func normalizeID(raw json.RawMessage) (json.RawMessage, bool) {
+	switch {
+	case isString(raw):
+		var str string
+		if json.Unmarshal(raw, &str) != nil {
+			return nil, false
+		}
+		b, err := marshal(str)
+		return b, err == nil
+	case isNumber(raw), string(raw) == "null":
+		return raw, true
+	}
+	return nil, false
 }
 
 func isString(b json.RawMessage) bool { return len(b) > 0 && b[0] == '"' }
@@ -226,7 +281,8 @@ func (s *Server) listResult() map[string]any {
 	tools := make([]map[string]any, 0, len(s.Tools))
 	for _, t := range s.Tools {
 		schema := t.InputSchema
-		if !json.Valid(schema) {
+		if trimmed := bytes.TrimSpace(schema); !json.Valid(trimmed) || len(trimmed) == 0 || trimmed[0] != '{' {
+			s.logger().Warn("mcp: tool input schema is not a JSON object, substituting", "tool", t.Name)
 			schema = json.RawMessage(`{"type":"object"}`)
 		}
 		tools = append(tools, map[string]any{"name": t.Name, "description": t.Description, "inputSchema": schema})
@@ -292,11 +348,16 @@ func toolResult(v any, isError bool) map[string]any {
 }
 
 // marshal encodes v compactly with HTML escaping off and no trailing newline.
-func marshal(v any) ([]byte, error) {
+func marshal(v any) (out []byte, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			out, err = nil, fmt.Errorf("encoding panicked: %v", rec)
+		}
+	}()
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	if err = enc.Encode(v); err != nil {
 		return nil, err
 	}
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil

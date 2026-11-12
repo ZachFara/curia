@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type harness struct {
@@ -342,6 +343,9 @@ func TestProtocolErrors(t *testing.T) {
 		{`{"jsonrpc":"1.0","id":1,"method":"ping"}`, -32600, float64(1)},
 		{`{"jsonrpc":2,"id":1,"method":"ping"}`, -32600, float64(1)},
 		{`{"jsonrpc":"2.0","id":1,"method":7}`, -32600, float64(1)},
+		{`{"jsonrpc":"2.0","id":1,"method":null}`, -32600, float64(1)},
+		{`{"jsonrpc":"2.0","method":null}`, -32600, nil},
+		{`{"jsonrpc":"2.0","id":1,"method":["ping"]}`, -32600, float64(1)},
 		{`{"jsonrpc":"2.0","id":{"a":1},"method":"ping"}`, -32600, nil},
 		{`{"jsonrpc":"2.0","id":1,"method":"resources/list"}`, -32601, float64(1)},
 		{`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"a","arguments":"x"}}`, -32602, float64(1)},
@@ -454,14 +458,122 @@ func TestContextCancelStopsServe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- (&Server{}).Serve(ctx, inR, io.Discard) }()
+	time.Sleep(50 * time.Millisecond) // let Serve go idle on the empty pipe
 	cancel()
-	_, _ = io.WriteString(inW, "\n")
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("err = %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Serve ignored cancellation")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Serve ignored cancellation while idle")
 	}
+}
+
+func TestNonObjectSchemaIsSubstituted(t *testing.T) {
+	var tools []Tool
+	for _, schema := range []string{`[]`, `"x"`, `7`, `null`, ``, `{bad`} {
+		tool := okTool("t")
+		tool.InputSchema = json.RawMessage(schema)
+		tools = append(tools, tool)
+	}
+	h := newHarness(t, tools...)
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	list, _ := dig(t, h.recv(), "result", "tools").([]any)
+	if len(list) != len(tools) {
+		t.Fatalf("tools = %v", list)
+	}
+	for i, tl := range list {
+		if dig(t, tl, "inputSchema", "type") != "object" {
+			t.Errorf("tool %d schema = %v", i, dig(t, tl, "inputSchema"))
+		}
+	}
+	h.finish()
+}
+
+type panicMarshaler struct{}
+
+func (panicMarshaler) MarshalJSON() ([]byte, error) { panic("cannot encode") }
+
+func TestPanicWhileEncodingResultIsContained(t *testing.T) {
+	bad := Tool{Name: "bad", Call: func(context.Context, json.RawMessage) (any, *ToolError) {
+		return panicMarshaler{}, nil
+	}}
+	h := newHarness(t, bad, okTool("a"))
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bad"}}`)
+	res := dig(t, h.recv(), "result")
+	text, _ := dig(t, res, "content", 0, "text").(string)
+	if dig(t, res, "isError") != true || !strings.Contains(text, `"internal"`) {
+		t.Errorf("result = %v", res)
+	}
+	h.send(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"a"}}`)
+	if dig(t, h.recv(), "result", "isError") != false {
+		t.Error("next call failed")
+	}
+	h.finish()
+}
+
+func TestStringIDIsEchoedAsValidUTF8(t *testing.T) {
+	h := newHarness(t, okTool("a"))
+	h.send("{\"jsonrpc\":\"2.0\",\"id\":\"bad\xffid\",\"method\":\"ping\"}")
+	line := h.recvLine()
+	if !utf8.ValidString(line) {
+		t.Fatalf("invalid UTF-8 on the wire: %q", line)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(line), &m); err != nil || m["id"] != "bad\uFFFDid" {
+		t.Errorf("id = %v (%v)", m["id"], err)
+	}
+	h.send(`{"jsonrpc":"2.0","id":"toolu-\u00e9<&>","method":"tools/call","params":{"name":"a"}}`)
+	m = h.recv()
+	if m["id"] != "toolu-\u00e9<&>" || dig(t, m, "result", "isError") != false {
+		t.Errorf("tools/call string id: %v", m)
+	}
+	h.finish()
+}
+
+// pingOfLength builds a ping request line of exactly n bytes.
+func pingOfLength(t *testing.T, n int) string {
+	t.Helper()
+	const head = `{"jsonrpc":"2.0","id":1,"method":"ping","params":{"p":"`
+	const tail = `"}}`
+	if n < len(head)+len(tail) {
+		t.Fatal("too short")
+	}
+	return head + strings.Repeat("a", n-len(head)-len(tail)) + tail
+}
+
+func TestLongLinesBelowAndAtTheLimit(t *testing.T) {
+	h := newHarness(t)
+	for _, n := range []int{100 << 10, 64<<10 + 1, 1 << 20} {
+		h.send(pingOfLength(t, n))
+		m := h.recv()
+		if m["id"] != float64(1) || m["result"] == nil {
+			t.Fatalf("line of %d bytes: %v", n, m)
+		}
+	}
+	h.send(pingOfLength(t, 1<<20+1))
+	if m := h.recv(); errCode(t, m) != -32700 || m["id"] != nil {
+		t.Fatalf("one byte over the limit: %v", m)
+	}
+	h.ping()
+	if rest := h.finish(); len(rest) != 0 {
+		t.Errorf("extra output: %v", rest)
+	}
+}
+
+func TestDeepNestingDoesNotCrash(t *testing.T) {
+	h := newHarness(t)
+	deep := strings.Repeat("[", 5000) + strings.Repeat("]", 5000)
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"ping","params":` + deep + `}`)
+	if m := h.recv(); m["result"] == nil {
+		t.Errorf("deep params: %v", m)
+	}
+	tooDeep := strings.Repeat("[", 200000)
+	h.send(tooDeep + strings.Repeat("]", 200000))
+	if m := h.recv(); errCode(t, m) != -32700 {
+		t.Errorf("too deep: %v", m)
+	}
+	h.ping()
+	h.finish()
 }
