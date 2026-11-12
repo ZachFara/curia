@@ -483,13 +483,15 @@ Each task runs on its own branch and worktree and merges by PR into `plan-2`. A 
 | 5 | 13 Hook wiring | none | `internal/state/state.go`, `state_test.go`, `internal/hook/run.go`, `hook_test.go`, `cmd/curia/hook.go`, `hook_test.go` |
 | 5 | 14 Delivery and `curia decide` | `internal/deliver/`, `cmd/curia/decide.go`, `decide_test.go` | none |
 | 6 | 16 Views | none | `internal/fleet/fleet.go`, `fleet_test.go`, `cmd/curia/status.go`, `status_test.go`, `internal/ui/model.go`, `view.go`, `ui_test.go`, `cmd/curia/ui.go`, `ui_test.go`, `cmd/curia/next_test.go` |
-| 7 | 17 Acceptance | `testdata/decisions/`, `e2e/decisions_test.go`, `e2e/testdata/decisions/` | none |
+| 6 | 18 Tools allowed by default (added 2026-11-12, Ruling 78) | none | `cmd/curia/install.go`, `install_test.go` (`internal/install/` only if a function's behaviour must change) |
+| 6 | 19 Settle interrupted sessions from the transcript (added 2026-11-12, Ruling 77; starts after Task 16 merges, because it touches `fleet` and `status`) | none | `internal/transcript/`, `internal/fleet/`, `cmd/curia/common.go`, `ls.go`, `next.go`, `status.go`, the dashboard's source in `cmd/curia/ui.go` and their tests |
+| 7 | 17 Acceptance (runs after Tasks 16, 18 and 19) | `testdata/decisions/`, `e2e/decisions_test.go`, `e2e/testdata/decisions/` | none |
 
 Dependencies: 6 and 7 need 1 and 2; 8 needs 1, 2, 3; 9 needs 2, 6; 10 needs 1, 2, 6; 11 needs 7, 9; 15 needs 9; 12 needs 4, 6, 7, 8, 11; 13 needs 6, 11; 14 needs 3, 6, 10, 11; 16 needs 9, 10, 14; 17 needs everything.
 
 Wave 5 puts Tasks 12, 13 and 14 in package `main` of `cmd/curia`: new package-level names there carry their command's prefix (`mcp...`, `decide...`, in tests too). Task 13 does not change the signature of any existing helper in `hook_test.go`. The orchestrator merges wave 5 one PR at a time and runs `make check` on `plan-2` after each.
 
-Expected models (confirmed at dispatch): Sonnet for 1, 2, 4, 7, 8, 15; Opus for 3, 5, 6, 9, 10, 11, 12, 13, 14, 16, 17 (concurrency, process boundaries, UI, or user-owned files).
+Expected models (confirmed at dispatch): Sonnet for 1, 2, 4, 7, 8, 15; Opus for 3, 5, 6, 9, 10, 11, 12, 13, 14, 16, 17 (concurrency, process boundaries, UI, or user-owned files). Added 2026-11-12: Task 18 on Sonnet, Task 19 on Opus. Task 17 runs after Tasks 16, 18 and 19.
 
 **Smoke check after each wave** (orchestrator, on `plan-2`, with a temp `HOME`, `CURIA_DB` and a private tmux server; Plan 1's lesson was that cross-task faults only show in a live binary):
 
@@ -824,7 +826,7 @@ func TestResponseMessageIgnored(t *testing.T)      // {"jsonrpc":"2.0","id":"srv
   - `install.MCPState` with `MCPAdded`, `MCPAlreadyOurs`, `MCPForeign`, `MCPAbsent`, `MCPRemoved`, `MCPNoClaude`
   - `install.ClaudeConfigPath(home, configDir string) string`: `<configDir>/.claude.json` when `configDir` is not empty, else `<home>/.claude.json`; the command passes `CLAUDE_CONFIG_DIR` and the home directory.
   - `install.AddMCP(ctx context.Context, run Runner, configPath, bin string) (MCPState, error)` and `install.RemoveMCP(ctx context.Context, run Runner, configPath, bin string) (MCPState, error)`
-  - `install.Hooks` keeps its signature and adds no permission rule. `install.AllowTools(settingsPath string, now time.Time) error` adds the four tool rules (below), each only if absent, in one write with the usual backup, and writes nothing when all four are there. `install.Unhooks` keeps its signature and also removes the four tool rules, in the same single write and backup.
+  - `install.Hooks` keeps its signature and adds no permission rule. `install.AllowTools(settingsPath string, now time.Time) error` adds the four tool rules (below), which `curia install` calls by default (owner's decision of 2026-11-12, Ruling 78; Task 18 changed the command), each only if absent, in one write with the usual backup, and writes nothing when all four are there. `install.Unhooks` keeps its signature and also removes the four tool rules, in the same single write and backup.
   - `install.ErrForeignSkill`: `WriteSkill`'s error when `SKILL.md` exists without the marker line.
 
 What `curia install` adds and `curia uninstall` removes, beyond Plan 1:
@@ -833,16 +835,16 @@ What `curia install` adds and `curia uninstall` removes, beyond Plan 1:
 | --- | --- | --- | --- |
 | Skill | writes `~/.claude/skills/curia-decisions/SKILL.md` (mode 0600, directories as `writeAtomic` creates them, atomic). If the file exists without the marker line it is left alone and install reports it. | removes the file only if it holds the marker line `<!-- curia:managed -->`, then the directory if empty | the marker identifies ours |
 | MCP server | reads the Claude config JSON (below). No `curia` entry: `claude mcp add --scope user curia -- <bin> mcp` through the runner. Ours (`mcpServers.curia.command` equals `<bin>` and `args` equals `["mcp"]`): nothing. Any other `curia` entry, or a file that is not valid JSON: foreign, left alone and reported. | reads the same file; only when the entry is ours: `claude mcp remove --scope user curia` | Claude Code owns the file; Curia only reads it, never writes it, and never runs `claude mcp get` or `claude mcp list` |
-| Tool permission rules (opt-in) | only with `curia install --allow-mcp-tools`: adds `mcp__curia__search_decisions`, `mcp__curia__request_decision`, `mcp__curia__check_decision`, `mcp__curia__withdraw_decision` to `permissions.allow` in `~/.claude/settings.json`, each only if absent. Without the flag nothing is added and install prints one line: `MCP tools not allowed without a prompt; to allow the four curia tools run: curia install --allow-mcp-tools` | removes those four exact strings, whether or not install added them (section 13, decision 35); leaves every other rule, including a hand-written `mcp__curia`, and the (possibly empty) array | four exact strings |
+| Tool permission rules (on by default; owner's decision of 2026-11-12, Ruling 78) | by default `curia install` adds `mcp__curia__search_decisions`, `mcp__curia__request_decision`, `mcp__curia__check_decision`, `mcp__curia__withdraw_decision` to `permissions.allow` in `~/.claude/settings.json`, each only if absent, and prints one line saying it allowed them and how to opt out. With `--no-allow-mcp-tools` nothing is added and install prints a hint to re-run without the flag (the plan's original wording was an opt-in `--allow-mcp-tools` and a hint to pass it; Task 18 replaced it) | removes those four exact strings, whether or not install added them (section 13, decision 35); leaves every other rule, including a hand-written `mcp__curia`, and the (possibly empty) array | four exact strings |
 | Key binding | the snippet gains `bind A display-popup -E -w 90% -h 80% '<bin> decide'` (quoted as the `a` binding is) | the snippet file is removed as before; the uninstall message adds `tmux unbind A` | as Plan 1 |
 
 **The Claude config JSON** is `$CLAUDE_CONFIG_DIR/.claude.json` when `CLAUDE_CONFIG_DIR` is set and not empty, else `$HOME/.claude.json`: that is where `claude mcp add --scope user` writes `mcpServers.<name>` as `{"type":"stdio","command":"<path>","args":["mcp"],"env":{}}`, with spaces in the path kept in one string (live probe C). It is read only, never written; a missing file or a missing `mcpServers` or `curia` key means absent. `claude mcp add` exits 1 with `already exists` when the name is taken; that is an error. Install never runs `claude mcp get` or `claude mcp list`: both start the server to health-check it, wait 30 seconds on a silent one, exit 0 even on failure, pass on the caller's whole environment, and print the command ambiguously when the path has spaces (probe C, decision 40).
 
-`claude` missing from `PATH` (the runner returns `exec.ErrNotFound`) is not an error: the state is `MCPNoClaude` and `curia install` prints the command to run by hand. A `permissions` or `allow` value of an unexpected type is an error and nothing is written, as for hooks. `curia install` prints one line per item saying what it did, including, with `--allow-mcp-tools`, that it allowed the four tools without a prompt, or, without it, the line above.
+`claude` missing from `PATH` (the runner returns `exec.ErrNotFound`) is not an error: the state is `MCPNoClaude` and `curia install` prints the command to run by hand. A `permissions` or `allow` value of an unexpected type is an error and nothing is written, as for hooks. `curia install` prints one line per item saying what it did, including that it allowed the four tools without a prompt, or, with `--no-allow-mcp-tools`, the hint above.
 
-Order and failures: hooks, then (with `--allow-mcp-tools`) the tool rules, the tmux snippet, the skill, the MCP registration. A foreign skill file (`install.ErrForeignSkill`) and a foreign, absent-`claude` or unrecognised MCP entry are reported and install continues and exits 0; any other error stops install with exit 1 after printing what was already done.
+Order and failures: hooks, then (unless `--no-allow-mcp-tools`) the tool rules, the tmux snippet, the skill, the MCP registration. A foreign skill file (`install.ErrForeignSkill`) and a foreign, absent-`claude` or unrecognised MCP entry are reported and install continues and exits 0; any other error stops install with exit 1 after printing what was already done.
 
-`cmd/curia/install.go` holds the `--allow-mcp-tools` flag and `var claudeRunner install.Runner`, which runs `claude` from `PATH` with a 30 second timeout; tests replace it. No test runs the real `claude`.
+`cmd/curia/install.go` holds the `--no-allow-mcp-tools` flag (Task 18; Task 5 first built an opt-in `--allow-mcp-tools`) and `var claudeRunner install.Runner`, which runs `claude` from `PATH` with a 30 second timeout; tests replace it. No test runs the real `claude`.
 
 `internal/install/skill/SKILL.md`, exact content:
 
@@ -945,8 +947,8 @@ func TestInstallWritesSkillAndRegistersMCP(t *testing.T)
 func TestInstallThroughStubClaude(t *testing.T)
 // claudeRunner runs a stub: a symlink named claude to /bin/sh in a temp dir whose cwd holds a script named "mcp"
 // that appends its arguments to a file (the AGENTS.md fake-executable trick) -> the file holds the add arguments
-func TestUninstallReversesPlan2Items(t *testing.T)  // install --allow-mcp-tools then uninstall -> no skill dir, allow list as before, recorder saw remove
-func TestInstallAllowsToolsOnlyWithFlag(t *testing.T) // no flag -> allow list unchanged and stdout holds the one-line hint; --allow-mcp-tools -> the four strings added
+func TestUninstallReversesPlan2Items(t *testing.T)  // install then uninstall -> no skill dir, allow list as before, recorder saw remove
+func TestInstallAllowsToolsOnlyWithFlag(t *testing.T) // as built in Task 5 (opt-in); Task 18 replaced it: plain install -> the four strings added; --no-allow-mcp-tools -> allow list unchanged and stdout holds the one-line hint
 func TestInstallForeignSkillContinues(t *testing.T) // foreign SKILL.md -> reported, MCP still registered, exit 0
 ```
 
@@ -1975,7 +1977,7 @@ Each is: what — why — cost if wrong.
 23. **The caller is found from the environment and the store on every call** (section 11, Task 12; the order is replaced by decision 36) — Claude Code gives a stdio server no session id that is documented; the pane maps to one live session by Plan 1's rules — see open question 1.
 24. **Agent instructions are a skill plus the MCP `instructions` string; no `CLAUDE.md` block** — the string is in context whenever the server is connected, the skill holds the long form, and `CLAUDE.md` is the user's file (here managed by chezmoi) — if agents ignore both, Plan 3's spawn preamble is the next lever.
 25. **`curia install` registers the server by running `claude mcp add --scope user`**, never by editing `~/.claude.json` (it recognises its own entry by reading that file: decision 40) — Claude Code rewrites that file constantly and it holds credentials and history — install needs `claude` on `PATH`; without it the user runs one printed command.
-26. **Allowing the four tools without a prompt is opt-in: `curia install --allow-mcp-tools` adds their four exact names to `permissions.allow`** (orchestrator ruling while the owner is away; the review narrowed the wildcard `mcp__curia` to exact names, and the orchestrator made it opt-in) — relaxing a permission in a user-owned file is security-sensitive, and the wildcard would also cover tools added later and a project-scoped server named `curia` that shadows ours — without the flag, every first use of a tool in every project stops at a permission prompt, which shows as `waiting`; install prints the one command that allows them.
+26. **Allowing the four tools without a prompt is on by default: `curia install` adds their four exact names to `permissions.allow`, and `--no-allow-mcp-tools` opts out** (owner's decision of 2026-11-12, Ruling 78, Task 18; this reversed the orchestrator's Ruling 40, which had made it opt-in with `--allow-mcp-tools`; the rest of this entry is the original reasoning; the review narrowed the wildcard `mcp__curia` to exact names, and the orchestrator made it opt-in) — relaxing a permission in a user-owned file is security-sensitive, and the wildcard would also cover tools added later and a project-scoped server named `curia` that shadows ours — without the flag, every first use of a tool in every project stops at a permission prompt, which shows as `waiting`; install prints the one command that allows them.
 27. **The decide popup is bound to `prefix + A`** — next to `a` for the dashboard and unbound in stock tmux; `D` would replace tmux's own client chooser — a user with their own `A` binding loses it until they edit the snippet.
 28. **Answer keys act at once on `assume` tickets; on a `blocking` ticket with no staged reasoning they first open the reasoning input, where `Enter` on an empty line sends without; `irreversible` tickets also ask for `y`** — the spec wants an answer in under 30 seconds and a confirmation in one key — a slip of the finger answers a cheap or costly ticket wrongly; `curia decisions edit --supersede` is the remedy.
 29. **`answered_via` gains `cli`** for the flag form — scripts and tests are not a popup — none.
@@ -1985,6 +1987,27 @@ Each is: what — why — cost if wrong.
 33. **`needs_decision` means an open blocking ticket** (spec F1 says "if a ticket is open") — an `assume` ticket lets the agent keep working, so a red window for it would ask for attention nobody needs to give — a session whose only open ticket is an assumption is not red.
 34. **The `meta` table is new** (section 4.1; spec section 5 has no such table) — the notification rate limit spans processes and needs one shared row — one small table.
 35. **`curia uninstall` removes the four exact tool rules whether or not install added them** — a permission rule is a plain string, so unlike a hook command it carries no mark of who wrote it, and Curia keeps no record outside the file — a rule the user wrote by hand is removed too; harmless once the server is unregistered, but the user must re-add it if they keep a foreign `curia` server.
+
+Rulings 59 to 78 (2026-11-12) changed what the text above says in the places listed here; the full text of each is in `PROGRESS.md`, "Plan 2 Rulings". The task sections above are not rewritten and the rulings win where they differ.
+
+- Ruling 59: the Stop block's wording is one line per decision with `option B [Postgres]` (label in square brackets, no "Exact wording" suffix), which later tests compare byte for byte.
+- Ruling 60: the notification body omits an empty repo part.
+- Rulings 61 and 62: a precedent token is a run of letters, marks or numbers; tokens over 64 runes are dropped; an empty match expression means no query.
+- Ruling 63, refined by 66, 67 and 68: in the decide view an answer key needs the ticket displayed unchanged for 250 ms (the dwell), `y` needs its prompt open 250 ms, and a 750 ms quiet period follows an own answer or a change the user did not cause.
+- Ruling 64: a superseded decision is not a duplicate (this amends section 4.5); Ruling 65: a non-empty `SupersededBy` implies supersede.
+- Ruling 54, extended by 58: `tmux.ErrPartialSend` means the text may be in the prompt; never type again, and do not requeue for typing.
+- Ruling 55: `Bell` writes only to `/dev/ttysN` or `/dev/pts/N`, checks for a character device and uses a write deadline.
+- Ruling 56: one Claude directory (`$CLAUDE_CONFIG_DIR` or `~/.claude`) holds `settings.json` and `skills/`; Ruling 57: the "tools not allowed" hint only when a rule is missing.
+- Ruling 69: help and usage errors of user-only commands are exempt from the agent guard.
+- Ruling 70 (final form): the MCP server never runs git; an unknown caller's repo is `CLAUDE_PROJECT_DIR` else the working directory, cleaned, absolute and symlink-resolved. This replaces the git fallback of Task 12 (`TestRepoFallsBackToGit`).
+- Ruling 71: a decided duplicate returned to its owner is claimed through `CheckDecision`.
+- Ruling 72: the hook's transaction first reads the open-blocking count and whether anything is queued, and claims only when something is queued; the Stop's claim cap is 169 deliveries (Task 11).
+- Ruling 73: typing needs the asking session to be the only live session in its pane; otherwise the answer goes through the Stop hook or `check_decision`.
+- Ruling 74 and 74a: a compaction SessionStart keeps an existing session's state; for an ended session it revives it like any SessionStart.
+- Ruling 75: an unidentified caller cannot withdraw (`not_yours`), and `differs_from` naming the ticket itself is `bad_precedent`.
+- Ruling 76: `make check` runs `go test -race -p 1 ./...`; Ruling 50 (the lock) now covers every gate.
+- Ruling 77: sessions stuck `working` or `waiting` after a denial or interrupt are settled from the transcript (Task 19).
+- Ruling 78: the four tools are allowed by default and `--no-allow-mcp-tools` opts out (decision 26 above; Task 18). This reverses Ruling 40.
 
 Decisions 36 to 41 come from the pre-wave-1 live probes (2026-11-11, Claude Code 2.1.322, tmux 3.8, in an isolated setup: private tmux server, `--settings`, `--mcp-config`, a temp `CLAUDE_CONFIG_DIR`).
 
@@ -2009,7 +2032,7 @@ Each has a default, so execution is not blocked.
 6. **Badge meaning.** Spec F4 says `D2` is "decisions"; Plan 1 counted sessions in `needs_decision`. Default: open blocking tickets (decision 19).
 7. **F17 "soonest first" for cold caches.** Default: decision 20.
 8. **Repo identity across worktrees.** `sessions.repo` is the worktree's top-level path, so two worktrees of one repository are two repos for precedent. Plan 2 has no worktrees of its own, so the default is to leave it; Plan 3 must store the main repository (git's common directory) before it spawns worktrees, or repo-scoped precedent will not cross tasks.
-9. **Auto-allowing the tools** (decision 26). Default: off; `curia install --allow-mcp-tools` adds the four exact tool names, and install without it prints how. Should install allow them by default, and is the server-wide `mcp__curia` ever wanted?
+9. **Settled by the owner 2026-11-12 (Ruling 78): auto-allowing the tools** (decision 26). The four exact tool names are allowed by default and `curia install --no-allow-mcp-tools` opts out. The server-wide `mcp__curia` is still not added.
 10. **Settled:** the Stop payload carries `last_assistant_message` (live probe A), and Plan 1's live-check fix reads it. **Stop reads the transcript for the last assistant text**, but Claude Code's docs say the transcript may not yet hold the final message at Stop and that the payload's `last_assistant_message` should be used. Not a Plan 2 change; default: leave it and record it in `PROGRESS.md` for a small fix PR.
 11. **`curia install` path problems inherited from Plan 1** (Open Questions 8, 14, 16): the MCP registration and the `A` binding record the same resolved binary path as the hooks, so a moved binary orphans them too. Default: same behaviour as the hooks.
 12. **The key for the decide popup** (decision 27). Default: `prefix + A`.
