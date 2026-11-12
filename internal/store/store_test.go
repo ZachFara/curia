@@ -88,6 +88,29 @@ func countMigrations(t *testing.T, path string) int {
 	return n
 }
 
+// migrationNames lists schema_migrations by name, as the migration runner
+// reads it.
+func migrationNames(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT name FROM schema_migrations ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return names
+}
+
 func TestOpenCreatesSchemaAndWAL(t *testing.T) {
 	path := dbPath(t)
 	open(t, path)
@@ -140,15 +163,12 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	open(t, path)
-	if n := countMigrations(t, path); n != 1 {
-		t.Errorf("schema_migrations has %d rows, want 1", n)
+	if n := countMigrations(t, path); n != 2 {
+		t.Errorf("schema_migrations has %d rows, want 2", n)
 	}
-	var name string
-	if err := rawDB(t, path).QueryRow(`SELECT name FROM schema_migrations`).Scan(&name); err != nil {
-		t.Fatal(err)
-	}
-	if name != "0001_init.sql" {
-		t.Errorf("migration name = %q, want 0001_init.sql", name)
+	names := migrationNames(t, rawDB(t, path))
+	if want := []string{"0001_init.sql", "0002_decisions.sql"}; !reflect.DeepEqual(names, want) {
+		t.Errorf("migration names = %v, want %v", names, want)
 	}
 }
 
@@ -474,8 +494,8 @@ func TestConcurrentOpenOfFreshFile(t *testing.T) {
 	for round := range 10 {
 		path := filepath.Join(t.TempDir(), fmt.Sprintf("round%d.db", round))
 		openAndUpsertConcurrently(t, path, openers)
-		if n := countMigrations(t, path); n != 1 {
-			t.Errorf("round %d: schema_migrations has %d rows, want 1", round, n)
+		if n := countMigrations(t, path); n != 2 {
+			t.Errorf("round %d: schema_migrations has %d rows, want 2", round, n)
 		}
 		got, err := open(t, path).ListSessions(context.Background(), store.ListFilter{})
 		if err != nil {
