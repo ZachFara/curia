@@ -109,6 +109,8 @@ func (t *Tx) ClaimDeliveries(ctx context.Context, sessionID string, now time.Tim
 	out, err := claim(ctx, t.tx, sessionID, now)
 	if err == nil {
 		if _, err = t.tx.ExecContext(end, `RELEASE claim_deliveries`); err == nil {
+			// SQLite promises no order for RETURNING rows; no test can see this
+			// sort (the plan returns id order today), so it is not dead code.
 			slices.SortFunc(out, func(a, b model.Decision) int { return cmp.Compare(a.N, b.N) })
 			return out, nil
 		}

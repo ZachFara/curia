@@ -1,4 +1,8 @@
 package store
 
-// ClaimCap exposes claimCap to the external tests.
-const ClaimCap = claimCap
+// Unexported values the external tests check.
+const (
+	ClaimCap         = claimCap
+	DecisionColumns  = decisionColumns
+	ReturnedDecision = returnedDecision
+)

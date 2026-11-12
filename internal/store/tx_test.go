@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -151,4 +152,13 @@ func incrementSharedTx(ctx context.Context, s *store.Store) error {
 		}
 	}
 	return fmt.Errorf("still busy after %d attempts: %w", maxAttempts, err)
+}
+
+func TestReturnedColumnsAreDecisionColumns(t *testing.T) {
+	// RETURNING takes no alias, so tx.go repeats the column list by hand.
+	got := strings.Fields(store.ReturnedDecision)
+	want := strings.Fields(strings.ReplaceAll(store.DecisionColumns, "d.", ""))
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("returnedDecision drifted from decisionColumns:\n got %v\nwant %v", got, want)
+	}
 }

@@ -49,21 +49,29 @@ func TestClaimNotifySlotOnePerWindow(t *testing.T) {
 
 	now := t0.Add(time.Duration(rounds) * time.Hour)
 	for _, c := range []struct {
-		at   time.Time
-		want bool
+		at    time.Time
+		every time.Duration
+		want  bool
 	}{
-		{now, true},
-		{now.Add(29 * time.Second), false},
-		{now.Add(30 * time.Second), true},
-		{now.Add(59 * time.Second), false},
-		{now.Add(60 * time.Second), true},
+		{now, every, true},
+		{now.Add(29 * time.Second), every, false},
+		{now.Add(30 * time.Second), every, true},
+		{now.Add(59 * time.Second), every, false},
+		{now.Add(60 * time.Second), every, true},
+		// The stored time (now+60s) is in the future of the next call.
+		{now.Add(80 * time.Second), every, false},
+		// With every <= 0 every call claims, but not before a future stored time.
+		{now.Add(time.Minute), 0, true},
+		{now.Add(time.Minute), 0, true},
+		{now.Add(30 * time.Second), 0, false},
+		{now.Add(30 * time.Second), -time.Minute, true},
 	} {
-		got, err := hs[0].ClaimNotifySlot(ctx, c.at, every)
+		got, err := hs[0].ClaimNotifySlot(ctx, c.at, c.every)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got != c.want {
-			t.Errorf("ClaimNotifySlot(now+%v) = %v, want %v", c.at.Sub(now), got, c.want)
+			t.Errorf("ClaimNotifySlot(now+%v, every %v) = %v, want %v", c.at.Sub(now), c.every, got, c.want)
 		}
 	}
 }

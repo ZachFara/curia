@@ -13,7 +13,9 @@ const notifyKey = "last_blocking_notify_at"
 // at now, at most one per every across all processes. In one statement
 // (so one write transaction): when meta has no last_blocking_notify_at, or
 // it is at least every before now, now is written and true returned;
-// otherwise nothing changes and it returns false.
+// otherwise nothing changes and it returns false. With every <= 0 every
+// call claims, unless the stored time is after now: a stored time in the
+// future (a clock set back) holds the slot until now reaches it plus every.
 func (s *Store) ClaimNotifySlot(ctx context.Context, now time.Time, every time.Duration) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `
 INSERT INTO meta (key, value) VALUES (?, ?)

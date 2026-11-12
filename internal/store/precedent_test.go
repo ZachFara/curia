@@ -176,6 +176,10 @@ func TestSearchTagsAnyOf(t *testing.T) {
 		{[]string{"b"}, nil},
 		{[]string{"db perf"}, nil},
 		{[]string{"%"}, nil},
+		{[]string{"DB "}, []string{db, dbPerf}},
+		{[]string{" Ui", "  "}, []string{ui}},
+		{[]string{""}, []string{db, dbPerf, ui, none}},
+		{[]string{" ", "\t"}, []string{db, dbPerf, ui, none}},
 		{[]string{"ui", "perf"}, []string{dbPerf, ui}},
 		{nil, []string{db, dbPerf, ui, none}},
 	}

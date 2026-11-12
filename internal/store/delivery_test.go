@@ -74,8 +74,15 @@ func claimStop(t *testing.T, s *store.Store, session string, now time.Time) []mo
 }
 
 func claimStopErr(s *store.Store, session string, now time.Time) ([]model.Decision, error) {
+	return claimStopLocked(s, session, now, func() {})
+}
+
+// claimStopLocked is claimStopErr calling locked first inside fn, where
+// the transaction holds the write lock.
+func claimStopLocked(s *store.Store, session string, now time.Time, locked func()) ([]model.Decision, error) {
 	var claimed []model.Decision
 	err := s.UpdateSessionTx(context.Background(), session, func(tx *store.Tx, sess model.Session, found bool) (model.Session, error) {
+		locked()
 		var err error
 		claimed, err = tx.ClaimDeliveries(context.Background(), session, now)
 		if !found {
@@ -311,13 +318,21 @@ var claimRacers = []model.DeliveryVia{model.ViaSendKeys, model.ViaStopHook, mode
 
 // claimRace runs ClaimTyping, a Stop claim inside UpdateSessionTx and
 // CheckDecision for decision id of session s1 at once, each from its own
-// handle at its own time, and returns the paths that claimed it.
-func claimRace(t *testing.T, hs []*store.Store, id string) []model.DeliveryVia {
+// handle at its own time, and returns the paths that claimed it. Racer
+// lead (an index into claimRacers) is released first and the other two
+// once it is under way: the Stop claim releases them from inside its fn,
+// when it holds the write lock, so it wins by construction; typing and
+// check release them just before they call the store. The other two then
+// race the leader and each other for real.
+func claimRace(t *testing.T, hs []*store.Store, id string, lead int) []model.DeliveryVia {
 	t.Helper()
 	ctx := context.Background()
 	at := func(k int) time.Time { return tClaim.Add(time.Duration(k+1) * time.Nanosecond) }
 	claimed := make([]bool, len(claimRacers))
 	errs := make([]error, len(claimRacers))
+	ahead := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(ahead) }) }
 	race := []func() error{
 		func() error {
 			_, _, ok, err := hs[0].ClaimTyping(ctx, id, at(0))
@@ -325,7 +340,11 @@ func claimRace(t *testing.T, hs []*store.Store, id string) []model.DeliveryVia {
 			return err
 		},
 		func() error {
-			got, err := claimStopErr(hs[1], "s1", at(1))
+			got, err := claimStopLocked(hs[1], "s1", at(1), func() {
+				if lead == 1 {
+					release()
+				}
+			})
 			claimed[1] = len(got) == 1 && got[0].ID == id
 			if len(got) > 1 {
 				return fmt.Errorf("stop claimed %v", decisionIDs(got))
@@ -338,17 +357,7 @@ func claimRace(t *testing.T, hs []*store.Store, id string) []model.DeliveryVia {
 			return err
 		},
 	}
-	var wg sync.WaitGroup
-	start := make(chan struct{})
-	for k, run := range race {
-		wg.Go(func() {
-			<-start
-			// BUSY at BEGIN means nothing ran, so the attempt is retried.
-			errs[k] = retryBusy(run, busyBeforeAnything)
-		})
-	}
-	close(start)
-	wg.Wait()
+	runLed(race, errs, lead, lead != 1, ahead, release)
 	var won []model.DeliveryVia
 	for k, via := range claimRacers {
 		if errs[k] != nil {
@@ -361,6 +370,29 @@ func claimRace(t *testing.T, hs []*store.Store, id string) []model.DeliveryVia {
 	return won
 }
 
+// runLed runs each of race in its own goroutine and stores its error in
+// errs. Racer lead runs first, calling release just before it starts when
+// releaseFirst is set (else it must call release itself) and in any case
+// when it ends; the others wait for ahead, which release closes.
+func runLed(race []func() error, errs []error, lead int, releaseFirst bool, ahead <-chan struct{}, release func()) {
+	var wg sync.WaitGroup
+	for k, run := range race {
+		wg.Go(func() {
+			if k == lead {
+				defer release() // also when the leader fails before releasing
+				if releaseFirst {
+					release()
+				}
+			} else {
+				<-ahead
+			}
+			// BUSY at BEGIN means nothing ran, so the attempt is retried.
+			errs[k] = retryBusy(run, busyBeforeAnything)
+		})
+	}
+	wg.Wait()
+}
+
 // busyBeforeAnything reports whether err is SQLITE_BUSY from starting a
 // write transaction, which ran nothing: "begin" for the decision
 // operations, "update session" (UpdateSession's wording) for the Stop
@@ -370,17 +402,33 @@ func busyBeforeAnything(err error) bool {
 }
 
 func TestDeliveryClaimedExactlyOnce(t *testing.T) {
-	// At least 300 rounds, then more until every path has won once; every
-	// round must have exactly one winner. Coverage fails only at the cap.
+	// 300 rounds, each led by the next path in turn, then, only if some path
+	// has not yet won, rounds led by that path up to a cap. A Stop leader
+	// holds the write lock when the others start, so it always wins; a
+	// typing or check leader has a head start, which wins every round it
+	// leads on one CPU and still some rounds on a loaded multi-core run.
+	// Every round must have exactly one winner.
 	const minRounds, maxRounds = 300, 3000
 	path := dbPath(t)
 	hs := handles(t, path, 3)
 	liveSession(t, hs[0], "s1", "%3", model.StateIdle)
 	wins := map[model.DeliveryVia]int{}
+	missing := func() int {
+		for k, via := range claimRacers {
+			if wins[via] == 0 {
+				return k
+			}
+		}
+		return -1
+	}
 	round := 0
-	for ; round < maxRounds && (round < minRounds || len(wins) < len(claimRacers)); round++ {
+	for ; round < maxRounds && (round < minRounds || missing() >= 0); round++ {
+		lead := round % len(claimRacers)
+		if round >= minRounds {
+			lead = missing()
+		}
 		d := queued(t, hs[0], fmt.Sprintf("Delivered in round %d?", round), "s1")
-		won := claimRace(t, hs, d.ID)
+		won := claimRace(t, hs, d.ID, lead)
 		got := getDecision(t, hs[0], d.ID)
 		if len(won) != 1 {
 			t.Fatalf("%s: claimed by %v, want exactly one (stored via %q)", d.ID, won, got.DeliveredVia)

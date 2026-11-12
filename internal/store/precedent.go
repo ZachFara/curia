@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/precedent"
@@ -30,7 +31,8 @@ type PrecedentQuery struct {
 // rules are section 4.6's table: global always; repo for the same,
 // non-empty repo; task for the same, non-empty task id, or while the
 // decision has no task, for the same, non-empty session. A tag matches a
-// whole stored tag (tags are stored joined by single spaces). bm25's
+// whole stored tag (tags are stored joined by single spaces, so a tag
+// with a space in it matches none). bm25's
 // weights follow the FTS columns: question, context, rationale, answer,
 // answer_reasoning, tags.
 const searchDecisions = selectDecisions + `
@@ -43,7 +45,7 @@ WHERE decisions_fts MATCH ?
                            OR (d.task_id = '' AND ? != '' AND d.session_id = ?))))
   AND (? = 0 OR EXISTS (
     SELECT 1 FROM json_each(?) t
-    WHERE t.value != '' AND instr(t.value, ' ') = 0
+    WHERE instr(t.value, ' ') = 0
       AND instr(' ' || d.tags || ' ', ' ' || t.value || ' ') > 0))
   AND d.id != ?
 ORDER BY bm25(decisions_fts, 10.0, 2.0, 2.0, 5.0, 3.0, 5.0), d.answered_at DESC
@@ -52,7 +54,9 @@ LIMIT ?`
 // SearchDecisions returns the decided precedent q finds, best first: the
 // rows the full-text index matches for precedent.MatchExpr(q.Text), within
 // the caller's scope, carrying any of q.Tags, other than q.ExcludeID, at
-// most q.Limit (5 when it is not positive, never more than 10). Text with
+// most q.Limit (5 when it is not positive, never more than 10). Tags are
+// trimmed and lowercased, as stored tags are, and empty ones dropped; no
+// tag left means no tag filter. Text with
 // no searchable words finds nothing, and no query runs. The text reaches
 // SQLite only as the MatchExpr expression, a bound parameter.
 func (s *Store) SearchDecisions(ctx context.Context, q PrecedentQuery) ([]model.Decision, error) {
@@ -65,16 +69,13 @@ func (s *Store) SearchDecisions(ctx context.Context, q PrecedentQuery) ([]model.
 		limit = defaultSearchLimit
 	}
 	limit = min(limit, maxSearchLimit)
-	tags := q.Tags
-	if tags == nil {
-		tags = []string{}
-	}
+	tags := searchTags(q.Tags)
 	js, err := json.Marshal(tags)
 	if err != nil {
 		return nil, fail("search decisions", "", err)
 	}
 	rows, err := s.db.QueryContext(ctx, searchDecisions, match, q.Repo, q.Repo, q.TaskID, q.TaskID,
-		q.SessionID, q.SessionID, len(q.Tags), string(js), q.ExcludeID, limit)
+		q.SessionID, q.SessionID, len(tags), string(js), q.ExcludeID, limit)
 	if err != nil {
 		return nil, fail("search decisions", "", err)
 	}
@@ -91,4 +92,16 @@ func (s *Store) SearchDecisions(ctx context.Context, q PrecedentQuery) ([]model.
 		return nil, fail("search decisions", "", err)
 	}
 	return out, nil
+}
+
+// searchTags is tags trimmed and lowercased, without the empty ones, never
+// nil (so it encodes as a JSON array).
+func searchTags(tags []string) []string {
+	out := []string{}
+	for _, tag := range tags {
+		if tag = strings.ToLower(strings.TrimSpace(tag)); tag != "" {
+			out = append(out, tag)
+		}
+	}
+	return out
 }
