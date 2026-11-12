@@ -21,7 +21,10 @@ const windowFormat = `'#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I
 // tmux runs pane-focus-in only with focus-events on, which is off by
 // default. The badge is appended to status-right only when it is not there
 // yet: the never-set @curia_badge option expands to nothing and marks it, so
-// sourcing the snippet again adds no second badge. Each command that reaches
+// sourcing the snippet again adds no second badge. tmux's default
+// status-right already fills its default status-right-length of 40, so a
+// length below 80 is raised to 80 (compared as numbers, e|<) and a larger one
+// is kept. Each command that reaches
 // a shell holds bin as one shell word, wrapped in one tmux quoting layer per
 // tmux parse on the way.
 func snippet(bin string) string {
@@ -29,6 +32,7 @@ func snippet(bin string) string {
 	return strings.Join([]string{
 		"set -g focus-events on",
 		"set -g status-interval 2",
+		"if -F '#{e|<:#{status-right-length},80}' 'set -g status-right-length 80'",
 		"if -F '#{m:*@curia_badge*,#{status-right}}' '' " +
 			tmuxQuote("set -ag status-right "+tmuxQuote(" #{@curia_badge}#("+b+" status)")),
 		"set -g window-status-format " + windowFormat,

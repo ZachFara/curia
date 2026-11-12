@@ -1,6 +1,7 @@
 package install
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
@@ -74,6 +75,35 @@ func TestSnippetInRealTmux(t *testing.T) {
 	}
 	if n := strings.Count(right, "#("+testBin+" status)"); n != 1 {
 		t.Errorf("status-right has %d badges after two sources, want 1: %q", n, right)
+	}
+}
+
+// TestSnippetMakesRoomForBadge: tmux's default status-right already fills the
+// default status-right-length of 40, which would cut the badge off. The
+// snippet raises a smaller length to 80 and keeps a larger one, including
+// one that is larger only as a number ("120" sorts before "80" as text).
+func TestSnippetMakesRoomForBadge(t *testing.T) {
+	for _, tc := range []struct{ preset, want string }{
+		{"", "80"}, // tmux's default, 40
+		{"79", "80"},
+		{"80", "80"},
+		{"120", "120"},
+	} {
+		t.Run("preset "+cmp.Or(tc.preset, "default"), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			dir := t.TempDir()
+			tm := realTmux(ctx, t, dir)
+			if tc.preset != "" {
+				if out, err := tm("set", "-g", "status-right-length", tc.preset); err != nil {
+					t.Fatalf("set status-right-length: %v: %s", err, out)
+				}
+			}
+			sourceSnippet(t, tm, dir, testBin, 2)
+			if out, err := tm("show", "-gv", "status-right-length"); err != nil || strings.TrimSpace(out) != tc.want {
+				t.Errorf("status-right-length = %q, %v; want %s", out, err, tc.want)
+			}
+		})
 	}
 }
 
