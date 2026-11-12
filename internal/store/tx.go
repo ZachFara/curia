@@ -156,3 +156,32 @@ func (t *Tx) OpenBlocking(ctx context.Context, sessionID string, now time.Time) 
 	}
 	return n, nil
 }
+
+// stopCheck counts a session's open blocking tickets and says whether any
+// answer of it is queued, in one read. Both parts use the
+// decisions_session_status index by session_id. Parameters: the session
+// id, now, the session id.
+const stopCheck = `
+SELECT
+  (SELECT count(*) FROM decisions d WHERE d.session_id = ? AND d.mode = 'blocking' AND ` + openAt + `),
+  EXISTS (SELECT 1 FROM decisions WHERE session_id = ? AND delivery = 'queued')`
+
+// StopCheck is what curia hook Stop reads before it claims anything, in one
+// small statement: the number of blocking tickets of session sessionID open
+// at now (as OpenBlocking counts them), and whether any answer of the
+// session is queued (so ClaimDeliveries has something to claim). A claim
+// changes only the delivery of decided tickets, never which tickets are
+// open, so the count is the same before and after a claim in the same
+// transaction. The hook runs ClaimDeliveries only when queued is true, so
+// the common Stop never prepares the claim's UPDATE ... RETURNING. An empty
+// sessionID has no tickets and nothing queued.
+func (t *Tx) StopCheck(ctx context.Context, sessionID string, now time.Time) (openBlocking int, queued bool, err error) {
+	if sessionID == "" {
+		return 0, false, nil
+	}
+	err = t.tx.QueryRowContext(ctx, stopCheck, sessionID, formatTime(now), sessionID).Scan(&openBlocking, &queued)
+	if err != nil {
+		return 0, false, fail("check stop for", sessionID, err)
+	}
+	return openBlocking, queued, nil
+}

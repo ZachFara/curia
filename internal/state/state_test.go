@@ -295,6 +295,30 @@ func TestStopWithOpenDecision(t *testing.T) {
 	}
 }
 
+// A Stop the hook blocks to deliver answers is not the end of the turn:
+// Claude goes on working with the answers (plan section 4.9).
+func TestStopBlockedIsWorking(t *testing.T) {
+	got := state.Apply(base(), model.Event{Kind: model.Stop, SessionID: "s1", Message: "done", StopBlocked: true, At: t1}, false)
+	if got.State != model.StateWorking || got.LastUpdate != "done" || !got.UpdatedAt.Equal(t1) {
+		t.Errorf("got state %s, LastUpdate %q, updated %v; want working, done, %v", got.State, got.LastUpdate, got.UpdatedAt, t1)
+	}
+}
+
+func TestStopBlockedBeatsOpenDecision(t *testing.T) {
+	got := state.Apply(base(), model.Event{Kind: model.Stop, SessionID: "s1", Message: "done", StopBlocked: true, At: t1}, true)
+	if got.State != model.StateWorking || got.LastUpdate != "done" {
+		t.Errorf("got state %s, LastUpdate %q; want working, done", got.State, got.LastUpdate)
+	}
+}
+
+// StopBlocked means nothing on another event.
+func TestStopBlockedOnlyOnStop(t *testing.T) {
+	got := state.Apply(base(), model.Event{Kind: model.SessionEnd, SessionID: "s1", StopBlocked: true, At: t1}, true)
+	if got.State != model.StateEnded {
+		t.Errorf("SessionEnd with StopBlocked: state %s, want ended", got.State)
+	}
+}
+
 func TestLastUpdateTruncatedTo80Runes(t *testing.T) {
 	target := strings.Repeat("é世", 50) // 100 runes
 	got := state.Apply(base(), model.Event{
@@ -329,5 +353,98 @@ func TestFirstSeenMidRunTakesIdentityFromEvent(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+// Ruling 74: a compaction fires SessionStart with source compact, often in
+// the middle of a turn. A stored session keeps its state, seen time, start
+// and subagent count; only the update time, a changed transcript path and a
+// named model are taken.
+func TestCompactSessionStartKeepsSession(t *testing.T) {
+	s := base()
+	s.State, s.SubagentsActive, s.LastUpdate = model.StateWorking, 2, "Edit a.go"
+	s.Model, s.TranscriptOffset, s.Repo, s.TmuxWindow = "claude-opus-5-5", 500, "/src/curia", "@7"
+	ev := model.Event{
+		Kind: model.SessionStart, Source: "compact", SessionID: "s1", Pane: "%9", Cwd: "/elsewhere",
+		TranscriptPath: "/t", At: t1,
+	}
+	got := state.Apply(s, ev, true)
+	want := s
+	want.UpdatedAt = t1
+	if got != want {
+		t.Errorf("compact on a working session:\n got %+v\nwant %+v", got, want)
+	}
+
+	ev.TranscriptPath, ev.Model = "/t2", "claude-haiku-5-5"
+	got = state.Apply(s, ev, false)
+	want.TranscriptPath, want.TranscriptOffset, want.Model = "/t2", 0, "claude-haiku-5-5"
+	if got != want {
+		t.Errorf("compact with a new transcript and model:\n got %+v\nwant %+v", got, want)
+	}
+
+	ev.TranscriptPath, ev.Model = "", ""
+	if got = state.Apply(s, ev, false); got.TranscriptPath != "/t" || got.TranscriptOffset != 500 {
+		t.Errorf("compact naming no transcript: path %q offset %d, want /t and 500 kept", got.TranscriptPath, got.TranscriptOffset)
+	}
+
+	for _, st := range []model.State{model.StateWaiting, model.StateIdle, model.StateNeedsDecision} {
+		in := base()
+		in.State = st
+		if got := state.Apply(in, ev, false); got.State != st || got.SeenAt != in.SeenAt {
+			t.Errorf("compact on %s: state %s seen %v, want both kept", st, got.State, got.SeenAt)
+		}
+	}
+}
+
+// For a session with no row yet, compact is a first event like any other.
+func TestCompactSessionStartFirstSeen(t *testing.T) {
+	ev := model.Event{Kind: model.SessionStart, Source: "compact", SessionID: "s1", Pane: "%1", Cwd: "/w", TranscriptPath: "/t", At: t1}
+	got := state.Apply(model.Session{}, ev, false)
+	want := model.Session{
+		ID: "s1", Agent: "claude", Pane: "%1", Cwd: "/w", TranscriptPath: "/t",
+		State: model.StateIdle, StartedAt: t1, UpdatedAt: t1, SeenAt: t1,
+	}
+	if got != want {
+		t.Errorf("compact first seen:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// Every other source starts the session afresh, as before.
+func TestOtherSessionStartSourcesRestart(t *testing.T) {
+	for _, source := range []string{"startup", "resume", "clear", "", "Compact"} {
+		s := base()
+		s.State, s.SubagentsActive = model.StateWorking, 2
+		got := state.Apply(s, model.Event{Kind: model.SessionStart, Source: source, SessionID: "s1", At: t1}, false)
+		if got.State != model.StateIdle || got.SeenAt != t1 || got.StartedAt != t1 || got.SubagentsActive != 0 {
+			t.Errorf("source %q: %+v, want idle, seen, started at %v, no subagents", source, got, t1)
+		}
+	}
+}
+
+func TestCompaction(t *testing.T) {
+	for _, tc := range []struct {
+		ev   model.Event
+		want bool
+	}{
+		{model.Event{Kind: model.SessionStart, Source: "compact"}, true},
+		{model.Event{Kind: model.SessionStart, Source: "startup"}, false},
+		{model.Event{Kind: model.SessionStart}, false},
+		{model.Event{Kind: model.Stop, Source: "compact"}, false},
+	} {
+		if got := state.Compaction(tc.ev); got != tc.want {
+			t.Errorf("Compaction(%+v) = %v, want %v", tc.ev, got, tc.want)
+		}
+	}
+}
+
+// Ruling 74a: an ended session is plainly alive again, so a compaction's
+// SessionStart revives it as any SessionStart does: idle and seen.
+func TestCompactSessionStartRevivesEnded(t *testing.T) {
+	s := base()
+	s.State, s.SubagentsActive = model.StateEnded, 2
+	ev := model.Event{Kind: model.SessionStart, Source: "compact", SessionID: "s1", Pane: "%1", Cwd: "/w", TranscriptPath: "/t", At: t1}
+	got := state.Apply(s, ev, false)
+	if got.State != model.StateIdle || got.SeenAt != t1 || got.StartedAt != t1 || got.SubagentsActive != 0 {
+		t.Errorf("compact on an ended session: %+v, want idle, seen and started at %v, no subagents", got, t1)
 	}
 }

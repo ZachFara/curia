@@ -44,12 +44,13 @@ type Session struct {
 // notification_type (for example "permission_prompt" or "idle_prompt").
 // LastAssistantMessage is a Stop's last_assistant_message: Claude's final
 // answer, which the transcript may not hold yet when Stop fires. Model is a
-// SessionStart's model, empty when the payload has none. StopBlocked is set by
-// the hook on a Stop it is about to block.
+// SessionStart's model, empty when the payload has none. Source is a
+// SessionStart's source ("startup", "resume", "clear" or "compact").
+// StopBlocked is set by the hook on a Stop it is about to block.
 type Event struct {
 	Kind                                                                                  EventKind
 	SessionID, Pane, Cwd, TranscriptPath, ToolName, ToolTarget, Message, NotificationType string
-	LastAssistantMessage, Model                                                           string
+	LastAssistantMessage, Model, Source                                                   string
 	StopBlocked                                                                           bool
 	At                                                                                    time.Time
 }

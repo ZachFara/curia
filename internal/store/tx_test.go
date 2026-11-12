@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -160,5 +161,95 @@ func TestReturnedColumnsAreDecisionColumns(t *testing.T) {
 	want := strings.Fields(strings.ReplaceAll(store.DecisionColumns, "d.", ""))
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("returnedDecision drifted from decisionColumns:\n got %v\nwant %v", got, want)
+	}
+}
+
+// stopCheck runs StopCheck for session id at now in its own transaction on
+// session s1.
+func stopCheck(t *testing.T, s *store.Store, id string, now time.Time) (int, bool) {
+	t.Helper()
+	var n int
+	var q bool
+	err := s.UpdateSessionTx(context.Background(), "s1", func(tx *store.Tx, sess model.Session, _ bool) (model.Session, error) {
+		var err error
+		n, q, err = tx.StopCheck(context.Background(), id, now)
+		sess.ID, sess.Agent = "s1", "claude"
+		return sess, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n, q
+}
+
+func TestTxStopCheck(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	now := t0.Add(time.Hour)
+	create(t, s, ticket(t, "Blocking one?", model.ModeBlocking, "s1", t0))
+	create(t, s, ticket(t, "Blocking two?", model.ModeBlocking, "s1", t0))
+	past := create(t, s, ticket(t, "Blocking past its deadline?", model.ModeBlocking, "s1", t0))
+	rawExec(t, path, `UPDATE decisions SET expires_at = ? WHERE id = ?`, "2026-11-12T09:30:00.000000000Z", past.ID)
+	create(t, s, ticket(t, "Assume one?", model.ModeAssume, "s1", t0))
+	create(t, s, ticket(t, "Blocking for s2?", model.ModeBlocking, "s2", t0))
+	delivered := queued(t, s, "Blocking answered and checked?", "s3")
+	if _, _, err := s.CheckDecision(context.Background(), delivered.ID, "s3", tClaim); err != nil {
+		t.Fatal(err)
+	}
+	queued(t, s, "Blocking answered?", "s1")
+
+	type facts struct {
+		open   int
+		queued bool
+	}
+	got := map[string]facts{}
+	for _, id := range []string{"s1", "s2", "s3", "s4", ""} {
+		n, q := stopCheck(t, s, id, now)
+		got[id] = facts{n, q}
+	}
+	want := map[string]facts{
+		"s1": {2, true},  // the expired, assume and answered tickets are not open
+		"s2": {1, false}, // open, nothing answered
+		"s3": {0, false}, // answered and already delivered
+		"s4": {0, false},
+		"":   {0, false},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("StopCheck = %+v, want %+v", got, want)
+	}
+}
+
+// StopCheck agrees with OpenBlocking, and a claim in the same transaction
+// leaves the count as it was and clears queued.
+func TestTxStopCheckAroundAClaim(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	liveSession(t, s, "s1", "%3", model.StateWorking)
+	create(t, s, ticket(t, "Still open?", model.ModeBlocking, "s1", t0))
+	d := queued(t, s, "Answered?", "s1")
+	err := s.UpdateSessionTx(ctx, "s1", func(tx *store.Tx, sess model.Session, _ bool) (model.Session, error) {
+		before, q, err := tx.StopCheck(ctx, "s1", tClaim)
+		if err != nil {
+			return sess, err
+		}
+		n, err := tx.OpenBlocking(ctx, "s1", tClaim)
+		if err != nil {
+			return sess, err
+		}
+		if before != 1 || !q || n != before {
+			t.Errorf("before the claim: StopCheck = %d, %v; OpenBlocking = %d; want 1, true, 1", before, q, n)
+		}
+		claimed, err := tx.ClaimDeliveries(ctx, "s1", tClaim)
+		if err != nil || len(claimed) != 1 || claimed[0].ID != d.ID {
+			t.Errorf("ClaimDeliveries = %v, %v; want %s", decisionIDs(claimed), err, d.ID)
+		}
+		after, q, err := tx.StopCheck(ctx, "s1", tClaim)
+		if after != before || q || err != nil {
+			t.Errorf("after the claim: StopCheck = %d, %v, %v; want %d, false, nil", after, q, err, before)
+		}
+		return sess, nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
