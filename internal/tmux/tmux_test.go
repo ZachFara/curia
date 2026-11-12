@@ -438,13 +438,14 @@ func TestSendKeysStopsAtFirstFailure(t *testing.T) {
 	}
 }
 
-// TestSendKeysWhenContextEnds: the context ends during step cancelAt (1
-// copy-mode, 2 text, 3 Enter). The runner records every step SendKeys asks
-// for and acts like exec.CommandContext: it refuses to start one once the
-// context is done, and with killed set, the step running when the context
-// ends fails as a killed process would, after tmux may already have typed the
-// text (Ruling 58). SendKeys itself must not ask for the text step once the
-// context is done.
+// TestSendKeysWhenContextEnds: the caller's context ends during step
+// cancelAt (1 copy-mode, 2 text, 3 Enter). The runner records every step
+// SendKeys asks for and acts like exec.CommandContext: it refuses to start one
+// once the step's context is done, and with killed set, the step running when
+// its context ends fails as a killed process would, after tmux may already
+// have typed the text (Ruling 58). SendKeys itself must not ask for the text
+// step once the context is done; once the text step has succeeded, Enter runs
+// whatever happens to the caller's context (Ruling 81).
 func TestSendKeysWhenContextEnds(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -452,20 +453,24 @@ func TestSendKeysWhenContextEnds(t *testing.T) {
 		killed   bool
 		runs     int
 		partial  bool
+		canceled bool // the error wraps context.Canceled; false: no error
 	}{
-		{name: "during copy-mode, which fails", cancelAt: 1, killed: true, runs: 1},
-		{name: "after copy-mode, before the text step starts", cancelAt: 1, runs: 1},
-		{name: "during the text step, which is killed", cancelAt: 2, killed: true, runs: 2, partial: true},
-		{name: "after the text step, so Enter never starts", cancelAt: 2, runs: 3, partial: true},
-		{name: "during Enter, which is killed", cancelAt: 3, killed: true, runs: 3, partial: true},
+		{name: "during copy-mode, which fails", cancelAt: 1, killed: true, runs: 1, canceled: true},
+		{name: "after copy-mode, before the text step starts", cancelAt: 1, runs: 1, canceled: true},
+		{name: "during the text step, which is killed", cancelAt: 2, killed: true, runs: 2, partial: true, canceled: true},
+		{name: "after the text step, so Enter still runs", cancelAt: 2, runs: 3},
+		{name: "during Enter, which is not killed", cancelAt: 3, killed: true, runs: 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			r := &cancellingRunner{cancel: cancel, cancelAt: tc.cancelAt, killed: tc.killed}
 			err := (&execClient{runner: r.run}).SendKeys(ctx, "%5", "hello")
-			if !errors.Is(err, context.Canceled) {
+			if tc.canceled && !errors.Is(err, context.Canceled) {
 				t.Errorf("err = %v, want it to wrap context.Canceled", err)
+			}
+			if !tc.canceled && err != nil {
+				t.Errorf("err = %v, want nil: Enter ran after the text step", err)
 			}
 			if got := errors.Is(err, ErrPartialSend); got != tc.partial {
 				t.Errorf("errors.Is(err, ErrPartialSend) = %v, want %v (err %v)", got, tc.partial, err)
@@ -492,11 +497,70 @@ func (r *cancellingRunner) run(ctx context.Context, args ...string) (string, err
 	}
 	if len(r.runs) == r.cancelAt {
 		r.cancel()
-		if r.killed {
+		if r.killed && ctx.Err() != nil {
 			return "", fmt.Errorf("tmux %s: signal: killed: %w", args[0], ctx.Err())
 		}
 	}
 	return "", nil
+}
+
+// TestSendKeysStepBudgets: each of SendKeys's three tmux invocations gets
+// its own deadline, the copy-mode and text steps at most keysStepTimeout away
+// and Enter at most enterTimeout away, whatever the caller's deadline; a
+// shorter caller deadline shortens the first two steps but not Enter, and a
+// caller canceled after the text step leaves Enter's context live (Ruling 81).
+func TestSendKeysStepBudgets(t *testing.T) {
+	caller, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	steps := budgetSteps(caller, t, cancel)
+	for k, s := range steps[:2] {
+		s.within(t, fmt.Sprintf("step %d", k+1), 0, 400*time.Millisecond)
+	}
+	if steps[2].err != nil {
+		t.Errorf("Enter ran on a done context: %v", steps[2].err)
+	}
+	steps[2].within(t, "Enter", time.Second, enterTimeout)
+
+	for k, s := range budgetSteps(context.Background(), t, func() {})[:2] {
+		s.within(t, fmt.Sprintf("no caller deadline: step %d", k+1), 0, keysStepTimeout)
+	}
+}
+
+// budgetStep is what one tmux invocation of SendKeys saw of its context.
+type budgetStep struct {
+	left time.Duration // until the deadline
+	has  bool          // a deadline is set
+	err  error         // ctx.Err() when the step started
+}
+
+// within fails unless the step had a deadline more than lo and at most hi away.
+func (s budgetStep) within(t *testing.T, what string, lo, hi time.Duration) {
+	t.Helper()
+	if !s.has || s.left <= lo || s.left > hi {
+		t.Errorf("%s: deadline in %v (set %v), want in (%v, %v]", what, s.left, s.has, lo, hi)
+	}
+}
+
+// budgetSteps runs SendKeys on ctx, calling afterText once the text step is
+// done, and returns what each of its three steps saw.
+func budgetSteps(ctx context.Context, t *testing.T, afterText func()) []budgetStep {
+	t.Helper()
+	var steps []budgetStep
+	runner := func(sctx context.Context, _ ...string) (string, error) {
+		d, ok := sctx.Deadline()
+		steps = append(steps, budgetStep{time.Until(d), ok, sctx.Err()})
+		if len(steps) == 2 {
+			afterText()
+		}
+		return "", nil
+	}
+	if err := (&execClient{runner: runner}).SendKeys(ctx, "%5", "hello"); err != nil {
+		t.Fatalf("SendKeys = %v, want nil", err)
+	}
+	if len(steps) != 3 {
+		t.Fatalf("steps = %d, want 3", len(steps))
+	}
+	return steps
 }
 
 func TestSendKeysAcceptsEightHundredRunes(t *testing.T) {

@@ -161,18 +161,31 @@ func checkKeys(pane, text string) error {
 	return nil
 }
 
+// keysStepTimeout bounds each of SendKeys's copy-mode and text steps, and
+// enterTimeout its Enter step, each on its own (Ruling 81).
+const (
+	keysStepTimeout = time.Second
+	enterTimeout    = 2 * time.Second
+)
+
 // SendKeys leaves any mode the pane is in, types text literally and presses
 // Enter, as three tmux invocations: text and Enter in one invocation make the
 // Enter a newline inside the prompt for long text.
 //
+// Each invocation has its own timeout. The copy-mode and text steps also end
+// with ctx. Once the text step has succeeded the text is in the prompt and
+// pressing Enter is the only good outcome, so the Enter step runs on a
+// context detached from ctx's cancellation, with its own timeout (Ruling 81).
+//
 // The error wraps ErrPartialSend when the text may have reached the pane:
 // when the Enter step fails for any reason, and when the text step fails
-// while ctx is done (a killed tmux client may already have typed the text).
-// The line may then be in the prompt unsubmitted, or even submitted; a caller
-// seeing ErrPartialSend must not retry by typing again. Plain errors, after
-// which nothing was typed, come from a failed copy-mode step, from ctx being
-// done before the text step starts (it is then never run), and from a text
-// step that tmux itself failed while ctx was live (such as no such pane).
+// once its context is done (a killed tmux client may already have typed the
+// text). The line may then be in the prompt unsubmitted, or even submitted; a
+// caller seeing ErrPartialSend must not retry by typing again. Plain errors,
+// after which nothing was typed, come from a failed copy-mode step, from ctx
+// being done before the text step starts (it is then never run), and from a
+// text step that tmux itself failed while its context was live (such as no
+// such pane).
 func (c *execClient) SendKeys(ctx context.Context, pane, text string) error {
 	if err := checkKeys(pane, text); err != nil {
 		return err
@@ -182,22 +195,35 @@ func (c *execClient) SendKeys(ctx context.Context, pane, text string) error {
 	if strings.HasSuffix(text, ";") {
 		text = strings.TrimSuffix(text, ";") + `\;`
 	}
-	if _, err := c.run(ctx, "copy-mode", "-q", "-t", pane); err != nil {
+	if err := c.runFor(ctx, keysStepTimeout, "copy-mode", "-q", "-t", pane); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := c.run(ctx, "send-keys", "-t", pane, "-l", "--", text); err != nil {
-		if ctx.Err() != nil {
+	tctx, cancel := context.WithTimeout(ctx, keysStepTimeout)
+	_, err := c.run(tctx, "send-keys", "-t", pane, "-l", "--", text)
+	done := tctx.Err() != nil
+	cancel()
+	if err != nil {
+		if done {
 			return fmt.Errorf("%w: %w", ErrPartialSend, err)
 		}
 		return err
 	}
-	if _, err := c.run(ctx, "send-keys", "-t", pane, "Enter"); err != nil {
+	if err := c.runFor(context.WithoutCancel(ctx), enterTimeout, "send-keys", "-t", pane, "Enter"); err != nil {
 		return fmt.Errorf("%w: %w", ErrPartialSend, err)
 	}
 	return nil
+}
+
+// runFor runs one tmux command on a context derived from ctx with its own
+// timeout, and returns only the error.
+func (c *execClient) runFor(ctx context.Context, timeout time.Duration, args ...string) error {
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	_, err := c.run(rctx, args...)
+	return err
 }
 
 // ttyPattern matches a pane's tty as tmux reports it: a pty, named
