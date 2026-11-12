@@ -1162,6 +1162,77 @@ func TestEditRescopeAndSupersede(t *testing.T) {
 	}
 }
 
+// Ruling 82: superseding an answer still queued leaves it queued (it is
+// delivered as the retraction); the first supersession of an answer already
+// delivered to a known session queues it again, once; an answer with no
+// session, or one never delivered (a confirmation), is left as it is.
+func TestSupersedeQueuesTheRetraction(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	now := t0.Add(time.Hour)
+	edited := now.Add(time.Hour)
+
+	still := answer(t, s, create(t, s, ticket(t, "Still queued?", model.ModeBlocking, "s1", t0)).ID, keyA, now)
+	if got := supersede(t, s, still.ID, edited); got.Delivery != model.DeliveryQueued {
+		t.Errorf("queued answer superseded: delivery %s, want queued", got.Delivery)
+	}
+
+	for _, via := range []model.DeliveryVia{model.ViaStopHook, model.ViaCheck, model.ViaSendKeys} {
+		d := answer(t, s, create(t, s, ticket(t, "Delivered by "+string(via)+"?", model.ModeBlocking, "s1", t0)).ID, keyA, now)
+		deliverBy(t, s, path, d.ID, via, now)
+		got := supersede(t, s, d.ID, edited)
+		if got.Delivery != model.DeliveryQueued || got.DeliveredVia != "" || !got.DeliveredAt.IsZero() {
+			t.Errorf("delivered by %s, superseded: delivery %s via %q at %v; want queued again", via, got.Delivery, got.DeliveredVia, got.DeliveredAt)
+		}
+		assertQueued(t, s, d.ID)
+		// The Stop hook delivers it once more, as the retraction; a second
+		// supersession does not queue it again.
+		if claimed := claimStop(t, s, "s1", edited.Add(time.Minute)); len(claimed) != 1 || claimed[0].ID != d.ID {
+			t.Fatalf("Stop after supersession claimed %v, want [%s]", decisionIDs(claimed), d.ID)
+		}
+		if again := supersede(t, s, d.ID, edited.Add(2*time.Minute)); again.Delivery != model.DeliveryDelivered {
+			t.Errorf("second supersession: delivery %s, want delivered (not queued again)", again.Delivery)
+		}
+	}
+
+	orphan := create(t, s, ticket(t, "Nobody asked?", model.ModeBlocking, "", t0))
+	if got := supersede(t, s, answer(t, s, orphan.ID, keyA, now).ID, edited); got.Delivery != model.DeliveryNone {
+		t.Errorf("answer with no session superseded: delivery %s, want none", got.Delivery)
+	}
+	confirmed := answer(t, s, create(t, s, ticket(t, "Assumed right?", model.ModeAssume, "s1", t0)).ID, keyA, now)
+	if confirmed.Status != model.StatusConfirmed {
+		t.Fatalf("setup: status %s, want confirmed", confirmed.Status)
+	}
+	if got := supersede(t, s, confirmed.ID, edited); got.Delivery != model.DeliveryNone {
+		t.Errorf("confirmation superseded: delivery %s, want none", got.Delivery)
+	}
+}
+
+// supersede supersedes decided ticket id at at and returns the stored row.
+func supersede(t *testing.T, s *store.Store, id string, at time.Time) model.Decision {
+	t.Helper()
+	got, err := s.EditDecision(context.Background(), id, model.DecisionEdit{Supersede: true}, at)
+	if err != nil {
+		t.Fatalf("EditDecision(%s): %v", id, err)
+	}
+	return got
+}
+
+// deliverBy delivers queued answer id of session s1 by path via at now.
+func deliverBy(t *testing.T, s *store.Store, path, id string, via model.DeliveryVia, now time.Time) {
+	t.Helper()
+	if via == model.ViaCheck {
+		if _, _, err := s.CheckDecision(context.Background(), id, "s1", now); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	claimStop(t, s, "s1", now)
+	if via == model.ViaSendKeys {
+		rawExec(t, path, `UPDATE decisions SET delivered_via = 'send_keys' WHERE id = ?`, id)
+	}
+}
+
 func TestEditSupersededByImpliesSupersede(t *testing.T) {
 	// Ruling 65: a non-empty SupersededBy supersedes; superseding again
 	// keeps the first superseded_at and never clears superseded_by.

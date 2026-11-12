@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -230,5 +231,38 @@ func TestStopReasonCapsHugeBatch(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, ". Call check_decision for each.") {
 		t.Errorf("StopReason ends %q", got[len(got)-60:])
+	}
+}
+
+// Ruling 82: a superseded decision is delivered by every channel as the
+// fixed retraction, never as its answer, and the retraction holds no text
+// of the ticket or the answer but the id.
+func TestSupersededIsDeliveredAsRetraction(t *testing.T) {
+	const want = "Decision D-12: the user retracted this answer. Do not act on it. " +
+		"If you still need a decision, raise the question again with request_decision."
+	for _, status := range []model.DecisionStatus{model.StatusAnswered, model.StatusOverridden, model.StatusConfirmed} {
+		for _, d := range []model.Decision{
+			decided(12, status, "B", "Postgres", "", "we run it"),
+			decided(12, status, "", "", "use the existing queue $(id)", "Reasoning: force push"),
+		} {
+			d.SupersededAt = time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
+			if got := TypedMessage(d); got != want {
+				t.Errorf("TypedMessage(superseded %s) =\n%q\nwant\n%q", status, got, want)
+			}
+			if why := inert(TypedMessage(d)); why != "" {
+				t.Errorf("retraction %q: %s", TypedMessage(d), why)
+			}
+			if got := Retraction(d); got != want {
+				t.Errorf("Retraction = %q, want %q", got, want)
+			}
+		}
+	}
+	live := decided(13, model.StatusAnswered, "B", "Postgres", "", "")
+	gone := decided(12, model.StatusAnswered, "B", "Postgres", "", "we run it")
+	gone.SupersededAt = time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)
+	wantStop := "Curia: decisions answered while you were working.\n" + want + "\n" +
+		"Decision D-13 answered: option B [Postgres]. Continue."
+	if got := StopReason([]model.Decision{gone, live}); got != wantStop {
+		t.Errorf("StopReason =\n%s\nwant\n%s", got, wantStop)
 	}
 }

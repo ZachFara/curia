@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/decision"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 )
@@ -585,6 +586,50 @@ func TestCheckReturnsAnswerAndClaims(t *testing.T) {
 	// Asking again still returns the answer already delivered.
 	if m := f.mustCall("check_decision", map[string]any{"id": "D-1"}); m["answer_key"] != "B" {
 		t.Errorf("second check = %v", m)
+	}
+}
+
+// Ruling 82: check_decision on a superseded answer, queued or already
+// delivered, says the user retracted it, and carries superseded; it claims
+// the retraction like any queued answer.
+func TestCheckSupersededSaysRetracted(t *testing.T) {
+	const retracted = "Decision D-1: the user retracted this answer. Do not act on it. " +
+		"If you still need a decision, raise the question again with request_decision."
+	f := newFixture(t)
+	f.mustCall("request_decision", ticket(webhookQ))
+	f.answer("D-1", "B", "we already run Redis")
+	if _, err := f.st.EditDecision(context.Background(), "D-1", model.DecisionEdit{Supersede: true}, f.now); err != nil {
+		t.Fatal(err)
+	}
+	m := f.mustCall("check_decision", map[string]any{"id": "D-1"})
+	if m["superseded"] != true || m["instruction"] != retracted {
+		t.Errorf("check of a superseded answer = %v, want superseded and the retraction", m)
+	}
+	if d := f.get("D-1"); d.Delivery != model.DeliveryDelivered || d.DeliveredVia != model.ViaCheck {
+		t.Errorf("delivery = %s via %q, want the retraction delivered via check", d.Delivery, d.DeliveredVia)
+	}
+	// A live answer carries no superseded key at all.
+	f.mustCall("request_decision", ticket("Which queue for retries?"))
+	f.answer("D-2", "A", "")
+	if m := f.mustCall("check_decision", map[string]any{"id": "D-2"}); m["superseded"] != nil {
+		t.Errorf("live check = %v, want no superseded key", m)
+	}
+}
+
+// A decided twin read after the user superseded it (the retry found it live
+// a moment before) is returned with superseded and the retraction.
+func TestDuplicateResultOfSupersededTwin(t *testing.T) {
+	d := model.Decision{
+		ID: "D-4", N: 4, Status: model.StatusAnswered, Mode: model.ModeBlocking, AnswerKey: "B", Answer: "B: Redis",
+		SupersededAt: toolsT0,
+	}
+	res := duplicateResult(d)
+	if !res.Superseded || res.Instruction != decision.Retraction(d) {
+		t.Errorf("duplicate of a superseded twin = %+v, want superseded and the retraction", res)
+	}
+	d.SupersededAt = time.Time{}
+	if res := duplicateResult(d); res.Superseded || res.Instruction != instrDecided {
+		t.Errorf("duplicate of a live twin = %+v, want the decided instruction", res)
 	}
 }
 

@@ -1026,6 +1026,38 @@ func TestStopClaimsQueuedAndBlocks(t *testing.T) {
 	wantDelivered(t, st, "D-1")
 }
 
+// Ruling 82: an answer the user superseded while it was queued, or after it
+// was delivered, is handed over at the next Stop as the retraction, never
+// as the answer.
+func TestStopDeliversRetractionOfSuperseded(t *testing.T) {
+	const want = `{"decision":"block","reason":"Curia: decisions answered while you were working.\n` +
+		`Decision D-1: the user retracted this answer. Do not act on it. ` +
+		`If you still need a decision, raise the question again with request_decision."}` + "\n"
+	ctx := context.Background()
+	st, env := workingSession(t)
+	queue(t, st, "A", "Which store for events?", "we already run it")
+	if _, err := st.EditDecision(ctx, "D-1", model.DecisionEdit{Supersede: true}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if res := stopRun(t, st, env, "A", ""); string(res.Stdout) != want {
+		t.Errorf("superseded while queued: Stdout =\n %q\nwant\n %q", res.Stdout, want)
+	}
+
+	st, env = workingSession(t)
+	queue(t, st, "A", "Which store for events?", "we already run it")
+	if res := stopRun(t, st, env, "A", ""); !strings.Contains(string(res.Stdout), "answered: option A") {
+		t.Fatalf("first Stop = %q, want the answer", res.Stdout)
+	}
+	run(t, st, env, model.UserPromptSubmit, payload("A", "", ""))
+	if _, err := st.EditDecision(ctx, "D-1", model.DecisionEdit{Supersede: true}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if res := stopRun(t, st, env, "A", ""); string(res.Stdout) != want {
+		t.Errorf("superseded after delivery: Stdout =\n %q\nwant\n %q", res.Stdout, want)
+	}
+	wantDelivered(t, st, "D-1")
+}
+
 func TestSecondStopDoesNotBlock(t *testing.T) {
 	st, env := workingSession(t)
 	queue(t, st, "A", "Which store for events?", "we already run it")

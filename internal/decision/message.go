@@ -85,14 +85,27 @@ func wording(d model.Decision, choice, reasoning string) string {
 	return b.String()
 }
 
+// Retraction is the fixed sentence that delivers superseded decision d by
+// every channel in place of its answer (Ruling 82): an answer the user
+// retired is never handed over as live. It holds no text but d's id, and
+// only the characters a typed line may hold.
+func Retraction(d model.Decision) string {
+	return "Decision " + idOf(d) + ": the user retracted this answer. Do not act on it. " +
+		"If you still need a decision, raise the question again with request_decision."
+}
+
 // TypedMessage is the one line curia decide types into the asking agent's
 // pane for decided ticket d, at most 600 runes. The option key, label, free
 // text and reasoning go through sanitize.Keys, so the line holds only
 // letters, digits, spaces and ". , : - _ /", has no line break and always
 // starts with the fixed words "Decision D-<n>" (Ruling 51). When Keys
 // dropped or cut anything, the line ends with " Exact wording: call
-// check_decision D-<n>.". A confirmed ticket gets the answered wording.
+// check_decision D-<n>.". A confirmed ticket gets the answered wording, and
+// a superseded one the Retraction.
 func TypedMessage(d model.Decision) string {
+	if !d.SupersededAt.IsZero() {
+		return Retraction(d)
+	}
 	lossy := false
 	keys := func(s string, limit int) string {
 		out, l := sanitize.Keys(s, limit)
@@ -132,8 +145,11 @@ func dropPeriod(s string) string {
 // stopLine is the line of d in a stop reason: the typed-line wording with
 // the full label in square brackets after the key (kept as is, brackets
 // and all) and the full free text and reasoning, each flattened to one
-// line (Ruling 59).
+// line (Ruling 59). A superseded decision gets the Retraction.
 func stopLine(d model.Decision) string {
+	if !d.SupersededAt.IsZero() {
+		return Retraction(d)
+	}
 	var choice string
 	if d.AnswerKey != "" {
 		choice = join(" ", "option", flat(d.AnswerKey, MaxKey))

@@ -250,6 +250,10 @@ func runDecisionsEdit(cmd *cobra.Command, args []string) error {
 	case e.Supersede:
 		_, _ = fmt.Fprintf(out, "%s superseded\n", id)
 	}
+	if e.Supersede && after.SessionID != "" && after.Delivery == model.DeliveryQueued {
+		// The retraction goes by the Stop hook or check_decision (Ruling 82).
+		_, _ = fmt.Fprintf(out, "%s retraction queued for the agent's Stop hook, or tell the agent to call check_decision %s\n", id, id)
+	}
 	return nil
 }
 

@@ -498,6 +498,24 @@ func (s *Store) ExpireDecisions(ctx context.Context, now time.Time) (int, error)
 	return int(n), nil
 }
 
+// edited is decided ticket cur after edit e at now, as EditDecision says.
+func edited(cur model.Decision, e model.DecisionEdit, now time.Time) model.Decision {
+	next := cur
+	if e.Scope != "" {
+		next.Scope = e.Scope
+	}
+	if (e.Supersede || e.SupersededBy != "") && next.SupersededAt.IsZero() {
+		next.SupersededAt = now
+		if cur.Delivery == model.DeliveryDelivered && cur.SessionID != "" {
+			next.Delivery, next.DeliveredVia, next.DeliveredAt = model.DeliveryQueued, "", time.Time{}
+		}
+	}
+	if e.SupersededBy != "" {
+		next.SupersededBy = e.SupersededBy
+	}
+	return next
+}
+
 // EditDecision rescopes and/or supersedes decided ticket id at now, in one
 // write transaction. The ticket must exist (ErrNotFound) and be decided
 // (ErrNotDecided). A non-empty e.SupersededBy must name another decided
@@ -505,7 +523,10 @@ func (s *Store) ExpireDecisions(ctx context.Context, now time.Time) (int, error)
 // e.Supersede, or a non-empty e.SupersededBy, which implies it (Ruling 65),
 // the ticket is superseded: superseded_at becomes now unless it is already
 // set, and a non-empty e.SupersededBy is recorded (an empty one never
-// clears it). The status never changes. It returns the stored row.
+// clears it). On the first supersession of an answer already delivered to a
+// known session, the delivery is queued again, so the retraction reaches the
+// agent by the usual paths (Ruling 82). The status never changes. It
+// returns the stored row.
 func (s *Store) EditDecision(ctx context.Context, id string, e model.DecisionEdit, now time.Time) (model.Decision, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -523,18 +544,12 @@ func (s *Store) EditDecision(ctx context.Context, id string, e model.DecisionEdi
 		err = requireDecided(ctx, tx, e.SupersededBy, id)
 	}
 	if err == nil {
-		next := cur
-		if e.Scope != "" {
-			next.Scope = e.Scope
-		}
-		if (e.Supersede || e.SupersededBy != "") && next.SupersededAt.IsZero() {
-			next.SupersededAt = now
-		}
-		if e.SupersededBy != "" {
-			next.SupersededBy = e.SupersededBy
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE decisions SET scope = ?, superseded_at = ?, superseded_by = ? WHERE n = ?`,
-			next.Scope, formatTime(next.SupersededAt), next.SupersededBy, cur.N)
+		next := edited(cur, e, now)
+		_, err = tx.ExecContext(ctx, `
+UPDATE decisions SET scope = ?, superseded_at = ?, superseded_by = ?, delivery = ?, delivered_via = ?, delivered_at = ?
+WHERE n = ?`,
+			next.Scope, formatTime(next.SupersededAt), next.SupersededBy,
+			next.Delivery, next.DeliveredVia, formatTime(next.DeliveredAt), cur.N)
 	}
 	if err != nil {
 		return model.Decision{}, fail("edit decision", id, err)

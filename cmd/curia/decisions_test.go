@@ -327,7 +327,7 @@ func TestEditRescope(t *testing.T) {
 func TestEditSupersedeSetsSupersededAt(t *testing.T) {
 	db := decisionsHome(t, decisionsSpecs()...)
 	out, err := runRoot(t, "decisions", "edit", "D-4", "--supersede")
-	if err != nil || out != "D-4 superseded\n" {
+	if err != nil || out != "D-4 superseded\nD-4 retraction queued for the agent's Stop hook, or tell the agent to call check_decision D-4\n" {
 		t.Fatalf("edit = %q, %v", out, err)
 	}
 	if d := decisionsGet(t, db, "D-4"); !d.SupersededAt.Equal(decisionsParse(t, decisionsNow)) {
@@ -340,11 +340,19 @@ func TestEditSupersedeSetsSupersededAt(t *testing.T) {
 	decisionsStatus = "open"
 	// --superseded-by implies --supersede and prints both parts with --scope.
 	out, err = runRoot(t, "decisions", "edit", "D-3", "--scope", "task", "--superseded-by", "D-4")
-	if err != nil || out != "D-3 scope repo -> task\nD-3 superseded by D-4\n" {
+	if err != nil || out != "D-3 scope repo -> task\nD-3 superseded by D-4\n"+
+		"D-3 retraction queued for the agent's Stop hook, or tell the agent to call check_decision D-3\n" {
 		t.Fatalf("edit = %q, %v", out, err)
 	}
-	if d := decisionsGet(t, db, "D-3"); d.SupersededBy != "D-4" || d.SupersededAt.IsZero() {
-		t.Errorf("D-3 = by %q at %v", d.SupersededBy, d.SupersededAt)
+	// D-3 had been delivered: its retraction is queued (Ruling 82).
+	if d := decisionsGet(t, db, "D-3"); d.SupersededBy != "D-4" || d.SupersededAt.IsZero() || d.Delivery != model.DeliveryQueued {
+		t.Errorf("D-3 = by %q at %v, delivery %s", d.SupersededBy, d.SupersededAt, d.Delivery)
+	}
+	// D-7 was superseded before: superseding again queues nothing.
+	decisionsScope, decisionsSupersede, decisionsSupersededBy = "", false, ""
+	out, err = runRoot(t, "decisions", "edit", "D-7", "--supersede")
+	if err != nil || out != "D-7 superseded\n" {
+		t.Fatalf("edit D-7 = %q, %v", out, err)
 	}
 }
 
