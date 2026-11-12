@@ -171,7 +171,8 @@ func (r *decisionsRun) refusedInsideAgent(t *testing.T) {
 }
 
 // Step 5: answering D-1 types it into S1's pane, which is idle once the
-// answer is stored, and the badge clears.
+// answer is stored, and the badge clears; the typed line's submission
+// confirms it.
 func (r *decisionsRun) typedIntoIdlePane(t *testing.T) {
 	t.Helper()
 	out := r.h.mustRun(t, "decide", "D-1", "--option", "A",
@@ -183,6 +184,9 @@ func (r *decisionsRun) typedIntoIdlePane(t *testing.T) {
 	if got := r.h.mustRun(t, "status"); got != "" {
 		t.Errorf("curia status after D-1 = %q, want nothing", got)
 	}
+	// Claude Code submits the typed line: its UserPromptSubmit names D-1,
+	// which confirms the typing (Ruling 86), so S1 may be typed into again.
+	r.quietHook(t, "UserPromptSubmit", "%0")
 }
 
 // Step 6: D-2's answer waits while S2 works, then blocks S2's next Stop

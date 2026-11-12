@@ -1097,6 +1097,38 @@ func TestStopDeliversRetractionOfSuperseded(t *testing.T) {
 	wantDelivered(t, st, "D-1")
 }
 
+// Ruling 86, defect 3: the UserPromptSubmit of the typed line confirms the
+// typed answer; a prompt that does not name it (the user's own, after the
+// line was lost in a menu) leaves it unconfirmed.
+func TestDefect3PromptNamingTypedAnswerConfirmsIt(t *testing.T) {
+	ctx := context.Background()
+	st, env := workingSession(t)
+	raise(t, st, "A", "Which store for events?", model.ModeBlocking)
+	stopRun(t, st, env, "A", "") // needs_decision in %3
+	d, err := st.AnswerDecision(ctx, "D-1", model.Answer{Key: "A", Via: model.AnsweredCLI}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, why, err := st.ClaimTyping(ctx, d.ID, t0); err != nil || why != store.TypingClaimed {
+		t.Fatalf("ClaimTyping = %v, %v", why, err)
+	}
+	prompt := func(text string) []byte {
+		b, err := json.Marshal(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return payload("A", "", `,"prompt":`+string(b))
+	}
+	run(t, st, env, model.UserPromptSubmit, prompt("please go on"))
+	if got := getDecision(t, st, "D-1"); !got.ConfirmedAt.IsZero() {
+		t.Errorf("confirmed at %v by a prompt that does not name it", got.ConfirmedAt)
+	}
+	run(t, st, env, model.UserPromptSubmit, prompt(decision.TypedMessage(getDecision(t, st, "D-1"))))
+	if got := getDecision(t, st, "D-1"); !got.ConfirmedAt.Equal(t0) {
+		t.Errorf("confirmed at %v, want %v: the typed line was submitted", got.ConfirmedAt, t0)
+	}
+}
+
 func TestSecondStopDoesNotBlock(t *testing.T) {
 	st, env := workingSession(t)
 	queue(t, st, "A", "Which store for events?", "we already run it")

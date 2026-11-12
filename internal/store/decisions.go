@@ -54,7 +54,7 @@ const decisionColumns = `
   d.recommendation, d.rationale, d.reversibility, d.mode, d.assumption, d.scope, d.tags, d.status,
   d.answer_key, d.answer, d.answer_reasoning, d.answered_via, d.precedent_of, d.differs_from,
   d.differs_why, d.withdraw_reason, d.superseded_by, d.args_hash, d.delivery, d.delivered_via,
-  d.created_at, d.expires_at, d.answered_at, d.closed_at, d.superseded_at, d.delivered_at`
+  d.created_at, d.expires_at, d.answered_at, d.closed_at, d.superseded_at, d.delivered_at, d.confirmed_at`
 
 // selectDecisions is the column list every reader of decisions uses. A
 // query adds "FROM decisions d" after it, or first the columns of a join,
@@ -75,13 +75,13 @@ const decided = `d.status IN ('answered', 'confirmed', 'overridden')`
 func scanDecision(sc scanner, extra ...any) (model.Decision, error) {
 	var d model.Decision
 	var options, tags string
-	var created, expires, answered, closed, superseded, delivered sql.NullString
+	var created, expires, answered, closed, superseded, delivered, confirmed sql.NullString
 	dest := append([]any{
 		&d.N, &d.ID, &d.SessionID, &d.TaskID, &d.Repo, &d.Question, &d.Context, &options,
 		&d.Recommendation, &d.Rationale, &d.Reversibility, &d.Mode, &d.Assumption, &d.Scope, &tags, &d.Status,
 		&d.AnswerKey, &d.Answer, &d.AnswerReasoning, &d.AnsweredVia, &d.PrecedentOf, &d.DiffersFrom,
 		&d.DiffersWhy, &d.WithdrawReason, &d.SupersededBy, &d.ArgsHash, &d.Delivery, &d.DeliveredVia,
-		&created, &expires, &answered, &closed, &superseded, &delivered,
+		&created, &expires, &answered, &closed, &superseded, &delivered, &confirmed,
 	}, extra...)
 	if err := sc.Scan(dest...); err != nil {
 		return model.Decision{}, err
@@ -100,6 +100,7 @@ func scanDecision(sc scanner, extra ...any) (model.Decision, error) {
 		{&d.ClosedAt, closed},
 		{&d.SupersededAt, superseded},
 		{&d.DeliveredAt, delivered},
+		{&d.ConfirmedAt, confirmed},
 	} {
 		t, err := parseTime(f.src)
 		if err != nil {
@@ -507,7 +508,8 @@ func edited(cur model.Decision, e model.DecisionEdit, now time.Time) model.Decis
 	if (e.Supersede || e.SupersededBy != "") && next.SupersededAt.IsZero() {
 		next.SupersededAt = now
 		if cur.Delivery == model.DeliveryDelivered && cur.SessionID != "" {
-			next.Delivery, next.DeliveredVia, next.DeliveredAt = model.DeliveryQueued, "", time.Time{}
+			next.Delivery, next.DeliveredVia = model.DeliveryQueued, ""
+			next.DeliveredAt, next.ConfirmedAt = time.Time{}, time.Time{}
 		}
 	}
 	if e.SupersededBy != "" {
@@ -546,10 +548,11 @@ func (s *Store) EditDecision(ctx context.Context, id string, e model.DecisionEdi
 	if err == nil {
 		next := edited(cur, e, now)
 		_, err = tx.ExecContext(ctx, `
-UPDATE decisions SET scope = ?, superseded_at = ?, superseded_by = ?, delivery = ?, delivered_via = ?, delivered_at = ?
+UPDATE decisions SET scope = ?, superseded_at = ?, superseded_by = ?, delivery = ?, delivered_via = ?,
+  delivered_at = ?, confirmed_at = ?
 WHERE n = ?`,
 			next.Scope, formatTime(next.SupersededAt), next.SupersededBy,
-			next.Delivery, next.DeliveredVia, formatTime(next.DeliveredAt), cur.N)
+			next.Delivery, next.DeliveredVia, formatTime(next.DeliveredAt), formatTime(next.ConfirmedAt), cur.N)
 	}
 	if err != nil {
 		return model.Decision{}, fail("edit decision", id, err)

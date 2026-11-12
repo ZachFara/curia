@@ -153,6 +153,7 @@ type decisionsRow struct {
 	ClosedAt       *time.Time           `json:"closed_at"`
 	SupersededAt   *time.Time           `json:"superseded_at"`
 	DeliveredAt    *time.Time           `json:"delivered_at"`
+	ConfirmedAt    *time.Time           `json:"confirmed_at"`
 }
 
 func decisionsToRow(d model.Decision) decisionsRow {
@@ -173,6 +174,7 @@ func decisionsToRow(d model.Decision) decisionsRow {
 		ArgsHash: d.ArgsHash, Delivery: d.Delivery, DeliveredVia: d.DeliveredVia,
 		CreatedAt: jsonTime(d.CreatedAt), ExpiresAt: jsonTime(d.ExpiresAt), AnsweredAt: jsonTime(d.AnsweredAt),
 		ClosedAt: jsonTime(d.ClosedAt), SupersededAt: jsonTime(d.SupersededAt), DeliveredAt: jsonTime(d.DeliveredAt),
+		ConfirmedAt: jsonTime(d.ConfirmedAt),
 	}
 }
 

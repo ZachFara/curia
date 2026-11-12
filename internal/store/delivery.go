@@ -35,9 +35,9 @@ const (
 	TypingSubagents
 	// TypingSharedPane: another live session is bound to the pane (Ruling 73).
 	TypingSharedPane
-	// TypingUnsubmitted: an answer typed into the session earlier has not
-	// been followed by any hook event, so its line may still sit unsubmitted
-	// in the prompt (Ruling 81).
+	// TypingUnsubmitted: an answer typed into the session earlier is not
+	// confirmed yet, so its line may still sit unsubmitted in the prompt, or
+	// be lost (Rulings 81 and 86).
 	TypingUnsubmitted
 )
 
@@ -59,20 +59,17 @@ func typingRefusal(sess model.Session) TypingRefusal {
 	return TypingClaimed
 }
 
-// unsubmitted reports whether an answer was typed into sess (delivered by
-// send_keys) no earlier than sess's last update. A typed line that was
-// submitted is followed within milliseconds by UserPromptSubmit, which moves
-// updated_at past it; until then the line may sit in the prompt, and a second
-// line would be glued to it (Ruling 81). A session with no update time counts
-// as not updated since any typing.
-func unsubmitted(ctx context.Context, tx *sql.Tx, sess model.Session) (bool, error) {
+// unconfirmed reports whether an answer typed into sess (delivered by
+// send_keys) is not yet confirmed: no prompt naming it has been submitted
+// and the agent has not read it with check_decision (Ruling 86). Its line
+// may still sit in the prompt, or be lost, and a second line would be glued
+// to it (Ruling 81).
+func unconfirmed(ctx context.Context, tx *sql.Tx, sess model.Session) (bool, error) {
 	var n int
-	at := formatTime(sess.UpdatedAt)
 	err := tx.QueryRowContext(ctx, `
 SELECT count(*) FROM decisions
-WHERE session_id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys'
-  AND (? IS NULL OR delivered_at >= ?)`,
-		sess.ID, at, at).Scan(&n)
+WHERE session_id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL`,
+		sess.ID).Scan(&n)
 	return n > 0, err
 }
 
@@ -96,8 +93,8 @@ WHERE tmux_pane = ? AND id != ? AND COALESCE(state, '') NOT IN (?, ?)`,
 // row must exist, have a pane, be idle or needs_decision and have no
 // subagent running (Ruling 84); no other session row that is neither ended
 // nor stale may be bound to that pane (Ruling 73); and no answer typed into
-// the session may be as new as the session's last update (Ruling 81). Then
-// the decision is marked delivered by send_keys and returned with
+// the session earlier may be unconfirmed (Rulings 81 and 86). Then the
+// decision is marked delivered by send_keys, unconfirmed, and returned with
 // TypingClaimed and the session. Otherwise nothing changes, and the refusal
 // says why, with both rows as stored (zero when absent).
 func (s *Store) ClaimTyping(ctx context.Context, id string, now time.Time) (d model.Decision, sess model.Session, why TypingRefusal, err error) {
@@ -142,7 +139,7 @@ func claimRefusal(ctx context.Context, tx *sql.Tx, d model.Decision, sess model.
 	if shared, err := sharesPane(ctx, tx, sess); err != nil || shared {
 		return TypingSharedPane, err
 	}
-	if typed, err := unsubmitted(ctx, tx, sess); err != nil || typed {
+	if typed, err := unconfirmed(ctx, tx, sess); err != nil || typed {
 		return TypingUnsubmitted, err
 	}
 	return TypingClaimed, nil
@@ -153,7 +150,7 @@ func claimRefusal(ctx context.Context, tx *sql.Tx, d model.Decision, sess model.
 // Any other decision, or none, is left as it is.
 func (s *Store) RequeueDelivery(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `
-UPDATE decisions SET delivery = 'queued', delivered_via = '', delivered_at = NULL
+UPDATE decisions SET delivery = 'queued', delivered_via = '', delivered_at = NULL, confirmed_at = NULL
 WHERE id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys'`, id)
 	if err != nil {
 		return fmt.Errorf("store: requeue delivery of %s: %w", id, err)
@@ -162,10 +159,11 @@ WHERE id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys'`, id)
 }
 
 // CheckDecision returns decision id for check_decision from callerSession
-// at now, and false when there is none, in one write transaction. When the
-// decision is decided and queued and callerSession is its non-empty
-// session, it is first marked delivered by check, so the answer the agent
-// reads is never delivered again by another path.
+// at now, and false when there is none, in one write transaction. When
+// callerSession is the decision's non-empty session, a decided, queued
+// answer is first marked delivered by check, so the answer the agent reads
+// is never delivered again by another path, and an answer typed and not yet
+// confirmed is confirmed (Ruling 86).
 func (s *Store) CheckDecision(ctx context.Context, id, callerSession string, now time.Time) (model.Decision, bool, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -176,6 +174,13 @@ func (s *Store) CheckDecision(ctx context.Context, id, callerSession string, now
 UPDATE decisions AS d SET delivery = 'delivered', delivered_via = 'check', delivered_at = ?
 WHERE d.id = ? AND d.delivery = 'queued' AND `+decided+` AND d.session_id = ? AND d.session_id != ''`,
 		formatTime(now), id, callerSession)
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `
+UPDATE decisions SET confirmed_at = ?
+WHERE id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL
+  AND session_id = ? AND session_id != ''`,
+			formatTime(now), id, callerSession)
+	}
 	if err != nil {
 		return model.Decision{}, false, fail("check decision", id, err)
 	}
@@ -187,4 +192,32 @@ WHERE d.id = ? AND d.delivery = 'queued' AND `+decided+` AND d.session_id = ? AN
 		return model.Decision{}, false, fail("check decision", id, err)
 	}
 	return d, found, nil
+}
+
+// typedNames matches the decisions a submitted prompt names: "Decision D-n"
+// followed by a space (an answer's wording) or a colon (a retraction's),
+// so D-1 is not taken for D-12. Its parameters are the prompt, twice.
+const typedNames = `(instr(?, 'Decision ' || id || ' ') > 0 OR instr(?, 'Decision ' || id || ':') > 0)`
+
+// ConfirmTyped confirms, for curia hook UserPromptSubmit at now, the answers
+// typed into session sessionID no later than now that prompt names
+// (Ruling 86), in one statement, and returns how many. An empty sessionID
+// confirms nothing.
+func (s *Store) ConfirmTyped(ctx context.Context, sessionID, prompt string, now time.Time) (int64, error) {
+	if sessionID == "" {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx, `
+UPDATE decisions SET confirmed_at = ?
+WHERE session_id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL
+  AND delivered_at <= ? AND `+typedNames,
+		formatTime(now), sessionID, formatTime(now), prompt, prompt)
+	if err != nil {
+		return 0, fail("confirm typed answers for", sessionID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fail("confirm typed answers for", sessionID, err)
+	}
+	return n, nil
 }

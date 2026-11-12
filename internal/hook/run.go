@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,8 +64,10 @@ type Result struct {
 // On Stop the same transaction also counts the session's open blocking
 // tickets and claims its queued answers (plan sections 4.3 and 4.9): claimed
 // answers block the stop (Result.Stdout) and leave the session working;
-// otherwise an open blocking ticket makes it needs_decision. No other event
-// reads the decisions.
+// otherwise an open blocking ticket makes it needs_decision. A
+// UserPromptSubmit whose prompt names a decision typed into the session
+// confirms it (store.ConfirmTyped, Ruling 86); no other event touches the
+// decisions.
 //
 // A transcript that cannot be read does not stop the update: the session is
 // written without it and the read error is returned with it. The same holds
@@ -108,6 +111,12 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 	})
 	if err != nil {
 		return Result{}, err
+	}
+	// A submitted prompt naming a typed answer confirms it (Ruling 86).
+	// Only a prompt that can name one costs a statement.
+	if kind == model.UserPromptSubmit && strings.Contains(ev.Prompt, "Decision D-") {
+		_, err = st.ConfirmTyped(ctx, ev.SessionID, ev.Prompt, ev.At)
+		readErr = errors.Join(readErr, err)
 	}
 	return Result{Session: out}, readErr
 }

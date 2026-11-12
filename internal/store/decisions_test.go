@@ -329,14 +329,55 @@ func assertPlan1Runs(t *testing.T, db *sql.DB, at string) {
 	}
 }
 
+// Ruling 86: a database migrated to 0003 counts answers typed before it as
+// confirmed when they were typed, and leaves every other row unconfirmed.
+func TestMigrationConfirmsEarlierTyping(t *testing.T) {
+	path := dbPath(t)
+	const at = "2026-11-11T14:00:05.000000000Z"
+	db := plan1Database(t, path, at)
+	schema, err := os.ReadFile("migrations/0002_decisions.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		string(schema),
+		`INSERT INTO schema_migrations (name, applied_at) VALUES ('0002_decisions.sql', '` + at + `')`,
+		`INSERT INTO decisions (id, question, options, recommendation, rationale, reversibility, mode, scope, status,
+		  args_hash, delivery, delivered_via, delivered_at, created_at)
+		 VALUES ('D-1', 'Typed?', '[]', 'A', 'r', 'cheap', 'blocking', 'repo', 'answered', 'h1', 'delivered', 'send_keys', '` + at + `', '` + at + `'),
+		        ('D-2', 'Stopped?', '[]', 'A', 'r', 'cheap', 'blocking', 'repo', 'answered', 'h2', 'delivered', 'stop_hook', '` + at + `', '` + at + `')`,
+	} {
+		if _, err = db.Exec(q); err != nil {
+			t.Fatalf("building the Plan 2 database: %v", err)
+		}
+	}
+	s := open(t, path)
+	if got := getDecision(t, s, "D-1"); !got.ConfirmedAt.Equal(decisionsTime(t, at)) {
+		t.Errorf("D-1 typed before the migration: confirmed at %v, want %s", got.ConfirmedAt, at)
+	}
+	if got := getDecision(t, s, "D-2"); !got.ConfirmedAt.IsZero() {
+		t.Errorf("D-2 (stop_hook): confirmed at %v, want zero", got.ConfirmedAt)
+	}
+}
+
+// decisionsTime parses a stored timestamp.
+func decisionsTime(t *testing.T, s string) time.Time {
+	t.Helper()
+	ts, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ts
+}
+
 func TestMigrationOnPlan1Database(t *testing.T) {
 	path := dbPath(t)
 	const at = "2026-11-11T14:00:05.000000000Z"
 	db := plan1Database(t, path, at)
 
 	s := open(t, path)
-	if n := countMigrations(t, path); n != 2 {
-		t.Errorf("schema_migrations has %d rows, want 2", n)
+	if n := countMigrations(t, path); n != 3 {
+		t.Errorf("schema_migrations has %d rows, want 3", n)
 	}
 	sess := get(t, s, "old")
 	want := model.Session{

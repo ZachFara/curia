@@ -70,7 +70,7 @@ func refusalNote(why store.TypingRefusal, d model.Decision) string {
 	case store.TypingSharedPane:
 		return queuedNote("pane is shared by another session", d) // Ruling 73
 	case store.TypingUnsubmitted:
-		return queuedNote("an answer typed earlier may still be unsubmitted in the agent's prompt", d)
+		return queuedNote("an answer typed earlier is not confirmed yet (it may sit unsubmitted in the agent's prompt)", d)
 	}
 	return "pane gone; " + askCheck(d.ID) // stale, ended, no pane or no row
 }

@@ -744,9 +744,9 @@ func TestSubagentsRunningIsNotTyped(t *testing.T) {
 		"agent has subagents running; it gets the answer when they finish, or tell the agent to call check_decision D-1")
 }
 
-// Ruling 81: after a partial send the line may sit in the prompt, so the
-// next answer for the session is not typed (it would be glued to the line)
-// until a hook event shows the agent took a prompt; then it is.
+// Rulings 81 and 86: after a partial send the line may sit in the prompt,
+// so the next answer for the session is not typed (it would be glued to the
+// line) until a submitted prompt names the first; then it is.
 func TestNoTypingOverAnUnsubmittedLine(t *testing.T) {
 	st := openStore(t)
 	seedSession(t, st, asker())
@@ -767,13 +767,13 @@ func TestNoTypingOverAnUnsubmittedLine(t *testing.T) {
 	if got := sendKeysCalls(fake.Calls); len(got) != 0 {
 		t.Errorf("typed over an unsubmitted line: %q", got)
 	}
-	wantQueued(t, st, out, second.ID, "an answer typed earlier may still be unsubmitted in the agent's prompt; "+
+	wantQueued(t, st, out, second.ID, "an answer typed earlier is not confirmed yet (it may sit unsubmitted in the agent's prompt); "+
 		"queued for the Stop hook, or tell the agent to call check_decision D-2")
 
-	// The user pressed Enter: UserPromptSubmit and Stop moved updated_at on.
-	s := asker()
-	s.State, s.UpdatedAt = model.StateIdle, now.Add(2*time.Minute)
-	seedSession(t, st, s)
+	// The user pressed Enter: the UserPromptSubmit named D-1 (Ruling 86).
+	if _, err = st.ConfirmTyped(context.Background(), "s1", decision.TypedMessage(getDecision(t, st, first.ID)), now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 	third := seedTicket(t, st, model.ModeBlocking, "Postgres log")
 	out, err = deliver.Answer(context.Background(), st, fake, log, third.ID, answerA, now.Add(3*time.Minute))
 	if err != nil {
