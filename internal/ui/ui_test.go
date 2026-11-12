@@ -621,6 +621,23 @@ func TestRepoColumnShowsBasename(t *testing.T) {
 	}
 }
 
+// The filter matches what the repo cell shows (the basename), not the
+// hidden directories of the stored path.
+func TestFilterMatchesDisplayedRepo(t *testing.T) {
+	sessions := []model.Session{
+		{ID: "1", Repo: "/home/zach/src/web", Branch: "main", Model: "m-web", UpdatedAt: testNow},
+		{ID: "2", Repo: "/home/zach/src/api", Branch: "dev", Model: "m-api", UpdatedAt: testNow},
+	}
+	m, _, _ := newTest(t, ModePopup, sessions...)
+	if f, _ := press(m, "/", "zach"); strings.Contains(f.View(), "m-web") || strings.Contains(f.View(), "m-api") {
+		t.Errorf("filter on a hidden path directory matched:\n%s", f.View())
+	}
+	m, _ = press(m, "/", "web@m")
+	if view := m.View(); !strings.Contains(view, "m-web") || strings.Contains(view, "m-api") {
+		t.Errorf("filter web@m, want only m-web:\n%s", view)
+	}
+}
+
 func TestShownPercentMatchesColor(t *testing.T) {
 	s := threeSessions()[0]
 	s.ContextUsed, s.ContextMax = 171999, 200000 // 85.9995%

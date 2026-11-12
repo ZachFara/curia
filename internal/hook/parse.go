@@ -25,7 +25,8 @@ var knownKinds = map[model.EventKind]bool{
 }
 
 // Parse reads a hook payload into an Event of the given kind, in pane, at
-// now. It reads session_id, cwd, transcript_path, tool_name and message;
+// now. It reads session_id, cwd, transcript_path, tool_name, message and
+// notification_type;
 // ToolTarget is the first present of tool_input.file_path,
 // tool_input.pattern or tool_input.command, cut to 60 runes. A field that is
 // missing or not a string reads as empty. Parse fails on an unknown kind, a
@@ -42,15 +43,16 @@ func Parse(kind model.EventKind, payload []byte, pane string, now time.Time) (mo
 		return model.Event{}, fmt.Errorf("%s payload is not a JSON object", kind)
 	}
 	ev := model.Event{
-		Kind:           kind,
-		SessionID:      str(fields["session_id"]),
-		Pane:           pane,
-		Cwd:            str(fields["cwd"]),
-		TranscriptPath: str(fields["transcript_path"]),
-		ToolName:       str(fields["tool_name"]),
-		ToolTarget:     toolTarget(fields["tool_input"]),
-		Message:        str(fields["message"]),
-		At:             now,
+		Kind:             kind,
+		SessionID:        str(fields["session_id"]),
+		Pane:             pane,
+		Cwd:              str(fields["cwd"]),
+		TranscriptPath:   str(fields["transcript_path"]),
+		ToolName:         str(fields["tool_name"]),
+		ToolTarget:       toolTarget(fields["tool_input"]),
+		Message:          str(fields["message"]),
+		NotificationType: str(fields["notification_type"]),
+		At:               now,
 	}
 	if ev.SessionID == "" {
 		return model.Event{}, fmt.Errorf("%s payload has no session_id", kind)

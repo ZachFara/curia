@@ -2,6 +2,7 @@ package hook_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,7 +22,13 @@ var t0 = time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
 
 func fixture(t *testing.T, kind model.EventKind) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", string(kind)+".json"))
+	return fixtureFile(t, string(kind))
+}
+
+// fixtureFile reads testdata/<name>.json.
+func fixtureFile(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Clean(filepath.Join("testdata", name+".json")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +50,9 @@ func TestParseFixtures(t *testing.T) {
 		with(model.UserPromptSubmit, nil),
 		with(model.PreToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Edit", "src/api.ts" }),
 		with(model.PostToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Grep", "func Parse" }),
-		with(model.Notification, func(e *model.Event) { e.Message = "Claude needs your permission to use Bash" }),
+		with(model.Notification, func(e *model.Event) {
+			e.Message, e.NotificationType = "Claude needs your permission to use Bash", "permission_prompt"
+		}),
 		with(model.Stop, nil),
 		with(model.SubagentStop, nil),
 		with(model.SessionEnd, nil),
@@ -59,6 +68,60 @@ func TestParseFixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseNotificationTypes(t *testing.T) {
+	for file, want := range map[string]string{
+		"NotificationIdlePrompt":  "idle_prompt",
+		"NotificationAuthSuccess": "auth_success",
+	} {
+		ev, err := hook.Parse(model.Notification, fixtureFile(t, file), "%3", t0)
+		if err != nil || ev.NotificationType != want {
+			t.Errorf("%s: NotificationType = %q, %v, want %q", file, ev.NotificationType, err, want)
+		}
+	}
+}
+
+// Ruling 31: the idle reminder and auth_success are not a request for input.
+func TestInformationalNotificationChangesNothing(t *testing.T) {
+	for _, file := range []string{"NotificationIdlePrompt", "NotificationAuthSuccess"} {
+		t.Run(file, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "curia.db")
+			st, err := store.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = st.Close() }()
+			env := (&fakeEnv{}).env("%3")
+			run(t, st, env, model.SessionStart, payload("sess-1", "/p/t.jsonl", ""))
+			idle := run(t, st, env, model.Stop, payload("sess-1", "", ""))
+			later := env
+			later.Now = func() time.Time { return t0.Add(time.Minute) }
+			if got := run(t, st, later, model.Notification, fixtureFile(t, file)); got != idle {
+				t.Errorf("after %s:\n %+v\nwant unchanged\n %+v", file, got, idle)
+			}
+			// The raw event is still recorded.
+			if n := countEvents(t, path); n != 3 {
+				t.Errorf("events = %d, want 3", n)
+			}
+		})
+	}
+}
+
+// countEvents counts the raw events in the database at path. The sqlite
+// driver is registered by the store package.
+func countEvents(t *testing.T, path string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func TestParseToolTarget(t *testing.T) {
@@ -222,6 +285,66 @@ func TestGitAndTmuxOnlyOnSessionStart(t *testing.T) {
 	}
 }
 
+// A session first seen mid-run (already running when Curia was installed)
+// gets what a SessionStart would have given it, once (Ruling 29).
+func TestFirstSeenMidRunIsEnrichedOnce(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{}
+	env := f.env("%2")
+	got := run(t, st, env, model.Notification, payload("M", "", `,"message":"needs you"`))
+	want := model.Session{
+		ID: "M", Agent: "claude", Pane: "%2", TmuxSession: "work", TmuxWindow: "@7",
+		Cwd: "/src/curia", Repo: "/src/curia", Branch: "feat/hook", LastUpdate: "needs you",
+		State: model.StateWaiting, StartedAt: t0, UpdatedAt: t0,
+	}
+	if got != want || get(t, st, "M") != want {
+		t.Errorf("first seen =\n %+v\nwant\n %+v", got, want)
+	}
+	for _, kind := range []model.EventKind{model.PreToolUse, model.Stop, model.Notification} {
+		run(t, st, env, kind, payload("M", "", `,"tool_name":"Bash"`))
+	}
+	if !slices.Equal(f.gitCalls, []string{"/src/curia"}) || !slices.Equal(f.paneCalls, []string{"%2"}) {
+		t.Errorf("Git calls %q, PaneInfo calls %q, want one each", f.gitCalls, f.paneCalls)
+	}
+}
+
+func TestFirstSeenMidRunEndsPriorSessionInPane(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{}
+	run(t, st, f.env("%3"), model.SessionStart, payload("A", "", ""))
+	run(t, st, f.env("%3"), model.PostToolUse, payload("B", "", `,"tool_name":"Read"`))
+	if a := get(t, st, "A"); a.State != model.StateEnded {
+		t.Errorf("A = %s, want ended by B first seen in its pane", a.State)
+	}
+	if b := get(t, st, "B"); b.State != model.StateWorking {
+		t.Errorf("B = %s, want working", b.State)
+	}
+}
+
+// TestFirstSeenKeepsWhatAConcurrentSessionStartFilled runs a SessionStart for
+// the same session while the first-seen event is asking git, that is between
+// its keyed read and its transaction.
+func TestFirstSeenKeepsWhatAConcurrentSessionStartFilled(t *testing.T) {
+	st := openStore(t)
+	starter := (&fakeEnv{}).env("%2")
+	starter.Git = func(string) (string, string) { return "/other", "main" }
+	starter.PaneInfo = func(string) (string, string) { return "other", "@9" }
+	env := (&fakeEnv{}).env("%2")
+	git := env.Git
+	env.Git = func(cwd string) (string, string) {
+		run(t, st, starter, model.SessionStart, payload("M", "", ""))
+		return git(cwd)
+	}
+	got := run(t, st, env, model.Notification, payload("M", "", `,"message":"needs you"`))
+	if got.Repo != "/other" || got.Branch != "main" || got.TmuxSession != "other" || got.TmuxWindow != "@9" {
+		t.Errorf("got repo %q branch %q tmux %q/%q, want the SessionStart's /other main other/@9",
+			got.Repo, got.Branch, got.TmuxSession, got.TmuxWindow)
+	}
+	if got.State != model.StateWaiting {
+		t.Errorf("State = %s, want waiting", got.State)
+	}
+}
+
 func TestSessionStartEndsPriorSessionInPane(t *testing.T) {
 	st := openStore(t)
 	f := &fakeEnv{}
@@ -366,7 +489,7 @@ func TestTranscriptReadResumesFromOffset(t *testing.T) {
 	}
 }
 
-func TestEndedSessionIgnoresLaterEvents(t *testing.T) {
+func TestEndedSessionIgnoresSubagentStopAndSessionEnd(t *testing.T) {
 	st := openStore(t)
 	tr := writeTranscript(t)
 	env := (&fakeEnv{}).env("%3")
@@ -375,9 +498,40 @@ func TestEndedSessionIgnoresLaterEvents(t *testing.T) {
 
 	later := env
 	later.Now = func() time.Time { return t0.Add(time.Hour) }
-	got := run(t, st, later, model.Stop, payload("A", tr, ""))
-	if got != ended {
-		t.Errorf("Stop after SessionEnd changed the session:\n %+v\nwant\n %+v", got, ended)
+	for _, kind := range []model.EventKind{model.SubagentStop, model.SessionEnd} {
+		if got := run(t, st, later, kind, payload("A", tr, "")); got != ended {
+			t.Errorf("%s after SessionEnd changed the session:\n %+v\nwant\n %+v", kind, got, ended)
+		}
+	}
+}
+
+// TestNestedSessionDoesNotHideParent: a `claude -p` run from an agent's Bash
+// tool inherits TMUX_PANE, so its SessionStart ends the outer session; the
+// outer session's next activity brings it back (Ruling 27).
+func TestNestedSessionDoesNotHideParent(t *testing.T) {
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%7")
+	steps := []struct {
+		kind  model.EventKind
+		id    string
+		extra string
+	}{
+		{model.SessionStart, "OUTER", ""},
+		{model.PreToolUse, "OUTER", `,"tool_name":"Bash"`},
+		{model.SessionStart, "NESTED", ""},
+		{model.SessionEnd, "NESTED", ""},
+		{model.PostToolUse, "OUTER", `,"tool_name":"Bash"`},
+		{model.Notification, "OUTER", `,"message":"Claude needs your permission to use Bash"`},
+	}
+	for _, s := range steps {
+		run(t, st, env, s.kind, payload(s.id, "", s.extra))
+	}
+	listed, err := st.ListSessions(context.Background(), store.ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != "OUTER" || listed[0].State != model.StateWaiting {
+		t.Errorf("listed = %+v, want OUTER waiting only", listed)
 	}
 }
 

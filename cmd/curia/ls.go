@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,12 +9,14 @@ import (
 	"text/tabwriter"
 	"time"
 	"unicode"
+	"unicode/utf16"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/ui"
 )
 
 // lsJSON is --json.
@@ -24,7 +27,8 @@ func init() {
 		Use:   "ls",
 		Short: "List sessions, most in need of you first",
 		Long: "Marks sessions whose tmux pane is gone as stale, then lists every session that\n" +
-			"has not ended, ranked by how much it needs you. --json prints a JSON array.",
+			"has not ended, except those stale for longer than stale_hide_after (10m by\n" +
+			"default), ranked by how much it needs you. --json prints a JSON array.",
 		Args: cobra.NoArgs,
 		RunE: runLs,
 	}
@@ -100,55 +104,48 @@ func printJSON(w io.Writer, sessions []model.Session) error {
 			StartedAt: jsonTime(s.StartedAt), UpdatedAt: jsonTime(s.UpdatedAt),
 		})
 	}
-	enc := json.NewEncoder(w)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // "&&" in a command stays readable
 	enc.SetIndent("", "  ")
-	return enc.Encode(rows)
+	if err := enc.Encode(rows); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
+	return err
 }
 
-// printTable prints one row per session. Every cell is session text, which
-// is untrusted, so it goes through cell before reaching the terminal.
+// escapeUnprintable writes every unprintable rune of encoded JSON (C1
+// controls, bidi overrides and other invisible format characters, which the
+// encoder leaves raw) as a \uXXXX escape, a surrogate pair above U+FFFF, so
+// they cannot reach a terminal. Outside strings JSON holds only printable
+// runes and the line breaks of the indentation, which are kept, and inside
+// strings the escapes decode to the same text.
+func escapeUnprintable(encoded string) string {
+	var b strings.Builder
+	for _, r := range encoded {
+		switch {
+		case r == '\n' || unicode.IsPrint(r):
+			b.WriteRune(r)
+		case r > 0xFFFF:
+			hi, lo := utf16.EncodeRune(r)
+			fmt.Fprintf(&b, `\u%04x\u%04x`, hi, lo)
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+	}
+	return b.String()
+}
+
+// printTable prints one row per session, the repo as its basename. Every
+// cell is session text, which is untrusted, so it goes through ui.Cell
+// before reaching the terminal.
 func printTable(w io.Writer, sessions []model.Session, now time.Time) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "STATE\tPANE\tREPO\tBRANCH\tAGE\tLAST UPDATE")
 	for _, s := range sessions {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", cell(string(s.State)), cell(s.Pane),
-			cell(s.Repo), cell(s.Branch), age(s.UpdatedAt, now), cell(s.LastUpdate))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", ui.Cell(string(s.State)), ui.Cell(s.Pane),
+			ui.Cell(ui.RepoName(s.Repo)), ui.Cell(s.Branch), ui.Cell(ui.Age(s.UpdatedAt, now)), ui.Cell(s.LastUpdate))
 	}
 	return tw.Flush()
-}
-
-// cell makes s safe to print in a table: every character that is not
-// printable (control characters such as ESC, C1 codes, tabs, line breaks,
-// and invisible format characters such as bidi overrides) becomes '?', so
-// no escape sequence reaches the terminal and the row stays one line.
-// An empty cell is "-".
-func cell(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return strings.Map(func(r rune) rune {
-		if unicode.IsPrint(r) { // includes the ASCII space
-			return r
-		}
-		return '?'
-	}, s)
-}
-
-// age is how long before now t was, in its largest whole unit; "-" for the
-// zero time.
-func age(t, now time.Time) string {
-	if t.IsZero() {
-		return "-"
-	}
-	d := max(now.Sub(t), 0)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d/time.Second))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d/time.Minute))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d/time.Hour))
-	default:
-		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
-	}
 }

@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -168,6 +170,70 @@ func TestLsTable(t *testing.T) {
 		if !strings.Contains(lines[1], want) {
 			t.Errorf("first row %q is missing %q", lines[1], want)
 		}
+	}
+}
+
+// Ruling 22: the table shows the repo's basename; --json keeps the full path.
+func TestLsTableShowsRepoBasename(t *testing.T) {
+	fleetHome(t, []string{"%1"}, model.Session{
+		ID: "x", Agent: "claude", Pane: "%1", State: model.StateWaiting, UpdatedAt: at(11, 0),
+		Repo: "/Users/me/src/curia", Branch: "main",
+	})
+	out, err := runRoot(t, "ls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := strings.Fields(strings.Split(out, "\n")[1]); len(f) < 3 || f[2] != "curia" {
+		t.Errorf("ls row = %q, want repo column curia", out)
+	}
+	if out, _ = runRoot(t, "ls", "--json"); !strings.Contains(out, `"repo": "/Users/me/src/curia"`) {
+		t.Errorf("ls --json lost the full repo path:\n%s", out)
+	}
+}
+
+// ls --json prints no raw C1, bidi or other unprintable rune and does not
+// HTML-escape, yet stays valid JSON that decodes to the stored strings.
+func TestLsJSONEscapesUnprintableRunes(t *testing.T) {
+	odd := model.Session{
+		ID: "x", Agent: "claude", Pane: "%1", State: model.StateWaiting, UpdatedAt: at(11, 0),
+		Repo:       "repo\x1b]0;owned\x07",
+		Branch:     "br\u202eanch\u009b2J",
+		LastUpdate: "make && ./run <x> \U000E0001 é 世 \u2028",
+	}
+	fleetHome(t, []string{"%1"}, odd)
+	out, err := runRoot(t, "ls", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range out {
+		if r != '\n' && !unicode.IsPrint(r) {
+			t.Errorf("ls --json printed the raw rune %U:\n%s", r, out)
+		}
+	}
+	for _, want := range []string{"make && ./run <x>", `\u202e`, `\u009b`, `\udb40\udc01`, "é 世", `\u001b`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ls --json lacks %q:\n%s", want, out)
+		}
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("ls --json is not valid JSON: %v\n%s", err, out)
+	}
+	if len(rows) != 1 || rows[0]["repo"] != odd.Repo || rows[0]["branch"] != odd.Branch || rows[0]["last_update"] != odd.LastUpdate {
+		t.Errorf("decoded %q, want the stored strings back", rows)
+	}
+}
+
+// ls hides sessions stale for longer than stale_hide_after; its help says so.
+func TestLsHelpMentionsHiddenStaleSessions(t *testing.T) {
+	t.Cleanup(func() { // cobra keeps --help set on the command
+		if ls, _, err := rootCmd.Find([]string{"ls"}); err == nil {
+			_ = ls.Flags().Set("help", "false")
+		}
+	})
+	out, err := runRoot(t, "ls", "--help")
+	if err != nil || !strings.Contains(out, "stale_hide_after") {
+		t.Errorf("ls --help = %q, %v, want it to say old stale sessions are hidden", out, err)
 	}
 }
 

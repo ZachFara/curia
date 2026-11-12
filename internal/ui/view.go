@@ -151,11 +151,11 @@ func (m Model) titles(cols []column) []string {
 }
 
 // cells are the texts of s's columns. Session text is untrusted, so every
-// cell goes through cell.
+// cell goes through Cell.
 func (m Model) cells(s model.Session, cols []column) []string {
 	out := make([]string, len(cols))
 	for i, c := range cols {
-		out[i] = cell(m.cellText(s, c))
+		out[i] = Cell(m.cellText(s, c))
 	}
 	return out
 }
@@ -180,21 +180,30 @@ func (m Model) cellText(s model.Session, c column) string {
 	case colUpdate:
 		return s.LastUpdate
 	default:
-		return age(s.UpdatedAt, m.now())
+		return Age(s.UpdatedAt, m.now())
 	}
 }
 
 // repoText is "repo@branch" with the basename of the stored repo path
 // (Ruling 22), the repo alone without a branch, and empty without a repo.
 func repoText(s model.Session) string {
-	if s.Repo == "" {
+	repo := RepoName(s.Repo)
+	if repo == "" {
 		return ""
 	}
-	repo := filepath.Base(s.Repo)
 	if s.Branch == "" {
 		return repo
 	}
 	return repo + "@" + s.Branch
+}
+
+// RepoName is how views show a stored repository path: its basename
+// (Ruling 22), or empty for no repository. curia ls uses it too.
+func RepoName(repo string) string {
+	if repo == "" {
+		return ""
+	}
+	return filepath.Base(repo)
 }
 
 // windowText is "session:window" with the window's current name, or its
@@ -340,8 +349,9 @@ func truncate(s string, w int) string {
 	return b.String() + ellipsis
 }
 
-// cell is clean(s), or "-" for an empty cell.
-func cell(s string) string {
+// Cell makes untrusted text safe to print as one table cell: clean(s), or
+// "-" for an empty cell. curia ls uses it too.
+func Cell(s string) string {
 	if s == "" {
 		return "-"
 	}
@@ -361,9 +371,9 @@ func clean(s string) string {
 	}, s)
 }
 
-// age is how long before now t was, in its largest whole unit; empty for
-// the zero time.
-func age(t, now time.Time) string {
+// Age is how long before now t was, in its largest whole unit, such as
+// "5m"; empty for the zero time.
+func Age(t, now time.Time) string {
 	if t.IsZero() {
 		return ""
 	}

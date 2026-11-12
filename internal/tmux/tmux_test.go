@@ -12,15 +12,16 @@ import (
 )
 
 func TestParseListPanes(t *testing.T) {
-	out := "%0\tmain\t@0\tzsh\n%1\tmain\t@1\tmy long window\n%2\twork\t@2\ta\tb\n"
+	out := "%0\tmain\t@0\t1794437573\tzsh\n%1\tmain\t@1\t1794437573\tmy long window\n%2\twork\t@2\t1794437573\ta\tb\n"
 	got, err := parsePanes(out)
 	if err != nil {
 		t.Fatal(err)
 	}
+	start := time.Unix(1794437573, 0)
 	want := []Pane{
-		{"%0", "main", "@0", "zsh"},
-		{"%1", "main", "@1", "my long window"},
-		{"%2", "work", "@2", "a\tb"},
+		{ID: "%0", Session: "main", WindowID: "@0", ServerStart: start, WindowName: "zsh"},
+		{ID: "%1", Session: "main", WindowID: "@1", ServerStart: start, WindowName: "my long window"},
+		{ID: "%2", Session: "work", WindowID: "@2", ServerStart: start, WindowName: "a\tb"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v want %+v", got, want)
@@ -31,8 +32,14 @@ func TestParsePanesMalformed(t *testing.T) {
 	if _, err := parsePanes("%0\tonly-two\n"); err == nil {
 		t.Fatal("want error for malformed line")
 	}
-	if _, err := parsePanes("\t\t\t\n"); err == nil {
+	if _, err := parsePanes("\t\t\t\t\n"); err == nil {
 		t.Fatal("want error for empty pane id")
+	}
+	// The old four-field format, or a start time that is not unix seconds.
+	for _, line := range []string{"%0\tmain\t@0\tzsh\n", "%0\tmain\t@0\tsoon\tzsh\n", "%0\tmain\t@0\t\tzsh\n"} {
+		if _, err := parsePanes(line); err == nil {
+			t.Errorf("parsePanes(%q): want error for a bad start time", line)
+		}
 	}
 }
 
@@ -52,7 +59,10 @@ func TestEscapeMessage(t *testing.T) {
 
 func TestFake(t *testing.T) {
 	ctx := context.Background()
-	f := &Fake{Panes: []Pane{{"%0", "s", "@0", "w"}, {"%1", "s", "@1", "x"}}}
+	f := &Fake{Panes: []Pane{
+		{ID: "%0", Session: "s", WindowID: "@0", WindowName: "w"},
+		{ID: "%1", Session: "s", WindowID: "@1", WindowName: "x"},
+	}}
 	var c Client = f
 
 	ps, err := c.ListPanes(ctx)
@@ -118,6 +128,10 @@ func TestExecAgainstRealTmux(t *testing.T) {
 	}
 	if len(panes) != 1 || panes[0].Session != "t" || panes[0].WindowName != "win dow" {
 		t.Fatalf("panes = %+v", panes)
+	}
+	// The server was started by realTmux, moments ago.
+	if d := time.Since(panes[0].ServerStart); d < 0 || d > time.Minute {
+		t.Fatalf("ServerStart = %v, want within the last minute", panes[0].ServerStart)
 	}
 	p := panes[0]
 

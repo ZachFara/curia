@@ -141,15 +141,11 @@ func TestApplyTransitions(t *testing.T) {
 	}
 }
 
-func TestEndedIgnoresEventsExceptSessionStart(t *testing.T) {
+func TestEndedIgnoresSubagentStopAndSessionEnd(t *testing.T) {
 	ended := base()
 	ended.State = model.StateEnded
-	kinds := []model.EventKind{
-		model.UserPromptSubmit, model.PreToolUse, model.PostToolUse,
-		model.Notification, model.Stop, model.SubagentStop, model.SessionEnd,
-	}
-	for _, k := range kinds {
-		ev := model.Event{Kind: k, SessionID: "s1", ToolName: "Task", Message: "m", At: t1}
+	for _, k := range []model.EventKind{model.SubagentStop, model.SessionEnd} {
+		ev := model.Event{Kind: k, SessionID: "s1", At: t1}
 		if got := state.Apply(ended, ev, true); got != ended {
 			t.Errorf("%s changed an ended session: %+v", k, got)
 		}
@@ -158,6 +154,111 @@ func TestEndedIgnoresEventsExceptSessionStart(t *testing.T) {
 	got := state.Apply(ended, ev, false)
 	if got.State != model.StateWorking || got.Pane != "%2" || got.StartedAt != t1 {
 		t.Errorf("SessionStart did not revive ended session: %+v", got)
+	}
+}
+
+// TestEndedResumesOnActivity: a session ended by a nested session's start in
+// its pane is alive again when it shows activity (Ruling 27).
+func TestEndedResumesOnActivity(t *testing.T) {
+	ended := base()
+	ended.State = model.StateEnded
+	for kind, want := range map[model.EventKind]model.State{
+		model.UserPromptSubmit: model.StateWorking,
+		model.PreToolUse:       model.StateWorking,
+		model.PostToolUse:      model.StateWorking,
+		model.Notification:     model.StateWaiting,
+		model.Stop:             model.StateIdle,
+	} {
+		ev := model.Event{Kind: kind, SessionID: "s1", ToolName: "Bash", Message: "m", At: t1}
+		got := state.Apply(ended, ev, false)
+		live := ended
+		live.State = model.StateWorking
+		if got.State != want || !got.UpdatedAt.Equal(t1) || got != state.Apply(live, ev, false) {
+			t.Errorf("%s on an ended session = %+v, want it applied normally (state %s)", kind, got, want)
+		}
+	}
+}
+
+func TestIgnores(t *testing.T) {
+	ended, live := base(), base()
+	ended.State = model.StateEnded
+	kinds := []model.EventKind{
+		model.SessionStart, model.UserPromptSubmit, model.PreToolUse, model.PostToolUse,
+		model.Notification, model.Stop, model.SubagentStop, model.SessionEnd,
+	}
+	for _, k := range kinds {
+		want := k == model.SubagentStop || k == model.SessionEnd
+		if got := state.Ignores(ended, model.Event{Kind: k}); got != want {
+			t.Errorf("Ignores(ended, %s) = %v, want %v", k, got, want)
+		}
+		if state.Ignores(live, model.Event{Kind: k}) {
+			t.Errorf("Ignores(idle, %s) = true", k)
+		}
+	}
+}
+
+func TestSessionStartResetsOffsetForNewTranscript(t *testing.T) {
+	s := base()
+	s.TranscriptOffset = 500
+	same := state.Apply(s, model.Event{Kind: model.SessionStart, SessionID: "s1", TranscriptPath: "/t", At: t1}, false)
+	if same.TranscriptOffset != 500 {
+		t.Errorf("same transcript: offset = %d, want 500 kept", same.TranscriptOffset)
+	}
+	moved := state.Apply(s, model.Event{Kind: model.SessionStart, SessionID: "s1", TranscriptPath: "/t2", At: t1}, false)
+	if moved.TranscriptPath != "/t2" || moved.TranscriptOffset != 0 {
+		t.Errorf("new transcript: path %q offset %d, want /t2 and 0", moved.TranscriptPath, moved.TranscriptOffset)
+	}
+	// First seen mid-run: the hook has already read ev's transcript up to the
+	// offset, so the offset belongs to the path the session takes from ev.
+	fresh := model.Session{TranscriptOffset: 300}
+	got := state.Apply(fresh, model.Event{Kind: model.PostToolUse, SessionID: "n", TranscriptPath: "/tp", At: t1}, false)
+	if got.TranscriptOffset != 300 {
+		t.Errorf("first seen mid-run: offset = %d, want 300 kept", got.TranscriptOffset)
+	}
+}
+
+func TestPostToolUseTaskDoesNotCountSubagent(t *testing.T) {
+	got := state.Apply(base(), model.Event{Kind: model.PostToolUse, SessionID: "s1", ToolName: "Task", At: t1}, false)
+	if got.SubagentsActive != 0 {
+		t.Errorf("SubagentsActive = %d, want 0 (only PreToolUse counts)", got.SubagentsActive)
+	}
+}
+
+// Ruling 31: idle_prompt (the prompt has sat idle about a minute) and
+// auth_success are not a request for input.
+func TestInformationalNotificationChangesNothing(t *testing.T) {
+	for _, typ := range []string{"idle_prompt", "auth_success"} {
+		for _, st := range []model.State{model.StateIdle, model.StateWorking, model.StateEnded} {
+			s := base()
+			s.State, s.LastUpdate = st, "done"
+			ev := model.Event{Kind: model.Notification, SessionID: "s1", Message: "waiting", NotificationType: typ, At: t1}
+			if got := state.Apply(s, ev, false); got != s {
+				t.Errorf("%s on %s changed the session: %+v", typ, st, got)
+			}
+			if !state.Ignores(s, ev) {
+				t.Errorf("Ignores(%s, %s) = false", st, typ)
+			}
+		}
+	}
+	// A session first seen on one gets a row, at its prompt, with no message.
+	ev := model.Event{Kind: model.Notification, SessionID: "n", Message: "waiting", NotificationType: "idle_prompt", At: t1}
+	if got := state.Apply(model.Session{}, ev, false); got.ID != "n" || got.State != model.StateIdle || got.LastUpdate != "" {
+		t.Errorf("first seen on idle_prompt = %+v, want idle with no LastUpdate", got)
+	}
+	for _, typ := range []string{"", "permission_prompt", "elicitation_dialog"} {
+		ev := model.Event{Kind: model.Notification, SessionID: "s1", Message: "m", NotificationType: typ, At: t1}
+		if got := state.Apply(base(), ev, false); got.State != model.StateWaiting {
+			t.Errorf("Notification %q: state %s, want waiting", typ, got.State)
+		}
+	}
+}
+
+func TestNotificationWithEmptyMessage(t *testing.T) {
+	s := base()
+	s.LastUpdate = "Bash ls"
+	got := state.Apply(s, model.Event{Kind: model.Notification, SessionID: "s1", At: t1}, false)
+	if got.State != model.StateWaiting || got.LastUpdate != "" || !got.UpdatedAt.Equal(t1) {
+		t.Errorf("got %+v, want waiting with the (empty) prompt text", got)
 	}
 }
 
@@ -189,6 +290,12 @@ func TestLastUpdateTruncatedTo80Runes(t *testing.T) {
 	}, false)
 	if n := len([]rune(got.LastUpdate)); n != 80 {
 		t.Errorf("message LastUpdate runes = %d, want 80", n)
+	}
+	got = state.Apply(base(), model.Event{
+		Kind: model.Stop, SessionID: "s1", Message: target, At: t1,
+	}, false)
+	if got.LastUpdate != string([]rune(target)[:80]) {
+		t.Errorf("Stop LastUpdate = %q, want the first 80 runes", got.LastUpdate)
 	}
 }
 

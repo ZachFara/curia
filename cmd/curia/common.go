@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/ZachFara/curia/internal/attention"
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/store"
@@ -46,22 +47,41 @@ func openLog(path string) (*slog.Logger, func() error, error) {
 	return slog.New(slog.NewTextHandler(f, nil)), f.Close, nil
 }
 
+// newTmuxClient builds the tmux client every command uses; tests replace it
+// with a tmux.Fake.
+var newTmuxClient = func() tmux.Client { return tmux.NewExec("") }
+
 // clock is the wall clock of the fleet commands (ls, next); tests fix it.
 var clock = time.Now
 
-// reconcile marks sessions whose pane is gone as stale (fleet.Reconcile).
-// When tmux cannot list its panes (no server, or not installed) it logs that
-// to the log file at logPath and skips reconciling.
+// reconcile marks sessions whose pane is gone as stale (fleet.Reconcile) and
+// re-applies the attention marker of each window it marked a session stale
+// in, so a red window does not stay red; a marker that fails is logged, not
+// returned. When tmux cannot list its panes (no server, or not installed) it
+// logs that to the log file at logPath and skips reconciling.
 func reconcile(ctx context.Context, st *store.Store, client tmux.Client, logPath string, now time.Time) error {
 	tctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 	defer cancel()
 	panes, err := client.ListPanes(tctx)
 	if err != nil {
-		if logger, closeLog, lerr := openLog(logPath); lerr == nil {
-			logger.Warn("tmux unreachable, not reconciling", "err", err.Error())
-			_ = closeLog()
-		}
+		logWarn(logPath, "tmux unreachable, not reconciling", "err", err.Error())
 		return nil
 	}
-	return fleet.Reconcile(ctx, st, panes, now)
+	windows, err := fleet.Reconcile(ctx, st, panes, now)
+	for _, w := range windows {
+		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
+		if aerr := attention.Apply(actx, client, st, w); aerr != nil {
+			logWarn(logPath, "reconcile attention marker", "window", w, "err", aerr.Error())
+		}
+		cancel()
+	}
+	return err
+}
+
+// logWarn appends one warning to the log file at logPath, if it opens.
+func logWarn(logPath, msg string, args ...any) {
+	if logger, closeLog, err := openLog(logPath); err == nil {
+		logger.Warn(msg, args...)
+		_ = closeLog()
+	}
 }

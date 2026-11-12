@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/tmux"
 )
 
 func TestNextSwitchesToMostUrgentPane(t *testing.T) {
@@ -41,6 +42,33 @@ func TestNextSkipsAndMarksStaleSessionWhosePaneIsGone(t *testing.T) {
 	}
 	if s := getSession(t, db, "gone"); s.State != model.StateStale || !s.UpdatedAt.Equal(fleetNow) {
 		t.Errorf("gone = %s at %v, want stale at %v", s.State, s.UpdatedAt, fleetNow)
+	}
+}
+
+// After a tmux server restart the new server numbers panes from %0 again, so
+// the dead session's pane id names an unrelated live pane.
+func TestNextSkipsAndMarksStaleSessionFromBeforeServerRestart(t *testing.T) {
+	db, fake := fleetHome(t, nil,
+		model.Session{
+			ID: "ghost", Agent: "claude", State: model.StateWaiting, Pane: "%1",
+			StartedAt: at(9, 0), UpdatedAt: at(10, 0),
+		},
+		model.Session{
+			ID: "fresh", Agent: "claude", State: model.StateWaiting, Pane: "%2",
+			StartedAt: at(11, 30), UpdatedAt: at(11, 40),
+		},
+	)
+	for _, id := range []string{"%1", "%2"} {
+		fake.Panes = append(fake.Panes, tmux.Pane{ID: id, Session: "work", WindowID: "@1", ServerStart: at(11, 0)})
+	}
+	if out, err := runRoot(t, "next"); err != nil || out != "" {
+		t.Errorf("next = %q, %v, want no output", out, err)
+	}
+	if want := []string{"ListPanes", "SwitchTo %2"}; !reflect.DeepEqual(fake.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
+	}
+	if s := getSession(t, db, "ghost"); s.State != model.StateStale || !s.UpdatedAt.Equal(fleetNow) {
+		t.Errorf("ghost = %s at %v, want stale at %v", s.State, s.UpdatedAt, fleetNow)
 	}
 }
 

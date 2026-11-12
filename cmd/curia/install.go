@@ -77,8 +77,11 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	if err = os.Remove(p.snippet); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	// Re-sourcing ~/.tmux.conf unsets nothing in a running server.
 	_, err = fmt.Fprintln(cmd.OutOrStdout(), "Curia is uninstalled.\n"+
-		"Restart running Claude Code sessions and run: tmux source-file ~/.tmux.conf")
+		"Restart running Claude Code sessions.\n"+
+		"Restart tmux to drop Curia's key bindings and hook, or run:\n"+
+		"  tmux set-hook -gu pane-focus-in; tmux unbind a; tmux unbind N")
 	return err
 }
 

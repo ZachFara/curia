@@ -156,9 +156,24 @@ func eventList(hooks map[string]any, event string) ([]any, error) {
 	return list, nil
 }
 
+// hookPrefix is how every hook command of ours for bin starts.
+func hookPrefix(bin string) string {
+	return shellQuote(bin) + " hook "
+}
+
+// shellQuote returns s as one POSIX shell word: unchanged when it holds only
+// [A-Za-z0-9_./-], else single-quoted with each ' written as '\”.
+func shellQuote(s string) string {
+	const safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-"
+	if s != "" && strings.Trim(s, safe) == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func ourEntry(bin, event string) map[string]any {
 	entry := map[string]any{
-		"hooks": []any{map[string]any{"type": "command", "command": bin + " hook " + event}},
+		"hooks": []any{map[string]any{"type": "command", "command": hookPrefix(bin) + event}},
 	}
 	if event == "PreToolUse" || event == "PostToolUse" {
 		entry["matcher"] = "*"
@@ -166,14 +181,15 @@ func ourEntry(bin, event string) map[string]any {
 	return entry
 }
 
-// isOurs reports whether a hook command was added by Curia for this binary.
+// isOurs reports whether a hook command was added by Curia for this binary,
+// in the form ourEntry writes it.
 func isOurs(hook any, bin string) bool {
 	h, ok := hook.(map[string]any)
 	if !ok {
 		return false
 	}
 	cmd, _ := h["command"].(string)
-	return strings.HasPrefix(cmd, bin+" hook ")
+	return strings.HasPrefix(cmd, hookPrefix(bin))
 }
 
 func containsOurs(entries []any, bin string) bool {
@@ -262,21 +278,30 @@ func writeBackup(path string, original []byte, now time.Time) error {
 
 // writeAtomic writes data to path via a temporary file and a rename, creating
 // the parent directory if needed. If path is a symlink the write lands on the
-// file it points to, so the link survives.
+// file it points to, so the link survives. A file that exists keeps its
+// permission bits; a new one is 0600.
 func writeAtomic(path string, data []byte) error {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
+	}
+	mode := fs.FileMode(0o600)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".curia-*")
+	tmp, err := os.CreateTemp(dir, ".curia-*") // created 0600
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return err
 	}
