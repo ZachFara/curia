@@ -24,8 +24,10 @@ const (
 	// TypingNotQueued: the decision is missing, has no answer to deliver,
 	// or another path delivered it first.
 	TypingNotQueued
-	// TypingNoPane: the session has no row or no pane, or is stale or ended.
+	// TypingNoPane: the session has no row or no pane, or is stale.
 	TypingNoPane
+	// TypingEnded: the session has ended, though its pane may live on.
+	TypingEnded
 	// TypingWorking: the session is working; its Stop hook delivers.
 	TypingWorking
 	// TypingWaiting: the session is at a prompt of its own.
@@ -51,6 +53,8 @@ func typingRefusal(sess model.Session) TypingRefusal {
 		return TypingWorking
 	case sess.State == model.StateWaiting:
 		return TypingWaiting
+	case sess.State == model.StateEnded:
+		return TypingEnded
 	case sess.Pane == "" || (sess.State != model.StateIdle && sess.State != model.StateNeedsDecision):
 		return TypingNoPane
 	case sess.SubagentsActive != 0:

@@ -30,8 +30,8 @@ var now = time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
 // Delivery notes of plan section 4.9 and Rulings 54 and 58. Every note for
 // an answer an idle agent would never collect ends with what the user can do.
 const (
-	noteWorking  = "agent is working; the Stop hook will deliver it"
-	noteWaiting  = "agent is at a prompt of its own; queued until it next stops"
+	noteWorking  = "agent is working; the Stop hook will deliver it, or tell the agent to call check_decision D-1"
+	noteWaiting  = "agent is at a prompt of its own; queued until it next stops, or tell the agent to call check_decision D-1"
 	notePaneGone = "pane gone; tell the agent to call check_decision D-1"
 	noteNoTmux   = "tmux unreachable; queued for the Stop hook, or tell the agent to call check_decision D-1"
 	noteFailed   = "typing failed; queued for the Stop hook, or tell the agent to call check_decision D-1"
@@ -403,8 +403,14 @@ func TestSessionOutsideTmuxLeavesQueued(t *testing.T) {
 }
 
 // Ended and stale sessions are never typed into, even with a live pane id.
+// Defect 10: an ended session's pane may live on (a nested session that
+// exited leaves it to the outer one), so its note says the session ended,
+// not that the pane is gone.
 func TestEndedOrStaleSessionLeavesQueued(t *testing.T) {
-	for _, state := range []model.State{model.StateEnded, model.StateStale} {
+	for state, note := range map[model.State]string{
+		model.StateEnded: "the asking session has ended; it can read the answer with check_decision D-1 if it is resumed",
+		model.StateStale: notePaneGone,
+	} {
 		t.Run(string(state), func(t *testing.T) {
 			st := openStore(t)
 			s := asker()
@@ -420,7 +426,7 @@ func TestEndedOrStaleSessionLeavesQueued(t *testing.T) {
 			if got := sendKeysCalls(fake.Calls); len(got) != 0 {
 				t.Errorf("typed into a %s session: %q", state, got)
 			}
-			wantQueued(t, st, out, d.ID, notePaneGone)
+			wantQueued(t, st, out, d.ID, note)
 		})
 	}
 }

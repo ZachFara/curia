@@ -170,7 +170,7 @@ func TestDecideTextAndReasonFromStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "D-1 answered: use the queue · queued: agent is working; the Stop hook will deliver it\n"; out != want {
+	if want := "D-1 answered: use the queue · queued: agent is working; the Stop hook will deliver it, or tell the agent to call check_decision D-1\n"; out != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
 	d := decisionsGet(t, db, "D-1")

@@ -36,8 +36,10 @@ const settleTimeout = 3 * time.Second
 const (
 	noteNothing   = "nothing to deliver"
 	noteNoSession = "no session to deliver to"
-	noteWorking   = "agent is working; the Stop hook will deliver it"
-	noteWaiting   = "agent is at a prompt of its own; queued until it next stops"
+	// noteWorking and noteWaiting are followed by askCheck: an interrupted
+	// or denied turn ends with no Stop (live check 2, defect 8).
+	noteWorking = "agent is working; the Stop hook will deliver it"
+	noteWaiting = "agent is at a prompt of its own; queued until it next stops"
 )
 
 // askCheck is the user's way to hand over answer id now: an idle agent never
@@ -62,9 +64,13 @@ func refusalNote(why store.TypingRefusal, d model.Decision) string {
 		}
 		return noteNothing
 	case store.TypingWorking:
-		return noteWorking
+		return noteWorking + ", or " + askCheck(d.ID)
 	case store.TypingWaiting:
-		return noteWaiting
+		return noteWaiting + ", or " + askCheck(d.ID)
+	case store.TypingEnded:
+		// Defect 10: a nested session that exited leaves its pane to the
+		// outer one, so "pane gone" would be wrong.
+		return "the asking session has ended; it can read the answer with check_decision " + d.ID + " if it is resumed"
 	case store.TypingSubagents:
 		return "agent has subagents running; it gets the answer when they finish, or " + askCheck(d.ID)
 	case store.TypingSharedPane:
@@ -72,7 +78,7 @@ func refusalNote(why store.TypingRefusal, d model.Decision) string {
 	case store.TypingUnsubmitted:
 		return queuedNote("an answer typed earlier is not confirmed yet (it may sit unsubmitted in the agent's prompt)", d)
 	}
-	return "pane gone; " + askCheck(d.ID) // stale, ended, no pane or no row
+	return "pane gone; " + askCheck(d.ID) // stale, no pane or no row
 }
 
 // settled returns a context for a step that must run even when ctx is

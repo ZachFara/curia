@@ -106,7 +106,7 @@ func TestClaimTypingRequiresIdleOrNeedsDecision(t *testing.T) {
 		{"working", model.StateWorking, "%3", 0, store.TypingWorking},
 		{"waiting", model.StateWaiting, "%3", 0, store.TypingWaiting},
 		{"stale", model.StateStale, "%3", 0, store.TypingNoPane},
-		{"ended", model.StateEnded, "%3", 0, store.TypingNoPane},
+		{"ended", model.StateEnded, "%3", 0, store.TypingEnded},
 		{"no pane", model.StateIdle, "", 0, store.TypingNoPane},
 		{"no session row", "", "", 0, store.TypingNoPane},
 		// Ruling 84: a subagent may have a permission dialog on screen.
