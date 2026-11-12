@@ -45,13 +45,16 @@ func statusBadge(ctx context.Context, args []string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = st.Close() }()
-	sessions, err := st.ListSessions(ctx, store.ListFilter{})
+	// No reconcile (no tmux call) and no expiry sweep: an assume ticket past
+	// its deadline is not open, so it is not counted either way. The only
+	// write is settling a session a denial or an interrupt left working or
+	// waiting, which costs nothing while no session is either.
+	now := clock()
+	sessions, _, err := listSettled(ctx, st, store.ListFilter{}, "", now)
 	if err != nil {
 		return "", err
 	}
-	// A pure read: no reconcile and no expiry sweep. An assume ticket past
-	// its deadline is not open, so it is not counted either way.
-	openBlocking, err := st.CountOpenBlocking(ctx, clock())
+	openBlocking, err := st.CountOpenBlocking(ctx, now)
 	if err != nil {
 		return "", err
 	}

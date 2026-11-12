@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ZachFara/curia/internal/transcript"
 )
@@ -182,6 +183,24 @@ func TestHostileValues(t *testing.T) {
 	u, _ = mustRead(t, tempFile(t, []byte(lines[1]+"\n")), 0)
 	if !u.Found || u.Model != "m2" || u.ContextUsed != 3 || u.LastAssistantText != "" {
 		t.Errorf("update = %+v", u)
+	}
+}
+
+// Read stops at the size the file had when it was opened, so a path to an
+// endless character device cannot keep it reading forever.
+func TestReadBoundedToSizeAtOpen(t *testing.T) {
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := transcript.Read("/dev/zero", 0)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Read(/dev/zero): %v, want nothing read and no error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read(/dev/zero) did not return within 5 s")
 	}
 }
 

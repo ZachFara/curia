@@ -26,7 +26,8 @@ func init() {
 	c := &cobra.Command{
 		Use:   "ls",
 		Short: "List sessions, most in need of you first",
-		Long: "Marks sessions whose tmux pane is gone as stale, then lists every session that\n" +
+		Long: "Marks sessions whose tmux pane is gone as stale, sets idle those a denied\n" +
+			"prompt or an interrupt left working or waiting, then lists every session that\n" +
 			"has not ended, except those stale for longer than stale_hide_after (10m by\n" +
 			"default), ranked by how much it needs you. --json prints a JSON array.",
 		Args: cobra.NoArgs,
@@ -46,11 +47,11 @@ func runLs(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	now := clock()
-	if err = reconcile(cmd.Context(), st, newTmuxClient(), cfg.LogPath, now); err != nil {
+	now, client := clock(), newTmuxClient()
+	if err = reconcile(cmd.Context(), st, client, cfg.LogPath, now); err != nil {
 		return err
 	}
-	sessions, err := st.ListSessions(cmd.Context(), store.ListFilter{HideStaleBefore: now.Add(-cfg.StaleHideAfter)})
+	sessions, err := listSettledMarked(cmd.Context(), st, client, store.ListFilter{HideStaleBefore: now.Add(-cfg.StaleHideAfter)}, cfg.LogPath, now)
 	if err != nil {
 		return err
 	}

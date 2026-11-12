@@ -143,3 +143,25 @@ func TestNextJumpsToSessionWithBlockingTicket(t *testing.T) {
 		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
 	}
 }
+
+// A session left waiting by a denial is settled first, so next does not jump
+// to it, and its window's marker is re-applied.
+func TestNextSkipsSettledSession(t *testing.T) {
+	db, fake := fleetHome(t, []string{"%1", "%2"},
+		settleDenied(t, "denied", model.StateWaiting, "%1"),
+		model.Session{ID: "done", Agent: "claude", State: model.StateIdle, Pane: "%2", TmuxWindow: "@2", UpdatedAt: at(11, 30)},
+	)
+	if out, err := runRoot(t, "next"); err != nil || out != "" {
+		t.Errorf("next = %q, %v, want no output", out, err)
+	}
+	want := []string{"ListPanes", "SetWindowOption @1 @curia_marker ", "SwitchTo %2"}
+	if !reflect.DeepEqual(fake.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
+	}
+	if s := getSession(t, db, "denied"); s.State != model.StateIdle || s.LastUpdate != "interrupted" {
+		t.Errorf("denied = %s %q, want idle \"interrupted\"", s.State, s.LastUpdate)
+	}
+	if log := readLog(t); log != nil {
+		t.Errorf("log = %q, want none", log)
+	}
+}

@@ -15,10 +15,10 @@ func init() {
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "next",
 		Short: "Switch to the session that needs you most (run from a tmux key binding)",
-		Long: "Marks sessions whose pane is gone as stale (as ls does), then switches the\n" +
-			"tmux client to the pane of the most urgent session that needs a decision, is\n" +
-			"waiting, or went idle since you last looked; otherwise shows \"nothing needs\n" +
-			"you\". Always exits 0; errors go to the log file.",
+		Long: "Marks sessions whose pane is gone as stale and settles interrupted ones (as\n" +
+			"ls does), then switches the tmux client to the pane of the most urgent session\n" +
+			"that needs a decision, is waiting, or went idle since you last looked;\n" +
+			"otherwise shows \"nothing needs you\". Always exits 0; errors go to the log file.",
 		Args: cobra.ArbitraryArgs,
 		// Bad flags or arguments reach runNext, so they are logged, not printed.
 		DisableFlagParsing: true,
@@ -58,10 +58,12 @@ func jumpNext(ctx context.Context, cfg config.Config, args []string) error {
 	defer func() { _ = st.Close() }()
 	client := newTmuxClient()
 	// Reconcile first, so a session whose pane is gone is never the target.
-	if err = reconcile(ctx, st, client, cfg.LogPath, clock()); err != nil {
+	now := clock()
+	if err = reconcile(ctx, st, client, cfg.LogPath, now); err != nil {
 		return err
 	}
-	sessions, err := st.ListSessions(ctx, store.ListFilter{})
+	// Settle next, so a session a denial left waiting is not the target.
+	sessions, err := listSettledMarked(ctx, st, client, store.ListFilter{}, cfg.LogPath, now)
 	if err != nil {
 		return err
 	}

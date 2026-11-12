@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -239,5 +240,25 @@ func TestUIInsideAgentCannotAnswer(t *testing.T) {
 	}
 	if d := decisionsGet(t, db, "D-1"); d.Status != model.StatusOpen {
 		t.Errorf("D-1 = %s, want still open", d.Status)
+	}
+}
+
+// The dashboard's source settles as ls does.
+func TestUISourceSettlesInterruptedSession(t *testing.T) {
+	db, fake := fleetHome(t, []string{"%1"}, settleDenied(t, "a", model.StateWaiting, "%1"))
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	got, err := storeSource{st: st, tm: fake, cfg: config.Default()}.Sessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].State != model.StateIdle || got[0].LastUpdate != "interrupted" {
+		t.Errorf("Sessions = %+v, want a idle and interrupted", got)
+	}
+	if want := []string{"ListPanes", "SetWindowOption @1 @curia_marker "}; !slices.Equal(fake.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
 	}
 }
