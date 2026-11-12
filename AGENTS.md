@@ -116,6 +116,24 @@ Rules for the toolchain:
 - **`CLAUDE_CODE_SESSION_ID` in an MCP server's environment goes stale after `/clear`:** the server keeps running while hooks get a new session id. `TMUX_PANE` stays correct.
 - **Every `cmd/curia` test runs behind `TestMain`'s guard** (`cmd/curia/main_test.go`, plan section 6.8): temp `HOME` and `CURIA_DB`, no reachable tmux server, agent variables cleared. A test that needs tmux uses `useFakeTmux`. A new `tmux.Client` method needs one more line on the guard's `unreachableTmux`.
 
+- **A denied prompt or an interrupt is corrected from the transcript, not from a hook** (Ruling 77, Task 19): no hook fires for either, so when a view refreshes a stale `working` or `waiting` session whose transcript ends in a `[Request interrupted by user...]` marker is set idle.
+- **`/bin/sh` is dash on the Linux CI runner**, so a test must not assert macOS shell wording (macOS says "command not found", dash says "Decision: not found").
+- **Go kills a process that writes to a closed stdout with SIGPIPE** unless the signal is ignored; the hook ignores it so it exits 0 as promised.
+- **Bubble Tea draws on a timer (about 60 frames a second), not after each update,** so message order does not tell you what is on screen. The decide view therefore uses a 250 ms dwell and a 750 ms quiet period before an answer key acts (Rulings 63, 66, 67, 68).
+- **Never read a value in an unusual way to get past a lint rule** (for example `os.LookupEnv` to dodge gosec's taint check): that is loosening a check. Use the ordinary call and satisfy the rule, or record the finding (Ruling 70).
+- **`go test` runs packages in parallel unless given `-p 1`,** which matters for latency gates: they measured other packages' load and failed on CI. `make check` uses `-p 1` (Ruling 76).
+- **A `merge` helper must not treat a failed check as "no checks yet".** A failed check must stop the merge.
+
+## Owner's amendments (2026-11-12)
+
+These amend the verbatim owner's rules below where they differ: the fix-and-re-review loop and the model tiers. The full record is in `PROGRESS.md` ("Owner's decisions and standing rules").
+
+- Minor review findings are not fixed before merge. They are ledgered and batched into the final fix wave.
+- Each task gets one reviewer pass. Important findings go back to the implementer; when it reports the fix with tests and CI is green, the task merges without a re-review. A re-review runs only when the review found something Critical. An orchestrator ruling on an approved task does not start an amendment round unless it fixes something Important.
+- Smaller plans get no pre-flight review.
+- Model use: Sonnet by default for work that fits the Sonnet rule, Haiku only for trivially easy mechanical work, Opus per the earlier rules (concurrency, cross-process work, several packages, UI, judgment). A reviewer is the same tier as the implementer and never below Sonnet.
+- On a design gap the spec and plan do not settle, make the best call, record it as a ruling and move on.
+
 ## Owner's rules (verbatim)
 
 The sections below are copied verbatim from the owner's orchestrator prompt. In them, "you" is the orchestrator and "me" is the owner.

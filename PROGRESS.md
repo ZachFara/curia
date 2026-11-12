@@ -6,10 +6,34 @@ This file mirrors the plans for humans; it does not replace them. Task order, in
 
 ## Plan 2 status
 
-- **Setup in review.** `chore/plan2-setup` holds the plan document (with the pre-flight review's changes applied), the `cmd/curia` test guard of plan section 6.8, and every shared-file change of plan section 6: depguard rules for the six new packages (decision 0010), the layout check's package list, CI on pushes to `plan-2`, AGENTS.md, decision records 0010 to 0014, and this file. Each boundary was proven with temporary probes (decision 0010, Consequences). Its PR goes into `main` (rebased onto the live-check fixes, PR #15).
-- The three pre-wave-1 live checks are done (2026-11-11, Claude Code 2.1.322, tmux 3.8): plan decisions 36 to 41, Rulings 42 to 47.
-- Integration branch: `plan-2`, to be branched from `main` once the setup PR merges. Every task PR goes into `plan-2`.
-- No task has been dispatched.
+- **Waves 1 to 5 are merged into `plan-2`** (2026-11-12). Wave 1: Tasks 1 (PR #19), 2 (PR #17), 3 (PR #20), 4 (PR #18), 5 (PR #21). Wave 2: Tasks 6 (PR #24), 7 (PR #22), 8 (PR #23). Wave 3: Tasks 9 (PR #26), 10 (PR #25). Wave 4: Tasks 11 (PR #28), 15 (PR #27). Wave 5: Tasks 12 (PR #30), 13 (PR #31), 14 (PR #29). Each wave's smoke check passed; the results are in the smoke check table below.
+- **Wave 6 is in progress:** Task 16 (views, Opus) and the added Task 18 (MCP tools allowed by default, Sonnet) were dispatched from `plan-2` at 50dd8a8.
+- **Next, in order:** Task 19 (added: settle interrupted sessions from the transcript, Opus), which starts after Task 16 merges because it touches `fleet` and `status`; then Task 17 (end-to-end acceptance), which runs after 16, 18 and 19; then the final whole-branch review and the final fix wave, which works from "Plan 2 deferred minors" below.
+- Integration branch: `plan-2`. Every task PR goes into `plan-2`. The setup PRs and the three pre-wave-1 live checks (2026-11-11, Claude Code 2.1.322, tmux 3.8; plan decisions 36 to 41, Rulings 42 to 47) are done.
+- The owner was present on 2026-11-12 and decided several points; see the next section.
+
+## Owner's decisions and standing rules (2026-11-12)
+
+Recorded from the ledger's three owner blocks. They apply from now on and override earlier practice where they differ.
+
+**Decisions**
+
+- MCP tools are allowed by default: `curia install` adds the four exact tool names to `permissions.allow`, and `--no-allow-mcp-tools` opts out (Ruling 78, which reverses Ruling 40). This is the added Task 18.
+- The licence is MIT (a `LICENSE` file was added on `plan-2` and the root allowlist updated).
+- `make check` running the test packages one at a time (`go test -race -p 1 ./...`, Ruling 76) is accepted.
+- Typing into panes without a check of the pane's foreground program is accepted as it is.
+- Stuck states (a denied prompt shows `waiting`, Esc shows `working`) are to be corrected from the transcript: the owner said to do the best possible and move on (Ruling 77, the added Task 19).
+- On design gaps the spec and plan do not settle, make the best call, record it and move on; do not park such gaps as open questions.
+
+**Review rules**
+
+- Minor findings are not fixed before merge. They are ledgered and batched into the final fix wave.
+- Each task gets one reviewer pass. Important findings go back to the implementer; when it reports the fix with tests and CI is green, the task merges without a re-review. A re-review runs only when the review found something Critical. Orchestrator rulings on approved tasks no longer cause "amendment rounds" unless the ruling fixes something Important; they are folded into the final fix wave.
+- No pre-flight review for smaller plans (Plans 3 and 4 are large and still get one).
+
+**Model use**
+
+- Sonnet by default for delegated work that fits the Sonnet rule; Haiku only for trivially easy mechanical work; Opus per the earlier rules (concurrency, cross-process work, several packages, UI, judgment). Reviewers are the same tier as the implementer and never below Sonnet.
 
 ## Plan 2 waves
 
@@ -69,13 +93,15 @@ Dependencies (plan section 7): 6 and 7 need 1 and 2; 8 needs 1, 2, 3; 9 needs 2,
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 16 | Views: badge, dashboard column and the `d` key | Opus (expected, confirmed at dispatch) | `fleet.Count(sessions, openBlocking)`; `curia status` reads `CountOpenBlocking` and does not sweep; `ui.Source.OpenDecisions`; the `DEC` column (popup only; the sidebar does not call `OpenDecisions`) and `WithDecide`/`d`, not offered when `refuseInsideAgent` fails; `TestCountUsesOpenBlocking`, `TestBadgeCountsTicketsNotSessions`, `TestBadgeIgnoresAssumeAndPastDeadline`, `TestStatusStillSilentOnError`, `TestDecColumnShowsOpenCount`, `TestSidebarHasNoDecColumn`, `TestDKeyOpensDecideForRow`, `TestDecideClosedReturnsToDashboard`, `TestDKeyWithoutOpenDecisions`, `TestDKeyDisabledInSidebar`, `TestNarrowWidthStillFitsWithDec`, `TestOpenDecisionsErrorKeepsLastCounts`, `TestStoreSourceSweepsExpiry`, `TestNextJumpsToSessionWithBlockingTicket` pass; Plan 1's `TestBadge`, `fleet.Count` tests and `TestViewShowsRankedRows` (9 columns) updated. | not started |
+| 16 | Views: badge, dashboard column and the `d` key | Opus (expected, confirmed at dispatch) | `fleet.Count(sessions, openBlocking)`; `curia status` reads `CountOpenBlocking` and does not sweep; `ui.Source.OpenDecisions`; the `DEC` column (popup only; the sidebar does not call `OpenDecisions`) and `WithDecide`/`d`, not offered when `refuseInsideAgent` fails; `TestCountUsesOpenBlocking`, `TestBadgeCountsTicketsNotSessions`, `TestBadgeIgnoresAssumeAndPastDeadline`, `TestStatusStillSilentOnError`, `TestDecColumnShowsOpenCount`, `TestSidebarHasNoDecColumn`, `TestDKeyOpensDecideForRow`, `TestDecideClosedReturnsToDashboard`, `TestDKeyWithoutOpenDecisions`, `TestDKeyDisabledInSidebar`, `TestNarrowWidthStillFitsWithDec`, `TestOpenDecisionsErrorKeepsLastCounts`, `TestStoreSourceSweepsExpiry`, `TestNextJumpsToSessionWithBlockingTicket` pass; Plan 1's `TestBadge`, `fleet.Count` tests and `TestViewShowsRankedRows` (9 columns) updated. | in progress (dispatched 2026-11-12 from 50dd8a8) |
+| 18 | MCP tools allowed by default (added by the owner's decision, Ruling 78) | Sonnet | `curia install` adds the four exact tool names to `permissions.allow` by default, each only if absent, and prints one line saying so and how to opt out; `--no-allow-mcp-tools` skips the step and prints the hint; the old `--allow-mcp-tools` flag is removed; uninstall removes exactly the four strings; install is idempotent; the user's own rules and an unexpected `permissions` or `allow` shape behave as before; `TestInstallAllowsToolsByDefault`, `TestInstallNoAllowFlagSkipsRules`, `TestInstallDefaultIsIdempotent`, `TestInstallKeepsUsersOwnRules`, `TestInstallBadPermissionsShape` pass and the tests that assumed the old default are replaced. | in progress (dispatched 2026-11-12 from 50dd8a8) |
+| 19 | Settle interrupted sessions from the transcript (added by the owner's decision, Ruling 77) | Opus | `transcript.Interrupted(path, offset)` and `fleet.Settle`: a `working` or `waiting` session at least 3 seconds old whose last conversational transcript line after its offset is a `[Request interrupted by user...]` marker becomes `idle`, seen, with last update `interrupted`; `ls`, `next`, the dashboard and `status` call it (`status` still prints nothing on error and does no tmux reconcile); the hook path is untouched; `TestInterruptedAfterDenial`, `TestInterruptedDuringTool`, `TestInterruptedMidStream`, `TestNotInterruptedWhenTurnContinued`, `TestSettleMovesInterruptedToIdleSeen`, `TestSettleSkipsWhenRowChanged`, `TestStatusDropsWAfterDenial` and the rest of the brief's tests pass; `status` cost before and after is reported. | not started; starts after Task 16 merges |
 
 ### Wave 7
 
 | Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
 | --- | --- | --- | --- | --- |
-| 17 | End-to-end acceptance | Opus (expected, confirmed at dispatch) | Hand-written fixtures in `testdata/decisions/` and golden files in `e2e/testdata/decisions/` (never generated from program output); `TestDecisionsEndToEnd` (script steps 1 to 11, private tmux server, MCP clients over real pipes) and `TestStopHookLatencyWithTickets` (at least 400 sequential processes, p95 < 50 ms) pass; `make check` passes. **Plan-level criteria (orchestrator):** `deadcode ./...` without `-test` on `plan-2` reports only deliberate test doubles (`tmux.Fake`); the isolated live check confirms the items plan section 14 marks for it. | not started |
+| 17 | End-to-end acceptance (runs after Tasks 16, 18 and 19) | Opus (expected, confirmed at dispatch) | Hand-written fixtures in `testdata/decisions/` and golden files in `e2e/testdata/decisions/` (never generated from program output); `TestDecisionsEndToEnd` (script steps 1 to 11, private tmux server, MCP clients over real pipes) and `TestStopHookLatencyWithTickets` (at least 400 sequential processes, p95 < 50 ms) pass; `make check` passes. **Plan-level criteria (orchestrator):** `deadcode ./...` without `-test` on `plan-2` reports only deliberate test doubles (`tmux.Fake`); the isolated live check confirms the items plan section 14 marks for it. | not started; after 16, 18 and 19 |
 
 ## Plan 2 smoke checks
 
@@ -83,19 +109,19 @@ Run by the orchestrator on `plan-2` after each wave, with a temp `HOME`, `CURIA_
 
 | After wave | Check | Result |
 | --- | --- | --- |
-| 1 | `make check`; `curia install` into the temp home with a stub `claude` writes the skill and the `A` binding | |
-| 3 | open the wave-3 database with the wave-1 binary's `curia ls` (old code, new schema) and the reverse: both work | |
-| 4 | `curia decisions ls --json` on an empty and on a seeded database | |
-| 5 | by hand over a pipe: `initialize`, `tools/list`, one `request_decision`; `curia decide D-1 --accept`; `curia hook Stop` prints one JSON line once | |
-| 6 | `curia status` shows `D1`; the popup shows the `DEC` column and `d` opens the ticket | |
-| 7 | Task 17, plus `deadcode ./...` without `-test`: only test doubles are reported | |
+| 1 | `make check`; `curia install` into the temp home with a stub `claude` writes the skill and the `A` binding | passed: `make check` on `plan-2`; install and uninstall into a temp home with a stub `claude` wrote and removed the skill, the `A` binding and the MCP registration call |
+| 3 | open the wave-3 database with the wave-1 binary's `curia ls` (old code, new schema) and the reverse: both work | passed: the old binary read and wrote a database made by the new one and the new one migrated an old one, no error logged |
+| 4 | `curia decisions ls --json` on an empty and on a seeded database | empty database passed (`[]`, exit 0; table header; `edit` inside an agent refuses); the seeded-database check was deferred to after Wave 5 (no ticket could be created from the CLI until `curia mcp` existed) and the ledger records no result for it |
+| 5 | by hand over a pipe: `initialize`, `tools/list`, one `request_decision`; `curia decide D-1 --accept`; `curia hook Stop` prints one JSON line once | passed with the real binary: `server/discover` gave -32601 then `initialize` 2025-11-25; exactly four tools; `request_decision` created D-1; `decide --accept` answered and queued; the first Stop printed one block line in the Ruling 59 wording, the second printed nothing; `decide` inside an agent refused; no ERROR in the log (the badge shows nothing for the open blocking ticket until Task 16) |
+| 6 | `curia status` shows `D1`; the popup shows the `DEC` column and `d` opens the ticket | not yet run (Wave 6 in progress) |
+| 7 | Task 17, plus `deadcode ./...` without `-test`: only test doubles are reported | not yet run |
 
 ## Plan 2 Rulings
 
-Format: Ruling: what — why — cost if wrong. Rulings 34 to 38 and 48 to 49 came from Plan 1's live check and are listed under Plan 1; Plan 2 numbering continues from 50.
+Format: Ruling: what — why — cost if wrong. Rulings 34 to 38 and 48 to 49 came from Plan 1's live check and are listed under Plan 1; Plan 2 numbering continues from 50. Rulings 69 to 78 were added on 2026-11-12; where a later ruling replaces an earlier one, the entry says so.
 
 39. Ruling: the pre-flight review's items 1-8, 11-13 and 15 are accepted as written (briefs include the cited section-4 parts; TestMain guard in cmd/curia; T15 forward refs cut; expire inside CreateDecision; bounded PruneEvents; copy-mode -q before typing; decide view pins selection; Stop emit first + savepoint; T5 failure rules; wave-5 name prefixes and one-at-a-time merges; small fixes; declared deviations incl. reasoning prompt on blocking answers) — each fixes a text defect that would otherwise cost a fix round — none beyond the plan text.
-40. Ruling (changes review item 9, security-sensitive, owner away): `curia install` adds NO permission rules by default; `--allow-mcp-tools` adds the four exact tool names; without it install prints how to allow them — auto-allowing tools in the owner's settings is a security-sensitive default the owner has not approved — agents hit a permission prompt on first use of each tool until the owner opts in.
+40. Ruling (changes review item 9, security-sensitive, owner away): `curia install` adds NO permission rules by default; `--allow-mcp-tools` adds the four exact tool names; without it install prints how to allow them — auto-allowing tools in the owner's settings is a security-sensitive default the owner has not approved — agents hit a permission prompt on first use of each tool until the owner opts in. (reversed by Ruling 78, owner's decision)
 41. Ruling (rejects review item 14): T13's in-process latency gate stays one pass of 200 samples, p95 < 20 ms, no retry, as Plan 1's TestHookLatency — retry-until-pass weakens a gate; Plan 1's margin was large (p95 3-7 ms under race) — a loaded machine could flake it; then measure, do not loosen.
 42. Ruling: the three desk-unsettled checks run before Wave 1 as live probes: MCP server environment, typing+Enter into a real prompt, `claude mcp get` output, plus Stop-hook block behaviour. Results amend T3, T5, T12, T13 before dispatch — each result changes task text, and building six waves on an unverified delivery design is the larger risk — one more step before Wave 1.
 43. Ruling: MCP caller resolved on every tool call: CURIA_SESSION_ID, then the non-ended session bound to TMUX_PANE, then CLAUDE_CODE_SESSION_ID if a live row exists, then unknown — the env session id goes stale after /clear, the pane does not — two live sessions in one pane (nested) resolve to the most recently updated. (Plan decision 36.)
@@ -125,9 +151,21 @@ Format: Ruling: what — why — cost if wrong. Rulings 34 to 38 and 48 to 49 ca
 67. Ruling: every refused answer key restarts the dwell clock — a held, auto-repeating key otherwise outlasts each gate in turn — impatient repeated pressing is held off until a pause.
 68. Ruling: an answer key refused because of a change the user did not cause starts the same 750 ms quiet period — terminals send no key-up, so a held key's first repeat after the operating system's 375 to 660 ms delay looks like a deliberate press — after any queue change that a key ran into, an answer needs a 750 ms pause; a keyboard with a repeat delay above 750 ms can still get one repeat through.
 
+69. Ruling: help and usage errors of the user-only commands (`decisions edit`, `decide`) are exempt from the agent guard, while the guard covers every path that reaches the store — they write nothing and reveal nothing an agent cannot already read — none.
+70. Ruling (final form; it replaces the first wording, which had the server use `os.LookupEnv` and require an existing directory): the MCP server never runs git. For a caller with no session row the repo is `CLAUDE_PROJECT_DIR`, else the working directory, read with `os.Getenv`, cleaned, required to be absolute, and passed through `filepath.EvalSymlinks` (an error gives an empty repo); there is no `os.Stat`, and nothing is done to hide a value from the linter — evading a taint check is loosening a check, `os.Stat` would trip gosec G703, and existence is not needed — an unidentified caller working in a subdirectory gets a repo value that does not match its sessions' git top level, so repo-scoped precedent can miss.
+71. Ruling: when `request_decision` returns a decided duplicate to the session that owns it, it claims the delivery through `store.CheckDecision`, so the same answer is not also typed or handed over by the Stop hook — delivery stays at most once — none known.
+72. Ruling: in the hook's transaction one small read returns the open-blocking count and whether anything is queued, and the savepoint with the `UPDATE ... RETURNING` claim runs only when something is queued — preparing the claim statement cost about 5.7 ms under `-race` on every Stop, most of which have nothing queued — one extra tiny read on the Stops that do claim.
+73. Ruling: `ClaimTyping` succeeds only when the asking session is the only non-ended, non-stale session bound to its pane; answers for a session that shares its pane are delivered only by the Stop hook or `check_decision` — a nested session that died without SessionEnd leaves an idle row on a pane where the outer session may sit at a permission prompt, and a typed Enter approves it — an answer for a session in a shared pane is never typed.
+74. Ruling (closes Plan 1 Open Question 21): a SessionStart with source `compact` on an existing session keeps its state, SeenAt, StartedAt and subagent count and does not end other sessions in the pane — compaction can happen mid-turn, the session then read as idle and `curia decide` could type into a working agent — a compaction at an idle prompt now refreshes nothing but `updated_at`.
+74a. Ruling (refines 74): a compaction's SessionStart for an ended session is handled like any SessionStart (the session is alive: idle and seen) — Ruling 27 says activity revives an ended session — a compaction mid-turn on a row wrongly marked ended shows idle until the next tool event.
+75. Ruling: an unidentified caller cannot withdraw (`not_yours`), identical tickets from unidentified callers still collapse (plan behaviour, pinned by a test), and `differs_from` naming the ticket itself is `bad_precedent` — all unknown callers share the empty session id, so withdraw would let one change another's ticket — an agent outside tmux that finds precedent cannot withdraw its own ticket; it stays open until answered or expired.
+76. Ruling (changes the owner's literal `go test -race ./...`; accepted by the owner 2026-11-12): `make check`'s test step is `go test -race -p 1 ./...`, packages one at a time — the hook's 20 ms and the end-to-end 50 ms gates were measuring other packages' parallel load and failed on CI once Wave 5 added real-tmux tests; no test or threshold changed — `make check` takes longer (the sum of package times instead of the longest). Committed on `plan-2` as 1ddf82f. AGENTS.md's command table already says `-p 1`.
+77. Ruling (owner: "just do your best and move on"; implemented by the added Task 19): when a view refreshes, a session in `working` or `waiting` whose last update is more than a few seconds old is corrected from the transcript: the new lines after the stored offset are read, and if the last conversational entry is a user rejection of a tool use or a `[Request interrupted by user...]` marker (or an assistant line aborted mid-stream followed by that marker), the session is set idle and seen through `UpdateSession`; `ls`, `next`, the dashboard and `status` do it — no Claude Code hook fires for a denied prompt or an interrupt, and the transcript records both about 200 ms after the keypress (shapes in `.superpowers/sdd/live-check-fix-report.md`, follow-up section) — the ledger states no cost; the brief limits the cost to one bounded tail read per working or waiting session and never settles on a marker that is not the last conversational line.
+78. Ruling (owner's decision; reverses Ruling 40; implemented by the added Task 18): `curia install` adds the four exact MCP tool names to `permissions.allow` by default, each only if absent, with `--no-allow-mcp-tools` to opt out, and uninstall removes them as before; the old `--allow-mcp-tools` flag is removed — the owner wants agents to raise and check tickets without a permission prompt on first use — the ledger states no cost.
+
 ## Plan 2 Open Questions
 
-Seeded from plan section 14. Each has a default, so execution is not blocked.
+Seeded from plan section 14. Each has a default, so execution is not blocked. Under the owner's rule of 2026-11-12, design gaps are now settled by a ruling instead of being added here.
 
 1. **Settled 2026-11-11 (live probe, plan decision 36):** the server inherits `claude`'s environment; `TMUX_PANE` is correct, `CLAUDE_CODE_SESSION_ID` goes stale after `/clear`, `CLAUDE_PROJECT_DIR` is the session cwd. As first asked: **Does Claude Code pass its environment to a stdio MCP server?** The docs state only that `CLAUDE_PROJECT_DIR` is set. If `TMUX_PANE` or `CLAUDE_CODE_SESSION_ID` is not inherited, the caller falls back to matching the project directory, which fails when two sessions share a directory. Default: the five-step order of Task 12. Live check: confirm which step resolves a real session; if none does reliably, Plan 3's `curia spawn` must set `CURIA_SESSION_ID` and manual sessions need another channel.
 2. **How hard should the "no self-answering" boundary be?** An agent with a shell can run `curia decide` or write to the SQLite file. Default: the `CLAUDECODE` guard plus `answered_via = cli` on every flag-form answer (decision 0013). A real boundary needs something an agent cannot reach. Is the guard enough for V1?
@@ -137,10 +175,19 @@ Seeded from plan section 14. Each has a default, so execution is not blocked.
 6. **Badge meaning.** Spec F4 says `D2` is "decisions"; Plan 1 counted sessions in `needs_decision`. Default: open blocking tickets.
 7. **F17 "soonest first" for cold caches.** Default: a cold cache sorts with unknown ones, by age.
 8. **Repo identity across worktrees.** `sessions.repo` is the worktree's top-level path. Default: leave it; Plan 3 must store the main repository before it spawns worktrees.
-9. **Auto-allowing the tools.** Orchestrator ruling with the owner away: off by default; `curia install --allow-mcp-tools` adds the four exact tool names, and uninstall removes those four strings (plan decisions 26 and 35). Should install allow them by default, and is the server-wide `mcp__curia` ever wanted?
+9. **Settled 2026-11-12 (owner's decision, Ruling 78, Task 18):** the tools are allowed by default and `--no-allow-mcp-tools` opts out; uninstall removes the four exact strings. As first asked: **Auto-allowing the tools.** The orchestrator had ruled off by default (Ruling 40, owner away; plan decisions 26 and 35). The server-wide `mcp__curia` is still never added.
 10. **Settled:** the Stop payload carries `last_assistant_message`, and Plan 1's live-check fix reads it. **Stop reads the transcript for the last assistant text**, but Claude Code's docs say the payload's `last_assistant_message` should be used at Stop. Not a Plan 2 change; default: leave it and do a small fix PR.
 11. **`curia install` path problems inherited from Plan 1** (Plan 1 Open Questions 8, 14, 16): the MCP registration and the `A` binding record the same resolved binary path as the hooks. Default: same behaviour as the hooks.
 12. **The key for the decide popup.** Default: `prefix + A`.
+13. **Settled 2026-11-12 (Ruling 76, accepted by the owner):** `make check`'s test step runs packages one at a time (`go test -race -p 1 ./...`) because the latency gates measured other packages' parallel load. As first noted: the owner's literal command was `go test -race ./...`.
+14. **Settled 2026-11-12 (owner, with Ruling 77 and Task 19):** a denied prompt leaving `waiting` and an interrupt leaving `working` (Plan 1 Open Question 19) are corrected from the transcript.
+15. **Settled 2026-11-12 (Rulings 74 and 74a):** SessionStart with source `compact` keeps state, and a compaction on an ended session revives it (Plan 1 Open Question 21).
+16. **Settled 2026-11-12 (owner):** MIT licence (Plan 1 Open Question 7).
+17. **Open, accepted by the owner as it is:** typing safety does not check the pane's foreground program. An editor left in a pane whose session row is still idle would receive the line; a check would need `pane_current_command` and knowing what Claude Code reports there.
+18. **Open:** a blocked Stop leaves the session `working` with no Stop to follow if Claude Code ignores the block (its cap of 8 consecutive blocks) or the user interrupts; later answers then wait for a Stop or `check_decision`. Task 19's transcript correction may cover the interrupt case; the ignored-block case is not covered.
+19. **Open:** CI does not print latency numbers (it needs `-v` or a log line in shared config), so a creeping latency shows only when a gate fails.
+20. **Open:** an unidentified caller (no session row) gets its repo from `CLAUDE_PROJECT_DIR` or the working directory (Ruling 70), which can differ from its sessions' git top level, so repo-scoped precedent can miss; and it cannot withdraw its own ticket (Ruling 75).
+21. **Open:** the decide popup cannot be driven by fast scripted input (Rulings 63, 66, 67, 68); the CLI flags are the scripting path. Whether phone SSH terminals send bracketed paste is unverified (Task 10 minor).
 
 Items for the isolated live check (could not be settled from the desk):
 
@@ -153,21 +200,47 @@ Remaining risks after the live probes (plan section 14): the `permission_prompt`
 
 ## Plan 2 Ledger
 
-- Wave 3 merged 2026-11-12: Task 9 (PR #26), Task 10 (PR #25, four fix rounds, the fourth by a fresh Fable implementer). Smoke check passed: a database created by the new binary is read and written by the old one, and one created by the old binary is migrated and read by the new one, with no error logged.
-- Wave 2 merged 2026-11-12: Task 6 (PR #24), Task 7 (PR #22), Task 8 (PR #23).
-- Wave 4 dispatched: Task 11 (Opus), Task 15 (Sonnet).
-
 - Wave 1 merged 2026-11-12: Task 1 (PR #19), Task 2 (PR #17), Task 3 (PR #20), Task 4 (PR #18), Task 5 (PR #21). Smoke check passed: `make check` on `plan-2`; `curia install` and `uninstall` into a temp home with a stub `claude` wrote and removed the skill, the `A` binding and the MCP registration call.
-- Wave 2 dispatched: Task 6 (Opus, raised from Sonnet by the pre-flight review), Task 7 (Sonnet), Task 8 (Sonnet).
+- Wave 2 merged 2026-11-12: Task 6 (PR #24, Opus, raised from Sonnet by the pre-flight review), Task 7 (PR #22), Task 8 (PR #23). The ledger records no separate smoke check for Wave 2 after its merge.
+- Wave 3 merged 2026-11-12: Task 9 (PR #26), Task 10 (PR #25, four fix rounds, the fourth by a fresh Fable implementer). Smoke check passed: a database created by the new binary is read and written by the old one, and one created by the old binary is migrated and read by the new one, with no error logged.
+- Wave 4 merged 2026-11-12: Task 11 (PR #28), Task 15 (PR #27). Smoke check: `decisions ls --json` on an empty database prints `[]` (exit 0), the table prints its header, `edit` inside an agent refuses (exit 1).
+- Wave 5 merged 2026-11-12, one PR at a time with `make check` on `plan-2` after each: Task 12 (PR #30), Task 14 (PR #29), Task 13 (PR #31). Smoke check passed with the real binary (see the smoke check table). CI on Task 14 first failed on Linux (latency gates under package parallelism; a test asserting macOS shell wording), which led to Ruling 76 and a test fix.
+- Wave 6 in progress: Task 16 (Opus) and Task 18 (Sonnet) dispatched from 50dd8a8. Then Task 19 (Opus, after Task 16), then Task 17, then the final whole-branch review and fix wave.
 
 One line per task: wave, worktree, branch, status, model, fix rounds.
 
 (none yet)
 
+## Plan 2 deferred minors (for the final fix wave)
+
+Every "minor (deferred)" line of the Plan 2 ledger as of 2026-11-12, grouped by task, 21 bullets from 20 ledger lines (the ledger's Task 10 "Minor new" note at the end of fix round 3 is included as a 21st bullet, though it does not use the word "deferred"). Tasks 16, 18, 19 and 17 have none yet. The final fix wave works from this list.
+
+- **Task 1:** `ESC ( B` style sequences leak their final letter. A cut can leave a space before the ellipsis. Combining marks are unbounded when the limit is zero or less.
+- **Task 1:** U+2028, U+2029 and NEL are dropped rather than treated as separators, so words join. `Text` can keep one trailing newline. The `oneLine` doc comment is badly wrapped.
+- **Task 2:** `TestDefaults` and `TestDecisionDefaults` assert the same defaults (plan-mandated).
+- **Task 4:** An explicit `"id":null` is answered as a normal request (MCP forbids null ids; `-32600` would be stricter). A malformed notification with a wrong `jsonrpc` version gets an error reply. Handling is strictly sequential by plan, so tools must stay fast and `notifications/cancelled` is not seen mid-call.
+- **Task 5:** A binary reinstalled at a new resolved path (for example a Homebrew Cellar path) makes the old MCP entry read as foreign. The message now says how to recover; the root cause is the same as Plan 1 Open Question 14.
+- **Task 5:** A relative or quoted-tilde `CLAUDE_CONFIG_DIR` is used as given (no `filepath.Abs`). A malformed `permissions` value is only reported when writing. The task exports more than the brief asked: `SkillPath`, `MCPAddCommand`, `ClaudeDir`, `ToolsAllowed`.
+- **Task 6:** The "Also answered" line drops ids that do not fit in a very large batch (Task 11's `ClaimDeliveries` could cap a claim at what one reason can name; the cap of 169 was later added). `Validate` does not normalise for itself, so callers must pass `Normalize` output (to be checked in Task 12).
+- **Task 6:** With more than 5 options `Validate` checks only the first 5 kept, so it can also report a recommendation as unknown. `Validate` on un-normalised input is O(n^2); Task 12 must call `Normalize` first.
+- **Task 7:** A doc typo, "letters letters". Private-use runes split tokens on the Go side.
+- **Task 8:** `notify.Exec` has no timeout or `WaitDelay` of its own, so Task 12 must pass a context with a short deadline (about 5 s). A nil `run` or `tm` would panic (callers always pass them).
+- **Task 9:** Superseding with a `SupersededBy` that is itself superseded is accepted. There is no concurrent test for retry after supersession (same code path as the tested one).
+- **Task 10:** Ctrl+C quits at once even with an answer in flight. Whether phone SSH terminals send bracketed paste is unverified. Task 16 must forward `decideTickMsg`, `decideRefreshMsg` and `decideAnsweredMsg` and stop the tick chain after `DecideClosedMsg`.
+- **Task 10:** `face` does not compare the stakes-line inputs (cache state) or age, which matters once Plan 5 writes cache columns. One extra ignored press after an own answer when a read landed during the flight (safe side).
+- **Task 10:** The notice "queue changed; press again" invites a quick press that is refused again (reword it to say pause). A ticket whose text changed on every 1 s refresh would be hard to answer.
+- **Task 10 (fix round 3 note, "Minor new"):** A dropped staging Enter (`decide.go` lines 524 to 527) restarts the dwell but does not consume the change flag, so it takes 3 presses instead of 2.
+- **Task 11:** Query-tag normalisation is `ToLower(TrimSpace)`, not the write rule's `sanitize.Line`. The `ClaimNotifySlot` doc is imprecise for a negative `every`. One test comment is misleading. Task 9's `TestAnswerRacesWithdrawAndExpire` uses staggered sleeps for coverage (watch it under `-race -cpu 8`).
+- **Task 12:** No test has a session naming its own different decided ticket in `differs_from`. The repo basename is shown without `sanitize` in the notification body and `repoBase`.
+- **Task 13:** A blocked Stop leaves the session `working` with no Stop to follow if Claude Code ignores the block (its 8-consecutive-blocks cap) or the user interrupts; later answers then wait for a Stop or `check_decision`.
+- **Task 13:** A compaction leaves a `stale` session stale and refreshes `updated_at` (un-hiding it briefly). In a narrow race, a session ended between lookup and transaction is restarted without enrichment. CI does not print latency numbers (needs `-v` or a log line in shared config).
+- **Task 14:** The shared-pane, typing-failed and could-not-check notes say "queued for the Stop hook" but give the user no action (suggest: have the agent call `check_decision D-n`). `unclaimedNote` infers "shared" and could mislabel a rare concurrent edit. `settleTimeout` of 1 s is shorter than the 2 s busy timeout.
+- **Task 15:** The `decisionsPrintTable` doc comment is detached by a blank line.
+
 ## Plan 2 Next steps
 
-1. Merge the setup PR (`chore/plan2-setup`) into `main`, then branch `plan-2` from `main`.
-2. Dispatch Wave 1 (Tasks 1 to 5), confirming each model first; smoke check after the wave.
+1. Finish Wave 6 (Tasks 16 and 18), then dispatch Task 19, then Task 17; smoke check after each wave.
+2. Final whole-branch review, then the final fix wave from "Plan 2 deferred minors".
 3. Owner: run `curia install` on the real machine and the three-session check; add Go 1.26 to PATH; choose a remedy for Plan 1 Open Question 19.
 
 # Plan 1 (Foundation): complete
@@ -209,7 +282,7 @@ What this suggests for the next plan: Sonnet was enough for single-package tasks
 
 1. Resolved by Ruling 4.
 2. Go 1.26 is keg-only via Homebrew on the dev Mac and not on PATH by default; owner to add it to their shell config (dotfiles are chezmoi-managed).
-3. `TestHookLatency` (Task 5, p95 < 20 ms in-process) runs under `-race` in `make check` and may be flaky, especially on CI runners. Decide at Task 5 dispatch how the budget is measured, without skipping or loosening the test.
+3. `TestHookLatency` (Task 5, p95 < 20 ms in-process) runs under `-race` in `make check` and may be flaky, especially on CI runners. Decide at Task 5 dispatch how the budget is measured, without skipping or loosening the test. (Further addressed in Plan 2 by Rulings 50 and 76: checks run under one lock and the test step runs packages one at a time.)
 4. Resolved by Ruling 5.
 5. `go.mod` says `go 1.26.0` plus `toolchain go1.26.11` rather than bare `go 1.26` (decision 0001).
 6. Resolved by Ruling 23.
@@ -224,10 +297,10 @@ What this suggests for the next plan: Sonnet was enough for single-package tasks
 16. A `#` or `%` in the binary path is not escaped for tmux formats in the snippet (hooks in `settings.json` are unaffected). `curia install` should refuse or warn on such a path.
 17. A session waiting on a permission prompt is ended and hidden when a background `claude -p` starts in its pane, until its next event (Ruling 27 restores it only then).
 18. `SubagentStop` on an ended session is ignored, so `subagents_active` can read high after a resume.
-19. A denied permission prompt leaves the session `waiting` (holding `W` and attracting `next`), and an Esc interrupt leaves it `working`, until the next prompt in that session; no Claude Code hook fires for either. The transcript shows a `user-rejected` tool result and "[Request interrupted by user...]" lines about 200 ms after the keypress, so a correction from the transcript when a view refreshes is possible, as is pane scraping. Owner to choose (Ruling 49).
+19. A denied permission prompt leaves the session `waiting` (holding `W` and attracting `next`), and an Esc interrupt leaves it `working`, until the next prompt in that session; no Claude Code hook fires for either. The transcript shows a `user-rejected` tool result and "[Request interrupted by user...]" lines about 200 ms after the keypress, so a correction from the transcript when a view refreshes is possible, as is pane scraping. Owner to choose (Ruling 49). **Resolved 2026-11-12:** the owner chose correction from the transcript; Ruling 77, implemented by Plan 2 Task 19.
 20. `docs/DESIGN.md`'s F1 table still says SessionStart means `working`; the code follows Ruling 37 (`idle` and seen). The spec is the owner's to update.
-21. A SessionStart with `source: compact` in the middle of a turn shows the session idle until its next tool event.
-7. No LICENSE file: the owner chose to leave it undecided (2026-11-11).
+21. A SessionStart with `source: compact` in the middle of a turn shows the session idle until its next tool event. **Resolved by Plan 2 Rulings 74 and 74a** (Task 13, PR #31).
+7. No LICENSE file: the owner chose to leave it undecided (2026-11-11). **Resolved 2026-11-12: MIT** (owner's decision; LICENSE added on `plan-2`).
 
 ## Plan 1 Rulings
 
