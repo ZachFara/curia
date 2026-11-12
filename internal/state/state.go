@@ -22,9 +22,7 @@ func Apply(s model.Session, ev model.Event, openDecision bool) model.Session {
 
 	switch ev.Kind {
 	case model.SessionStart:
-		start(&s, ev)
-		s.State = model.StateWorking
-		s.SubagentsActive = 0
+		sessionStart(&s, ev)
 	case model.UserPromptSubmit:
 		s.State = model.StateWorking
 		s.SeenAt = ev.At
@@ -79,6 +77,20 @@ func informational(ev model.Event) bool {
 func countSubagent(s *model.Session, ev model.Event) {
 	if ev.ToolName == "Task" || ev.ToolName == "Agent" {
 		s.SubagentsActive++
+	}
+}
+
+// sessionStart starts s from ev. A new or /cleared session sits at an empty
+// prompt the user just opened, so it is idle and seen (Ruling 37); its first
+// prompt makes it working. A model ev names stands until a transcript read
+// replaces it.
+func sessionStart(s *model.Session, ev model.Event) {
+	start(s, ev)
+	s.State = model.StateIdle
+	s.SeenAt = ev.At
+	s.SubagentsActive = 0
+	if ev.Model != "" {
+		s.Model = ev.Model
 	}
 }
 

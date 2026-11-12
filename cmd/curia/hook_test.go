@@ -200,8 +200,8 @@ func TestHookRecordsSession(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("GetSession = found %v, err %v", found, err)
 	}
-	if sess.State != model.StateWorking || sess.Pane != "" {
-		t.Errorf("session = %+v, want working with no pane", sess)
+	if sess.State != model.StateIdle || sess.Pane != "" {
+		t.Errorf("session = %+v, want idle with no pane", sess)
 	}
 }
 
@@ -322,6 +322,33 @@ func wantCalls(t *testing.T, got []string, want ...string) {
 	}
 }
 
+// Ruling 37: a session at its empty prompt is listed, but not counted in
+// the badge and not offered by next; its first prompt makes it working.
+func TestHookFreshSessionIsIdleUntilFirstPrompt(t *testing.T) {
+	m := newMarkerHook(t)
+	wantCalls(t, m.event("SessionStart", "A"))
+	if s := getSession(t, m.db, "A"); s.State != model.StateIdle {
+		t.Errorf("A after SessionStart = %s, want idle", s.State)
+	}
+	if out, err := runRoot(t, "status"); err != nil || out != "" {
+		t.Errorf("status = %q, %v, want an empty badge", out, err)
+	}
+	if out, err := runRoot(t, "ls"); err != nil || !strings.Contains(out, "idle") {
+		t.Errorf("ls = %q, %v, want A listed as idle", out, err)
+	}
+	m.fake.Calls = nil
+	if _, err := runRoot(t, "next"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(m.fake.Calls, "DisplayMessage nothing needs you") {
+		t.Errorf("next made calls %q, want nothing needs you", m.fake.Calls)
+	}
+	wantCalls(t, m.event("UserPromptSubmit", "A"))
+	if s := getSession(t, m.db, "A"); s.State != model.StateWorking {
+		t.Errorf("A after UserPromptSubmit = %s, want working", s.State)
+	}
+}
+
 func TestHookToolEventsOnWorkingSessionMakeNoCall(t *testing.T) {
 	m := newMarkerHook(t)
 	wantCalls(t, m.event("SessionStart", "A"))
@@ -334,6 +361,68 @@ func TestHookNotificationOnSeenSessionSetsRed(t *testing.T) {
 	m.event("SessionStart", "A")
 	m.seen()
 	wantCalls(t, m.event("Notification", "A"), "SetWindowOption @7 @curia_marker red")
+}
+
+// Ruling 38: an event that would turn the window the user is looking at red
+// marks its pane seen instead.
+func TestHookFocusedPaneIsMarkedSeenNotRed(t *testing.T) {
+	m := newMarkerHook(t)
+	m.fake.Focused = true
+	m.event("SessionStart", "A")
+	wantCalls(t, m.event("Notification", "A"))
+	if !slices.Contains(m.fake.Calls, "PaneFocused %1") {
+		t.Errorf("calls = %q, want a PaneFocused %%1 check", m.fake.Calls)
+	}
+	s := getSession(t, m.db, "A")
+	if s.State != model.StateWaiting || s.SeenAt.Before(s.UpdatedAt) {
+		t.Errorf("A = %s seen %v updated %v, want waiting and seen", s.State, s.SeenAt, s.UpdatedAt)
+	}
+	// A later event that would turn it red is checked again.
+	wantCalls(t, m.event("Notification", "A"))
+	if !slices.Contains(m.fake.Calls, "PaneFocused %1") {
+		t.Errorf("calls = %q, want a second check", m.fake.Calls)
+	}
+}
+
+func TestHookUnfocusedPaneTurnsRed(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	wantCalls(t, m.event("Notification", "A"), "SetWindowOption @7 @curia_marker red")
+	if !slices.Contains(m.fake.Calls, "PaneFocused %1") {
+		t.Errorf("calls = %q, want a PaneFocused %%1 check", m.fake.Calls)
+	}
+	// Already red: the marker does not change, so tmux is not asked again.
+	m.event("Notification", "A")
+	if slices.Contains(m.fake.Calls, "PaneFocused %1") {
+		t.Errorf("calls = %q, want no focus check on a red session", m.fake.Calls)
+	}
+}
+
+func TestHookEventsThatDoNotTurnRedMakeNoFocusCheck(t *testing.T) {
+	m := newMarkerHook(t)
+	for _, kind := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"} {
+		m.event(kind, "A")
+		if slices.Contains(m.fake.Calls, "PaneFocused %1") {
+			t.Errorf("%s: calls = %q, want no focus check", kind, m.fake.Calls)
+		}
+	}
+}
+
+// focusFailingTmux is a Fake whose focus check fails.
+type focusFailingTmux struct{ *tmux.Fake }
+
+func (f focusFailingTmux) PaneFocused(context.Context, string) (bool, error) {
+	return false, errors.New("no client")
+}
+
+func TestHookFocusCheckFailureIsLoggedAndTurnsRed(t *testing.T) {
+	m := newMarkerHook(t)
+	newTmuxClient = func() tmux.Client { return focusFailingTmux{m.fake} } // useFakeTmux restores it
+	m.event("SessionStart", "A")
+	wantCalls(t, m.event("Notification", "A"), "SetWindowOption @7 @curia_marker red")
+	if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "no client") || !strings.Contains(log[0], "%1") {
+		t.Errorf("log = %q, want one line with the failed check", log)
+	}
 }
 
 func TestHookPostToolUseClearsRed(t *testing.T) {

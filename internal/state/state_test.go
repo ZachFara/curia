@@ -30,6 +30,8 @@ func TestApplyTransitions(t *testing.T) {
 		want func(model.Session) model.Session
 	}{
 		{
+			// Ruling 37: a new or /cleared session sits at an empty prompt,
+			// and the user started it, so it is idle and seen.
 			name: "SessionStart",
 			in:   model.Session{SubagentsActive: 3},
 			ev: model.Event{
@@ -39,7 +41,7 @@ func TestApplyTransitions(t *testing.T) {
 			want: func(model.Session) model.Session {
 				return model.Session{
 					ID: "s1", Agent: "claude", Pane: "%1", Cwd: "/w", TranscriptPath: "/t",
-					State: model.StateWorking, StartedAt: t1, UpdatedAt: t1,
+					State: model.StateIdle, StartedAt: t1, UpdatedAt: t1, SeenAt: t1,
 				}
 			},
 		},
@@ -152,8 +154,8 @@ func TestEndedIgnoresSubagentStopAndSessionEnd(t *testing.T) {
 	}
 	ev := model.Event{Kind: model.SessionStart, SessionID: "s1", Pane: "%2", At: t1}
 	got := state.Apply(ended, ev, false)
-	if got.State != model.StateWorking || got.Pane != "%2" || got.StartedAt != t1 {
-		t.Errorf("SessionStart did not revive ended session: %+v", got)
+	if got.State != model.StateIdle || got.Pane != "%2" || got.StartedAt != t1 || got.SeenAt != t1 {
+		t.Errorf("SessionStart did not revive ended session as idle and seen: %+v", got)
 	}
 }
 
@@ -214,6 +216,22 @@ func TestSessionStartResetsOffsetForNewTranscript(t *testing.T) {
 	got := state.Apply(fresh, model.Event{Kind: model.PostToolUse, SessionID: "n", TranscriptPath: "/tp", At: t1}, false)
 	if got.TranscriptOffset != 300 {
 		t.Errorf("first seen mid-run: offset = %d, want 300 kept", got.TranscriptOffset)
+	}
+}
+
+func TestSessionStartTakesModelWhenNamed(t *testing.T) {
+	s := base()
+	s.Model = "claude-opus-5-5"
+	named := state.Apply(s, model.Event{Kind: model.SessionStart, SessionID: "s1", Model: "claude-haiku-5-5", At: t1}, false)
+	if named.Model != "claude-haiku-5-5" {
+		t.Errorf("SessionStart naming a model: %q, want claude-haiku-5-5", named.Model)
+	}
+	unnamed := state.Apply(s, model.Event{Kind: model.SessionStart, SessionID: "s1", At: t1}, false)
+	if unnamed.Model != "claude-opus-5-5" {
+		t.Errorf("SessionStart naming none: %q, want claude-opus-5-5 kept", unnamed.Model)
+	}
+	if other := state.Apply(s, model.Event{Kind: model.UserPromptSubmit, SessionID: "s1", Model: "x", At: t1}, false); other.Model != "claude-opus-5-5" {
+		t.Errorf("UserPromptSubmit changed the model to %q", other.Model)
 	}
 }
 

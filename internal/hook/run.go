@@ -130,6 +130,11 @@ func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config)
 	case model.PostToolUse, model.Notification, model.Stop:
 		err = readTranscript(&s, &ev, cfg)
 	}
+	// Claude Code may run Stop before the final answer is in the transcript,
+	// so the payload's copy wins (Ruling 36).
+	if first := transcript.FirstLine(ev.LastAssistantMessage); ev.Kind == model.Stop && first != "" {
+		ev.Message = first
+	}
 	return state.Apply(s, ev, false), err // Plan 2 wires real open decisions
 }
 
@@ -141,7 +146,8 @@ func fillEmpty(field *string, v string) {
 }
 
 // readTranscript reads the transcript's lines after s.TranscriptOffset into
-// s and, on Stop, puts the last assistant text into ev.Message.
+// s and, on Stop, puts the last assistant text into ev.Message (which apply
+// replaces with the payload's last_assistant_message when there is one).
 func readTranscript(s *model.Session, ev *model.Event, cfg config.Config) error {
 	path := s.TranscriptPath
 	if path == "" { // first seen mid-run: Apply takes the path from ev

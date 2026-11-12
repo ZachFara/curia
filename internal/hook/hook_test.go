@@ -46,14 +46,17 @@ func TestParseFixtures(t *testing.T) {
 		return ev
 	}
 	tests := []model.Event{
-		with(model.SessionStart, nil),
+		with(model.SessionStart, func(e *model.Event) { e.Model = "claude-haiku-5-5" }),
 		with(model.UserPromptSubmit, nil),
 		with(model.PreToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Edit", "src/api.ts" }),
 		with(model.PostToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Grep", "func Parse" }),
 		with(model.Notification, func(e *model.Event) {
 			e.Message, e.NotificationType = "Claude needs your permission to use Bash", "permission_prompt"
 		}),
-		with(model.Stop, nil),
+		with(model.Stop, func(e *model.Event) {
+			e.LastAssistantMessage = `The file notes.txt contains the text "alpha line 1".`
+		}),
+		// A subagent's closing text is not the session's answer.
 		with(model.SubagentStop, nil),
 		with(model.SessionEnd, nil),
 	}
@@ -258,7 +261,7 @@ func TestRunSessionStartRecordsSession(t *testing.T) {
 	want := model.Session{
 		ID: "A", Agent: "claude", Pane: "%3", TmuxSession: "work", TmuxWindow: "@7",
 		Cwd: "/src/curia", Repo: "/src/curia", Branch: "feat/hook", TranscriptPath: "/p/a.jsonl",
-		State: model.StateWorking, StartedAt: t0, UpdatedAt: t0,
+		State: model.StateIdle, StartedAt: t0, UpdatedAt: t0, SeenAt: t0,
 	}
 	if stored != want {
 		t.Errorf("stored =\n %+v\nwant\n %+v", stored, want)
@@ -357,11 +360,11 @@ func TestSessionStartEndsPriorSessionInPane(t *testing.T) {
 	if a := get(t, st, "A"); a.State != model.StateEnded || !a.UpdatedAt.Equal(t0.Add(time.Minute)) {
 		t.Errorf("A = %s at %v, want ended at %v", a.State, a.UpdatedAt, t0.Add(time.Minute))
 	}
-	if b := get(t, st, "B"); b.State != model.StateWorking || b.Pane != "%3" {
-		t.Errorf("B = %s in %q, want working in %%3", b.State, b.Pane)
+	if b := get(t, st, "B"); b.State != model.StateIdle || b.Pane != "%3" {
+		t.Errorf("B = %s in %q, want idle in %%3", b.State, b.Pane)
 	}
-	if c := get(t, st, "C"); c.State != model.StateWorking {
-		t.Errorf("C in another pane = %s, want working", c.State)
+	if c := get(t, st, "C"); c.State != model.StateIdle {
+		t.Errorf("C in another pane = %s, want idle (not ended)", c.State)
 	}
 }
 
@@ -377,8 +380,8 @@ func TestHookWithoutTmuxPane(t *testing.T) {
 			t.Errorf("%s: pane %q, tmux %q/%q, want none", id, s.Pane, s.TmuxSession, s.TmuxWindow)
 		}
 		// Without a pane there is nothing to end: B must not end A.
-		if s.State != model.StateWorking {
-			t.Errorf("%s: state %s, want working", id, s.State)
+		if s.State != model.StateIdle {
+			t.Errorf("%s: state %s, want idle", id, s.State)
 		}
 		if s.Repo != "/src/curia" || s.Branch != "feat/hook" {
 			t.Errorf("%s: repo %q branch %q, want them from Git", id, s.Repo, s.Branch)
@@ -449,6 +452,79 @@ func TestStopReadsTranscript(t *testing.T) {
 				t.Errorf("store has %+v, Run returned %+v", stored, got)
 			}
 		})
+	}
+}
+
+// TestStopPrefersLastAssistantMessage: at Stop, Claude Code may not have
+// flushed the final answer to the transcript yet, but the payload carries it
+// (Ruling 36). Its first line is the Stop message; model and context still
+// come from the transcript.
+func TestStopPrefersLastAssistantMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name, extra, want string
+	}{
+		{"first line of the payload's text", `,"last_assistant_message":"Done: notes.txt says alpha.\nSecond line."`, "Done: notes.txt says alpha."},
+		{"CRLF", `,"last_assistant_message":"Done.\r\nMore"`, "Done."},
+		{"absent falls back to the transcript", "", "Fixed the login bug."},
+		{"empty falls back to the transcript", `,"last_assistant_message":""`, "Fixed the login bug."},
+		{"empty first line falls back to the transcript", `,"last_assistant_message":"\nlater"`, "Fixed the login bug."},
+		{"not a string falls back to the transcript", `,"last_assistant_message":7`, "Fixed the login bug."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openStore(t)
+			tr := writeTranscript(t)
+			env := (&fakeEnv{}).env("%3")
+			run(t, st, env, model.SessionStart, payload("A", tr, ""))
+			got := run(t, st, env, model.Stop, payload("A", tr, tc.extra))
+			if got.LastUpdate != tc.want || got.Model != "claude-opus-5-5" || got.ContextUsed != 42000 {
+				t.Errorf("after Stop: LastUpdate %q model %q context %d, want %q from the transcript's opus at 42000",
+					got.LastUpdate, got.Model, got.ContextUsed, tc.want)
+			}
+		})
+	}
+}
+
+// TestStopMessageWithoutTranscript: a Stop whose session has no transcript
+// path still takes the payload's text.
+func TestStopMessageWithoutTranscript(t *testing.T) {
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	run(t, st, env, model.SessionStart, payload("A", "", ""))
+	if got := run(t, st, env, model.Stop, payload("A", "", `,"last_assistant_message":"hi"`)); got.LastUpdate != "hi" {
+		t.Errorf("LastUpdate = %q, want hi", got.LastUpdate)
+	}
+}
+
+// TestSessionStartModelKeptUntilTranscriptRead: an interactive SessionStart
+// names the model; the session shows it until a transcript read replaces it.
+func TestSessionStartModelKeptUntilTranscriptRead(t *testing.T) {
+	st := openStore(t)
+	tr := writeTranscript(t)
+	env := (&fakeEnv{}).env("%3")
+	if got := run(t, st, env, model.SessionStart, payload("A", tr, `,"model":"claude-haiku-5-5"`)); got.Model != "claude-haiku-5-5" {
+		t.Errorf("after SessionStart: model %q, want claude-haiku-5-5", got.Model)
+	}
+	if got := run(t, st, env, model.UserPromptSubmit, payload("A", tr, "")); got.Model != "claude-haiku-5-5" {
+		t.Errorf("after UserPromptSubmit: model %q, want it kept", got.Model)
+	}
+	if got := run(t, st, env, model.PostToolUse, payload("A", tr, `,"tool_name":"Read"`)); got.Model != "claude-opus-5-5" {
+		t.Errorf("after a transcript read: model %q, want the transcript's claude-opus-5-5", got.Model)
+	}
+	// A SessionStart without one (a resume, headless, or /clear's new id)
+	// leaves what the session has.
+	if got := run(t, st, env, model.SessionStart, payload("A", tr, "")); got.Model != "claude-opus-5-5" {
+		t.Errorf("after a SessionStart with no model: %q, want claude-opus-5-5 kept", got.Model)
+	}
+}
+
+// TestParseReadsModelOnlyOnSessionStart: no other payload carries the
+// session's model.
+func TestParseReadsModelOnlyOnSessionStart(t *testing.T) {
+	body := []byte(`{"session_id":"s","model":"claude-haiku-5-5"}`)
+	for _, kind := range []model.EventKind{model.UserPromptSubmit, model.PostToolUse, model.Stop, model.SubagentStop} {
+		if ev, err := hook.Parse(kind, body, "", t0); err != nil || ev.Model != "" {
+			t.Errorf("Parse(%s).Model = %q, %v, want empty", kind, ev.Model, err)
+		}
 	}
 }
 
@@ -532,6 +608,26 @@ func TestNestedSessionDoesNotHideParent(t *testing.T) {
 	}
 	if len(listed) != 1 || listed[0].ID != "OUTER" || listed[0].State != model.StateWaiting {
 		t.Errorf("listed = %+v, want OUTER waiting only", listed)
+	}
+}
+
+// TestHeadlessRunSequence: `claude -p` fires SessionStart, UserPromptSubmit,
+// Stop and SessionEnd (live check), so it is working from its prompt on.
+func TestHeadlessRunSequence(t *testing.T) {
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	for _, step := range []struct {
+		kind model.EventKind
+		want model.State
+	}{
+		{model.SessionStart, model.StateIdle},
+		{model.UserPromptSubmit, model.StateWorking},
+		{model.Stop, model.StateIdle},
+		{model.SessionEnd, model.StateEnded},
+	} {
+		if got := run(t, st, env, step.kind, payload("H", "", "")); got.State != step.want {
+			t.Errorf("after %s: %s, want %s", step.kind, got.State, step.want)
+		}
 	}
 }
 

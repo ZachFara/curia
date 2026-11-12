@@ -4,6 +4,7 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -25,6 +26,9 @@ type Client interface {
 	ListPanes(ctx context.Context) ([]Pane, error)
 	// PaneInfo returns the pane with the given id.
 	PaneInfo(ctx context.Context, pane string) (Pane, error)
+	// PaneFocused reports whether the pane is the active pane of the active
+	// window of a session with an attached client.
+	PaneFocused(ctx context.Context, pane string) (bool, error)
 	// SwitchTo moves the attached client to the pane.
 	SwitchTo(ctx context.Context, pane string) error
 	// SetWindowOption sets a window option (or @user option) on a window.
@@ -34,3 +38,6 @@ type Client interface {
 	// KillPane closes the pane.
 	KillPane(ctx context.Context, pane string) error
 }
+
+// ErrNoWindow is wrapped by an error for a window that does not exist.
+var ErrNoWindow = errors.New("tmux: no such window")

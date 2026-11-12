@@ -1,1 +1,1 @@
-{"session_id":"sess-1","transcript_path":"/p/t.jsonl","cwd":"/repo","permission_mode":"default","hook_event_name":"SubagentStop","stop_hook_active":false}
+{"session_id":"sess-1","transcript_path":"/p/t.jsonl","cwd":"/repo","permission_mode":"default","hook_event_name":"SubagentStop","stop_hook_active":false,"agent_id":"a1","agent_type":"","agent_transcript_path":"/p/subagents/a1.jsonl","last_assistant_message":"Subagent report."}

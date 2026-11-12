@@ -1,1 +1,1 @@
-{"session_id":"sess-1","transcript_path":"/p/t.jsonl","cwd":"/repo","permission_mode":"default","hook_event_name":"Stop","stop_hook_active":false}
+{"session_id":"sess-1","transcript_path":"/p/t.jsonl","cwd":"/repo","scratchpad_dir":"/tmp/scratch","prompt_id":"fc842216-39ae-49ee-bc94-1fac3c9880ab","permission_mode":"default","effort":{"level":"medium"},"hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"The file notes.txt contains the text \"alpha line 1\".","background_tasks":[],"session_crons":[]}
