@@ -3,6 +3,7 @@ package sanitize
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -190,6 +191,10 @@ var hostile = []string{
 	"a\u2066b\u2069c\u200bd\ufeffe",
 	"\x7f\x80\x9f del and c1",
 	"line1\r\nline2\rline3\n\n\n\nline4\t\ttab",
+	"nb\u00a0sp\u2003em\u3000ideo\u202fnarrow",
+	"a\x1b\nb\x1b\r\nc\x1b\rd",
+	"tail\n\n\n \n",
+	"\n\n\nhead",
 	strings.Repeat("\x1b[", 1<<19),
 }
 
@@ -219,16 +224,21 @@ func TestHostileCorpus(t *testing.T) {
 		for _, r := range out {
 			switch {
 			case r == '\n' && newlineOK:
-			case r < 0x20, r >= 0x7f && r <= 0x9f, r >= 0x202a && r <= 0x202e:
+			case r < 0x20, r >= 0x7f && r <= 0x9f, r >= 0x202a && r <= 0x202e,
+				r >= 0x2066 && r <= 0x2069, r == 0x200b, r == 0xfeff:
 				t.Errorf("%s: forbidden rune %U in %.40q", name, r, out)
 			}
 		}
 	}
+	start := time.Now()
 	for _, in := range hostile {
 		check("Line", Line(in, 0), false)
 		check("Text", Text(in, 0), true)
 		k, _ := Keys(in, 0)
 		check("Keys", k, false)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("corpus took %v, want under 2s", d)
 	}
 }
 
@@ -245,5 +255,75 @@ func TestHostileExpectations(t *testing.T) {
 		if got := Line(c.in, 0); got != c.line {
 			t.Errorf("Line(%.30q) = %q, want %q", c.in, got, c.line)
 		}
+	}
+}
+
+func TestSpaceSeparatorsBecomeSpaces(t *testing.T) {
+	in := "a\u00a0b\u2003c\u3000d\u202fe\u00a0\u00a0 f"
+	want := "a b c d e f"
+	if got := Line(in, 0); got != want {
+		t.Errorf("Line = %q, want %q", got, want)
+	}
+	if got := Text(in+"\n\u3000g\u00a0", 0); got != want+"\ng" {
+		t.Errorf("Text = %q, want %q", got, want+"\ng")
+	}
+	out, lossy := Keys(in, 0)
+	if out != want || lossy {
+		t.Errorf("Keys = %q, %v, want %q, false", out, lossy, want)
+	}
+}
+
+func TestEscBeforeLineBreakKeepsBreak(t *testing.T) {
+	for _, in := range []string{"a\x1b\nb", "a\x1b\rb", "a\x1b\r\nb"} {
+		if got := Text(in, 0); got != "a\nb" {
+			t.Errorf("Text(%q) = %q, want %q", in, got, "a\nb")
+		}
+		if got := Line(in, 0); got != "a b" {
+			t.Errorf("Line(%q) = %q, want %q", in, got, "a b")
+		}
+	}
+}
+
+func TestTextTrailingAndLeadingBlankLines(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"a\n\n\n", "a\n"},
+		{"a\n \n\t\n", "a\n"},
+		{"\n\n\na", "\na"},
+		{"\n\n", ""},
+	}
+	for _, c := range cases {
+		if got := Text(c.in, 0); got != c.want {
+			t.Errorf("Text(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestC1StringWithoutTerminatorSwallowsRest(t *testing.T) {
+	for _, intro := range []string{"\u0090", "\u0098", "\u009d", "\u009e", "\u009f"} {
+		in := "keep" + intro + "payload\nmore text"
+		if got := Line(in, 0); got != "keep" {
+			t.Errorf("Line(%q) = %q, want %q", in, got, "keep")
+		}
+		if got := Text(in, 0); got != "keep" {
+			t.Errorf("Text(%q) = %q, want %q", in, got, "keep")
+		}
+	}
+}
+
+func TestLargeInputIsLinear(t *testing.T) {
+	inputs := []string{
+		strings.Repeat("\x1b[", 1<<20),
+		strings.Repeat("\x1b]", 1<<20),
+		strings.Repeat("\x1b[31", 1<<18),
+		strings.Repeat("a\u00a0\n", 1<<18),
+	}
+	start := time.Now()
+	for _, in := range inputs {
+		Line(in, 200)
+		Text(in, 200)
+		Keys(in, 200)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("1 MiB inputs took %v, want under 2s", d)
 	}
 }

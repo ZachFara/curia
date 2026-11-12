@@ -23,7 +23,9 @@ const (
 // Line makes s one line of printable text: escape sequences are removed,
 // line breaks and tabs become spaces, runes that are not printable are
 // dropped, runs of spaces collapse and the ends are trimmed. A positive
-// limit cuts the result to that many runes, the last one an ellipsis.
+// limit cuts the result to that many runes, the last one an ellipsis;
+// callers pass a positive limit for untrusted text, since a limit that is
+// not positive leaves the length unbounded.
 func Line(s string, limit int) string {
 	out, _ := cut(oneLine(scan(s)), limit, ellipsis)
 	return out
@@ -32,7 +34,8 @@ func Line(s string, limit int) string {
 // Text is Line for several lines: "\r\n" and "\r" become "\n", each line is
 // cleaned as Line cleans one, and at most one blank line is kept in a row.
 // A positive limit cuts the result to that many runes, the last one an
-// ellipsis.
+// ellipsis; callers pass a positive limit for untrusted text, since a limit
+// that is not positive leaves the length unbounded.
 func Text(s string, limit int) string {
 	s = strings.ReplaceAll(scan(s), "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
@@ -78,12 +81,12 @@ func squeeze(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// oneLine turns line breaks and tabs into spaces, drops every rune that is
-// not printable, then squeezes the spaces. The input has been through scan.
+// oneLine turns line breaks, tabs and Unicode space separators (category Zs)
+// into spaces, drops every rune that is not printable, then squeezes the spaces. The input has been through scan.
 func oneLine(s string) string {
 	return squeeze(strings.Map(func(r rune) rune {
 		switch {
-		case r == '\n' || r == '\r' || r == '\t':
+		case r == '\n' || r == '\r' || r == '\t' || unicode.Is(unicode.Zs, r):
 			return ' '
 		case unicode.IsPrint(r): // includes the ASCII space
 			return r
@@ -138,13 +141,14 @@ func scan(s string) string {
 
 // escLen is the length in bytes of what follows an ESC that belongs to the
 // sequence. An ESC followed by another ESC is dropped alone, so the second
-// one introduces its own sequence.
+// one introduces its own sequence; an ESC followed by a line break is
+// dropped alone too, so the break survives.
 func escLen(rest string) int {
 	r, n := utf8.DecodeRuneInString(rest)
 	switch r {
 	case utf8.RuneError:
 		return n // end of input (0) or one invalid byte (1)
-	case esc:
+	case esc, '\n', '\r':
 		return 0
 	case '[':
 		return n + csiLen(rest[n:])
