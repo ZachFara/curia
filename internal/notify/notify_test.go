@@ -145,3 +145,56 @@ func TestExecRunsAProgram(t *testing.T) {
 		t.Error("false: want an error")
 	}
 }
+
+func TestBodyOmitsEmptyRepo(t *testing.T) {
+	cases := []struct{ repo, want string }{
+		{"", "d-7: q"},
+		{"/", "d-7: q"},
+		{"/home/u/code/curia", "d-7 curia: q"},
+	}
+	for _, c := range cases {
+		r := &recorder{}
+		d := blocking("q")
+		d.Repo = c.repo
+		cfg := config.Config{NotifyMacOS: true}
+		if err := Blocking(context.Background(), &tmux.Fake{}, r.run, "darwin", cfg, d, ""); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.calls[0][8]; got != c.want {
+			t.Errorf("repo %q: body %q, want %q", c.repo, got, c.want)
+		}
+	}
+}
+
+func TestBodyNeverStartsWithDash(t *testing.T) {
+	r := &recorder{}
+	cfg := config.Config{NotifyMacOS: true}
+	d := blocking("-e do shell script")
+	d.Repo = ""
+	if err := Blocking(context.Background(), &tmux.Fake{}, r.run, "darwin", cfg, d, ""); err != nil {
+		t.Fatal(err)
+	}
+	if body := r.calls[0][8]; strings.HasPrefix(body, "-") {
+		t.Errorf("body %q starts with a dash", body)
+	}
+}
+
+type failingBell struct{ *tmux.Fake }
+
+func (f failingBell) Bell(ctx context.Context, pane string) error {
+	_ = f.Fake.Bell(ctx, pane)
+	return errors.New("bell failed")
+}
+
+func TestBothTriedWhenBellFails(t *testing.T) {
+	r := &recorder{}
+	fk := &tmux.Fake{}
+	cfg := config.Config{NotifyBell: true, NotifyMacOS: true}
+	err := Blocking(context.Background(), failingBell{fk}, r.run, "darwin", cfg, blocking("q"), "%5")
+	if err == nil || err.Error() != "bell failed" {
+		t.Errorf("err = %v", err)
+	}
+	if len(r.calls) != 1 || !reflect.DeepEqual(fk.Calls, []string{"Bell %5"}) {
+		t.Errorf("calls = %v / %v", fk.Calls, r.calls)
+	}
+}

@@ -46,8 +46,18 @@ func Blocking(ctx context.Context, tm tmux.Client, run Run, goos string, cfg con
 		errs = append(errs, tm.Bell(ctx, pane))
 	}
 	if cfg.NotifyMacOS && goos == "darwin" {
-		body := sanitize.Line(d.ID+" "+filepath.Base(d.Repo)+": "+d.Question, bodyMax)
+		body := sanitize.Line(d.ID+repoPart(d.Repo)+": "+d.Question, bodyMax)
 		errs = append(errs, run(ctx, osascript, "-e", scriptA, "-e", scriptB, "-e", scriptC, title, body))
 	}
 	return errors.Join(errs...)
+}
+
+// repoPart is " <base>" for a repo with a usable base name, and empty for an
+// empty or root repo (base "", "." or "/"), whose name would only be noise.
+func repoPart(repo string) string {
+	base := filepath.Base(repo)
+	if base == "" || base == "." || base == "/" {
+		return ""
+	}
+	return " " + base
 }
