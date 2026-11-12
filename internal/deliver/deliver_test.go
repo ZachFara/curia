@@ -27,13 +27,14 @@ import (
 // now is the fixed clock of every test.
 var now = time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
 
-// Delivery notes of plan section 4.9 and Rulings 54 and 58.
+// Delivery notes of plan section 4.9 and Rulings 54 and 58. Every note for
+// an answer an idle agent would never collect ends with what the user can do.
 const (
 	noteWorking  = "agent is working; the Stop hook will deliver it"
 	noteWaiting  = "agent is at a prompt of its own; queued until it next stops"
-	notePaneGone = "pane gone; the agent gets it from check_decision"
-	noteNoTmux   = "tmux unreachable; queued for the Stop hook"
-	noteFailed   = "typing failed; queued for the Stop hook"
+	notePaneGone = "pane gone; tell the agent to call check_decision D-1"
+	noteNoTmux   = "tmux unreachable; queued for the Stop hook, or tell the agent to call check_decision D-1"
+	noteFailed   = "typing failed; queued for the Stop hook, or tell the agent to call check_decision D-1"
 )
 
 func openStore(t *testing.T) *store.Store {
@@ -716,8 +717,124 @@ func TestSharedPaneIsNotTyped(t *testing.T) {
 			if got := sendKeysCalls(fake.Calls); len(got) != 0 {
 				t.Errorf("typed into a pane shared with a %s session: %q", other, got)
 			}
-			wantQueued(t, st, out, d.ID, "pane is shared by another session; queued for the Stop hook")
+			wantQueued(t, st, out, d.ID, "pane is shared by another session; queued for the Stop hook, or tell the agent to call check_decision D-1")
 		})
+	}
+}
+
+// Ruling 84: a session with subagents running is never typed into, since a
+// subagent's permission dialog may be on screen; the note says why and what
+// the user can do.
+func TestSubagentsRunningIsNotTyped(t *testing.T) {
+	st := openStore(t)
+	s := asker()
+	s.SubagentsActive = 1
+	seedSession(t, st, s)
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	log, _ := testLog()
+	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+		t.Errorf("typed into a session with a subagent running: %q", got)
+	}
+	wantQueued(t, st, out, d.ID,
+		"agent has subagents running; it gets the answer when they finish, or tell the agent to call check_decision D-1")
+}
+
+// Ruling 81: after a partial send the line may sit in the prompt, so the
+// next answer for the session is not typed (it would be glued to the line)
+// until a hook event shows the agent took a prompt; then it is.
+func TestNoTypingOverAnUnsubmittedLine(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, asker())
+	first := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	second := seedTicket(t, st, model.ModeBlocking, "Postgres view")
+	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}, SendKeysErr: tmux.ErrPartialSend}
+	log, _ := testLog()
+	if _, err := deliver.Answer(context.Background(), st, fake, log, first.ID, answerA, now); err != nil {
+		t.Fatal(err)
+	}
+	fake.SendKeysErr, fake.Calls = nil, nil
+	// The partial send left the session idle (AnswerDecision cleared
+	// needs_decision), with no hook event since.
+	out, err := deliver.Answer(context.Background(), st, fake, log, second.ID, answerA, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+		t.Errorf("typed over an unsubmitted line: %q", got)
+	}
+	wantQueued(t, st, out, second.ID, "an answer typed earlier may still be unsubmitted in the agent's prompt; "+
+		"queued for the Stop hook, or tell the agent to call check_decision D-2")
+
+	// The user pressed Enter: UserPromptSubmit and Stop moved updated_at on.
+	s := asker()
+	s.State, s.UpdatedAt = model.StateIdle, now.Add(2*time.Minute)
+	seedSession(t, st, s)
+	third := seedTicket(t, st, model.ModeBlocking, "Postgres log")
+	out, err = deliver.Answer(context.Background(), st, fake, log, third.ID, answerA, now.Add(3*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 1 || out.Decision.DeliveredVia != model.ViaSendKeys {
+		t.Errorf("after a hook event: SendKeys calls %q, via %q; want D-3 typed", got, out.Decision.DeliveredVia)
+	}
+}
+
+// deadlineTmux records the deadline of the context SendKeys is given.
+type deadlineTmux struct {
+	*tmux.Fake
+	left *time.Duration
+}
+
+func (d deadlineTmux) SendKeys(ctx context.Context, pane, text string) error {
+	if dl, ok := ctx.Deadline(); ok {
+		*d.left = time.Until(dl)
+	}
+	return d.Fake.SendKeys(ctx, pane, text)
+}
+
+// Ruling 81: typing is not squeezed into one second for all three tmux
+// steps; SendKeys bounds each step itself and gets the caller's context.
+func TestTypingKeepsTheCallersDeadline(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, asker())
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	log, _ := testLog()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	var left time.Duration
+	if _, err := deliver.Answer(ctx, st, deadlineTmux{fake, &left}, log, d.ID, answerA, now); err != nil {
+		t.Fatal(err)
+	}
+	if left < 30*time.Second {
+		t.Errorf("SendKeys got a deadline %v away, want the caller's minute", left)
+	}
+}
+
+// goneWindowTmux fails every marker write as tmux does for a closed window.
+type goneWindowTmux struct{ *tmux.Fake }
+
+func (goneWindowTmux) SetWindowOption(context.Context, string, string, string) error {
+	return fmt.Errorf("%w: tmux set-option: no such window: @7", tmux.ErrNoWindow)
+}
+
+// A window that closed is not worth a warning (as for applyMarkers).
+func TestMarkerOnGoneWindowIsNotWarned(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, asker())
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	log, buf := testLog()
+	if _, err := deliver.Answer(context.Background(), st, goneWindowTmux{fake}, log, d.ID, answerA, now); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("log warns about a gone window:\n%s", buf)
 	}
 }
 
@@ -788,7 +905,7 @@ func (l lockingTmux) ListPanes(ctx context.Context) ([]tmux.Pane, error) {
 // A store error in Reconcile or ClaimTyping types nothing and leaves the
 // answer queued.
 func TestStoreErrorBeforeClaimTypesNothing(t *testing.T) {
-	const noteNoCheck = "could not check the session; queued for the Stop hook"
+	const noteNoCheck = "could not check the session; queued for the Stop hook, or tell the agent to call check_decision D-1"
 	t.Run("reconcile", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "curia.db")
 		st := openStoreAt(t, path)
@@ -859,7 +976,7 @@ func TestFailedRequeueSaysSo(t *testing.T) {
 		t.Fatal(err)
 	}
 	release()
-	want := "typing failed and the answer could not be queued again; the agent can read it with check_decision"
+	want := "typing failed and the answer could not be queued again; tell the agent to call check_decision D-1"
 	if out.Note != want {
 		t.Errorf("note = %q, want %q", out.Note, want)
 	}

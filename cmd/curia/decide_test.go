@@ -463,7 +463,7 @@ func TestDecideDeliveryFailureIsReportedNotFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide = %v, want success", err)
 	}
-	if want := "D-1 answered: A: Postgres · queued: tmux unreachable; queued for the Stop hook\n"; out != want {
+	if want := "D-1 answered: A: Postgres · queued: tmux unreachable; queued for the Stop hook, or tell the agent to call check_decision D-1\n"; out != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
 	if d := decisionsGet(t, db, "D-1"); d.Status != model.StatusAnswered || d.Delivery != model.DeliveryQueued {

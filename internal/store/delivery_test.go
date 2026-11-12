@@ -95,72 +95,126 @@ func claimStopLocked(s *store.Store, session string, now time.Time, locked func(
 
 func TestClaimTypingRequiresIdleOrNeedsDecision(t *testing.T) {
 	cases := []struct {
-		name  string
-		state model.State // "" for no session row
-		pane  string
-		ok    bool
+		name      string
+		state     model.State // "" for no session row
+		pane      string
+		subagents int
+		why       store.TypingRefusal
 	}{
-		{"idle", model.StateIdle, "%3", true},
-		{"needs_decision", model.StateNeedsDecision, "%3", true},
-		{"working", model.StateWorking, "%3", false},
-		{"waiting", model.StateWaiting, "%3", false},
-		{"stale", model.StateStale, "%3", false},
-		{"ended", model.StateEnded, "%3", false},
-		{"no pane", model.StateIdle, "", false},
-		{"no session row", "", "", false},
+		{"idle", model.StateIdle, "%3", 0, store.TypingClaimed},
+		{"needs_decision", model.StateNeedsDecision, "%3", 0, store.TypingClaimed},
+		{"working", model.StateWorking, "%3", 0, store.TypingWorking},
+		{"waiting", model.StateWaiting, "%3", 0, store.TypingWaiting},
+		{"stale", model.StateStale, "%3", 0, store.TypingNoPane},
+		{"ended", model.StateEnded, "%3", 0, store.TypingNoPane},
+		{"no pane", model.StateIdle, "", 0, store.TypingNoPane},
+		{"no session row", "", "", 0, store.TypingNoPane},
+		// Ruling 84: a subagent may have a permission dialog on screen.
+		{"idle with a subagent", model.StateIdle, "%3", 1, store.TypingSubagents},
+		{"needs_decision with subagents", model.StateNeedsDecision, "%3", 2, store.TypingSubagents},
 	}
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) { checkClaimTyping(t, c.state, c.pane, c.ok) })
+		t.Run(c.name, func(t *testing.T) { checkClaimTyping(t, c.state, c.pane, c.subagents, c.why) })
 	}
 }
 
 // checkClaimTyping claims a queued answer of session s1, stored in state
-// (no row when state is "") with pane, and checks the outcome is wantOK.
-func checkClaimTyping(t *testing.T, state model.State, pane string, wantOK bool) {
+// (no row when state is "") with pane and subagents running, and checks the
+// claim's refusal is want.
+func checkClaimTyping(t *testing.T, state model.State, pane string, subagents int, want store.TypingRefusal) {
 	t.Helper()
 	s := open(t, dbPath(t))
 	var sess model.Session
+	store1 := func() {
+		sess = model.Session{ID: "s1", Agent: "claude", Pane: pane, State: state, SubagentsActive: subagents, UpdatedAt: t0}
+		upsert(t, s, sess)
+	}
 	if state != "" {
-		sess = liveSession(t, s, "s1", pane, state)
+		store1()
 	}
 	d := queued(t, s, "Type the answer?", "s1")
-	if state == model.StateNeedsDecision {
-		// AnswerDecision cleared needs_decision; put it back.
-		sess = liveSession(t, s, "s1", pane, state)
+	if state != "" {
+		// AnswerDecision cleared needs_decision; put the row back.
+		store1()
 	}
-	got, gotSess, ok, err := s.ClaimTyping(context.Background(), d.ID, tClaim)
+	got, gotSess, why, err := s.ClaimTyping(context.Background(), d.ID, tClaim)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok != wantOK {
-		t.Fatalf("ok = %v, want %v", ok, wantOK)
+	if why != want {
+		t.Fatalf("refusal = %v, want %v", why, want)
 	}
 	if !reflect.DeepEqual(gotSess, sess) {
 		t.Errorf("session:\n got %+v\nwant %+v", gotSess, sess)
 	}
-	if !wantOK {
+	if want != store.TypingClaimed {
 		assertQueued(t, s, d.ID)
 		return
 	}
 	assertDelivered(t, s, d.ID, model.ViaSendKeys, tClaim)
 	assertDecision(t, got, getDecision(t, s, d.ID))
-	if _, _, again, err := s.ClaimTyping(context.Background(), d.ID, tClaim.Add(time.Second)); err != nil || again {
-		t.Errorf("second claim = %v, %v; want false, nil", again, err)
+	if _, _, again, err := s.ClaimTyping(context.Background(), d.ID, tClaim.Add(time.Second)); err != nil || again != store.TypingNotQueued {
+		t.Errorf("second claim = %v, %v; want TypingNotQueued, nil", again, err)
 	}
 	assertDelivered(t, s, d.ID, model.ViaSendKeys, tClaim)
+}
+
+// Ruling 81: once an answer was typed into a session, no other answer is
+// typed into it until a hook event moves the session's updated_at past the
+// typing, so a line left unsubmitted in the prompt is never glued to the
+// next one. An answer typed and then requeued (nothing was typed) does not
+// count, nor one delivered by another path, nor one to another session.
+func TestClaimTypingWaitsForSubmitOfEarlierLine(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	liveSession(t, s, "s1", "%3", model.StateIdle)
+	liveSession(t, s, "s2", "%4", model.StateIdle)
+	first := queued(t, s, "Typed first?", "s1")
+	second := queued(t, s, "Typed second?", "s1")
+	other := queued(t, s, "For s2?", "s2")
+	if _, _, why, err := s.ClaimTyping(ctx, first.ID, tClaim); err != nil || why != store.TypingClaimed {
+		t.Fatalf("first claim = %v, %v", why, err)
+	}
+	for _, at := range []time.Time{tClaim, tClaim.Add(time.Minute)} {
+		if _, _, why, err := s.ClaimTyping(ctx, second.ID, at); err != nil || why != store.TypingUnsubmitted {
+			t.Fatalf("second claim at %v = %v, %v; want TypingUnsubmitted", at, why, err)
+		}
+		assertQueued(t, s, second.ID)
+	}
+	if _, _, why, err := s.ClaimTyping(ctx, other.ID, tClaim); err != nil || why != store.TypingClaimed {
+		t.Errorf("claim for another session = %v, %v; want claimed", why, err)
+	}
+	// A hook event at the very instant of the typing is not later than it.
+	upsert(t, s, model.Session{ID: "s1", Agent: "claude", Pane: "%3", State: model.StateIdle, UpdatedAt: tClaim})
+	if _, _, why, err := s.ClaimTyping(ctx, second.ID, tClaim.Add(time.Minute)); err != nil || why != store.TypingUnsubmitted {
+		t.Fatalf("claim after an event at the typing = %v, %v; want TypingUnsubmitted", why, err)
+	}
+	// UserPromptSubmit, then Stop: the line was submitted.
+	upsert(t, s, model.Session{ID: "s1", Agent: "claude", Pane: "%3", State: model.StateIdle, UpdatedAt: tClaim.Add(time.Millisecond)})
+	if _, _, why, err := s.ClaimTyping(ctx, second.ID, tClaim.Add(time.Minute)); err != nil || why != store.TypingClaimed {
+		t.Fatalf("claim after a later hook event = %v, %v; want claimed", why, err)
+	}
+	// A requeued typing (nothing typed) blocks nothing.
+	if err := s.RequeueDelivery(ctx, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	third := queued(t, s, "Typed third?", "s1")
+	if _, _, why, err := s.ClaimTyping(ctx, third.ID, tClaim.Add(2*time.Minute)); err != nil || why != store.TypingClaimed {
+		t.Errorf("claim after a requeue = %v, %v; want claimed", why, err)
+	}
 }
 
 func TestClaimTypingNothingToClaim(t *testing.T) {
 	s := open(t, dbPath(t))
 	ctx := context.Background()
 	sess := liveSession(t, s, "s1", "%3", model.StateIdle)
-	if _, gotSess, ok, err := s.ClaimTyping(ctx, "D-99", tClaim); err != nil || ok || !reflect.DeepEqual(gotSess, model.Session{}) {
-		t.Errorf("missing decision = %+v, %v, %v; want zero session, false, nil", gotSess, ok, err)
+	if _, gotSess, why, err := s.ClaimTyping(ctx, "D-99", tClaim); err != nil || why != store.TypingNotQueued || !reflect.DeepEqual(gotSess, model.Session{}) {
+		t.Errorf("missing decision = %+v, %v, %v; want zero session, TypingNotQueued, nil", gotSess, why, err)
 	}
 	d := create(t, s, ticket(t, "Still open?", model.ModeBlocking, "s1", t0))
-	got, gotSess, ok, err := s.ClaimTyping(ctx, d.ID, tClaim)
-	if err != nil || ok {
-		t.Fatalf("open ticket = %v, %v; want false, nil", ok, err)
+	got, gotSess, why, err := s.ClaimTyping(ctx, d.ID, tClaim)
+	if err != nil || why != store.TypingNotQueued {
+		t.Fatalf("open ticket = %v, %v; want TypingNotQueued, nil", why, err)
 	}
 	if !reflect.DeepEqual(gotSess, sess) || got.Delivery != model.DeliveryNone {
 		t.Errorf("open ticket: session %+v delivery %s; want the stored session and none", gotSess, got.Delivery)
@@ -193,11 +247,11 @@ func TestClaimTypingRefusesSharedPane(t *testing.T) {
 				liveSession(t, s, "s2", c.pane, c.other)
 			}
 			d := queued(t, s, "Type the answer?", "s1")
-			_, gotSess, ok, err := s.ClaimTyping(context.Background(), d.ID, tClaim)
+			_, gotSess, why, err := s.ClaimTyping(context.Background(), d.ID, tClaim)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if ok != c.ok {
+			if ok := why == store.TypingClaimed; ok != c.ok {
 				t.Fatalf("ok = %v, want %v", ok, c.ok)
 			}
 			if !reflect.DeepEqual(gotSess, sess) {
@@ -219,8 +273,8 @@ func TestRequeueOnlyUndoesTyping(t *testing.T) {
 	liveSession(t, s, "s2", "%4", model.StateIdle)
 
 	typed := queued(t, s, "Typed?", "s1")
-	if _, _, ok, err := s.ClaimTyping(ctx, typed.ID, tClaim); err != nil || !ok {
-		t.Fatalf("ClaimTyping = %v, %v", ok, err)
+	if _, _, why, err := s.ClaimTyping(ctx, typed.ID, tClaim); err != nil || why != store.TypingClaimed {
+		t.Fatalf("ClaimTyping = %v, %v", why, err)
 	}
 	if err := s.RequeueDelivery(ctx, typed.ID); err != nil {
 		t.Fatal(err)
@@ -380,8 +434,8 @@ func claimRace(t *testing.T, hs []*store.Store, id string, lead int) []model.Del
 	release := func() { once.Do(func() { close(ahead) }) }
 	race := []func() error{
 		func() error {
-			_, _, ok, err := hs[0].ClaimTyping(ctx, id, at(0))
-			claimed[0] = ok
+			_, _, why, err := hs[0].ClaimTyping(ctx, id, at(0))
+			claimed[0] = why == store.TypingClaimed
 			return err
 		},
 		func() error {
@@ -456,7 +510,10 @@ func TestDeliveryClaimedExactlyOnce(t *testing.T) {
 	const minRounds, maxRounds = 300, 3000
 	path := dbPath(t)
 	hs := handles(t, path, 3)
-	liveSession(t, hs[0], "s1", "%3", model.StateIdle)
+	// Updated after every round's typing, as the hook events that follow a
+	// submitted line would, so an earlier round's typing never holds up
+	// this round's (Ruling 81).
+	upsert(t, hs[0], model.Session{ID: "s1", Agent: "claude", Pane: "%3", State: model.StateIdle, UpdatedAt: tClaim.Add(time.Hour)})
 	wins := map[model.DeliveryVia]int{}
 	missing := func() int {
 		for k, via := range claimRacers {
