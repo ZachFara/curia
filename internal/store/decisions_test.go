@@ -479,6 +479,33 @@ func TestRetryAfterDecisionReturnsIt(t *testing.T) {
 	}
 }
 
+func TestRetryAfterSupersedeOpensNew(t *testing.T) {
+	// Ruling 64: a superseded decision is not a duplicate.
+	path := dbPath(t)
+	s := open(t, path)
+	ctx := context.Background()
+	create(t, s, ticket(t, "Superseded question?", model.ModeBlocking, "s1", t0))
+	decided := answer(t, s, "D-1", keyA, t0.Add(time.Hour))
+
+	// Decided and not superseded: still the duplicate.
+	assertDecision(t, retry(t, s, ticket(t, "Superseded question?", model.ModeBlocking, "s1", t0.Add(2*time.Hour))), decided)
+
+	if _, err := s.EditDecision(ctx, "D-1", model.DecisionEdit{Supersede: true}, t0.Add(3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	fresh := create(t, s, ticket(t, "Superseded question?", model.ModeBlocking, "s1", t0.Add(4*time.Hour)))
+	if fresh.ID != "D-2" || fresh.Status != model.StatusOpen {
+		t.Errorf("retry after supersede = %s %s, want a new open D-2", fresh.ID, fresh.Status)
+	}
+	// The new open ticket is now the twin.
+	if got := retry(t, s, ticket(t, "Superseded question?", model.ModeBlocking, "s1", t0.Add(5*time.Hour))); got.ID != "D-2" {
+		t.Errorf("next retry = %s, want D-2", got.ID)
+	}
+	if n := countDecisions(t, path); n != 2 {
+		t.Errorf("decisions = %d, want 2", n)
+	}
+}
+
 func TestRetryAfterWithdrawOrExpiryOpensNew(t *testing.T) {
 	s := open(t, dbPath(t))
 	ctx := context.Background()
@@ -841,11 +868,30 @@ func assertConsistent(t *testing.T, orig, got model.Decision) {
 	assertDecision(t, got, want)
 }
 
+// raceOutcomes are the outcomes TestAnswerRacesWithdrawAndExpire must see
+// win at least once.
+var raceOutcomes = []model.DecisionStatus{
+	model.StatusAnswered, model.StatusOverridden, model.StatusWithdrawn, model.StatusExpired,
+}
+
 func TestAnswerRacesWithdrawAndExpire(t *testing.T) {
+	// At least 200 rounds, and then more until every outcome has won once,
+	// so the test covers each path however the machine schedules them; it
+	// fails on coverage only at the cap.
+	const minRounds, maxRounds = 200, 2000
 	path := dbPath(t)
 	hs := handles(t, path, 3)
 	wins := map[model.DecisionStatus]int{}
-	for round := range 200 {
+	allWon := func() bool {
+		for _, st := range raceOutcomes {
+			if wins[st] == 0 {
+				return false
+			}
+		}
+		return true
+	}
+	round := 0
+	for ; round < maxRounds && (round < minRounds || !allWon()); round++ {
 		mode := model.ModeBlocking
 		if round%2 == 1 {
 			mode = model.ModeAssume
@@ -863,12 +909,10 @@ func TestAnswerRacesWithdrawAndExpire(t *testing.T) {
 		}
 		assertConsistent(t, d, got)
 	}
-	t.Logf("winners over 200 rounds: %v", wins)
-	// The 3ms rounds put each operation first in turn, so every outcome wins
-	// somewhere; otherwise this test would not cover that path.
-	for _, st := range []model.DecisionStatus{model.StatusAnswered, model.StatusOverridden, model.StatusWithdrawn, model.StatusExpired} {
+	t.Logf("winners over %d rounds: %v", round, wins)
+	for _, st := range raceOutcomes {
 		if wins[st] == 0 {
-			t.Errorf("%s never won a round", st)
+			t.Errorf("%s never won in %d rounds", st, round)
 		}
 	}
 }
@@ -1104,15 +1148,77 @@ func TestEditRescopeAndSupersede(t *testing.T) {
 	assertDecision(t, getDecision(t, s, d.ID), want)
 	assertDecision(t, getDecision(t, s, pending.ID), pending)
 
+	// Superseding again names the replacement and keeps the first
+	// superseded_at (Ruling 65).
 	later := edited.Add(time.Minute)
 	got, err = s.EditDecision(ctx, d.ID, model.DecisionEdit{Supersede: true, SupersededBy: replacement.ID}, later)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want.SupersededAt, want.SupersededBy = later, replacement.ID
+	want.SupersededBy = replacement.ID
 	assertDecision(t, got, want)
 	if got.Status != model.StatusAnswered {
 		t.Errorf("status = %s, want answered (superseding changes no status)", got.Status)
+	}
+}
+
+func TestEditSupersededByImpliesSupersede(t *testing.T) {
+	// Ruling 65: a non-empty SupersededBy supersedes; superseding again
+	// keeps the first superseded_at and never clears superseded_by.
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	now := t0.Add(time.Hour)
+	var ids []string
+	for i := range 3 {
+		d := create(t, s, ticket(t, fmt.Sprintf("Decided question %d?", i), model.ModeBlocking, "s1", t0))
+		answer(t, s, d.ID, keyA, now)
+		ids = append(ids, d.ID)
+	}
+	edit := func(e model.DecisionEdit, at time.Time) model.Decision {
+		t.Helper()
+		got, err := s.EditDecision(ctx, ids[0], e, at)
+		if err != nil {
+			t.Fatalf("EditDecision(%+v): %v", e, err)
+		}
+		return got
+	}
+	want := getDecision(t, s, ids[0])
+
+	first := now.Add(time.Hour)
+	want.SupersededAt, want.SupersededBy = first, ids[1]
+	assertDecision(t, edit(model.DecisionEdit{SupersededBy: ids[1]}, first), want)
+
+	// Supersede with no replacement: superseded_by stays, superseded_at stays.
+	assertDecision(t, edit(model.DecisionEdit{Supersede: true}, first.Add(time.Hour)), want)
+	// A rescope alone touches neither.
+	want.Scope = model.ScopeGlobal
+	assertDecision(t, edit(model.DecisionEdit{Scope: model.ScopeGlobal}, first.Add(2*time.Hour)), want)
+	// A new replacement is recorded; superseded_at stays.
+	want.SupersededBy = ids[2]
+	assertDecision(t, edit(model.DecisionEdit{SupersededBy: ids[2]}, first.Add(3*time.Hour)), want)
+	assertDecision(t, getDecision(t, s, ids[0]), want)
+}
+
+func TestUndecodableOptionsFailsTheReadNamingTheID(t *testing.T) {
+	// A corrupt row fails the read, and the error says which row; it is
+	// never skipped silently.
+	path := dbPath(t)
+	s := open(t, path)
+	ctx := context.Background()
+	create(t, s, ticket(t, "A good ticket?", model.ModeBlocking, "s1", t0))
+	create(t, s, ticket(t, "A corrupted ticket?", model.ModeBlocking, "s1", t0))
+	rawExec(t, path, `UPDATE decisions SET options = 'not json' WHERE id = 'D-2'`)
+
+	_, _, getErr := s.GetDecision(ctx, "D-2")
+	_, listErr := s.ListDecisions(ctx, store.DecisionFilter{})
+	_, openErr := s.OpenTickets(ctx, t0)
+	for name, err := range map[string]error{"GetDecision": getErr, "ListDecisions": listErr, "OpenTickets": openErr} {
+		if err == nil || !strings.Contains(err.Error(), "decision D-2") {
+			t.Errorf("%s = %v, want an error naming decision D-2", name, err)
+		}
+	}
+	if _, _, err := s.GetDecision(ctx, "D-1"); err != nil {
+		t.Errorf("GetDecision(D-1) = %v, want the good row", err)
 	}
 }
 

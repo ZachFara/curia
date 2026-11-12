@@ -83,7 +83,7 @@ func scanDecision(sc scanner, extra ...any) (model.Decision, error) {
 		return model.Decision{}, err
 	}
 	if err := json.Unmarshal([]byte(options), &d.Options); err != nil {
-		return model.Decision{}, fmt.Errorf("options of %s: %w", d.ID, err)
+		return model.Decision{}, fmt.Errorf("decision %s: undecodable options: %w", d.ID, err)
 	}
 	d.Tags = strings.Fields(tags)
 	for _, f := range []struct {
@@ -99,7 +99,7 @@ func scanDecision(sc scanner, extra ...any) (model.Decision, error) {
 	} {
 		t, err := parseTime(f.src)
 		if err != nil {
-			return model.Decision{}, fmt.Errorf("times of %s: %w", d.ID, err)
+			return model.Decision{}, fmt.Errorf("decision %s: undecodable time: %w", d.ID, err)
 		}
 		*f.dst = t
 	}
@@ -151,8 +151,8 @@ WHERE status = 'open' AND mode = 'assume' AND expires_at <= ?`
 // CreateDecision stores the open ticket d, which comes from decision.New,
 // in one write transaction (plan sections 4.2 and 4.5). A twin of d (same
 // session and args hash) past its deadline is expired first. If a live
-// twin remains, open or decided, the newest one is returned with duplicate
-// true and nothing is inserted; an open twin takes d's DiffersFrom and
+// twin remains, open or decided and not superseded (Ruling 64), the newest
+// one is returned with duplicate true and nothing is inserted; an open twin takes d's DiffersFrom and
 // DiffersWhy when d has a DiffersFrom. Otherwise d is inserted as open,
 // with the next id, and the stored row is returned.
 func (s *Store) CreateDecision(ctx context.Context, d model.Decision) (stored model.Decision, duplicate bool, err error) {
@@ -194,7 +194,7 @@ func liveTwin(ctx context.Context, tx *sql.Tx, d model.Decision) (model.Decision
 	}
 	twin, err := scanDecision(tx.QueryRowContext(ctx, selectDecisions+`
 FROM decisions d
-WHERE d.session_id = ? AND d.args_hash = ? AND ((`+openAt+`) OR `+decided+`)
+WHERE d.session_id = ? AND d.args_hash = ? AND ((`+openAt+`) OR (`+decided+` AND d.superseded_at IS NULL))
 ORDER BY d.n DESC LIMIT 1`, d.SessionID, d.ArgsHash, now))
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Decision{}, false, nil
@@ -497,9 +497,11 @@ func (s *Store) ExpireDecisions(ctx context.Context, now time.Time) (int, error)
 // EditDecision rescopes and/or supersedes decided ticket id at now, in one
 // write transaction. The ticket must exist (ErrNotFound) and be decided
 // (ErrNotDecided). A non-empty e.SupersededBy must name another decided
-// ticket (ErrBadPrecedent). A non-empty e.Scope replaces the scope; with
-// e.Supersede, superseded_at becomes now and superseded_by e.SupersededBy.
-// The status never changes. It returns the stored row.
+// ticket (ErrBadPrecedent). A non-empty e.Scope replaces the scope. With
+// e.Supersede, or a non-empty e.SupersededBy, which implies it (Ruling 65),
+// the ticket is superseded: superseded_at becomes now unless it is already
+// set, and a non-empty e.SupersededBy is recorded (an empty one never
+// clears it). The status never changes. It returns the stored row.
 func (s *Store) EditDecision(ctx context.Context, id string, e model.DecisionEdit, now time.Time) (model.Decision, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -521,8 +523,11 @@ func (s *Store) EditDecision(ctx context.Context, id string, e model.DecisionEdi
 		if e.Scope != "" {
 			next.Scope = e.Scope
 		}
-		if e.Supersede {
-			next.SupersededAt, next.SupersededBy = now, e.SupersededBy
+		if (e.Supersede || e.SupersededBy != "") && next.SupersededAt.IsZero() {
+			next.SupersededAt = now
+		}
+		if e.SupersededBy != "" {
+			next.SupersededBy = e.SupersededBy
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE decisions SET scope = ?, superseded_at = ?, superseded_by = ? WHERE n = ?`,
 			next.Scope, formatTime(next.SupersededAt), next.SupersededBy, cur.N)
