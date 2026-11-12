@@ -49,12 +49,11 @@ type Result struct {
 }
 
 // Run records one hook event and returns a Result: the session as stored,
-// and on a Stop that claimed answers the line to print. In order it
-// parses the payload, appends the raw event, and on SessionStart (but not a
+// and on a Stop that claimed answers the line to print. In order it parses
+// the payload, appends the raw event, and on SessionStart (but not a
 // compaction's for a live session, Ruling 74), or for a session it has no
-// row for yet (one
-// first seen mid-run, Ruling 29), ends any
-// other session in the pane and asks git and tmux about it. Then in one store
+// row for yet (one first seen mid-run, Ruling 29), ends any other session
+// in the pane and asks git and tmux about it. Then in one store
 // transaction it loads the session, folds in the transcript's new lines
 // (PostToolUse, Notification, Stop), applies the state machine and writes the
 // result. Git and tmux run before that transaction, so no subprocess runs

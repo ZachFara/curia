@@ -870,7 +870,8 @@ func TestHookClosedStdoutExitsZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	child := exec.Command(self, "-test.run=^TestHookClosedStdoutChild$", "-test.count=1")
+	// The context kills a hung child when the test ends.
+	child := exec.CommandContext(t.Context(), self, "-test.run=^TestHookClosedStdoutChild$", "-test.count=1", "-test.timeout=30s")
 	child.Env = append(os.Environ(), hookChildHome+"="+home)
 	child.Stdout = w
 	var stderr bytes.Buffer
