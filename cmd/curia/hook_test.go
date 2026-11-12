@@ -363,18 +363,6 @@ func TestHookNotificationOnSeenSessionSetsRed(t *testing.T) {
 	wantCalls(t, m.event("Notification", "A"), "SetWindowOption @7 @curia_marker red")
 }
 
-// The permission dialog turns the window red when it opens, not when the
-// Notification arrives about 6 s later.
-func TestHookPermissionRequestSetsRed(t *testing.T) {
-	m := newMarkerHook(t)
-	m.event("SessionStart", "A")
-	m.seen()
-	wantCalls(t, m.event("PermissionRequest", "A"), "SetWindowOption @7 @curia_marker red")
-	if s := getSession(t, m.db, "A"); s.State != model.StateWaiting {
-		t.Errorf("A = %s, want waiting", s.State)
-	}
-}
-
 // Ruling 38: an event that would turn the window the user is looking at red
 // marks its pane seen instead.
 func TestHookFocusedPaneIsMarkedSeenNotRed(t *testing.T) {

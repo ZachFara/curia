@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,12 +13,9 @@ import (
 const testBin = "/opt/curia/bin/curia"
 
 var expectedEvents = []string{
-	"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse",
+	"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
 	"Notification", "Stop", "SubagentStop", "SessionEnd",
 }
-
-// toolEvents are the events whose entries carry a "*" matcher.
-var toolEvents = []string{"PreToolUse", "PermissionRequest", "PostToolUse"}
 
 var testNow = time.Unix(1700000000, 0)
 
@@ -137,12 +133,9 @@ func checkOurEntries(t *testing.T, m map[string]any) {
 		if countOurs(entries) != 1 {
 			t.Errorf("%s: ours = %d", ev, countOurs(entries))
 		}
-		if len(entries) == 0 {
-			continue
-		}
 		last := asMap(entries[len(entries)-1])
 		_, hasMatcher := last["matcher"]
-		if want := slices.Contains(toolEvents, ev); hasMatcher != want {
+		if want := ev == "PreToolUse" || ev == "PostToolUse"; hasMatcher != want {
 			t.Errorf("%s: matcher present = %v, want %v", ev, hasMatcher, want)
 		} else if want && last["matcher"] != "*" {
 			t.Errorf("%s: matcher = %v", ev, last["matcher"])
@@ -226,42 +219,6 @@ func TestHooksIdempotent(t *testing.T) {
 	}
 	if matches, _ := filepath.Glob(path + ".bak.*"); len(matches) != 1 {
 		t.Errorf("backups = %v, want only the first run's", matches)
-	}
-}
-
-// planOneSettings is what `curia install` from Plan 1 wrote: the eight
-// events it registered then, next to a user's own Stop hook.
-const planOneSettings = `{
-  "hooks": {
-    "SessionStart": [{"hooks": [{"type": "command", "command": "/opt/curia/bin/curia hook SessionStart"}]}],
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/opt/curia/bin/curia hook UserPromptSubmit"}]}],
-    "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "/opt/curia/bin/curia hook PreToolUse"}]}],
-    "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "/opt/curia/bin/curia hook PostToolUse"}]}],
-    "Notification": [{"hooks": [{"type": "command", "command": "/opt/curia/bin/curia hook Notification"}]}],
-    "Stop": [
-      {"hooks": [{"type": "command", "command": "say done"}]},
-      {"hooks": [{"type": "command", "command": "/opt/curia/bin/curia hook Stop"}]}
-    ],
-    "SubagentStop": [{"hooks": [{"type": "command", "command": "/opt/curia/bin/curia hook SubagentStop"}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "/opt/curia/bin/curia hook SessionEnd"}]}]
-  }
-}`
-
-// TestHooksUpgradeAddsOnlyNewEvents: re-running install over an older
-// install adds the events registered since and duplicates none.
-func TestHooksUpgradeAddsOnlyNewEvents(t *testing.T) {
-	path := settingsIn(t)
-	writeFile(t, path, planOneSettings)
-	if err := Hooks(path, testBin, testNow); err != nil {
-		t.Fatal(err)
-	}
-	m := readSettings(t, path)
-	checkOurEntries(t, m)
-	if n := len(eventEntries(t, m, "Stop")); n != 2 {
-		t.Errorf("Stop entries = %d, want the user's and ours", n)
-	}
-	if n := len(eventEntries(t, m, "PermissionRequest")); n != 1 {
-		t.Errorf("PermissionRequest entries = %d, want ours alone", n)
 	}
 }
 

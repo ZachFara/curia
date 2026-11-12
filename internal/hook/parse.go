@@ -20,7 +20,7 @@ const maxToolTargetRunes = 60
 // knownKinds are the events Parse accepts.
 var knownKinds = map[model.EventKind]bool{
 	model.SessionStart: true, model.UserPromptSubmit: true, model.PreToolUse: true,
-	model.PermissionRequest: true, model.PostToolUse: true, model.Notification: true, model.Stop: true,
+	model.PostToolUse: true, model.Notification: true, model.Stop: true,
 	model.SubagentStop: true, model.SessionEnd: true,
 }
 

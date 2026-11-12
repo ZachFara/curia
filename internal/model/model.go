@@ -21,15 +21,14 @@ type EventKind string
 
 // Hook event kinds, one per Claude Code hook name.
 const (
-	SessionStart      EventKind = "SessionStart"
-	UserPromptSubmit  EventKind = "UserPromptSubmit"
-	PreToolUse        EventKind = "PreToolUse"
-	PermissionRequest EventKind = "PermissionRequest"
-	PostToolUse       EventKind = "PostToolUse"
-	Notification      EventKind = "Notification"
-	Stop              EventKind = "Stop"
-	SubagentStop      EventKind = "SubagentStop"
-	SessionEnd        EventKind = "SessionEnd"
+	SessionStart     EventKind = "SessionStart"
+	UserPromptSubmit EventKind = "UserPromptSubmit"
+	PreToolUse       EventKind = "PreToolUse"
+	PostToolUse      EventKind = "PostToolUse"
+	Notification     EventKind = "Notification"
+	Stop             EventKind = "Stop"
+	SubagentStop     EventKind = "SubagentStop"
+	SessionEnd       EventKind = "SessionEnd"
 )
 
 // Session is one row of the store: an agent session and its latest state.

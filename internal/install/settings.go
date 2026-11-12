@@ -19,7 +19,7 @@ import (
 
 // hookEvents are the Claude Code hook names Curia registers for.
 var hookEvents = []string{
-	"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse",
+	"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
 	"Notification", "Stop", "SubagentStop", "SessionEnd",
 }
 
@@ -175,7 +175,7 @@ func ourEntry(bin, event string) map[string]any {
 	entry := map[string]any{
 		"hooks": []any{map[string]any{"type": "command", "command": hookPrefix(bin) + event}},
 	}
-	if event == "PreToolUse" || event == "PermissionRequest" || event == "PostToolUse" {
+	if event == "PreToolUse" || event == "PostToolUse" {
 		entry["matcher"] = "*"
 	}
 	return entry

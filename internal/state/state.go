@@ -30,11 +30,6 @@ func Apply(s model.Session, ev model.Event, openDecision bool) model.Session {
 		s.State = model.StateWorking
 		s.LastUpdate = toolUpdate(ev)
 		countSubagent(&s, ev)
-	case model.PermissionRequest:
-		// The permission dialog is open; the permission_prompt Notification
-		// follows about 6 s later.
-		s.State = model.StateWaiting
-		s.LastUpdate = toolUpdate(ev)
 	case model.PostToolUse:
 		s.State = model.StateWorking
 		s.LastUpdate = toolUpdate(ev)
