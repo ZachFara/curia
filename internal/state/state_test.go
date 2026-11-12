@@ -92,6 +92,17 @@ func TestApplyTransitions(t *testing.T) {
 			},
 		},
 		{
+			// The permission dialog has opened (it fires about 6 s before
+			// the permission_prompt Notification).
+			name: "PermissionRequest",
+			in:   func() model.Session { s := base(); s.State = model.StateWorking; return s }(),
+			ev:   model.Event{Kind: model.PermissionRequest, SessionID: "s1", ToolName: "Write", ToolTarget: "out.txt", At: t1},
+			want: func(s model.Session) model.Session {
+				s.State, s.UpdatedAt, s.LastUpdate = model.StateWaiting, t1, "Write out.txt"
+				return s
+			},
+		},
+		{
 			name: "Stop with message",
 			in:   func() model.Session { s := base(); s.State = model.StateWorking; s.LastUpdate = "old"; return s }(),
 			ev:   model.Event{Kind: model.Stop, SessionID: "s1", Message: "done", At: t1},
@@ -163,11 +174,12 @@ func TestEndedResumesOnActivity(t *testing.T) {
 	ended := base()
 	ended.State = model.StateEnded
 	for kind, want := range map[model.EventKind]model.State{
-		model.UserPromptSubmit: model.StateWorking,
-		model.PreToolUse:       model.StateWorking,
-		model.PostToolUse:      model.StateWorking,
-		model.Notification:     model.StateWaiting,
-		model.Stop:             model.StateIdle,
+		model.UserPromptSubmit:  model.StateWorking,
+		model.PreToolUse:        model.StateWorking,
+		model.PostToolUse:       model.StateWorking,
+		model.Notification:      model.StateWaiting,
+		model.PermissionRequest: model.StateWaiting,
+		model.Stop:              model.StateIdle,
 	} {
 		ev := model.Event{Kind: kind, SessionID: "s1", ToolName: "Bash", Message: "m", At: t1}
 		got := state.Apply(ended, ev, false)
@@ -183,8 +195,8 @@ func TestIgnores(t *testing.T) {
 	ended, live := base(), base()
 	ended.State = model.StateEnded
 	kinds := []model.EventKind{
-		model.SessionStart, model.UserPromptSubmit, model.PreToolUse, model.PostToolUse,
-		model.Notification, model.Stop, model.SubagentStop, model.SessionEnd,
+		model.SessionStart, model.UserPromptSubmit, model.PreToolUse, model.PermissionRequest,
+		model.PostToolUse, model.Notification, model.Stop, model.SubagentStop, model.SessionEnd,
 	}
 	for _, k := range kinds {
 		want := k == model.SubagentStop || k == model.SessionEnd

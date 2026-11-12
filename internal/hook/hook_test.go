@@ -49,6 +49,7 @@ func TestParseFixtures(t *testing.T) {
 		with(model.SessionStart, nil),
 		with(model.UserPromptSubmit, nil),
 		with(model.PreToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Edit", "src/api.ts" }),
+		with(model.PermissionRequest, func(e *model.Event) { e.ToolName, e.ToolTarget = "Write", "/repo/out.txt" }),
 		with(model.PostToolUse, func(e *model.Event) { e.ToolName, e.ToolTarget = "Grep", "func Parse" }),
 		with(model.Notification, func(e *model.Event) {
 			e.Message, e.NotificationType = "Claude needs your permission to use Bash", "permission_prompt"
