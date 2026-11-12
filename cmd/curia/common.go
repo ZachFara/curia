@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -57,7 +58,8 @@ var clock = time.Now
 // reconcile marks sessions whose pane is gone as stale (fleet.Reconcile) and
 // re-applies the attention marker of each window it marked a session stale
 // in, so a red window does not stay red; a marker that fails is logged, not
-// returned. When tmux cannot list its panes (no server, or not installed) it
+// returned, unless the window is gone, which is the usual reason its session
+// went stale. When tmux cannot list its panes (no server, or not installed) it
 // logs that to the log file at logPath and skips reconciling.
 func reconcile(ctx context.Context, st *store.Store, client tmux.Client, logPath string, now time.Time) error {
 	tctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
@@ -70,7 +72,7 @@ func reconcile(ctx context.Context, st *store.Store, client tmux.Client, logPath
 	windows, err := fleet.Reconcile(ctx, st, panes, now)
 	for _, w := range windows {
 		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
-		if aerr := attention.Apply(actx, client, st, w); aerr != nil {
+		if aerr := attention.Apply(actx, client, st, w); aerr != nil && !errors.Is(aerr, tmux.ErrNoWindow) {
 			logWarn(logPath, "reconcile attention marker", "window", w, "err", aerr.Error())
 		}
 		cancel()

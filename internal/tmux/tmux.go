@@ -4,6 +4,7 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -37,3 +38,6 @@ type Client interface {
 	// KillPane closes the pane.
 	KillPane(ctx context.Context, pane string) error
 }
+
+// ErrNoWindow is wrapped by an error for a window that does not exist.
+var ErrNoWindow = errors.New("tmux: no such window")

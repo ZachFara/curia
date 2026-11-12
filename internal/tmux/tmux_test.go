@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -159,7 +160,19 @@ func TestExecAgainstRealTmux(t *testing.T) {
 		t.Fatalf("show-options = %q, %v", out, err)
 	}
 
+	checkNoWindow(ctx, t, c, p)
 	checkHeadlessAndKill(ctx, t, c, tm, p)
+}
+
+// checkNoWindow: a window that is gone is told apart from other failures.
+func checkNoWindow(ctx context.Context, t *testing.T, c Client, p Pane) {
+	t.Helper()
+	if err := c.SetWindowOption(ctx, "@999", "@curia", "x"); !errors.Is(err, ErrNoWindow) {
+		t.Errorf("SetWindowOption on a missing window = %v, want ErrNoWindow", err)
+	}
+	if err := c.SetWindowOption(ctx, p.WindowID, "not-an-option", "x"); err == nil || errors.Is(err, ErrNoWindow) {
+		t.Errorf("SetWindowOption with a bad option = %v, want another error", err)
+	}
 }
 
 // checkHeadlessAndKill covers the calls that need no attached client.

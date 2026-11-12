@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -85,8 +86,15 @@ func (c *execClient) SwitchTo(ctx context.Context, pane string) error {
 	return err
 }
 
+// noWindow holds what tmux prints for a window target that does not exist:
+// tmux 3.8 says "no such window", older releases "can't find window".
+var noWindow = []string{"no such window", "can't find window"}
+
 func (c *execClient) SetWindowOption(ctx context.Context, window, name, value string) error {
 	_, err := c.run(ctx, "set-option", "-w", "-t", window, "--", name, value)
+	if err != nil && slices.ContainsFunc(noWindow, func(s string) bool { return strings.Contains(err.Error(), s) }) {
+		return fmt.Errorf("%w: %w", ErrNoWindow, err)
+	}
 	return err
 }
 

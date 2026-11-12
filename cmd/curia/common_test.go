@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -123,6 +124,34 @@ func TestReconcileReappliesMarkerOfStaleWindows(t *testing.T) {
 	}
 	if want := []string{"ListPanes"}; !slices.Equal(fake.Calls, want) {
 		t.Errorf("second run tmux calls = %q, want %q", fake.Calls, want)
+	}
+}
+
+// goneWindowTmux fails every marker write the way tmux does for a window
+// that no longer exists.
+type goneWindowTmux struct{ tmux.Fake }
+
+func (f *goneWindowTmux) SetWindowOption(_ context.Context, window, _, _ string) error {
+	return fmt.Errorf("tmux set-option: exit status 1: no such window: %s: %w", window, tmux.ErrNoWindow)
+}
+
+// A window that closed with its pane is the usual reason a session goes
+// stale, so its marker cannot be set and that is not worth a log line.
+func TestReconcileGoneWindowIsNotLogged(t *testing.T) {
+	db, _ := fleetHome(t, nil, redGoneSession)
+	gone := &goneWindowTmux{}
+	gone.Panes = []tmux.Pane{{ID: "%1"}}
+	prev := newTmuxClient
+	newTmuxClient = func() tmux.Client { return gone }
+	t.Cleanup(func() { newTmuxClient = prev })
+	if _, err := runRoot(t, "ls"); err != nil {
+		t.Fatal(err)
+	}
+	if log := readLog(t); len(log) != 0 {
+		t.Errorf("log = %q, want nothing for a window that is gone", log)
+	}
+	if s := getSession(t, db, "red"); s.State != model.StateStale {
+		t.Errorf("red = %s, want stale", s.State)
 	}
 }
 
