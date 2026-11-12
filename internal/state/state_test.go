@@ -436,3 +436,15 @@ func TestCompaction(t *testing.T) {
 		}
 	}
 }
+
+// Ruling 74a: an ended session is plainly alive again, so a compaction's
+// SessionStart revives it as any SessionStart does: idle and seen.
+func TestCompactSessionStartRevivesEnded(t *testing.T) {
+	s := base()
+	s.State, s.SubagentsActive = model.StateEnded, 2
+	ev := model.Event{Kind: model.SessionStart, Source: "compact", SessionID: "s1", Pane: "%1", Cwd: "/w", TranscriptPath: "/t", At: t1}
+	got := state.Apply(s, ev, false)
+	if got.State != model.StateIdle || got.SeenAt != t1 || got.StartedAt != t1 || got.SubagentsActive != 0 {
+		t.Errorf("compact on an ended session: %+v, want idle, seen and started at %v, no subagents", got, t1)
+	}
+}

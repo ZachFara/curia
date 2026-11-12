@@ -51,7 +51,8 @@ type Result struct {
 // Run records one hook event and returns a Result: the session as stored,
 // and on a Stop that claimed answers the line to print. In order it
 // parses the payload, appends the raw event, and on SessionStart (but not a
-// compaction's, Ruling 74), or for a session it has no row for yet (one
+// compaction's for a live session, Ruling 74), or for a session it has no
+// row for yet (one
 // first seen mid-run, Ruling 29), ends any
 // other session in the pane and asks git and tmux about it. Then in one store
 // transaction it loads the session, folds in the transcript's new lines
@@ -79,15 +80,17 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 	if err = st.AppendEvent(ctx, ev, payload); err != nil {
 		return Result{}, err
 	}
-	// A compaction's SessionStart (Ruling 74) is not a new start: like any
-	// other event, it starts only a session with no row yet.
+	// A compaction's SessionStart (Rulings 74 and 74a) starts only a session
+	// with no row yet or an ended one; a live one goes on as it was.
 	starting := kind == model.SessionStart && !state.Compaction(ev)
 	if !starting {
+		var prev model.Session
 		var found bool
-		if _, found, err = st.GetSession(ctx, ev.SessionID); err != nil {
+		if prev, found, err = st.GetSession(ctx, ev.SessionID); err != nil {
 			return Result{}, err
 		}
-		starting = !found // first seen mid-run
+		// First seen mid-run, or an ended session a compaction revives.
+		starting = !found || (kind == model.SessionStart && !state.Continues(prev, ev))
 	}
 	var start *startInfo
 	if starting {
@@ -210,7 +213,7 @@ func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config,
 	}
 	switch {
 	case start == nil: // git and tmux were not asked
-	case ev.Kind == model.SessionStart && (s.ID == "" || !state.Compaction(ev)):
+	case ev.Kind == model.SessionStart && !state.Continues(s, ev):
 		s.Repo, s.Branch = start.repo, start.branch
 		s.TmuxSession, s.TmuxWindow = start.tmuxSession, start.window
 	default:

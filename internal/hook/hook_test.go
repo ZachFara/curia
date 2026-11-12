@@ -596,6 +596,35 @@ func TestCompactKeepsSession(t *testing.T) {
 	}
 }
 
+// Ruling 74a: a compaction's SessionStart for an ended session is a start
+// like any other: it is idle and seen, git and tmux are asked, and it ends
+// the pane's other sessions.
+func TestCompactRevivesEndedSession(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{}
+	env := f.env("%3")
+	run(t, st, env, model.SessionStart, payload("A", "/p/t.jsonl", ""))
+	run(t, st, env, model.UserPromptSubmit, payload("A", "/p/t.jsonl", ""))
+	run(t, st, env, model.SessionEnd, payload("A", "/p/t.jsonl", ""))
+	other := model.Session{ID: "B", Agent: "claude", Pane: "%3", State: model.StateWorking, StartedAt: t0, UpdatedAt: t0}
+	if err := st.UpsertSession(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	later := f.env("%3")
+	later.Now = func() time.Time { return t0.Add(time.Minute) }
+	a := run(t, st, later, model.SessionStart, payload("A", "/p/t.jsonl", `,"source":"compact"`))
+	at := t0.Add(time.Minute)
+	if a.State != model.StateIdle || a.SeenAt != at || a.StartedAt != at || a.TmuxWindow != "@7" {
+		t.Errorf("A after compact on ended: %+v, want idle, seen and started at %v in @7", a, at)
+	}
+	if b := get(t, st, "B"); b.State != model.StateEnded {
+		t.Errorf("B in the same pane = %s, want ended", b.State)
+	}
+	if len(f.gitCalls) != 2 || len(f.paneCalls) != 2 {
+		t.Errorf("Git called %d times, PaneInfo %d times, want twice each", len(f.gitCalls), len(f.paneCalls))
+	}
+}
+
 // For a session with no row yet, compact is a first event like any other.
 func TestCompactFirstSeenStartsSession(t *testing.T) {
 	st := openStore(t)

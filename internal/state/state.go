@@ -14,8 +14,8 @@ const sourceCompact = "compact"
 // session has an open blocking decision ticket, which turns a Stop into
 // needs_decision unless ev.StopBlocked (the hook is blocking the Stop to
 // deliver answers), which makes it working.
-// A SessionStart starts the session afresh, except a compaction's
-// (Compaction) for a stored session, which keeps it as it was.
+// A SessionStart starts the session afresh, except a compaction's for a
+// stored session that is not ended (Continues), which keeps it as it was.
 // It is pure: no I/O and no clock. An ended session ignores SubagentStop and
 // SessionEnd and is returned unchanged (see Ignores); any other event is
 // applied as usual and brings it back.
@@ -91,10 +91,10 @@ func countSubagent(s *model.Session, ev model.Event) {
 // sessionStart starts s from ev. A new or /cleared session sits at an empty
 // prompt the user just opened, so it is idle and seen (Ruling 37); its first
 // prompt makes it working. A model ev names stands until a transcript read
-// replaces it. A compaction's SessionStart for a stored session is not a
-// start: see compacted.
+// replaces it. A compaction's SessionStart that Continues the session is
+// not a start: see compacted.
 func sessionStart(s *model.Session, ev model.Event) {
-	if s.ID != "" && Compaction(ev) {
+	if Continues(*s, ev) {
 		compacted(s, ev)
 		return
 	}
@@ -161,6 +161,14 @@ func truncate(s string) string {
 // middle of a turn (Ruling 74).
 func Compaction(ev model.Event) bool {
 	return ev.Kind == model.SessionStart && ev.Source == sourceCompact
+}
+
+// Continues reports whether ev is a compaction's SessionStart for s that
+// leaves s going on as it was: s has a row and is not ended (Rulings 74 and
+// 74a). An ended session is plainly alive again, so for it, as for one with
+// no row, a compaction is a start like any other.
+func Continues(s model.Session, ev model.Event) bool {
+	return s.ID != "" && s.State != model.StateEnded && Compaction(ev)
 }
 
 // compacted applies a compaction's SessionStart to a stored session: the
