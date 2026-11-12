@@ -145,20 +145,20 @@ func unseen(s model.Session) bool {
 	return s.SeenAt.IsZero() || s.SeenAt.Before(s.UpdatedAt)
 }
 
-// Counts is how many sessions are in each state the badge shows.
+// Counts is what the badge shows: open blocking tickets, waiting sessions
+// and reviews.
 type Counts struct {
 	Decisions, Waiting, Reviews int
 }
 
-// Count counts sessions waiting on a decision and waiting for input,
-// whether or not they have been seen. Reviews stays 0 until Plan 4.
-func Count(s []model.Session) Counts {
-	var c Counts
+// Count counts the sessions waiting for input, whether or not they have
+// been seen, and takes Decisions from openBlocking, the number of open
+// blocking tickets across all sessions (Plan 2 section 4.10), not from
+// needs_decision sessions. Reviews stays 0 until Plan 4.
+func Count(s []model.Session, openBlocking int) Counts {
+	c := Counts{Decisions: openBlocking}
 	for _, x := range s {
-		switch x.State {
-		case model.StateNeedsDecision:
-			c.Decisions++
-		case model.StateWaiting:
+		if x.State == model.StateWaiting {
 			c.Waiting++
 		}
 	}
