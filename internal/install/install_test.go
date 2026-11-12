@@ -414,6 +414,7 @@ func TestTmuxFenceAddedOnceAndRemoved(t *testing.T) {
 		"set -g status-interval 2\n",
 		`if -F '#{m:*@curia_badge*,#{status-right}}' '' "set -ag status-right ' #{@curia_badge}#(` + testBin + ` status)'"` + "\n",
 		"bind a display-popup -E -w 90% -h 80% '" + testBin + " ui'\n",
+		"bind A display-popup -E -w 90% -h 80% '" + testBin + " decide'\n",
 		"bind N run-shell '" + testBin + " next'\n",
 		`set-hook -g pane-focus-in "run-shell -b '` + testBin + ` seen #{pane_id}'"` + "\n",
 		"set -g window-status-current-format '#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'\n",

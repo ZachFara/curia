@@ -157,10 +157,13 @@ func TestSnippetQuotedBinaryInRealTmux(t *testing.T) {
 	}
 	waitForLine(t, calls, "status ")
 
-	for _, key := range []string{"a", "N"} {
+	for _, key := range []string{"a", "N", "A"} {
 		if out, err := tm("list-keys", "-T", "prefix", key); err != nil || !strings.Contains(out, "curia") {
 			t.Errorf("binding %s = %q, %v", key, out, err)
 		}
+	}
+	if out, err := tm("list-keys", "-T", "prefix", "A"); err != nil || !strings.Contains(out, "decide") {
+		t.Errorf("binding A = %q, %v; want the decide popup", out, err)
 	}
 }
 
