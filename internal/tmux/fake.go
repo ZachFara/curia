@@ -7,12 +7,13 @@ import (
 )
 
 // Fake is an in-memory Client for tests of packages that use tmux. Set Panes
-// before use, and Focused for PaneFocused's answer; every call is appended to
-// Calls as "Method arg arg ...".
+// before use, Focused for PaneFocused's answer and SendKeysErr for SendKeys'
+// error; every call is appended to Calls as "Method arg arg ...".
 type Fake struct {
-	Panes   []Pane
-	Focused bool
-	Calls   []string
+	Panes       []Pane
+	Focused     bool
+	SendKeysErr error
+	Calls       []string
 }
 
 var _ Client = (*Fake)(nil)
@@ -66,5 +67,19 @@ func (f *Fake) DisplayMessage(_ context.Context, text string) error {
 func (f *Fake) KillPane(_ context.Context, pane string) error {
 	f.record("KillPane %s", pane)
 	f.Panes = slices.DeleteFunc(f.Panes, func(p Pane) bool { return p.ID == pane })
+	return nil
+}
+
+// SendKeys records the call and returns SendKeysErr. It types nothing and
+// does not check its arguments. Set SendKeysErr to ErrPartialSend (or an
+// error wrapping it) to act out a line typed but not submitted.
+func (f *Fake) SendKeys(_ context.Context, pane, text string) error {
+	f.record("SendKeys %s %s", pane, text)
+	return f.SendKeysErr
+}
+
+// Bell records the call.
+func (f *Fake) Bell(_ context.Context, pane string) error {
+	f.record("Bell %s", pane)
 	return nil
 }

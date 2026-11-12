@@ -126,6 +126,10 @@ func (unreachableTmux) DisplayMessage(context.Context, string) error { return er
 
 func (unreachableTmux) KillPane(context.Context, string) error { return errTmuxUnreachable }
 
+func (unreachableTmux) SendKeys(context.Context, string, string) error { return errTmuxUnreachable }
+
+func (unreachableTmux) Bell(context.Context, string) error { return errTmuxUnreachable }
+
 func TestGuardIsolatesEnvironment(t *testing.T) {
 	home := os.Getenv("HOME")
 	if home == "" || !strings.HasPrefix(home, guardDir+string(os.PathSeparator)) {
