@@ -79,21 +79,21 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 }
 
 // storeSource is the dashboard's ui.Source: on every read it reconciles
-// with tmux, lists the sessions as ls does and ranks them.
+// with tmux, settles and lists the sessions as ls does and ranks them.
 type storeSource struct {
 	st  *store.Store
 	tm  tmux.Client
 	cfg config.Config
 }
 
-// Sessions reconciles, then returns every session that has not ended and
-// is not stale for longer than cfg.StaleHideAfter, ranked.
+// Sessions reconciles and settles, then returns every session that has not
+// ended and is not stale for longer than cfg.StaleHideAfter, ranked.
 func (s storeSource) Sessions(ctx context.Context) ([]model.Session, error) {
 	now := clock()
 	if err := reconcile(ctx, s.st, s.tm, s.cfg.LogPath, now); err != nil {
 		return nil, err
 	}
-	sessions, err := s.st.ListSessions(ctx, store.ListFilter{HideStaleBefore: now.Add(-s.cfg.StaleHideAfter)})
+	sessions, err := listSettledMarked(ctx, s.st, s.tm, store.ListFilter{HideStaleBefore: now.Add(-s.cfg.StaleHideAfter)}, s.cfg.LogPath, now)
 	if err != nil {
 		return nil, err
 	}

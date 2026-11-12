@@ -1,0 +1,81 @@
+package fleet
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/transcript"
+)
+
+// settleAfter is how long a session must have gone without a hook event
+// before Settle reads its transcript: Claude Code writes the transcript
+// about 200 ms after the entries it records.
+const settleAfter = 3 * time.Second
+
+// interruptedUpdate is the LastUpdate of a settled session. Transcript text
+// is never stored.
+const interruptedUpdate = "interrupted"
+
+// Settle corrects sessions a denied permission prompt or an interrupt left
+// working or waiting: no hook fires for either (Ruling 77). Each of the
+// given sessions that is working or waiting, whose UpdatedAt is at least 3
+// seconds before now, and whose transcript after its TranscriptOffset ends
+// in a user-interrupt marker (transcript.Interrupted) becomes idle and
+// seen, with LastUpdate "interrupted" and UpdatedAt and SeenAt now; nothing
+// else changes. Each write goes through store.UpdateSession and is skipped
+// if the stored row's state or UpdatedAt is no longer the listed one (a
+// hook event arrived). Sessions in other states, or too recent, are not
+// read at all. One session's failure does not stop the others: Settle
+// returns the ids it settled and the failures joined.
+func Settle(ctx context.Context, st *store.Store, sessions []model.Session, now time.Time) (settled []string, err error) {
+	var errs []error
+	for _, s := range sessions {
+		if !settleCandidate(s, now) {
+			continue
+		}
+		done, err := settleOne(ctx, st, s, now)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("fleet: settle session %s: %w", s.ID, err))
+		}
+		if done {
+			settled = append(settled, s.ID)
+		}
+	}
+	return settled, errors.Join(errs...)
+}
+
+// settleCandidate reports whether s is working or waiting and has had no
+// hook event for settleAfter.
+func settleCandidate(s model.Session, now time.Time) bool {
+	return (s.State == model.StateWorking || s.State == model.StateWaiting) && !now.Before(s.UpdatedAt.Add(settleAfter))
+}
+
+// settleOne settles the listed session if its transcript ends in an
+// interrupt and its stored row is still the listed one.
+func settleOne(ctx context.Context, st *store.Store, listed model.Session, now time.Time) (bool, error) {
+	interrupted, err := transcript.Interrupted(listed.TranscriptPath, listed.TranscriptOffset)
+	if err != nil || !interrupted {
+		return false, err
+	}
+	done := false
+	err = st.UpdateSession(ctx, listed.ID, func(cur model.Session, _ bool) model.Session {
+		done = false
+		// Sessions are never deleted; a missing row has an empty ID, which
+		// UpdateSession refuses to write.
+		if cur.State != listed.State || !cur.UpdatedAt.Equal(listed.UpdatedAt) {
+			return cur
+		}
+		cur.State, cur.LastUpdate = model.StateIdle, interruptedUpdate
+		cur.SeenAt, cur.UpdatedAt = now, now
+		done = true
+		return cur
+	})
+	if err != nil {
+		return false, err
+	}
+	return done, nil
+}

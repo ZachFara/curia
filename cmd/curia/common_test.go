@@ -173,3 +173,38 @@ func TestReconcileMarkerFailureIsLoggedNotFatal(t *testing.T) {
 		t.Errorf("red = %s, want stale", s.State)
 	}
 }
+
+// settleToolUse is a turn that stopped at a tool_use (a permission prompt
+// is open), and settleDenial the lines Claude Code appends when the user
+// denies it, in the shapes captured from real sessions.
+const (
+	settleToolUse = `{"type":"user","message":{"role":"user","content":"Create out.txt"}}
+{"type":"assistant","message":{"model":"m","content":[{"type":"tool_use","id":"t1","name":"Write","input":{}}],"usage":{"input_tokens":1}}}
+`
+	settleDenial = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use.","is_error":true,"tool_use_id":"t1"}]},"toolUseResult":"User rejected tool use","toolDenialKind":"user-rejected"}
+{"type":"attachment","attachment":{"type":"x"}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}
+{"type":"system","subtype":"turn_duration","durationMs":1996}
+`
+)
+
+// settleTranscript writes content to a new transcript file and returns its
+// path.
+func settleTranscript(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// settleDenied is a session in state in pane, window @1, whose transcript
+// ends in a denial and whose last hook event was at 11:00 (fleetNow is 12:00).
+func settleDenied(t *testing.T, id string, state model.State, pane string) model.Session {
+	t.Helper()
+	return model.Session{
+		ID: id, Agent: "claude", State: state, Pane: pane, TmuxWindow: "@1", LastUpdate: "Write out.txt",
+		TranscriptPath: settleTranscript(t, settleToolUse+settleDenial), UpdatedAt: at(11, 0),
+	}
+}

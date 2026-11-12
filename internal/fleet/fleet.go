@@ -1,6 +1,7 @@
 // Package fleet is the view over every session at once: it marks sessions
-// whose pane is gone as stale, ranks sessions by how much they need the user,
-// and builds the status-bar badge.
+// whose pane is gone as stale, settles sessions a denial or an interrupt left
+// working or waiting, ranks sessions by how much they need the user, and
+// builds the status-bar badge.
 package fleet
 
 import (

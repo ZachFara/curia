@@ -2,6 +2,8 @@ package main
 
 import (
 	"database/sql"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ZachFara/curia/internal/model"
@@ -99,5 +101,52 @@ func TestBadgeIgnoresAssumeAndPastDeadline(t *testing.T) {
 				t.Errorf("D-2 = %s after status, want still open", d.Status)
 			}
 		})
+	}
+}
+
+// Ruling 77: a denied prompt fires no hook, so status settles the session
+// from its transcript and the W it held goes away.
+func TestStatusDropsWAfterDenial(t *testing.T) {
+	path := settleTranscript(t, settleToolUse)
+	db, fake := fleetHome(t, nil, model.Session{
+		ID: "a", Agent: "claude", State: model.StateWaiting, Pane: "%1", TmuxWindow: "@1",
+		TranscriptPath: path, UpdatedAt: at(11, 0),
+	})
+	if out, err := runRoot(t, "status"); err != nil || out != "W1" {
+		t.Fatalf("status before the denial = %q, %v, want \"W1\"", out, err)
+	}
+	f, err := os.OpenFile(filepath.Clean(path), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(settleDenial); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	if out, err := runRoot(t, "status"); err != nil || out != "" {
+		t.Errorf("status after the denial = %q, %v, want empty output", out, err)
+	}
+	s := getSession(t, db, "a")
+	if s.State != model.StateIdle || !s.SeenAt.Equal(fleetNow) || !s.UpdatedAt.Equal(fleetNow) || s.LastUpdate != "interrupted" {
+		t.Errorf("a = %s seen %v updated %v %q, want idle, seen and updated at %v, \"interrupted\"",
+			s.State, s.SeenAt, s.UpdatedAt, s.LastUpdate, fleetNow)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("status called tmux: %q", fake.Calls)
+	}
+}
+
+// Settling is a correction: a transcript status cannot read leaves that
+// session as it is, and the badge is still printed.
+func TestStatusIgnoresUnreadableTranscript(t *testing.T) {
+	fleetHome(t, nil,
+		model.Session{ID: "a", Agent: "claude", State: model.StateWaiting, Pane: "%1", TranscriptPath: t.TempDir(), UpdatedAt: at(11, 0)},
+		settleDenied(t, "b", model.StateWaiting, "%2"),
+	)
+	if out, err := runRoot(t, "status"); err != nil || out != "W1" {
+		t.Errorf("status = %q, %v, want \"W1\"", out, err)
+	}
+	if log := readLog(t); log != nil {
+		t.Errorf("status logged %q, want nothing", log)
 	}
 }

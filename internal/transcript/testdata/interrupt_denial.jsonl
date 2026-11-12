@@ -1,0 +1,12 @@
+{"type":"mode","mode":"default","sessionId":"s1"}
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"Create out.txt containing hello using the Write tool."},"uuid":"u1","timestamp":"2026-11-12T03:21:44.100Z","sessionId":"s1"}
+{"parentUuid":"u1","isSidechain":false,"type":"attachment","attachment":{"type":"prompt_snapshot","content":"[Request interrupted by user for tool use]"},"uuid":"a1","timestamp":"2026-11-12T03:21:44.101Z"}
+{"parentUuid":"a1","isSidechain":false,"type":"assistant","message":{"model":"claude-haiku-5-5","role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Write","input":{"file_path":"out.txt","content":"hello"}}],"stop_reason":"tool_use","usage":{"input_tokens":2,"cache_read_input_tokens":48018,"cache_creation_input_tokens":306}},"uuid":"as1","timestamp":"2026-11-12T03:21:46.529Z"}
+{"parentUuid":"as1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.","is_error":true,"tool_use_id":"toolu_01"}]},"uuid":"u2","timestamp":"2026-11-12T03:21:48.328Z","toolUseResult":"User rejected tool use","toolDenialKind":"user-rejected","sourceToolAssistantUUID":"as1","sessionId":"s1"}
+{"parentUuid":"u2","isSidechain":false,"type":"attachment","attachment":{"type":"prompt_snapshot","systemPrompt":["You are an agent."]},"uuid":"a2","timestamp":"2026-11-12T03:21:48.328Z"}
+{"parentUuid":"a2","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"uuid":"u3","timestamp":"2026-11-12T03:21:48.329Z","sessionId":"s1"}
+{"parentUuid":"u3","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":1996,"messageCount":19,"timestamp":"2026-11-12T03:21:48.331Z","uuid":"sy1","isMeta":false}
+{"type":"last-prompt","lastPrompt":"Create out.txt containing hello using the Write tool.","sessionId":"s1"}
+{"type":"ai-title","aiTitle":"Create out.txt","sessionId":"s1"}
+{"type":"mode","mode":"default","sessionId":"s1"}
+{"type":"permission-mode","permissionMode":"default","sessionId":"s1"}

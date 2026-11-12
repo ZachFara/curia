@@ -68,29 +68,40 @@ type usage struct {
 // all counted assistant lines read (Claude Code writes one line per content
 // block, so the final line may hold only a tool_use).
 func Read(path string, offset int64) (Update, int64, error) {
-	f, err := os.Open(filepath.Clean(path))
-	if errors.Is(err, fs.ErrNotExist) {
-		return Update{}, offset, nil
-	}
-	if err != nil {
-		return Update{}, offset, fmt.Errorf("open transcript: %w", err)
+	f, size, err := openTranscript(path)
+	if f == nil {
+		return Update{}, offset, err
 	}
 	defer func() { _ = f.Close() }()
-
-	info, err := f.Stat()
-	if err != nil {
-		return Update{}, offset, fmt.Errorf("stat transcript: %w", err)
-	}
-	if offset < 0 || offset > info.Size() {
+	if offset < 0 || offset > size {
 		offset = 0
 	}
 	r := bufio.NewReaderSize(f, 64<<10)
 	var buf []byte
-	start, ok, err := position(f, r, info.Size(), offset, &buf)
+	start, ok, err := position(f, r, size, offset, &buf)
 	if err != nil || !ok {
 		return Update{}, offset, err
 	}
 	return scan(r, &buf, start)
+}
+
+// openTranscript opens the transcript at path and returns it with its size.
+// A missing file yields a nil file and no error; on any error the file is
+// nil too.
+func openTranscript(path string) (*os.File, int64, error) {
+	f, err := os.Open(filepath.Clean(path))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, 0, nil
+	}
+	if err != nil {
+		return nil, 0, fmt.Errorf("open transcript: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, fmt.Errorf("stat transcript: %w", err)
+	}
+	return f, info.Size(), nil
 }
 
 // position seeks f to the first line to parse. Normally that is offset; if
