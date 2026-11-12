@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/ZachFara/curia/internal/install"
 )
 
 func runRoot(t *testing.T, args ...string) (string, error) {
@@ -71,35 +73,49 @@ func installRecord(t *testing.T) *installRecorder {
 	return r
 }
 
-// installRun runs curia with args and resets the install flag afterwards,
-// because cobra keeps a flag's value between runs.
+// installRun runs curia with args, resetting the install flag before and
+// after, because cobra keeps a flag's value between runs.
 func installRun(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	installAllowMCPTools = false
 	t.Cleanup(func() { installAllowMCPTools = false })
 	return runRoot(t, args...)
 }
 
-// installHome is a temp HOME and CLAUDE_CONFIG_DIR and the paths in them.
+// installHome is a temp HOME (and CLAUDE_CONFIG_DIR) and the paths in them.
 type installHome struct {
-	home, settings, skill, config, bin string
+	home, claudeDir, settings, skill, config, bin string
 }
 
+// installSetup points HOME and CLAUDE_CONFIG_DIR at temp dirs and writes
+// settings, when not empty, to the settings file Claude reads.
 func installSetup(t *testing.T, settings string) installHome {
 	t.Helper()
+	return installSetupDirs(t, settings, t.TempDir())
+}
+
+// installSetupDirs is installSetup with CLAUDE_CONFIG_DIR set to configDir;
+// "" sets it empty, which counts as unset.
+func installSetupDirs(t *testing.T, settings, configDir string) installHome {
+	t.Helper()
 	home := t.TempDir()
-	configDir := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
 	bin, err := executablePath()
 	if err != nil {
 		t.Fatal(err)
 	}
+	claudeDir, config := configDir, filepath.Join(configDir, ".claude.json")
+	if configDir == "" {
+		claudeDir, config = filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json")
+	}
 	h := installHome{
-		home:     home,
-		settings: filepath.Join(home, ".claude", "settings.json"),
-		skill:    filepath.Join(home, ".claude", "skills", "curia-decisions", "SKILL.md"),
-		config:   filepath.Join(configDir, ".claude.json"),
-		bin:      bin,
+		home:      home,
+		claudeDir: claudeDir,
+		settings:  filepath.Join(claudeDir, "settings.json"),
+		skill:     install.SkillPath(filepath.Join(claudeDir, "skills")),
+		config:    config,
+		bin:       bin,
 	}
 	if settings != "" {
 		if err := os.MkdirAll(filepath.Dir(h.settings), 0o750); err != nil {
@@ -373,6 +389,19 @@ func TestInstallAllowsToolsOnlyWithFlag(t *testing.T) {
 	if strings.Contains(out, installWantToolsHint) || !strings.Contains(out, "without a prompt") {
 		t.Errorf("install --allow-mcp-tools output:\n%s", out)
 	}
+
+	// All four there: a plain install says so instead of the hint (Ruling 57).
+	before, _ := os.ReadFile(filepath.Clean(h.settings))
+	out, err = installRun(t, "install")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if strings.Contains(out, installWantToolsHint) || !strings.Contains(out, "already allowed without a prompt in "+h.settings) {
+		t.Errorf("install with the four rules present:\n%s", out)
+	}
+	if after, _ := os.ReadFile(filepath.Clean(h.settings)); string(after) != string(before) {
+		t.Errorf("plain install rewrote settings:\n%s", after)
+	}
 }
 
 func TestInstallForeignSkillContinues(t *testing.T) {
@@ -415,8 +444,109 @@ func TestInstallForeignMCPEntryContinues(t *testing.T) {
 		if !strings.Contains(out, h.config) || !strings.Contains(out, "left alone") {
 			t.Errorf("%s: foreign MCP entry not reported:\n%s", args[0], out)
 		}
+		if args[0] == "install" && !strings.Contains(out, "run: claude mcp remove --scope user curia, then curia install again") {
+			t.Errorf("install does not say how to recover:\n%s", out)
+		}
 	}
 	if calls := rec.joined(); len(calls) != 0 {
 		t.Errorf("claude calls = %q, want none", calls)
 	}
+}
+
+func TestUninstallReportsSkill(t *testing.T) {
+	installRecord(t)
+	h := installSetup(t, "")
+	if out, err := installRun(t, "install"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	out, err := installRun(t, "uninstall")
+	if err != nil || !strings.Contains(out, "Skill: removed "+h.skill) {
+		t.Errorf("uninstall of our skill: %v\n%s", err, out)
+	}
+
+	if err = os.MkdirAll(filepath.Dir(h.skill), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	foreign := "my own skill\n"
+	if err = os.WriteFile(h.skill, []byte(foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err = installRun(t, "uninstall")
+	if err != nil {
+		t.Fatalf("uninstall with a foreign skill: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Skill: "+h.skill+" is not Curia's; left alone") || !strings.Contains(out, "Curia is uninstalled") {
+		t.Errorf("foreign skill not reported:\n%s", out)
+	}
+	if b, _ := os.ReadFile(filepath.Clean(h.skill)); string(b) != foreign {
+		t.Errorf("foreign skill changed: %q", b)
+	}
+}
+
+// installCheckClaudeDir installs with --allow-mcp-tools and uninstalls, and
+// checks that hooks, tool rules and the skill land in h.claudeDir and
+// nowhere else under HOME, and that uninstall reverses them.
+func installCheckClaudeDir(t *testing.T, h installHome) {
+	t.Helper()
+	out, err := installRun(t, "install", "--allow-mcp-tools")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Hooks: registered in "+h.settings+"\n") {
+		t.Errorf("install output does not name the settings path %s:\n%s", h.settings, out)
+	}
+	settings, err := os.ReadFile(filepath.Clean(h.settings))
+	if err != nil || !strings.Contains(string(settings), " hook SessionStart") {
+		t.Errorf("hooks not in %s: %v %s", h.settings, err, settings)
+	}
+	if got := installAllow(t, h.settings); !slices.Equal(got, append([]string{"Bash(ls:*)"}, installToolRules...)) {
+		t.Errorf("allow = %q", got)
+	}
+	if _, err := os.Stat(h.skill); err != nil {
+		t.Errorf("skill not at %s: %v", h.skill, err)
+	}
+	if h.claudeDir != filepath.Join(h.home, ".claude") {
+		if _, err := os.Stat(filepath.Join(h.home, ".claude")); !os.IsNotExist(err) {
+			t.Errorf("install created %s/.claude: %v", h.home, err)
+		}
+	}
+
+	if out, err := installRun(t, "uninstall"); err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	settings, _ = os.ReadFile(filepath.Clean(h.settings))
+	if strings.Contains(string(settings), " hook ") {
+		t.Errorf("hooks left in %s: %s", h.settings, settings)
+	}
+	if got := installAllow(t, h.settings); !slices.Equal(got, []string{"Bash(ls:*)"}) {
+		t.Errorf("allow after uninstall = %q", got)
+	}
+	if _, err := os.Stat(filepath.Dir(h.skill)); !os.IsNotExist(err) {
+		t.Errorf("skill dir left: %v", err)
+	}
+	if h.claudeDir != filepath.Join(h.home, ".claude") {
+		if _, err := os.Stat(filepath.Join(h.home, ".claude")); !os.IsNotExist(err) {
+			t.Errorf("uninstall created %s/.claude: %v", h.home, err)
+		}
+	}
+}
+
+// Ruling 56: with CLAUDE_CONFIG_DIR set, settings.json and skills/ live in it.
+func TestInstallUsesClaudeConfigDir(t *testing.T) {
+	rec := installRecord(t)
+	h := installSetup(t, `{"permissions":{"allow":["Bash(ls:*)"]}}`)
+	installCheckClaudeDir(t, h)
+	if calls := rec.joined(); !slices.Equal(calls, []string{installAddCall(h.bin)}) {
+		t.Errorf("claude calls = %q", calls)
+	}
+}
+
+// Ruling 56: with CLAUDE_CONFIG_DIR empty, they live in $HOME/.claude.
+func TestInstallWithoutClaudeConfigDir(t *testing.T) {
+	installRecord(t)
+	h := installSetupDirs(t, `{"permissions":{"allow":["Bash(ls:*)"]}}`, "")
+	if h.claudeDir != filepath.Join(h.home, ".claude") {
+		t.Fatalf("claudeDir = %s", h.claudeDir)
+	}
+	installCheckClaudeDir(t, h)
 }

@@ -40,6 +40,16 @@ const (
 // mcpName is the name Curia's server is registered under.
 const mcpName = "curia"
 
+// ClaudeDir is Claude Code's user directory, which holds settings.json and
+// skills/: configDir (CLAUDE_CONFIG_DIR) when it is not empty, else
+// <home>/.claude (Ruling 56).
+func ClaudeDir(home, configDir string) string {
+	if configDir != "" {
+		return filepath.Clean(configDir)
+	}
+	return filepath.Join(home, ".claude")
+}
+
 // ClaudeConfigPath is the Claude config JSON that `claude mcp add --scope
 // user` writes: <configDir>/.claude.json when configDir (CLAUDE_CONFIG_DIR)
 // is not empty, else <home>/.claude.json.

@@ -13,17 +13,12 @@ import (
 	"testing"
 )
 
-// skillFile is where WriteSkill puts the skill under skillsDir.
-func skillFile(skillsDir string) string {
-	return filepath.Join(skillsDir, "curia-decisions", "SKILL.md")
-}
-
 func TestWriteSkillCreatesFile(t *testing.T) {
 	skills := filepath.Join(t.TempDir(), ".claude", "skills")
 	if err := WriteSkill(skills); err != nil {
 		t.Fatal(err)
 	}
-	path := skillFile(skills)
+	path := SkillPath(skills)
 	if got := readFile(t, path); got != string(skillMD) {
 		t.Errorf("SKILL.md = %q, want the embedded bytes", got)
 	}
@@ -42,7 +37,7 @@ func TestWriteSkillIdempotentAndUpgrades(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	path := skillFile(skills)
+	path := SkillPath(skills)
 	if got := readFile(t, path); got != string(skillMD) {
 		t.Errorf("after two writes SKILL.md = %q", got)
 	}
@@ -57,7 +52,7 @@ func TestWriteSkillIdempotentAndUpgrades(t *testing.T) {
 
 func TestWriteSkillLeavesForeignFile(t *testing.T) {
 	skills := t.TempDir()
-	path := skillFile(skills)
+	path := SkillPath(skills)
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +75,7 @@ func TestRemoveSkillOnlyOurs(t *testing.T) {
 	if err := RemoveSkill(skills); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Dir(skillFile(skills))
+	dir := filepath.Dir(SkillPath(skills))
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("skill dir still there: %v", err)
 	}
@@ -101,11 +96,11 @@ func TestRemoveSkillOnlyOurs(t *testing.T) {
 		t.Fatal(err)
 	}
 	foreign := "my own skill\n"
-	writeFile(t, skillFile(skills), foreign)
-	if err := RemoveSkill(skills); err != nil {
-		t.Errorf("RemoveSkill on foreign file: %v", err)
+	writeFile(t, SkillPath(skills), foreign)
+	if err := RemoveSkill(skills); !errors.Is(err, ErrForeignSkill) {
+		t.Errorf("RemoveSkill on foreign file = %v, want ErrForeignSkill", err)
 	}
-	if got := readFile(t, skillFile(skills)); got != foreign {
+	if got := readFile(t, SkillPath(skills)); got != foreign {
 		t.Errorf("foreign SKILL.md changed: %q", got)
 	}
 }
@@ -115,12 +110,12 @@ func TestRemoveSkillKeepsOtherFilesInDir(t *testing.T) {
 	if err := WriteSkill(skills); err != nil {
 		t.Fatal(err)
 	}
-	other := filepath.Join(filepath.Dir(skillFile(skills)), "notes.md")
+	other := filepath.Join(filepath.Dir(SkillPath(skills)), "notes.md")
 	writeFile(t, other, "mine\n")
 	if err := RemoveSkill(skills); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(skillFile(skills)); !os.IsNotExist(err) {
+	if _, err := os.Stat(SkillPath(skills)); !os.IsNotExist(err) {
 		t.Errorf("SKILL.md still there: %v", err)
 	}
 	if got := readFile(t, other); got != "mine\n" {
@@ -151,15 +146,76 @@ func TestSkillSymlinkedDirSurvives(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkLink("WriteSkill")
-	if got := readFile(t, skillFile(target)); got != string(skillMD) {
+	if got := readFile(t, SkillPath(target)); got != string(skillMD) {
 		t.Errorf("skill not written through the link: %q", got)
 	}
 	if err := RemoveSkill(link); err != nil {
 		t.Fatal(err)
 	}
 	checkLink("RemoveSkill")
-	if _, err := os.Stat(filepath.Dir(skillFile(target))); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Dir(SkillPath(target))); !os.IsNotExist(err) {
 		t.Errorf("skill dir in the link's target still there: %v", err)
+	}
+}
+
+func TestRemoveSkillUnlinksSymlinkedFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dotfiles", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, target, string(skillMD))
+	skills := filepath.Join(dir, "skills")
+	link := SkillPath(skills)
+	if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveSkill(skills); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("link still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(link)); !os.IsNotExist(err) {
+		t.Errorf("emptied skill dir still there: %v", err)
+	}
+	if got := readFile(t, target); got != string(skillMD) {
+		t.Errorf("link target changed: %q", got)
+	}
+}
+
+func TestRemoveSkillSymlinkedSkillDir(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dotfiles", "curia-decisions")
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	skills := filepath.Join(dir, "skills")
+	if err := os.MkdirAll(skills, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(skills, "curia-decisions")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSkill(skills); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(target, "SKILL.md")); got != string(skillMD) {
+		t.Fatalf("skill not written through the dir link: %q", got)
+	}
+	if err := RemoveSkill(skills); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("dir link still there: %v", err)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil || len(entries) != 0 {
+		t.Errorf("link target = %v, %v; want kept and empty", entries, err)
 	}
 }
 
@@ -479,6 +535,15 @@ func TestClaudeConfigPath(t *testing.T) {
 	}
 }
 
+func TestClaudeDir(t *testing.T) {
+	if got := ClaudeDir("/h", "/c"); got != "/c" {
+		t.Errorf(`ClaudeDir("/h", "/c") = %q`, got)
+	}
+	if got := ClaudeDir("/h", ""); got != "/h/.claude" {
+		t.Errorf(`ClaudeDir("/h", "") = %q`, got)
+	}
+}
+
 func TestMCPAddCommandQuotesBin(t *testing.T) {
 	if got, want := MCPAddCommand("/my tools/curia"), "claude mcp add --scope user curia -- '/my tools/curia' mcp"; got != want {
 		t.Errorf("MCPAddCommand = %q, want %q", got, want)
@@ -561,6 +626,30 @@ func TestAllowToolsCreatesMissingParts(t *testing.T) {
 				t.Errorf("allow = %q, want %q", got, wantToolRules)
 			}
 		})
+	}
+}
+
+func TestToolsAllowed(t *testing.T) {
+	all, _ := json.Marshal(append([]string{"Bash(ls:*)"}, wantToolRules...))
+	three, _ := json.Marshal(wantToolRules[:3])
+	for content, want := range map[string]bool{
+		`{"permissions":{"allow":` + string(all) + `}}`:   true,
+		`{"permissions":{"allow":` + string(three) + `}}`: false,
+		`{"model":"opus"}`:    false,
+		`{"permissions":"x"}`: false,
+		`{`:                   false,
+	} {
+		path := settingsIn(t)
+		writeFile(t, path, content)
+		if got := ToolsAllowed(path); got != want {
+			t.Errorf("ToolsAllowed(%s) = %v, want %v", content, got, want)
+		}
+		if got := readFile(t, path); got != content {
+			t.Errorf("ToolsAllowed changed the file: %q", got)
+		}
+	}
+	if ToolsAllowed(filepath.Join(t.TempDir(), "absent.json")) {
+		t.Error("ToolsAllowed on a missing file = true")
 	}
 }
 

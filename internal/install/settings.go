@@ -102,6 +102,26 @@ func AllowTools(settingsPath string, now time.Time) error {
 	return saveSettings(settingsPath, raw, settings, now)
 }
 
+// ToolsAllowed reports whether all four curia MCP tool rules are already in
+// permissions.allow of the settings file at settingsPath. A file that is
+// missing, unreadable or of an unexpected shape reports false.
+func ToolsAllowed(settingsPath string) bool {
+	_, settings, err := loadSettings(filepath.Clean(settingsPath))
+	if err != nil {
+		return false
+	}
+	_, allow, err := allowList(settings)
+	if err != nil {
+		return false
+	}
+	for _, rule := range toolRules {
+		if !slices.Contains(allow, any(rule)) {
+			return false
+		}
+	}
+	return true
+}
+
 // allowList returns settings["permissions"] and its "allow" list; an absent
 // one is returned empty and not yet stored in settings.
 func allowList(settings map[string]any) (map[string]any, []any, error) {

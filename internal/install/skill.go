@@ -21,8 +21,8 @@ const skillMarker = "<!-- curia:managed -->"
 // skillName is the skill's directory under the skills directory.
 const skillName = "curia-decisions"
 
-// ErrForeignSkill is WriteSkill's error when SKILL.md exists without the
-// marker line, so it is not Curia's and is left alone.
+// ErrForeignSkill is WriteSkill's and RemoveSkill's error when SKILL.md
+// exists without the marker line, so it is not Curia's and is left alone.
 var ErrForeignSkill = errors.New("SKILL.md exists and is not Curia's (no " + skillMarker + " line); left alone")
 
 // SkillPath is where WriteSkill puts the skill under skillsDir.
@@ -50,17 +50,26 @@ func WriteSkill(skillsDir string) error {
 }
 
 // RemoveSkill removes skillsDir/curia-decisions/SKILL.md if it holds the
-// marker line, then the directory if that left it empty. A missing file, or
-// one without the marker, is left alone and is not an error. A SKILL.md that
-// is a symlink loses the link, never the file it points to.
+// marker line, then the directory if that left it empty. A missing file is
+// not an error; one without the marker is left alone and the error wraps
+// ErrForeignSkill.
+//
+// Symlinks are removed, never followed to delete what they point to: a
+// SKILL.md that is a symlink loses the link and its target keeps its bytes.
+// When the curia-decisions directory itself is a symlink, the SKILL.md inside
+// its target is removed and then, if that target is left empty, the link is
+// removed and the empty target directory stays.
 func RemoveSkill(skillsDir string) error {
 	path := filepath.Clean(SkillPath(skillsDir))
 	ours, err := skillIsOurs(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	if err != nil || !ours {
+	if err != nil {
 		return err
+	}
+	if !ours {
+		return fmt.Errorf("%s: %w", path, ErrForeignSkill)
 	}
 	if err = os.Remove(path); err != nil {
 		return err

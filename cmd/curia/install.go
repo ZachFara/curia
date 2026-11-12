@@ -22,15 +22,22 @@ var installAllowMCPTools bool
 // replace it, and no test runs the real claude.
 var claudeRunner install.Runner = installRunClaude
 
-// installClaudeTimeout bounds one claude invocation.
-const installClaudeTimeout = 30 * time.Second
+const (
+	// installClaudeTimeout bounds one claude invocation.
+	installClaudeTimeout = 30 * time.Second
+	// installClaudeWaitDelay bounds the wait for claude's output after the
+	// timeout kills it, should a child it started keep the pipe open.
+	installClaudeWaitDelay = 3 * time.Second
+)
 
 // installRunClaude runs claude from PATH with args and returns its combined
 // output.
 func installRunClaude(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, installClaudeTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "claude", args...).CombinedOutput()
+	c := exec.CommandContext(ctx, "claude", args...)
+	c.WaitDelay = installClaudeWaitDelay
+	return c.CombinedOutput()
 }
 
 // installToolsHint is what install prints when --allow-mcp-tools is not given.
@@ -47,12 +54,14 @@ func homePaths() (installPaths, error) {
 	if err != nil {
 		return installPaths{}, err
 	}
+	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	claudeDir := install.ClaudeDir(home, configDir)
 	return installPaths{
-		settings:     filepath.Join(home, ".claude", "settings.json"),
+		settings:     filepath.Join(claudeDir, "settings.json"),
 		snippet:      filepath.Join(home, ".config", "curia", "curia.tmux"),
 		tmuxConf:     filepath.Join(home, ".tmux.conf"),
-		skills:       filepath.Join(home, ".claude", "skills"),
-		claudeConfig: install.ClaudeConfigPath(home, os.Getenv("CLAUDE_CONFIG_DIR")),
+		skills:       filepath.Join(claudeDir, "skills"),
+		claudeConfig: install.ClaudeConfigPath(home, configDir),
 	}, nil
 }
 
@@ -113,10 +122,14 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 }
 
 // installTools adds the four tool rules with --allow-mcp-tools, and otherwise
-// says how to.
+// says how to, unless all four are there already (Ruling 57).
 func installTools(out io.Writer, settings string) error {
 	if !installAllowMCPTools {
-		installSay(out, "%s", installToolsHint)
+		if install.ToolsAllowed(settings) {
+			installSay(out, "MCP tools: the four curia tools are already allowed without a prompt in %s", settings)
+		} else {
+			installSay(out, "%s", installToolsHint)
+		}
 		return nil
 	}
 	if err := install.AllowTools(settings, time.Now()); err != nil {
@@ -154,7 +167,8 @@ func installMCP(ctx context.Context, out io.Writer, config, bin string) error {
 	case install.MCPAlreadyOurs:
 		installSay(out, "MCP server: already registered with Claude Code as curia")
 	case install.MCPForeign:
-		installSay(out, "MCP server: %s has a curia entry that is not this binary's, or is not valid JSON; left alone", config)
+		installSay(out, "MCP server: %s has a curia entry that is not this binary's, or is not valid JSON; left alone. "+
+			"To replace it, run: claude mcp remove --scope user curia, then curia install again", config)
 	case install.MCPNoClaude:
 		installSay(out, "MCP server: claude is not on PATH; to register it, run: %s", install.MCPAddCommand(bin))
 	}
@@ -175,7 +189,7 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	if err = os.Remove(p.snippet); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if err = install.RemoveSkill(p.skills); err != nil {
+	if err = uninstallSkill(cmd.OutOrStdout(), p.skills); err != nil {
 		return err
 	}
 	if err = uninstallMCP(cmd.Context(), cmd.OutOrStdout(), p.claudeConfig, bin); err != nil {
@@ -187,6 +201,26 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 		"Restart tmux to drop Curia's key bindings and hook, or run:\n"+
 		"  tmux set-hook -gu pane-focus-in; tmux unbind a; tmux unbind N; tmux unbind A")
 	return err
+}
+
+// uninstallSkill removes the skill if it is ours and says what it found; a
+// SKILL.md that is not Curia's is reported and left alone.
+func uninstallSkill(out io.Writer, skills string) error {
+	path := install.SkillPath(skills)
+	_, statErr := os.Lstat(path)
+	err := install.RemoveSkill(skills)
+	switch {
+	case errors.Is(err, install.ErrForeignSkill):
+		installSay(out, "Skill: %s is not Curia's; left alone", path)
+		return nil
+	case err != nil:
+		return err
+	case statErr != nil:
+		installSay(out, "Skill: not installed; nothing to remove")
+	default:
+		installSay(out, "Skill: removed %s", path)
+	}
+	return nil
 }
 
 // uninstallMCP removes the MCP server if it is ours and says what it found.
@@ -201,7 +235,8 @@ func uninstallMCP(ctx context.Context, out io.Writer, config, bin string) error 
 	case install.MCPAbsent:
 		installSay(out, "MCP server: not registered; nothing to remove")
 	case install.MCPForeign:
-		installSay(out, "MCP server: %s has a curia entry that is not this binary's, or is not valid JSON; left alone", config)
+		installSay(out, "MCP server: %s has a curia entry that is not this binary's, or is not valid JSON; left alone. "+
+			"To remove it anyway, run: claude mcp remove --scope user curia", config)
 	case install.MCPNoClaude:
 		installSay(out, "MCP server: claude is not on PATH; to remove it, run: claude mcp remove --scope user curia")
 	}
