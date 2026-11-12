@@ -133,9 +133,13 @@ layout:
 	scripts/check-layout.sh
 
 ## test: all tests under the race detector
+# Packages run one at a time (-p 1): several packages hold latency gates
+# (the hook's 20 ms budget, the end-to-end 50 ms budget), and with packages
+# running in parallel those gates measured the other packages' load, on CI
+# most of all. The tests and their thresholds are unchanged.
 test:
-	@echo "==> go test -race ./..."
-	@scripts/with-test-lock.sh go test -race ./...
+	@echo "==> go test -race -p 1 ./..."
+	@scripts/with-test-lock.sh go test -race -p 1 ./...
 
 ## build: build the curia binary into ./curia
 build:
