@@ -6,7 +6,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main, plan-1]
+    branches: [main, plan-1, plan-2]
 
 permissions:
   contents: read

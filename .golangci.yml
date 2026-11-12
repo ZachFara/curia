@@ -1,6 +1,6 @@
 # golangci-lint v2 configuration. Strict by design; see
-# docs/decisions/0002 (linters and thresholds) and docs/decisions/0003
-# (depguard package boundaries). Thresholds are never raised and no
+# docs/decisions/0002 (linters and thresholds), docs/decisions/0003 and
+# 0010 (depguard package boundaries). Thresholds are never raised and no
 # exclusions are added after setup (AGENTS.md, ENGINEERING).
 version: "2"
 
@@ -89,8 +89,9 @@ linters:
       # may import the standard library, the third-party modules it needs, and
       # only the internal packages ABOVE it in the table. Every rule is strict
       # (fail closed): an import not on the allow list is rejected.
-      # Order of the table: model, config, store, state, transcript, hook,
-      # tmux, fleet, attention, ui, install, cmd/curia.
+      # Order of the table (docs/decisions/0010): model, config, sanitize,
+      # decision, precedent, store, state, transcript, hook, tmux, fleet,
+      # attention, notify, deliver, mcp, ui, install, cmd/curia.
       rules:
         model:
           list-mode: strict
@@ -116,6 +117,48 @@ linters:
             - pkg: github.com/ZachFara/curia
               desc: "internal/config may import only internal packages above it: model (docs/decisions/0003)"
 
+        sanitize:
+          list-mode: strict
+          files:
+            - "**/internal/sanitize/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/sanitize may import only internal packages above it: model, config (docs/decisions/0010)"
+
+        decision:
+          list-mode: strict
+          files:
+            - "**/internal/decision/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/decision may import only internal packages above it: model, config, sanitize (docs/decisions/0010)"
+
+        precedent:
+          list-mode: strict
+          files:
+            - "**/internal/precedent/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/precedent may import only internal packages above it: model to decision (docs/decisions/0010)"
+
         store:
           list-mode: strict
           files:
@@ -125,10 +168,13 @@ linters:
             - modernc.org/sqlite
             - github.com/ZachFara/curia/internal/model$
             - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
             - github.com/ZachFara/curia/internal/store$
           deny:
             - pkg: github.com/ZachFara/curia
-              desc: "internal/store may import only internal packages above it: model, config (docs/decisions/0003)"
+              desc: "internal/store may import only internal packages above it: model, config, sanitize, decision, precedent (docs/decisions/0003)"
 
         state:
           list-mode: strict
@@ -138,11 +184,14 @@ linters:
             - $gostd
             - github.com/ZachFara/curia/internal/model$
             - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
           deny:
             - pkg: github.com/ZachFara/curia
-              desc: "internal/state may import only internal packages above it: model, config, store (docs/decisions/0003)"
+              desc: "internal/state may import only internal packages above it: model to store (docs/decisions/0003)"
 
         transcript:
           list-mode: strict
@@ -152,12 +201,15 @@ linters:
             - $gostd
             - github.com/ZachFara/curia/internal/model$
             - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
           deny:
             - pkg: github.com/ZachFara/curia
-              desc: "internal/transcript may import only internal packages above it: model, config, store, state (docs/decisions/0003)"
+              desc: "internal/transcript may import only internal packages above it: model to state (docs/decisions/0003)"
 
         hook:
           list-mode: strict
@@ -167,13 +219,16 @@ linters:
             - $gostd
             - github.com/ZachFara/curia/internal/model$
             - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
             - github.com/ZachFara/curia/internal/hook$
           deny:
             - pkg: github.com/ZachFara/curia
-              desc: "internal/hook may import only internal packages above it: model, config, store, state, transcript (docs/decisions/0003)"
+              desc: "internal/hook may import only internal packages above it: model to transcript (docs/decisions/0003)"
 
         tmux:
           list-mode: strict
@@ -183,6 +238,9 @@ linters:
             - $gostd
             - github.com/ZachFara/curia/internal/model$
             - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -200,6 +258,9 @@ linters:
             - $gostd
             - github.com/ZachFara/curia/internal/model$
             - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -218,6 +279,9 @@ linters:
             - $gostd
             - github.com/ZachFara/curia/internal/model$
             - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -229,6 +293,78 @@ linters:
             - pkg: github.com/ZachFara/curia
               desc: "internal/attention may import only internal packages above it: model to fleet (docs/decisions/0003)"
 
+        notify:
+          list-mode: strict
+          files:
+            - "**/internal/notify/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+            - github.com/ZachFara/curia/internal/transcript$
+            - github.com/ZachFara/curia/internal/hook$
+            - github.com/ZachFara/curia/internal/tmux$
+            - github.com/ZachFara/curia/internal/fleet$
+            - github.com/ZachFara/curia/internal/attention$
+            - github.com/ZachFara/curia/internal/notify$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/notify may import only internal packages above it: model to attention (docs/decisions/0010)"
+
+        deliver:
+          list-mode: strict
+          files:
+            - "**/internal/deliver/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+            - github.com/ZachFara/curia/internal/transcript$
+            - github.com/ZachFara/curia/internal/hook$
+            - github.com/ZachFara/curia/internal/tmux$
+            - github.com/ZachFara/curia/internal/fleet$
+            - github.com/ZachFara/curia/internal/attention$
+            - github.com/ZachFara/curia/internal/notify$
+            - github.com/ZachFara/curia/internal/deliver$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/deliver may import only internal packages above it: model to notify (docs/decisions/0010)"
+
+        mcp:
+          list-mode: strict
+          files:
+            - "**/internal/mcp/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/state$
+            - github.com/ZachFara/curia/internal/transcript$
+            - github.com/ZachFara/curia/internal/hook$
+            - github.com/ZachFara/curia/internal/tmux$
+            - github.com/ZachFara/curia/internal/fleet$
+            - github.com/ZachFara/curia/internal/attention$
+            - github.com/ZachFara/curia/internal/notify$
+            - github.com/ZachFara/curia/internal/deliver$
+            - github.com/ZachFara/curia/internal/mcp$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/mcp may import only internal packages above it: model to deliver (docs/decisions/0010)"
+
         ui:
           list-mode: strict
           files:
@@ -239,6 +375,9 @@ linters:
             - github.com/charmbracelet/lipgloss
             - github.com/ZachFara/curia/internal/model$
             - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -246,10 +385,13 @@ linters:
             - github.com/ZachFara/curia/internal/tmux$
             - github.com/ZachFara/curia/internal/fleet$
             - github.com/ZachFara/curia/internal/attention$
+            - github.com/ZachFara/curia/internal/notify$
+            - github.com/ZachFara/curia/internal/deliver$
+            - github.com/ZachFara/curia/internal/mcp$
             - github.com/ZachFara/curia/internal/ui$
           deny:
             - pkg: github.com/ZachFara/curia
-              desc: "internal/ui may import only internal packages above it: model to attention (docs/decisions/0003)"
+              desc: "internal/ui may import only internal packages above it: model to mcp (docs/decisions/0003)"
 
         install:
           list-mode: strict
@@ -259,6 +401,9 @@ linters:
             - $gostd
             - github.com/ZachFara/curia/internal/model$
             - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -266,6 +411,9 @@ linters:
             - github.com/ZachFara/curia/internal/tmux$
             - github.com/ZachFara/curia/internal/fleet$
             - github.com/ZachFara/curia/internal/attention$
+            - github.com/ZachFara/curia/internal/notify$
+            - github.com/ZachFara/curia/internal/deliver$
+            - github.com/ZachFara/curia/internal/mcp$
             - github.com/ZachFara/curia/internal/ui$
             - github.com/ZachFara/curia/internal/install$
           deny:
@@ -284,6 +432,9 @@ linters:
             - modernc.org/sqlite
             - github.com/ZachFara/curia/internal/model$
             - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -291,6 +442,9 @@ linters:
             - github.com/ZachFara/curia/internal/tmux$
             - github.com/ZachFara/curia/internal/fleet$
             - github.com/ZachFara/curia/internal/attention$
+            - github.com/ZachFara/curia/internal/notify$
+            - github.com/ZachFara/curia/internal/deliver$
+            - github.com/ZachFara/curia/internal/mcp$
             - github.com/ZachFara/curia/internal/ui$
             - github.com/ZachFara/curia/internal/install$
           deny:
@@ -315,6 +469,9 @@ linters:
             - $all
             - "!**/internal/model/**"
             - "!**/internal/config/**"
+            - "!**/internal/sanitize/**"
+            - "!**/internal/decision/**"
+            - "!**/internal/precedent/**"
             - "!**/internal/store/**"
             - "!**/internal/state/**"
             - "!**/internal/transcript/**"
@@ -322,6 +479,9 @@ linters:
             - "!**/internal/tmux/**"
             - "!**/internal/fleet/**"
             - "!**/internal/attention/**"
+            - "!**/internal/notify/**"
+            - "!**/internal/deliver/**"
+            - "!**/internal/mcp/**"
             - "!**/internal/ui/**"
             - "!**/internal/install/**"
             - "!**/cmd/curia/**"
