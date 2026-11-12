@@ -1,0 +1,80 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "tools": [
+      {
+        "description": "Search past decisions the user already made. Call before raising a ticket.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["query"],
+          "properties": {
+            "query": {"type": "string", "maxLength": 500, "description": "The question in plain words."},
+            "repo": {"type": "string", "description": "Repository path to match repo-scoped decisions against. Default: your session's repository."},
+            "tags": {"type": "array", "maxItems": 8, "items": {"type": "string"}, "description": "Return only decisions carrying at least one of these tags."}
+          }
+        },
+        "name": "search_decisions"
+      },
+      {
+        "description": "Raise a decision ticket for the user: a question, 2 to 4 options, your recommendation and why.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["question", "options", "recommendation", "rationale", "reversibility", "mode"],
+          "properties": {
+            "question": {"type": "string", "maxLength": 300, "description": "One question, one line."},
+            "context": {"type": "string", "maxLength": 2000, "description": "What you know: files, constraints, what you tried."},
+            "options": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 4,
+              "items": {
+                "type": "object",
+                "required": ["key", "label"],
+                "properties": {
+                  "key": {"type": "string", "pattern": "^[A-Za-z0-9]{1,8}$"},
+                  "label": {"type": "string", "maxLength": 80},
+                  "tradeoffs": {"type": "string", "maxLength": 300}
+                }
+              }
+            },
+            "recommendation": {"type": "string", "description": "The key of the option you recommend."},
+            "rationale": {"type": "string", "maxLength": 1200, "description": "Why, in at most 150 words."},
+            "reversibility": {"type": "string", "enum": ["cheap", "costly", "irreversible"]},
+            "mode": {"type": "string", "enum": ["blocking", "assume"], "description": "blocking: end your turn and wait. assume: proceed with your recommendation; irreversible choices must block."},
+            "assumption": {"type": "string", "maxLength": 300, "description": "Required for assume: what you will proceed with."},
+            "scope": {"type": "string", "enum": ["task", "repo", "global"], "description": "How far the answer applies as precedent. Default repo."},
+            "tags": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
+            "differs_from": {"type": "string", "description": "A decision id that looks similar but does not settle this."},
+            "differs_why": {"type": "string", "maxLength": 300}
+          }
+        },
+        "name": "request_decision"
+      },
+      {
+        "description": "Read a ticket's status and, once decided, the answer.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["id"],
+          "properties": {
+            "id": {"type": "string", "pattern": "^D-[1-9][0-9]{0,8}$"}
+          }
+        },
+        "name": "check_decision"
+      },
+      {
+        "description": "Withdraw your own open ticket, giving the reason or the past decision that settles it.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["id", "reason"],
+          "properties": {
+            "id": {"type": "string", "pattern": "^D-[1-9][0-9]{0,8}$"},
+            "reason": {"type": "string", "maxLength": 300},
+            "precedent_id": {"type": "string", "description": "The past decision that settles this, if one does."}
+          }
+        },
+        "name": "withdraw_decision"
+      }
+    ]
+  }
+}
