@@ -1,62 +1,164 @@
 # PROGRESS
 
-This file mirrors the plan for humans; it does not replace it. Task order, interfaces and tests come from `docs/superpowers/plans/2026-11-11-curia-plan-1-foundation.md`.
+This file mirrors the plans for humans; it does not replace them. Task order, interfaces and tests come from the current plan, `docs/superpowers/plans/2026-11-11-curia-plan-2-decisions.md`. Plan 1 (`docs/superpowers/plans/2026-11-11-curia-plan-1-foundation.md`) is complete; its record is kept below.
 
-## Status
+# Plan 2 (Decisions): in progress
+
+## Plan 2 status
+
+- **Setup in review.** `chore/plan2-setup` holds the plan document and every shared-file change of plan section 6: depguard rules for the six new packages (decision 0010), the layout check's package list, CI on pushes to `plan-2`, AGENTS.md, decision records 0010 to 0014, and this file. Each boundary was proven with temporary probes (decision 0010, Consequences). Its PR goes into `plan-2` after the parallel plan review.
+- Integration branch: `plan-2`, branched from `main` after Plan 1 merged (PR #14). Every task PR goes into `plan-2`.
+- No task has been dispatched.
+
+## Plan 2 waves
+
+Every task's done criteria also include: `make check` passes in the task's worktree; the PR into `plan-2` uses the PR template; CI (`check`) is green; the task review is clean or every finding is parked with a ruling; no shared file is touched (plan section 2).
+
+Model column: the plan's expected models (section 7), **expected, confirmed at dispatch**. The orchestrator confirms or changes it, with a one-line reason, before dispatching.
+
+Dependencies (plan section 7): 6 and 7 need 1 and 2; 8 needs 1, 2, 3; 9 needs 2, 6; 10 needs 1, 2, 6; 11 needs 7, 9; 15 needs 9; 12 needs 4, 6, 7, 8, 11; 13 needs 6, 11; 14 needs 3, 6, 10, 11; 16 needs 9, 10, 14; 17 needs everything.
+
+### Wave 1
+
+| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 1 | Sanitiser | Sonnet (expected, confirmed at dispatch) | `sanitize.Line`, `Text`, `Keys` (with `lossy`), one rune scanner, no regular expressions; `TestLineStripsEscapeSequences`, `TestLineOneLine`, `TestLineDropsInvisible`, `TestLineLimit`, `TestTextKeepsParagraphs`, `TestKeysAlphabet`, `TestKeysLimitIsLossy`, `TestIdempotent`, `TestHostileCorpus` pass under `-race`. | not started |
+| 2 | Decision types and config | Sonnet (expected, confirmed at dispatch) | `internal/model/decision.go` types and enums exactly as the Interfaces block (types only); `model.Event.StopBlocked`; `config.AssumeExpiry` (default 24h), `NotifyBell`, `NotifyMacOS`; `TestDecisionDefaults`, `TestLoadDecisionOverrides`, `TestNonPositiveAssumeExpiryRejected` pass; `TestDefaults` gains the three assertions; `go build ./...` works. | not started |
+| 3 | tmux: typing and bell | Opus (expected, confirmed at dispatch) | `tmux.Client.SendKeys` and `Bell` on the exec client and `tmux.Fake` (with `SendKeysErr`); input guard independent of `sanitize`; trailing `;` sent as `\;`; `TestSendKeysRefusesBadInput`, `TestSendKeysLiteralInRealTmux`, `TestSendKeysUnknownPaneFails`, `TestBellInRealTmux`, `TestBellUnknownPaneFails`, `TestFakeRecordsSendKeysAndBell` pass, the real-tmux ones not skipped where tmux is installed. | not started |
+| 4 | MCP protocol server | Sonnet (expected, confirmed at dispatch) | `mcp.Server.Serve` over line-delimited JSON-RPC 2.0 with the plan's five methods and error codes, standard library only (decision 0011); `TestInitializeNegotiatesVersion`, `TestToolsListInOrder`, `TestToolCallResultAndError`, `TestUnknownToolIsInvalidParams`, `TestProtocolErrors`, `TestNotificationsGetNoReply`, `TestOversizedLineSkipped`, `TestPanicInToolIsContained`, `TestOutputIsOneLinePerMessage`, `TestEOFEndsServe` pass through real pipes. | not started |
+| 5 | Install additions | Opus (expected, confirmed at dispatch) | `install.WriteSkill`/`RemoveSkill` with the embedded `skill/SKILL.md` (exact content), `AddMCP`/`RemoveMCP` through a `Runner`, the `mcp__curia` permission rule in the hooks write, the `A` binding; `TestWriteSkillCreatesFile`, `TestWriteSkillIdempotentAndUpgrades`, `TestWriteSkillLeavesForeignFile`, `TestRemoveSkillOnlyOurs`, `TestRemoveSkillKeepsOtherFilesInDir`, `TestSkillSymlinkedDirSurvives`, `TestAddMCPSequence`, `TestAddMCPAlreadyOurs`, `TestAddMCPForeign`, `TestAddMCPNoClaude`, `TestRemoveMCPOnlyOurs`, `TestBinWithSpacesIsOneArgument`, `TestHooksAddPermissionRuleOnce`, `TestUnhooksRemovesOnlyOurRule`, `TestPermissionsOfWrongTypeUntouched`, `TestInstallWritesSkillAndRegistersMCP`, `TestInstallThroughStubClaude`, `TestUninstallReversesPlan2Items` pass; the real-tmux binding loop checks `A`; no test runs the real `claude`. | not started |
+
+### Wave 2
+
+| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 6 | Ticket rules | Sonnet (expected, confirmed at dispatch) | `decision.Parse`, `Normalize`, `Validate`, `ArgsHash`, `New`, `ValidID`, `IsDecided`, `Resolve`, `Triage`, `Stakes`, `TypedMessage`, `StopReason`, all pure, limits as exported constants; `TestValidateAcceptsGoodTicket`, `TestValidateReportsEveryProblem`, `TestNormalizeCleansAndSortsTags`, `TestDefaultScopeIsRepo`, `TestParseTypeErrorIsOneProblem`, `TestArgsHashVector`, `TestArgsHashIgnoresDiffersAndTagOrder`, `TestArgsHashChangesWithMeaning`, `TestNewSetsExpiryForAssumeOnly`, `TestValidID`, `TestResolveTable`, `TestResolveRejectsBadAnswers`, `TestTriageOrder`, `TestTriageAllUnknownIsOldestBlockingFirst`, `TestStakes`, `TestTypedMessageWording`, `TestTypedMessageIsInert`, `TestStopReasonJoinsAndCaps` pass. | not started |
+| 7 | Precedent matching | Sonnet (expected, confirmed at dispatch) | `precedent.Tokens`, `MatchExpr`, `Similarity`, `Strong` and the constants, pure; `TestTokens`, `TestMatchExprQuotesAndCaps`, `TestMatchExprHostile`, `TestMatchExprEmpty`, `TestSimilarity`, `TestStrongThreshold`, `TestStrongCapsAtThree` pass. | not started |
+| 8 | Notifications | Sonnet (expected, confirmed at dispatch) | `notify.Run`, `notify.Blocking` (bell and the fixed `osascript` script with ticket text only as an argument); `TestBlockingOnlyForBlockingTickets`, `TestBellWhenEnabledAndInPane`, `TestMacOSPassesTextAsArguments`, `TestMacOSOnlyOnDarwin`, `TestBothTriedWhenOneFails`, `TestBodyCappedAt140` pass; no test runs `osascript`. | not started |
+
+### Wave 3
+
+| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 9 | Store: decisions | Opus (expected, confirmed at dispatch) | `0002_decisions.sql` exactly as plan section 4.1; `CreateDecision`, `GetDecision`, `ListDecisions`, `OpenTickets`, `OpenCounts`, `CountOpenBlocking`, `AnswerDecision`, `WithdrawDecision`, `ExpireDecisions`, `EditDecision`, each write one `BEGIN IMMEDIATE` transaction (expiry one `UPDATE`); `TestOpenIsIdempotent` expects 2 migrations; `TestMigrationAddsDecisions`, `TestMigrationOnPlan1Database`, `TestCreateAllocatesSequentialIDs`, `TestDecisionRoundTrip`, `TestIdenticalRetryCollapses`, `TestRetryAddsDiffers`, `TestRetryAfterDecisionReturnsIt`, `TestRetryAfterWithdrawOrExpiryOpensNew`, `TestSameTicketFromTwoSessionsIsTwoRows`, `TestConcurrentCreatesAllocateDistinctIDs`, `TestConcurrentIdenticalRetriesCollapse`, `TestAnswerTable`, `TestAnswerErrors`, `TestConcurrentAnswersOneWins`, `TestAnswerRacesWithdrawAndExpire`, `TestAnswerClearsNeedsDecision`, `TestAnswerKeepsNeedsDecisionWhileAnotherIsOpen`, `TestAnswerDoesNotTouchOtherStates`, `TestWithdrawRules`, `TestPastDeadlineIsNotOpenBeforeTheSweep`, `TestExpireFlipsOnlyDueAssume`, `TestEditRescopeAndSupersede`, `TestOpenTicketsJoinsSession`, `TestOpenCountsAndBlockingCount`, `TestListDecisionsFilters`, `TestFTSStaysInSync`, `TestCacheColumnsSurviveSessionUpsert` pass under `-race`, with all Plan 1 store tests. | not started |
+| 10 | Decide view | Opus (expected, confirmed at dispatch) | `ui.DecideSource`, `DecideOptions`, `DecideClosedMsg`, `NewDecide`; every ticket string through `sanitize`; `TestDecideListsTicketsInSourceOrder`, `TestDecideShowsSelectedTicket`, `TestNumberKeyAnswers`, `TestNumberBeyondOptionsIgnored`, `TestEnterAcceptsRecommendation`, `TestFreeTextAnswer`, `TestStagedReasoningAndScopeTravel`, `TestMovingDropsStaged`, `TestIrreversibleNeedsConfirmation`, `TestOutcomeShownAndQueueRefreshed`, `TestAnswerErrorShown`, `TestSessionFilter`, `TestEmbeddedCloseSendsMessage`, `TestEmptyQueue`, `TestTicketTextCannotDrawEscapes`, `TestDecideNarrowWidth`, `TestPasteIsNotACommand`, `TestInputCaps` pass. | not started |
+
+### Wave 4
+
+| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 11 | Store: search, delivery and the hook's transaction | Opus (expected, confirmed at dispatch) | `SearchDecisions` (via `precedent.MatchExpr`, bound parameters), `ClaimTyping`, `RequeueDelivery`, `CheckDecision`, `UpdateSessionTx` with `Tx.ClaimDeliveries` and `Tx.OpenBlocking`, `ClaimNotifySlot`, `PruneEvents`; `UpdateSession` delegates with no behaviour change; `TestSearchFindsDecidedOnly`, `TestSearchScopeTable`, `TestSearchRanksQuestionAboveContext`, `TestSearchStemming`, `TestSearchTagsAnyOf`, `TestSearchExcludeAndLimit`, `TestSearchHostileQuery`, `TestSearchSeesAnswerText`, `TestClaimTypingRequiresIdleOrNeedsDecision`, `TestRequeueOnlyUndoesTyping`, `TestCheckDecisionClaimsForOwnerOnly`, `TestTxClaimDeliveriesReturnsAndMarks`, `TestDeliveryClaimedExactlyOnce`, `TestUpdateSessionTxRollsBackOnError`, `TestUpdateSessionStillLosesNoUpdates`, `TestClaimNotifySlotOnePerWindow`, `TestPruneEventsBatches` pass under `-race`. | not started |
+| 15 | `curia decisions` | Sonnet (expected, confirmed at dispatch) | `curia decisions ls [--status] [--json]` and `curia decisions edit` in `cmd/curia/decisions.go`, edit refusing under `CLAUDECODE`; hand-written `cmd/curia/testdata/decisions.golden.json`; `TestDecisionsLsJSONGolden`, `TestDecisionsLsStatusFilter`, `TestDecisionsLsEmptyIsEmptyArray`, `TestDecisionsLsSweepsExpiry`, `TestDecisionsLsTableIsSanitised`, `TestEditRescope`, `TestEditSupersedeDropsFromSearch`, `TestEditErrors`, `TestEditRefusesInsideAgent` pass. | not started |
+
+### Wave 5
+
+| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 12 | MCP tools and `curia mcp` | Opus (expected, confirmed at dispatch) | `mcp.Tools` (exactly four, exact schemas and instruction strings), `mcp.Instructions`, caller resolution in the plan's five-step order, `curia mcp` pruning events at start; `TestToolSurfaceIsExactlyFour`, `TestRequestCreatesTicket`, `TestRequestInvalidListsAllProblems`, `TestRequestIdenticalRetry`, `TestRequestReturnsStrongPrecedent`, `TestRequestNoPrecedentAcrossRepos`, `TestRequestGlobalPrecedentAcrossRepos`, `TestRequestWeakMatchNotReturned`, `TestDiffersFromSuppressesThatPrecedent`, `TestTicketWithoutSessionIsAccepted`, `TestBlockingNotifiesOnce`, `TestCheckReturnsAnswerAndClaims`, `TestCheckByOtherSessionDoesNotClaim`, `TestCheckUnknownAndMalformedID`, `TestWithdrawByOwnerCitingPrecedent`, `TestWithdrawErrors`, `TestSearchUsesCallerRepoByDefault`, `TestToolsSweepExpiry`, `TestStoreErrorIsInternal`, `TestMCPOverPipes`, `TestCallerResolutionOrder`, `TestRepoFallsBackToGit`, `TestNotifyRateLimited`, `TestMCPStartupPrunesEvents` pass. | not started |
+| 13 | Hook wiring | Opus (expected, confirmed at dispatch) | `hook.Result`, `hook.Run` returning it; `Stop` through `UpdateSessionTx` with `ClaimDeliveries` and `OpenBlocking`; `state.Apply` honours `StopBlocked`; `cmd/curia/hook.go` prints the one JSON line under the watchdog mutex (decision 0012); `TestStopBlockedIsWorking`, `TestStopBlockedBeatsOpenDecision`, `TestStopWithOpenBlockingNeedsDecision`, `TestStopWithOnlyAssumeIsIdle`, `TestStopWithAnotherSessionsTicketIsIdle`, `TestStopClaimsQueuedAndBlocks`, `TestSecondStopDoesNotBlock`, `TestStopDeliversSeveralInOneBlock`, `TestTwoStopHooksOneBlocks`, `TestOtherEventsNeverPrintOrClaim`, `TestStopOutputSurvivesHostileText`, `TestStopOnEndedSessionResumesAndDelivers`, `TestStopLatencyWithDecisions` (p95 < 20 ms), `TestStdoutOnlyOnBlockedStop`, `TestHookExitsZeroAndSilentWhenDecisionQueryFails`, `TestClaimAfterWatchdogIsLogged` pass, with Plan 1's `TestHookLatency`. | not started |
+| 14 | Delivery and `curia decide` | Opus (expected, confirmed at dispatch) | `deliver.Answer` in the plan's seven steps; `curia decide` popup and flag forms, refusing under `CLAUDECODE` before opening anything; `newDecideSource`; `TestIdleSessionGetsTypedLine`, `TestNeverTypesIntoWaitingOrWorking`, `TestPaneGoneLeavesQueued`, `TestRecycledPaneIsNotTyped`, `TestSessionOutsideTmuxLeavesQueued`, `TestTmuxUnreachableLeavesQueued`, `TestSendKeysFailureRequeues`, `TestConfirmDeliversNothing`, `TestOverrideTypesRevertInstruction`, `TestMarkerReappliedAfterAnswer`, `TestAnswerErrorDeliversNothing`, `TestTypedLineReachesRealPane`, `TestHostileTextIsInertInARealShell`, `TestDecideRefusesInsideAgent`, `TestDecideOptionAnswers`, `TestDecideAcceptConfirmsAssume`, `TestDecideTextAndReasonFromStdin`, `TestDecideJSON`, `TestDecideFlagErrors`, `TestDecideAlreadyAnswered`, `TestDecideUnknownKeyNamesValidOnes`, `TestDecideOutputIsSanitised`, `TestDecideViaSSH`, `TestDecideSourceExpiresAndSorts` pass, the real-tmux ones not skipped where tmux is installed. | not started |
+
+### Wave 6
+
+| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 16 | Views: badge, dashboard column and the `d` key | Opus (expected, confirmed at dispatch) | `fleet.Count(sessions, openBlocking)`; `curia status` reads `CountOpenBlocking` and does not sweep; `ui.Source.OpenDecisions`; the `DEC` column (popup only) and `WithDecide`/`d`; `TestCountUsesOpenBlocking`, `TestBadgeCountsTicketsNotSessions`, `TestBadgeIgnoresAssumeAndPastDeadline`, `TestStatusStillSilentOnError`, `TestDecColumnShowsOpenCount`, `TestSidebarHasNoDecColumn`, `TestDKeyOpensDecideForRow`, `TestDecideClosedReturnsToDashboard`, `TestDKeyWithoutOpenDecisions`, `TestDKeyDisabledInSidebar`, `TestNarrowWidthStillFitsWithDec`, `TestOpenDecisionsErrorKeepsLastCounts`, `TestStoreSourceSweepsExpiry`, `TestNextJumpsToSessionWithBlockingTicket` pass; Plan 1's `TestBadge`, `fleet.Count` tests and `TestViewShowsRankedRows` (9 columns) updated. | not started |
+
+### Wave 7
+
+| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 17 | End-to-end acceptance | Opus (expected, confirmed at dispatch) | Hand-written fixtures in `testdata/decisions/` and golden files in `e2e/testdata/decisions/` (never generated from program output); `TestDecisionsEndToEnd` (script steps 1 to 11, private tmux server, MCP clients over real pipes) and `TestStopHookLatencyWithTickets` (at least 400 sequential processes, p95 < 50 ms) pass; `make check` passes. **Plan-level criteria (orchestrator):** `deadcode ./...` without `-test` on `plan-2` reports only deliberate test doubles (`tmux.Fake`); the isolated live check confirms the items plan section 14 marks for it. | not started |
+
+## Plan 2 smoke checks
+
+Run by the orchestrator on `plan-2` after each wave, with a temp `HOME`, `CURIA_DB` and a private tmux server (Plan 1's lesson: cross-task faults only show in a live binary).
+
+| After wave | Check | Result |
+| --- | --- | --- |
+| 1 | `make check`; `curia install` into the temp home with a stub `claude` writes the skill and the `A` binding | |
+| 3 | open the wave-3 database with the wave-1 binary's `curia ls` (old code, new schema) and the reverse: both work | |
+| 4 | `curia decisions ls --json` on an empty and on a seeded database | |
+| 5 | by hand over a pipe: `initialize`, `tools/list`, one `request_decision`; `curia decide D-1 --accept`; `curia hook Stop` prints one JSON line once | |
+| 6 | `curia status` shows `D1`; the popup shows the `DEC` column and `d` opens the ticket | |
+| 7 | Task 17, plus `deadcode ./...` without `-test`: only test doubles are reported | |
+
+## Plan 2 Rulings
+
+Format: Ruling: what — why — cost if wrong. Numbering continues from Plan 1 (next is 34).
+
+(none yet)
+
+## Plan 2 Open Questions
+
+Seeded from plan section 14. Each has a default, so execution is not blocked.
+
+1. **Does Claude Code pass its environment to a stdio MCP server?** The docs state only that `CLAUDE_PROJECT_DIR` is set. If `TMUX_PANE` or `CLAUDE_CODE_SESSION_ID` is not inherited, the caller falls back to matching the project directory, which fails when two sessions share a directory. Default: the five-step order of Task 12. Live check: confirm which step resolves a real session; if none does reliably, Plan 3's `curia spawn` must set `CURIA_SESSION_ID` and manual sessions need another channel.
+2. **How hard should the "no self-answering" boundary be?** An agent with a shell can run `curia decide` or write to the SQLite file. Default: the `CLAUDECODE` guard plus `answered_via = cli` on every flag-form answer (decision 0013). A real boundary needs something an agent cannot reach. Is the guard enough for V1?
+3. **Spec section 7 against a pane that has become a shell.** Default: the restricted `sanitize.Keys` alphabet, at the cost of lossy typed text (decision 0013). The alternative is to type only `Decision D-117 answered. Call check_decision D-117.`
+4. **Spec section 5 against the schema here** (extra columns, `n` as the primary key; decision 0014). Default: as written; should `docs/DESIGN.md` be updated to match?
+5. **Plan 1's hook rule against F7.** Default: the amended stdout rule (decision 0012).
+6. **Badge meaning.** Spec F4 says `D2` is "decisions"; Plan 1 counted sessions in `needs_decision`. Default: open blocking tickets.
+7. **F17 "soonest first" for cold caches.** Default: a cold cache sorts with unknown ones, by age.
+8. **Repo identity across worktrees.** `sessions.repo` is the worktree's top-level path. Default: leave it; Plan 3 must store the main repository before it spawns worktrees.
+9. **Auto-allowing the tools** (`mcp__curia` in `permissions.allow`). Default: on.
+10. **Stop reads the transcript for the last assistant text**, but Claude Code's docs say the payload's `last_assistant_message` should be used at Stop. Not a Plan 2 change; default: leave it and do a small fix PR.
+11. **`curia install` path problems inherited from Plan 1** (Plan 1 Open Questions 8, 14, 16): the MCP registration and the `A` binding record the same resolved binary path as the hooks. Default: same behaviour as the hooks.
+12. **The key for the decide popup.** Default: `prefix + A`.
+
+Items for the isolated live check (could not be settled from the desk):
+
+- Whether Claude Code's prompt accepts typed text followed at once by Enter as one submitted message, or needs a pause (a long line may be treated as a paste).
+- Whether a `Stop` with subagents or background tasks still running delivers reliably.
+- Whether `claude mcp get <name>` prints the configured command in a form that contains the binary path.
+- Whether the installed Claude Code shows the `instructions` string to the model in full (about 800 characters).
+
+## Plan 2 Ledger
+
+One line per task: wave, worktree, branch, status, model, fix rounds.
+
+(none yet)
+
+## Plan 2 Next steps
+
+1. Merge the setup PR (`chore/plan2-setup`) into `plan-2` after the plan review; apply any plan-text changes the review makes.
+2. Dispatch Wave 1 (Tasks 1 to 5), confirming each model first; smoke check after the wave.
+3. Carried over from Plan 1: the isolated live check (method of Ruling 33) and its fixes, if not yet done; owner: run `curia install` on the real machine and the three-session check; add Go 1.26 to PATH.
+
+# Plan 1 (Foundation): complete
+
+Plan 1's record, kept as it stood when Plan 1 closed. Its waves, done criteria and models are in the Plan 1 plan and in the results table below.
+
+## Plan 1 status
 
 - **Plan 1 (Foundation): complete.** All eleven tasks, the final whole-branch review and its fix wave are merged into `plan-1` (PRs #2 to #13). The fix-wave re-review found every finding addressed and nothing new at Critical or Important level.
 - `deadcode ./...` without `-test` reports only `tmux.Fake`, the deliberate test double.
 - The owner (2026-11-11) authorised the orchestrator to merge its own PRs, including `plan-1` into `main`, and to write and execute Plan 2 and later plans. An isolated live check (private tmux server, temp HOME) is authorised; the real `curia install` stays with the owner.
 - Not yet proven against a live Claude Code and tmux setup on the owner's machine.
 
-## Plan 1 waves
+## Plan 1 results by task
 
-Every task's done criteria also include: `make check` passes in the task's worktree; the PR into `plan-1` uses the PR template; CI (`check`) is green; the task review is clean or every finding is parked with a ruling.
+Cost is given as subagent tokens (implementer plus its reviewers, thousands), from the harness's own counts; cost-lens was not run.
 
-Model column: the expected starting point from the owner's prompt, **expected, confirmed at dispatch**. The orchestrator confirms or changes it, with a one-line reason, before dispatching.
+| Task | Implementer | Reviewer | Fix rounds | Tokens (k) | Notes |
+| --- | --- | --- | --- | --- | --- |
+| 1 Scaffold, types, config | Sonnet | Sonnet | 0 | 91 | clean first time |
+| 2 Store | Opus | Opus | 1 | 300 | review found the lost-update gap; Rulings 14, 15 |
+| 3 State machine | Sonnet | Sonnet | 0 | 95 | clean first time |
+| 4 Transcript reader | Sonnet | Sonnet | 1 | 160 | text-across-lines and tail window; Rulings 10, 11 |
+| 5 Hook command | Opus | Opus | 1 | 357 | git errors unlogged; test hit the real repo once |
+| 6 tmux adapter | Sonnet | Sonnet | 1 | 151 | `%` strftime expansion in display-message |
+| 7 Fleet, ls, status, next | Opus (was Sonnet) | Opus | 0 | 232 | clean; pre-review rebase and Ruling 20 |
+| 8 Attention markers | Sonnet | Sonnet | 1 | 190 | plus a pre-review change (Ruling 19) |
+| 9 Dashboard | Opus | Opus | 1 | 345 | stale rows could be killed |
+| 10 Install | Sonnet | Sonnet | 1 | 179 | symlink clobber, backup overwrite |
+| 11 End-to-end replay | Opus | Opus | 1 | 354 | blocked once on the latency gate (Ruling 26) |
+| Setup (Phase 1) | Opus | orchestrator | 0 | 165 | |
+| Final review, fix wave, re-review | Opus fixer | Fable | 1 wave | 712 | 2 Critical, 6 Important, all cross-task |
 
-### Wave 1
+What this suggests for the next plan: Sonnet was enough for single-package tasks with exact signatures (1, 3, 4, 6, 8, 10), but four of those six needed a fix round for behaviour the plan did not spell out. Every Opus task except 7 also needed one. The findings that mattered most (focus-events, nested sessions, restart ghosts) were cross-task and only the whole-branch review with a live binary found them, so the next plan should run a live smoke check per wave, not only at the end.
 
-| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
-| --- | --- | --- | --- | --- |
-| 1 | Scaffold, shared types and config | Sonnet (confirmed: 3 files, exact signatures and tests in the plan, no concurrency or UI) | `internal/model` types and constants exactly as the Interfaces block; `config.Default`, `config.Load`; `TestDefaults`, `TestLoadMissingFileReturnsDefaults`, `TestLoadOverrides`, `TestCuriaDBEnvOverride` pass; `go build ./cmd/curia` works. `go.mod` and `cmd/curia/main.go` already exist (Ruling 3): Task 1 does not edit them. | merged (PR #2) |
-
-### Wave 2
-
-| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
-| --- | --- | --- | --- | --- |
-| 2 | Store | Opus (confirmed: concurrent writers, WAL and busy_timeout behaviour) | `store.Open` (WAL, `busy_timeout=2000`, embedded migrations recorded in `schema_migrations`), Upsert as one `INSERT ... ON CONFLICT` statement, Get, List with `ListFilter`, AppendEvent, MarkSeen, EndOthersInPane; `0001_init.sql` matches spec section 5 with the two stated differences; `TestOpenCreatesSchemaAndWAL`, `TestOpenIsIdempotent`, `TestUpsertRoundTrip`, `TestListFiltersEndedAndOldStale`, `TestMarkSeen`, `TestEndOthersInPane`, `TestConcurrentUpserts` pass under `-race`. | merged (PR #7) |
-| 3 | State machine | Sonnet (confirmed: one pure function, full rule table in the plan) | `state.Apply` pure (no I/O, no clock), one switch on `ev.Kind`, every rule in the plan's table; `TestApplyTransitions`, `TestEndedIgnoresEventsExceptSessionStart`, `TestSubagentCountNeverNegative`, `TestStopWithOpenDecision`, `TestLastUpdateTruncatedTo80Runes` pass. | merged (PR #3) |
-| 4 | Transcript reader | Sonnet (confirmed: one function, exact rules and tests in the plan) | `transcript.Read` with the plan's rules (usage lines only, synthetic and malformed skipped, partial trailing line not consumed, missing file, shrunk file re-read from 0); fixtures in `internal/transcript/testdata/`; `TestReadsLatestUsage`, `TestIncrementalOffset`, `TestPartialTrailingLine`, `TestMissingFile`, `TestShrunkFileRereadsFromZero`, `TestSkipsSyntheticAndMalformed`, `TestLastAssistantTextFirstLine` pass. | merged (PR #4) |
-| 6 | tmux adapter | Sonnet (confirmed: thin exec wrapper with exact signatures; the process boundary is one CLI call per method) | `tmux.Pane`, `tmux.Client` (6 methods), `tmux.NewExec(socket)`, `tmux.Fake` with `Panes` and `Calls`; `TestParseListPanes` passes; `TestExecAgainstRealTmux` runs (not skipped) locally and in CI against `tmux -L curia-test`, and kills its server in `t.Cleanup`. | merged (PR #5) |
-| 10 | Install and uninstall | Sonnet (confirmed: file merge logic with exact rules and tests, no concurrency) | `install.Hooks`, `Unhooks`, `WriteTmux`, `RemoveTmux` per the plan's rules (backup before write, user entries preserved, invalid JSON writes nothing, fence added once); `TestHooksMergePreservesUserHooks`, `TestHooksIdempotent`, `TestHooksBackupWritten`, `TestInvalidJSONUntouched`, `TestMissingSettingsCreated`, `TestUnhooksRemovesOnlyOurs`, `TestTmuxFenceAddedOnceAndRemoved` pass; `curia install` / `uninstall` in `cmd/curia/install.go`. | merged (PR #6) |
-
-### Wave 3
-
-| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
-| --- | --- | --- | --- | --- |
-| 5 | Hook command | Opus (confirmed: integrates four packages, cross-process locking, latency budget) | `hook.Parse`, `hook.Env`, `hook.Run` in the plan's order; one payload fixture per event kind; `curia hook <Event>` exits 0 on every path and logs errors; `TestParseFixtures`, `TestRunSessionStartRecordsSession`, `TestSessionStartEndsPriorSessionInPane`, `TestHookWithoutTmuxPane`, `TestStopReadsTranscript`, `TestHookLatency` (p95 < 20 ms), `TestMalformedPayloadExitsZero`, `TestHookExitsZeroWhenStoreLocked` pass under `-race`. | merged (PR #8) |
-
-### Wave 4
-
-| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
-| --- | --- | --- | --- | --- |
-| 7 | Fleet ranking, badge, ls, status, next | Opus (changed from Sonnet: seven files across `fleet` and three commands, plus a cross-process reconcile under Ruling 14) | `fleet.Reconcile`, `Rank`, `Counts`/`Count`, `Badge`, `Next`; `curia ls [--json]`, `curia status`, `curia next` in their own files; `TestReconcileMarksMissingPanesStale`, `TestReconcileIgnoresSessionsWithoutPane`, `TestRankOrder`, `TestRankOldestFirstWithinGroup`, `TestBadge`, `TestNextSkipsSessionsWithoutPane`, `TestNextNoneWhenAllWorking`, `TestLsJSONGolden` pass. | merged (PR #10) |
-| 8 | Attention markers and mark-seen | Sonnet (confirmed: one small package and one command, exact signatures and tests) | `attention.Marker`, `WindowMarker`, `Apply`; `curia seen <pane>`; `cmd/curia/hook.go` calls `attention.Apply` after `hook.Run` and a tmux failure never changes the exit code; `TestMarkerByState`, `TestWindowMarkerStrongestWins`, `TestApplySetsWindowOption`, `TestSeenClearsMarker` pass. | merged (PR #9) |
-
-### Wave 5
-
-| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
-| --- | --- | --- | --- | --- |
-| 9 | Dashboard popup and sidebar | Opus (confirmed: a UI with keyboard, mouse and layout behaviour) | `ui.Source`, `ui.New`, `Mode`, `ui.ContextLevel`/`Level`; 8 columns, 1 s refresh, the plan's keys; `curia ui` and `curia sidebar`; `TestContextLevelThresholds`, `TestViewShowsRankedRows`, `TestEnterSwitchesToSelectedPane`, `TestSidebarEnterDoesNotQuit`, `TestKillRequiresConfirmation`, `TestFilterNarrowsRows`, `TestRowWithoutPaneNotJumpable`, `TestNarrowWidthTruncates` pass. | merged (PR #11) |
-
-### Wave 6
-
-| Task | Title | Model (expected, confirmed at dispatch) | Done criteria | Status |
-| --- | --- | --- | --- | --- |
-| 11 | End-to-end replay of five sessions | Opus (confirmed: cross-process test of the built binary with timing and concurrency) | Hand-written fixtures in `testdata/replay/` and golden `e2e/testdata/ls.golden.json` (never generated from program output); `TestReplayFiveSessions` passes (every run exits 0, p95 < 50 ms per process, `ls --json` order S2, S3, S1, S5, `status` prints `W1`); `go test -race ./...` passes; the live check in Step 5 done by hand and reported. **Plan-level criterion:** the orchestrator runs `deadcode ./...` (without `-test`) on `plan-1`; every reported symbol is either a deliberate test double (`tmux.Fake`) or fixed before the PR to main (Ruling 1). | merged (PR #12) |
-
-## Open Questions
+## Plan 1 Open Questions
 
 1. Resolved by Ruling 4.
 2. Go 1.26 is keg-only via Homebrew on the dev Mac and not on PATH by default; owner to add it to their shell config (dotfiles are chezmoi-managed).
@@ -67,7 +169,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 8. `curia uninstall` only removes entries for the current binary path (Ruling 13); entries from a moved or rebuilt binary stay behind and fire against a missing file. Decide whether uninstall should also match older paths.
 9. Under sustained heavy write load a waiting SQLite writer can time out (SQLite polls for the lock rather than queueing). Hooks are short so this is unlikely in practice; revisit if the log shows busy errors.
 10. Resolved by Ruling 28 for a restarted server. `fleet.Reconcile` matches sessions to panes by pane id alone. A restarted tmux server numbers panes from `%0` again, so an old session whose id is reused is never marked stale and `next` could jump to an unrelated pane. The data model has no server identity; decide in the final review or Plan 2.
-11. The `events` table keeps full hook payloads (up to 1 MiB each, including tool output) with no pruning. Add retention in Plan 2.
+11. The `events` table keeps full hook payloads (up to 1 MiB each, including tool output) with no pruning. Add retention in Plan 2. **Addressed by Plan 2:** Task 11 adds `store.PruneEvents` and Task 12 runs it (7 days, in batches) when `curia mcp` starts (plan decision 30).
 12. A session outside tmux that dies without SessionEnd keeps its last state forever (it is never stale by design), so a waiting one pins `W1`. An age-out or a `curia forget` belongs in a later plan.
 13. Two tmux servers on different sockets can both have a `%1`; telling them apart needs a `tmux_server` column (restore plan).
 14. `curia install` records the resolved binary path; an upgrade that changes the path orphans the old hook entries (see Ruling 13). Decide at packaging time whether to match any `curia hook <Event>` entry.
@@ -77,7 +179,7 @@ Model column: the expected starting point from the owner's prompt, **expected, c
 18. `SubagentStop` on an ended session is ignored, so `subagents_active` can read high after a resume.
 7. No LICENSE file: the owner chose to leave it undecided (2026-11-11).
 
-## Rulings
+## Plan 1 Rulings
 
 Format: Ruling: what — why — cost if wrong.
 
@@ -121,8 +223,23 @@ Format: Ruling: what — why — cost if wrong.
 32. Ruling: the fix wave is one Opus agent on `fix/plan1-final-review` with a PR into `plan-1` and one scoped re-review on Fable — the skill's single fix wave — none.
 
 31a. Ruling (addition to 31): a session first seen on an `idle_prompt` or `auth_success` Notification is recorded as idle with no last update — a row needs a state and idle is what such a session is — none.
+33. Ruling: the isolated live check runs real Claude Code with the real HOME for its own login but loads hooks only through `claude --settings <temp file>` whose hook commands set HOME and CURIA_DB to a temp dir, on a private tmux server — a temp HOME has no credentials — the test sessions' transcripts land in the real `~/.claude/projects`.
 
-## Ledger
+## Plan 1 deferred minors
+
+- Task 1: `config.Default` and `expandHome` discard `os.UserHomeDir` errors; unknown TOML keys are silently ignored.
+- Task 2: `TestUpdateSessionLosesNoUpdates` depends on timing (about 2.5x margin); retry `SQLITE_BUSY` inside the test loop. A failed `COMMIT` could return a connection mid-transaction (theoretical).
+- Task 3: `SessionStart` on an empty-ID session calls `start` twice; a few untested edges.
+- Task 4: first read of a 50 MB transcript measured 16.2 ms warm, close to the 20 ms budget (lever: smaller tail window).
+- Task 6: the real-tmux round trip checks `escapeMessage` through raw tmux, not `DisplayMessage` end to end.
+- Task 10: a dangling symlink target is still replaced by a regular file; rewritten files get mode 0600 whatever they had; a binary path with a space or quote goes unquoted into the hook command and tmux snippet.
+- Task 5: a payload over 1 MiB drops the event; stdin read has no deadline; whole-process hook latency was only measured on a loaded machine (check in Task 11).
+- Task 7: `ls --json` HTML-escapes `&&` and passes raw C1 and bidi characters; `ls` help text is inaccurate about hidden stale sessions; `Reconcile`'s in-transaction re-check is untested; `newTmuxClient` is used by four commands and belongs in `common.go`.
+- Task 8: each `Apply` re-lists all live sessions; `seen` stops at the first failing window.
+- Task 9: `internal/ui` duplicates `ls.go`'s text cleaner and `age`; the kill confirmation does not re-check that the row is still live; the filter matches the full repo path while the cell shows the basename; `ls` table should show the repo basename too (Ruling 22).
+- Task 11: SessionStart starts three processes (tmux and two git commands) and takes 15 to 20 ms at the median, close to the 20 ms budget; its tail is the main risk to the e2e latency gate on a loaded machine.
+- Final fix wave: a server already carrying the old unmarked badge gets one duplicate on the first re-source after upgrade; a failed keyed read in `hook.Run` drops that event's session update; a watchdog that fires before the log opens exits without a log line.
+## Plan 1 ledger
 
 One line per task: wave, worktree, branch, status.
 
@@ -137,47 +254,3 @@ One line per task: wave, worktree, branch, status.
 - Task 4: wave 2, `.worktrees/plan1-t4-transcript`, `feat/plan1-t4-transcript`, merged (PR #4), Sonnet, 1 fix rounds.
 - Task 6: wave 2, `.worktrees/plan1-t6-tmux`, `feat/plan1-t6-tmux`, merged (PR #5), Sonnet, 1 fix rounds.
 - Task 10: wave 2, `.worktrees/plan1-t10-install`, `feat/plan1-t10-install`, merged (PR #6), Sonnet, 1 fix rounds.
-
-## Next steps
-
-1. Merge `plan-1` into `main` (owner-authorised).
-2. Isolated live check; fix what it finds through reviewed PRs.
-3. Write Plan 2 (Decisions), merge it as a docs PR, make the shared-file setup changes, execute it in waves on `plan-2`.
-4. Owner: run `curia install` on the real machine and the three-session check; add Go 1.26 to PATH.
-
-## Plan 1 results by task
-
-Cost is given as subagent tokens (implementer plus its reviewers, thousands), from the harness's own counts; cost-lens was not run.
-
-| Task | Implementer | Reviewer | Fix rounds | Tokens (k) | Notes |
-| --- | --- | --- | --- | --- | --- |
-| 1 Scaffold, types, config | Sonnet | Sonnet | 0 | 91 | clean first time |
-| 2 Store | Opus | Opus | 1 | 300 | review found the lost-update gap; Rulings 14, 15 |
-| 3 State machine | Sonnet | Sonnet | 0 | 95 | clean first time |
-| 4 Transcript reader | Sonnet | Sonnet | 1 | 160 | text-across-lines and tail window; Rulings 10, 11 |
-| 5 Hook command | Opus | Opus | 1 | 357 | git errors unlogged; test hit the real repo once |
-| 6 tmux adapter | Sonnet | Sonnet | 1 | 151 | `%` strftime expansion in display-message |
-| 7 Fleet, ls, status, next | Opus (was Sonnet) | Opus | 0 | 232 | clean; pre-review rebase and Ruling 20 |
-| 8 Attention markers | Sonnet | Sonnet | 1 | 190 | plus a pre-review change (Ruling 19) |
-| 9 Dashboard | Opus | Opus | 1 | 345 | stale rows could be killed |
-| 10 Install | Sonnet | Sonnet | 1 | 179 | symlink clobber, backup overwrite |
-| 11 End-to-end replay | Opus | Opus | 1 | 354 | blocked once on the latency gate (Ruling 26) |
-| Setup (Phase 1) | Opus | orchestrator | 0 | 165 | |
-| Final review, fix wave, re-review | Opus fixer | Fable | 1 wave | 712 | 2 Critical, 6 Important, all cross-task |
-
-What this suggests for the next plan: Sonnet was enough for single-package tasks with exact signatures (1, 3, 4, 6, 8, 10), but four of those six needed a fix round for behaviour the plan did not spell out. Every Opus task except 7 also needed one. The findings that mattered most (focus-events, nested sessions, restart ghosts) were cross-task and only the whole-branch review with a live binary found them, so the next plan should run a live smoke check per wave, not only at the end.
-
-## Deferred minors (for the final review)
-
-- Task 1: `config.Default` and `expandHome` discard `os.UserHomeDir` errors; unknown TOML keys are silently ignored.
-- Task 2: `TestUpdateSessionLosesNoUpdates` depends on timing (about 2.5x margin); retry `SQLITE_BUSY` inside the test loop. A failed `COMMIT` could return a connection mid-transaction (theoretical).
-- Task 3: `SessionStart` on an empty-ID session calls `start` twice; a few untested edges.
-- Task 4: first read of a 50 MB transcript measured 16.2 ms warm, close to the 20 ms budget (lever: smaller tail window).
-- Task 6: the real-tmux round trip checks `escapeMessage` through raw tmux, not `DisplayMessage` end to end.
-- Task 10: a dangling symlink target is still replaced by a regular file; rewritten files get mode 0600 whatever they had; a binary path with a space or quote goes unquoted into the hook command and tmux snippet.
-- Task 5: a payload over 1 MiB drops the event; stdin read has no deadline; whole-process hook latency was only measured on a loaded machine (check in Task 11).
-- Task 7: `ls --json` HTML-escapes `&&` and passes raw C1 and bidi characters; `ls` help text is inaccurate about hidden stale sessions; `Reconcile`'s in-transaction re-check is untested; `newTmuxClient` is used by four commands and belongs in `common.go`.
-- Task 8: each `Apply` re-lists all live sessions; `seen` stops at the first failing window.
-- Task 9: `internal/ui` duplicates `ls.go`'s text cleaner and `age`; the kill confirmation does not re-check that the row is still live; the filter matches the full repo path while the cell shows the basename; `ls` table should show the repo basename too (Ruling 22).
-- Task 11: SessionStart starts three processes (tmux and two git commands) and takes 15 to 20 ms at the median, close to the 20 ms budget; its tail is the main risk to the e2e latency gate on a loaded machine.
-- Final fix wave: a server already carrying the old unmarked badge gets one duplicate on the first re-source after upgrade; a failed keyed read in `hook.Run` drops that event's session update; a watchdog that fires before the log opens exits without a log line.
