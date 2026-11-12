@@ -491,7 +491,7 @@ func TestDecidePartialSendTellsTheUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide = %v, want success", err)
 	}
-	for _, want := range []string{"D-1 answered: A: Postgres · ", "prompt", "check_decision"} {
+	for _, want := range []string{"D-1 answered: A: Postgres · typing may not have finished: check the agent's pane", "check_decision D-1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout = %q, want it to hold %q", out, want)
 		}

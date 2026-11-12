@@ -3,6 +3,7 @@ package deliver_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,12 +37,46 @@ const (
 
 func openStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "curia.db"))
+	return openStoreAt(t, filepath.Join(t.TempDir(), "curia.db"))
+}
+
+func openStoreAt(t *testing.T, path string) *store.Store {
+	t.Helper()
+	st, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return st
+}
+
+// lockStore takes the database's write lock on a connection of its own,
+// as a busy writer in another process would, and returns its release.
+func lockStore(t *testing.T, path string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err == nil {
+		_, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE")
+	}
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			_ = conn.Close()
+			_ = db.Close()
+		})
+	}
+	t.Cleanup(release)
+	return release
 }
 
 // asker is the asking session: needs_decision in live pane %5 of window @7,
@@ -454,10 +490,10 @@ func TestPartialSendIsNotRequeued(t *testing.T) {
 	if got := sendKeysCalls(fake.Calls); len(got) != 1 {
 		t.Errorf("SendKeys calls = %q, want exactly one, never a retry", got)
 	}
-	for _, want := range []string{"prompt", "check_decision"} {
-		if !strings.Contains(out.Note, want) {
-			t.Errorf("note = %q, want it to mention %q", out.Note, want)
-		}
+	want := "typing may not have finished: check the agent's pane (tmux session work, window @7); " +
+		"press Enter if the line is there, otherwise tell it to call check_decision D-1"
+	if out.Note != want {
+		t.Errorf("note = %q, want %q", out.Note, want)
 	}
 	stored := getDecision(t, st, d.ID)
 	if stored.Delivery != model.DeliveryDelivered || stored.DeliveredVia != model.ViaSendKeys {
@@ -636,6 +672,203 @@ func TestSecondAnswerIsNotDelivered(t *testing.T) {
 	if len(fake.Calls) != 0 {
 		t.Errorf("second answer tmux calls = %q, want none", fake.Calls)
 	}
+}
+
+// A partial send in a session with no tmux session or window known still
+// tells the user what to do.
+func TestPartialSendNoteWithoutWindow(t *testing.T) {
+	st := openStore(t)
+	s := asker()
+	s.TmuxSession, s.TmuxWindow = "", ""
+	seedSession(t, st, s)
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}, SendKeysErr: tmux.ErrPartialSend}
+	log, _ := testLog()
+	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "typing may not have finished: check the agent's pane; " +
+		"press Enter if the line is there, otherwise tell it to call check_decision D-1"
+	if out.Note != want {
+		t.Errorf("note = %q, want %q", out.Note, want)
+	}
+}
+
+// Ruling 73: a pane another live session is bound to (a nested session
+// that died without SessionEnd, say) is never typed into.
+func TestSharedPaneIsNotTyped(t *testing.T) {
+	for _, other := range []model.State{model.StateWorking, model.StateWaiting, model.StateIdle} {
+		t.Run(string(other), func(t *testing.T) {
+			st := openStore(t)
+			seedSession(t, st, asker())
+			outer := asker()
+			outer.ID, outer.State = "outer", other
+			seedSession(t, st, outer)
+			d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+			fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+			log, _ := testLog()
+			out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+				t.Errorf("typed into a pane shared with a %s session: %q", other, got)
+			}
+			wantQueued(t, st, out, d.ID, "pane is shared by another session; queued for the Stop hook")
+		})
+	}
+}
+
+// lateTmux's SendKeys fails as a killed copy-mode step does once the
+// caller's deadline has passed: a plain error, nothing typed.
+type lateTmux struct{ *tmux.Fake }
+
+func (l lateTmux) SendKeys(ctx context.Context, pane, text string) error {
+	_ = l.Fake.SendKeys(ctx, pane, text)
+	<-ctx.Done()
+	return errors.New("tmux copy-mode: signal: killed")
+}
+
+// The caller's deadline passing while typing does not stop the requeue,
+// nor the marker update after it.
+func TestRequeueSurvivesCallerDeadline(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, asker())
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	log, buf := testLog()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	out, err := deliver.Answer(ctx, st, lateTmux{fake}, log, d.ID, answerA, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("setup: the caller's deadline did not pass while typing")
+	}
+	wantQueued(t, st, out, d.ID, noteFailed)
+	if !slices.Contains(fake.Calls, "SetWindowOption @7 @curia_marker ") {
+		t.Errorf("tmux calls = %q, want the marker of @7 cleared after the deadline", fake.Calls)
+	}
+	if strings.Contains(buf.String(), "deadline exceeded") {
+		t.Errorf("a step after typing ran on the dead context:\n%s", buf)
+	}
+}
+
+// closingTmux lists the live panes, then closes the store Answer was given,
+// so the next store step fails.
+type closingTmux struct {
+	*tmux.Fake
+	st *store.Store
+}
+
+func (c closingTmux) ListPanes(ctx context.Context) ([]tmux.Pane, error) {
+	panes, err := c.Fake.ListPanes(ctx)
+	if err == nil {
+		err = c.st.Close()
+	}
+	return panes, err
+}
+
+// lockingTmux lists the live panes, then has another writer take the
+// store's write lock, so the claim's transaction cannot start.
+type lockingTmux struct {
+	*tmux.Fake
+	lock func()
+}
+
+func (l lockingTmux) ListPanes(ctx context.Context) ([]tmux.Pane, error) {
+	panes, err := l.Fake.ListPanes(ctx)
+	l.lock()
+	return panes, err
+}
+
+// A store error in Reconcile or ClaimTyping types nothing and leaves the
+// answer queued.
+func TestStoreErrorBeforeClaimTypesNothing(t *testing.T) {
+	const noteNoCheck = "could not check the session; queued for the Stop hook"
+	t.Run("reconcile", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "curia.db")
+		st := openStoreAt(t, path)
+		seedSession(t, st, asker())
+		d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+		doomed := openStoreAt(t, path)
+		fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+		log, buf := testLog()
+		out, err := deliver.Answer(context.Background(), doomed, closingTmux{fake, doomed}, log, d.ID, answerA, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+			t.Errorf("typed after a store error: %q", got)
+		}
+		wantQueued(t, st, out, d.ID, noteNoCheck)
+		wantWarnNoError(t, buf)
+	})
+	t.Run("claim", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "curia.db")
+		st := openStoreAt(t, path)
+		seedSession(t, st, asker())
+		d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+		fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+		var release func()
+		lock := func() { release = lockStore(t, path) }
+		log, buf := testLog()
+		out, err := deliver.Answer(context.Background(), st, lockingTmux{fake, lock}, log, d.ID, answerA, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+			t.Errorf("typed after a failed claim: %q", got)
+		}
+		wantQueued(t, st, out, d.ID, noteNoCheck)
+		if !strings.Contains(buf.String(), "typing claim failed") {
+			t.Errorf("log does not name the failed claim:\n%s", buf)
+		}
+		wantWarnNoError(t, buf)
+	})
+}
+
+// lockedSendTmux fails SendKeys with a plain error (nothing typed) while
+// another writer holds the store's write lock, so the requeue cannot run.
+type lockedSendTmux struct {
+	*tmux.Fake
+	lock func()
+}
+
+func (l lockedSendTmux) SendKeys(ctx context.Context, pane, text string) error {
+	_ = l.Fake.SendKeys(ctx, pane, text)
+	l.lock()
+	return errors.New("tmux send-keys: can't find pane: %5")
+}
+
+func TestFailedRequeueSaysSo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "curia.db")
+	st := openStoreAt(t, path)
+	seedSession(t, st, asker())
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	var release func()
+	lock := func() { release = lockStore(t, path) }
+	log, buf := testLog()
+	out, err := deliver.Answer(context.Background(), st, lockedSendTmux{fake, lock}, log, d.ID, answerA, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	want := "typing failed and the answer could not be queued again; the agent can read it with check_decision"
+	if out.Note != want {
+		t.Errorf("note = %q, want %q", out.Note, want)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 1 {
+		t.Errorf("SendKeys calls = %q, want exactly one", got)
+	}
+	if strings.Contains(buf.String(), "answer queued again") {
+		t.Errorf("log says the answer was queued again although the requeue failed:\n%s", buf)
+	}
+	wantWarnNoError(t, buf)
 }
 
 // realSocket is per run, so concurrent test runs never share a server.

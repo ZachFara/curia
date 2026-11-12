@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -19,12 +20,30 @@ func typable(sess model.Session) bool {
 	return sess.Pane != "" && (sess.State == model.StateIdle || sess.State == model.StateNeedsDecision)
 }
 
+// sharesPane reports whether a session row other than sess is bound to
+// sess's pane in a state other than ended or stale (a row with no state
+// counts as live). A nested session started from another session's pane
+// inherits that pane, and one that died without SessionEnd stays idle or
+// needs_decision while the outer session is alive there, perhaps at a
+// permission prompt (Ruling 73).
+func sharesPane(ctx context.Context, tx *sql.Tx, sess model.Session) (bool, error) {
+	var n int
+	err := tx.QueryRowContext(ctx, `
+SELECT count(*) FROM sessions
+WHERE tmux_pane = ? AND id != ? AND COALESCE(state, '') NOT IN (?, ?)`,
+		sess.Pane, sess.ID, model.StateEnded, model.StateStale).Scan(&n)
+	return n > 0, err
+}
+
 // ClaimTyping claims decision id for typing into its session's pane at
-// now, in one write transaction: the decision must be queued and its
-// session row must exist, have a pane and be idle or needs_decision. Then
-// the decision is marked delivered by send_keys and returned with ok true
-// and the session. Otherwise nothing changes and ok is false, with both
-// rows as stored (zero when absent), so the caller can say why.
+// now, in one write transaction: the decision must be queued; its session
+// row must exist, have a pane and be idle or needs_decision; and no other
+// session row that is neither ended nor stale may be bound to that pane
+// (Ruling 73). Then the decision is marked delivered by send_keys and
+// returned with ok true and the session. Otherwise nothing changes and ok
+// is false, with both rows as stored (zero when absent), so the caller can
+// say why: a queued decision whose session is idle or needs_decision in a
+// pane was refused because another live session shares the pane.
 func (s *Store) ClaimTyping(ctx context.Context, id string, now time.Time) (d model.Decision, sess model.Session, ok bool, err error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -39,6 +58,13 @@ func (s *Store) ClaimTyping(ctx context.Context, id string, now time.Time) (d mo
 		return model.Decision{}, model.Session{}, false, fail("claim typing", id, err)
 	}
 	if d.Delivery != model.DeliveryQueued || !typable(sess) {
+		return d, sess, false, nil
+	}
+	shared, err := sharesPane(ctx, tx, sess)
+	if err != nil {
+		return model.Decision{}, model.Session{}, false, fail("claim typing", id, err)
+	}
+	if shared {
 		return d, sess, false, nil
 	}
 	if _, err = tx.ExecContext(ctx,

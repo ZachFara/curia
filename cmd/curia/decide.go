@@ -39,10 +39,6 @@ const decideAnswerLimit = decision.MaxAnswerText
 // decideNoteLimit bounds a printed delivery note.
 const decideNoteLimit = 300
 
-// errDecideInsideAgent refuses curia decide inside an agent session: no
-// agent may answer a decision (spec section 7).
-var errDecideInsideAgent = errors.New("curia decide cannot run inside an agent session (CLAUDECODE is set): only the user may answer a decision")
-
 func init() {
 	cmd := &cobra.Command{
 		Use:   "decide [<id>]",
@@ -67,8 +63,9 @@ func init() {
 }
 
 func runDecide(cmd *cobra.Command, args []string) error {
+	// No agent may answer a decision (spec section 7).
 	if refuseInsideAgent() != nil {
-		return errDecideInsideAgent
+		return errors.New("curia decide cannot run inside an agent session (CLAUDECODE is set): only the user may answer a decision")
 	}
 	if len(args) == 0 {
 		if decideOption != "" || decideAccept || decideText != "" || decideReason != "" || decideScope != "" || decideJSON {
