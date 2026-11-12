@@ -71,7 +71,8 @@ func (f *Fake) KillPane(_ context.Context, pane string) error {
 }
 
 // SendKeys records the call and returns SendKeysErr. It types nothing and
-// does not check its arguments.
+// does not check its arguments. Set SendKeysErr to ErrPartialSend (or an
+// error wrapping it) to act out a line typed but not submitted.
 func (f *Fake) SendKeys(_ context.Context, pane, text string) error {
 	f.record("SendKeys %s %s", pane, text)
 	return f.SendKeysErr
