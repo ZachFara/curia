@@ -295,6 +295,30 @@ func TestStopWithOpenDecision(t *testing.T) {
 	}
 }
 
+// A Stop the hook blocks to deliver answers is not the end of the turn:
+// Claude goes on working with the answers (plan section 4.9).
+func TestStopBlockedIsWorking(t *testing.T) {
+	got := state.Apply(base(), model.Event{Kind: model.Stop, SessionID: "s1", Message: "done", StopBlocked: true, At: t1}, false)
+	if got.State != model.StateWorking || got.LastUpdate != "done" || !got.UpdatedAt.Equal(t1) {
+		t.Errorf("got state %s, LastUpdate %q, updated %v; want working, done, %v", got.State, got.LastUpdate, got.UpdatedAt, t1)
+	}
+}
+
+func TestStopBlockedBeatsOpenDecision(t *testing.T) {
+	got := state.Apply(base(), model.Event{Kind: model.Stop, SessionID: "s1", Message: "done", StopBlocked: true, At: t1}, true)
+	if got.State != model.StateWorking || got.LastUpdate != "done" {
+		t.Errorf("got state %s, LastUpdate %q; want working, done", got.State, got.LastUpdate)
+	}
+}
+
+// StopBlocked means nothing on another event.
+func TestStopBlockedOnlyOnStop(t *testing.T) {
+	got := state.Apply(base(), model.Event{Kind: model.SessionEnd, SessionID: "s1", StopBlocked: true, At: t1}, true)
+	if got.State != model.StateEnded {
+		t.Errorf("SessionEnd with StopBlocked: state %s, want ended", got.State)
+	}
+}
+
 func TestLastUpdateTruncatedTo80Runes(t *testing.T) {
 	target := strings.Repeat("é世", 50) // 100 runes
 	got := state.Apply(base(), model.Event{

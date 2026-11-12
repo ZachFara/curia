@@ -1,12 +1,16 @@
 package hook
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/decision"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/state"
 	"github.com/ZachFara/curia/internal/store"
@@ -34,6 +38,16 @@ type startInfo struct {
 	repo, branch, tmuxSession, window string
 }
 
+// Result is what Run did: the session as stored, and what curia hook must
+// write to stdout. Stdout is nil except on a Stop that claimed queued
+// answers: then it is one line, {"decision":"block","reason":...} and a
+// newline, which blocks the stop and hands Claude the answers as the
+// reason.
+type Result struct {
+	Session model.Session
+	Stdout  []byte
+}
+
 // Run records one hook event and returns the session as stored. In order it
 // parses the payload, appends the raw event, and on SessionStart, or for a
 // session it has no row for yet (one first seen mid-run, Ruling 29), ends any
@@ -44,40 +58,108 @@ type startInfo struct {
 // while the write lock is held, and only once per session besides
 // SessionStart.
 //
+// On Stop the same transaction also claims the session's queued answers and
+// counts its open blocking tickets (plan sections 4.3 and 4.9): claimed
+// answers block the stop (Result.Stdout) and leave the session working;
+// otherwise an open blocking ticket makes it needs_decision. No other event
+// reads the decisions.
+//
 // A transcript that cannot be read does not stop the update: the session is
-// written without it and the read error is returned with it.
-func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st *store.Store, cfg config.Config) (model.Session, error) {
+// written without it and the read error is returned with it. The same holds
+// for a claim that fails (it is rolled back, so nothing is claimed or
+// printed) and for a count that fails (it counts as none).
+func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st *store.Store, cfg config.Config) (Result, error) {
 	ev, err := Parse(kind, payload, env.Pane, env.Now())
 	if err != nil {
-		return model.Session{}, err
+		return Result{}, err
 	}
 	if err = st.AppendEvent(ctx, ev, payload); err != nil {
-		return model.Session{}, err
+		return Result{}, err
 	}
 	starting := kind == model.SessionStart
 	if !starting {
 		var found bool
 		if _, found, err = st.GetSession(ctx, ev.SessionID); err != nil {
-			return model.Session{}, err
+			return Result{}, err
 		}
 		starting = !found // first seen mid-run
 	}
 	var start *startInfo
 	if starting {
 		if start, err = sessionStart(ctx, ev, env, st); err != nil {
-			return model.Session{}, err
+			return Result{}, err
 		}
+	}
+	if kind == model.Stop {
+		return runStop(ctx, ev, start, st, cfg)
 	}
 	var out model.Session
 	var readErr error
 	err = st.UpdateSession(ctx, ev.SessionID, func(s model.Session, _ bool) model.Session {
-		out, readErr = apply(s, ev, start, cfg)
+		out, readErr = apply(s, ev, start, cfg, nil)
 		return out
 	})
 	if err != nil {
-		return model.Session{}, err
+		return Result{}, err
 	}
-	return out, readErr
+	return Result{Session: out}, readErr
+}
+
+// runStop is Run's transaction for a Stop: apply with the session's queued
+// answers claimed and its open blocking tickets counted on the same
+// transaction. The block line is built only once the transaction has
+// committed, so an answer is never announced unless its claim is stored.
+func runStop(ctx context.Context, ev model.Event, start *startInfo, st *store.Store, cfg config.Config) (Result, error) {
+	var out model.Session
+	var claimed []model.Decision
+	var errs error
+	err := st.UpdateSessionTx(ctx, ev.SessionID, func(tx *store.Tx, s model.Session, _ bool) (model.Session, error) {
+		var readErr, decideErr error
+		out, readErr = apply(s, ev, start, cfg, func(ev *model.Event) bool {
+			var open bool
+			claimed, open, decideErr = decide(ctx, tx, ev)
+			return open
+		})
+		errs = errors.Join(readErr, decideErr)
+		return out, nil
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	res := Result{Session: out}
+	if len(claimed) > 0 {
+		res.Stdout, err = blockLine(claimed)
+		errs = errors.Join(errs, err)
+	}
+	return res, errs
+}
+
+// decide claims, on tx at ev's time, the queued answers of ev's session and
+// counts its open blocking tickets, and sets ev.StopBlocked when it claimed
+// any. A failed claim has been rolled back and claims nothing; a failed
+// count counts as none. Both errors are returned.
+func decide(ctx context.Context, tx *store.Tx, ev *model.Event) ([]model.Decision, bool, error) {
+	claimed, claimErr := tx.ClaimDeliveries(ctx, ev.SessionID, ev.At)
+	n, countErr := tx.OpenBlocking(ctx, ev.SessionID, ev.At)
+	ev.StopBlocked = len(claimed) > 0
+	return claimed, n > 0, errors.Join(claimErr, countErr)
+}
+
+// blockLine is the hook output that blocks a Stop to deliver claimed: one
+// line of JSON, with HTML escaping off, and a newline. JSON escapes the
+// reason's own line breaks, so it is one line.
+func blockLine(claimed []model.Decision) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	err := enc.Encode(struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}{"block", decision.StopReason(claimed)})
+	if err != nil {
+		return nil, fmt.Errorf("stop block line: %w", err)
+	}
+	return b.Bytes(), nil
 }
 
 // sessionStart ends the other sessions in ev's pane and asks git and tmux
@@ -107,9 +189,12 @@ func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store)
 }
 
 // apply is the update Run makes inside the store transaction. start is what
-// git and tmux said, or nil when they were not asked. It must not call the
-// store.
-func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config) (model.Session, error) {
+// git and tmux said, or nil when they were not asked. decisions, set on
+// Stop only, runs after the transcript is folded in: it may set
+// ev.StopBlocked and reports whether the session has an open blocking
+// ticket. It is not called for an event the state machine ignores. apply
+// itself must not call the store.
+func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config, decisions func(*model.Event) bool) (model.Session, error) {
 	if state.Ignores(s, ev) {
 		return s, nil // the transcript is not read either
 	}
@@ -135,7 +220,11 @@ func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config)
 	if first := transcript.FirstLine(ev.LastAssistantMessage); ev.Kind == model.Stop && first != "" {
 		ev.Message = first
 	}
-	return state.Apply(s, ev, false), err // Plan 2 wires real open decisions
+	open := false
+	if decisions != nil {
+		open = decisions(&ev)
+	}
+	return state.Apply(s, ev, open), err
 }
 
 // fillEmpty sets *field to v when *field is empty.

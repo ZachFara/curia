@@ -1,18 +1,23 @@
 package hook_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/decision"
 	"github.com/ZachFara/curia/internal/hook"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -227,17 +232,35 @@ func openStore(t *testing.T) *store.Store {
 	return st
 }
 
+// openWithRaw opens a store in a temp dir and a plain connection to the
+// same file, for writing rows past the store's checks.
+func openWithRaw(t *testing.T) (*store.Store, *sql.DB) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "curia.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return st, db
+}
+
 func payload(id, transcript string, extra string) []byte {
 	return fmt.Appendf(nil, `{"session_id":%q,"transcript_path":%q,"cwd":"/src/curia"%s}`, id, transcript, extra)
 }
 
 func run(t *testing.T, st *store.Store, env hook.Env, kind model.EventKind, body []byte) model.Session {
 	t.Helper()
-	sess, err := hook.Run(context.Background(), kind, body, env, st, config.Default())
+	res, err := hook.Run(context.Background(), kind, body, env, st, config.Default())
 	if err != nil {
 		t.Fatalf("Run(%s): %v", kind, err)
 	}
-	return sess
+	return res.Session
 }
 
 func get(t *testing.T, st *store.Store, id string) model.Session {
@@ -438,10 +461,11 @@ func TestStopReadsTranscript(t *testing.T) {
 			cfg := config.Default()
 			cfg.ContextMax = tc.maxes
 			run(t, st, env, model.SessionStart, payload("A", tr, ""))
-			got, err := hook.Run(context.Background(), model.Stop, payload("A", tr, ""), env, st, cfg)
+			res, err := hook.Run(context.Background(), model.Stop, payload("A", tr, ""), env, st, cfg)
 			if err != nil {
 				t.Fatal(err)
 			}
+			got := res.Session
 			info, _ := os.Stat(tr)
 			if got.State != model.StateIdle || got.Model != "claude-opus-5-5" || got.ContextUsed != 42000 ||
 				got.ContextMax != tc.wantMax || got.LastUpdate != "Fixed the login bug." ||
@@ -705,5 +729,541 @@ func TestHookLatency(t *testing.T) {
 	t.Logf("PostToolUse over %d runs: p50 %v, p95 %v, max %v", runs, p50, p95, durations[runs-1])
 	if p95 >= 20*time.Millisecond {
 		t.Errorf("p95 = %v, want < 20ms", p95)
+	}
+}
+
+// Decisions at Stop (plan sections 4.3 and 4.9).
+
+// assumeExpiry is the deadline of an assume ticket (the config default).
+const assumeExpiry = 24 * time.Hour
+
+// request is a valid ticket request with four options; question makes it
+// distinct from other requests.
+func request(question string, mode model.Mode) decision.Request {
+	r := decision.Request{
+		Question: question,
+		Context:  "internal/events/store.go writes about 200 events a minute.",
+		Options: []model.Option{
+			{Key: "A", Label: "Postgres table", Tradeoffs: "Durable and queryable. Needs a migration."},
+			{Key: "B", Label: "Redis stream", Tradeoffs: "No migration. History is capped by memory."},
+			{Key: "C", Label: "SQLite file", Tradeoffs: "Local only."},
+			{Key: "D", Label: "Flat files", Tradeoffs: "No queries at all."},
+		},
+		Recommendation: "A",
+		Rationale:      "Replays need 30 days of history, which Redis cannot hold at this volume.",
+		Reversibility:  string(model.ReversCostly),
+		Mode:           string(mode),
+		Scope:          string(model.ScopeRepo),
+		Tags:           []string{"storage", "events"},
+	}
+	if mode == model.ModeAssume {
+		r.Assumption = "Postgres"
+	}
+	return r
+}
+
+// raise stores an open ticket from session, raised at t0.
+func raise(t *testing.T, st *store.Store, session, question string, mode model.Mode) model.Decision {
+	t.Helper()
+	r := request(question, mode)
+	if ps := decision.Validate(decision.Normalize(r)); ps != nil {
+		t.Fatalf("test request %q is invalid: %v", question, ps)
+	}
+	d, dup, err := st.CreateDecision(context.Background(),
+		decision.New(r, decision.Caller{SessionID: session, Repo: "/src/curia"}, t0, assumeExpiry))
+	if err != nil || dup {
+		t.Fatalf("CreateDecision(%q) = %s, duplicate %v, err %v", question, d.ID, dup, err)
+	}
+	return d
+}
+
+// queue raises a blocking ticket from session and answers it with option A
+// and reasoning at t0, so its answer is queued for delivery.
+func queue(t *testing.T, st *store.Store, session, question, reasoning string) model.Decision {
+	t.Helper()
+	id := raise(t, st, session, question, model.ModeBlocking).ID
+	d, err := st.AnswerDecision(context.Background(), id,
+		model.Answer{Key: "A", Reasoning: reasoning, Via: model.AnsweredCLI}, t0)
+	if err != nil {
+		t.Fatalf("AnswerDecision(%s): %v", id, err)
+	}
+	if d.Delivery != model.DeliveryQueued {
+		t.Fatalf("%s delivery = %s, want queued", id, d.Delivery)
+	}
+	return d
+}
+
+func getDecision(t *testing.T, st *store.Store, id string) model.Decision {
+	t.Helper()
+	d, found, err := st.GetDecision(context.Background(), id)
+	if err != nil || !found {
+		t.Fatalf("GetDecision(%s) = found %v, err %v", id, found, err)
+	}
+	return d
+}
+
+// wantDelivered checks that decision id was delivered by the Stop hook at t0.
+func wantDelivered(t *testing.T, st *store.Store, id string) {
+	t.Helper()
+	d := getDecision(t, st, id)
+	if d.Delivery != model.DeliveryDelivered || d.DeliveredVia != model.ViaStopHook || !d.DeliveredAt.Equal(t0) {
+		t.Errorf("%s: delivery %s via %q at %v, want delivered via stop_hook at %v",
+			id, d.Delivery, d.DeliveredVia, d.DeliveredAt, t0)
+	}
+}
+
+// wantQueued checks that decision id is still queued.
+func wantQueued(t *testing.T, st *store.Store, id string) {
+	t.Helper()
+	if d := getDecision(t, st, id); d.Delivery != model.DeliveryQueued || d.DeliveredVia != "" {
+		t.Errorf("%s: delivery %s via %q, want still queued", id, d.Delivery, d.DeliveredVia)
+	}
+}
+
+// stopRun runs one Stop for session with the payload's extra fields and
+// fails the test on an error.
+func stopRun(t *testing.T, st *store.Store, env hook.Env, session, extra string) hook.Result {
+	t.Helper()
+	res, err := hook.Run(context.Background(), model.Stop, payload(session, "", extra), env, st, config.Default())
+	if err != nil {
+		t.Fatalf("Run(Stop): %v", err)
+	}
+	return res
+}
+
+// workingSession returns a store holding session A, working in pane %3,
+// and the env that ran it.
+func workingSession(t *testing.T) (*store.Store, hook.Env) {
+	t.Helper()
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	run(t, st, env, model.SessionStart, payload("A", "", ""))
+	run(t, st, env, model.UserPromptSubmit, payload("A", "", ""))
+	return st, env
+}
+
+// wantState checks the state Run returned and the stored one.
+func wantState(t *testing.T, st *store.Store, res hook.Result, want model.State) {
+	t.Helper()
+	if res.Session.State != want {
+		t.Errorf("Run returned state %s, want %s", res.Session.State, want)
+	}
+	if stored := get(t, st, res.Session.ID); stored != res.Session {
+		t.Errorf("store has\n %+v\nRun returned\n %+v", stored, res.Session)
+	}
+}
+
+// blockReason decodes a Stop's output, checking it is one JSON line with
+// exactly the keys decision ("block") and reason, and returns the reason.
+func blockReason(t *testing.T, out []byte) string {
+	t.Helper()
+	if bytes.Count(out, []byte("\n")) != 1 || !bytes.HasSuffix(out, []byte("\n")) {
+		t.Fatalf("Stdout = %q, want one line ending in a newline", out)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(out, &fields); err != nil {
+		t.Fatalf("Stdout %q is not a JSON object: %v", out, err)
+	}
+	var verdict, reason string
+	if len(fields) != 2 || json.Unmarshal(fields["decision"], &verdict) != nil ||
+		json.Unmarshal(fields["reason"], &reason) != nil || verdict != "block" {
+		t.Fatalf("Stdout = %s, want exactly decision \"block\" and a reason string", out)
+	}
+	return reason
+}
+
+func TestStopWithOpenBlockingNeedsDecision(t *testing.T) {
+	st, env := workingSession(t)
+	raise(t, st, "A", "Which store for events?", model.ModeBlocking)
+	res := stopRun(t, st, env, "A", `,"last_assistant_message":"Waiting on D-1."`)
+	if res.Stdout != nil {
+		t.Errorf("Stdout = %q, want nil", res.Stdout)
+	}
+	wantState(t, st, res, model.StateNeedsDecision)
+	if res.Session.LastUpdate != "Waiting on D-1." {
+		t.Errorf("LastUpdate = %q, want the payload's message", res.Session.LastUpdate)
+	}
+}
+
+func TestStopWithOnlyAssumeIsIdle(t *testing.T) {
+	st, env := workingSession(t)
+	raise(t, st, "A", "Which store for events?", model.ModeAssume)
+	res := stopRun(t, st, env, "A", "")
+	if res.Stdout != nil {
+		t.Errorf("Stdout = %q, want nil", res.Stdout)
+	}
+	wantState(t, st, res, model.StateIdle)
+}
+
+func TestStopWithAnotherSessionsTicketIsIdle(t *testing.T) {
+	st, env := workingSession(t)
+	raise(t, st, "B", "Which store for events?", model.ModeBlocking)
+	other := queue(t, st, "B", "Which queue for jobs?", "it is there")
+	res := stopRun(t, st, env, "A", "")
+	if res.Stdout != nil {
+		t.Errorf("Stdout = %q, want nil", res.Stdout)
+	}
+	wantState(t, st, res, model.StateIdle)
+	wantQueued(t, st, other.ID)
+}
+
+func TestStopClaimsQueuedAndBlocks(t *testing.T) {
+	st, env := workingSession(t)
+	d := queue(t, st, "A", "Which store for events?", "we already run it")
+	if d.ID != "D-1" {
+		t.Fatalf("ticket id %s, want D-1", d.ID)
+	}
+	res := stopRun(t, st, env, "A", "")
+	want := `{"decision":"block","reason":"Curia: decisions answered while you were working.\nDecision D-1 answered: option A [Postgres table]. Reasoning: we already run it. Continue."}` + "\n"
+	if string(res.Stdout) != want {
+		t.Errorf("Stdout =\n %q\nwant\n %q", res.Stdout, want)
+	}
+	wantState(t, st, res, model.StateWorking)
+	wantDelivered(t, st, "D-1")
+}
+
+func TestSecondStopDoesNotBlock(t *testing.T) {
+	st, env := workingSession(t)
+	queue(t, st, "A", "Which store for events?", "we already run it")
+	if res := stopRun(t, st, env, "A", ""); res.Stdout == nil {
+		t.Fatal("first Stop printed nothing, want the block")
+	}
+	res := stopRun(t, st, env, "A", `,"stop_hook_active":true`)
+	if res.Stdout != nil {
+		t.Errorf("second Stop: Stdout = %q, want nil", res.Stdout)
+	}
+	wantState(t, st, res, model.StateIdle)
+}
+
+// A Stop that follows a blocked one carries stop_hook_active true (live
+// probe A); the hook claims what is queued all the same.
+func TestStopHookActiveIsNotSpecial(t *testing.T) {
+	st, env := workingSession(t)
+	queue(t, st, "A", "Which store for events?", "we already run it")
+	first := stopRun(t, st, env, "A", `,"stop_hook_active":false`)
+	if r := blockReason(t, first.Stdout); !strings.Contains(r, "D-1") {
+		t.Errorf("first reason %q, want D-1", r)
+	}
+	if second := stopRun(t, st, env, "A", `,"stop_hook_active":true`); second.Stdout != nil {
+		t.Errorf("second Stop: Stdout = %q, want nil", second.Stdout)
+	}
+	queue(t, st, "A", "Which queue for jobs?", "it is there")
+	third := stopRun(t, st, env, "A", `,"stop_hook_active":true`)
+	r := blockReason(t, third.Stdout)
+	if !strings.Contains(r, "Decision D-2 ") || strings.Contains(r, "D-1") {
+		t.Errorf("third reason %q, want D-2 only", r)
+	}
+	wantState(t, st, third, model.StateWorking)
+	wantDelivered(t, st, "D-2")
+}
+
+func TestStopDeliversSeveralInOneBlock(t *testing.T) {
+	st, env := workingSession(t)
+	for i := range 3 {
+		queue(t, st, "A", fmt.Sprintf("Which store for events, part %d?", i), fmt.Sprintf("reason %d", i))
+	}
+	res := stopRun(t, st, env, "A", "")
+	reason := blockReason(t, res.Stdout)
+	var delivered []model.Decision
+	for _, id := range []string{"D-1", "D-2", "D-3"} {
+		wantDelivered(t, st, id)
+		delivered = append(delivered, getDecision(t, st, id))
+	}
+	if want := decision.StopReason(delivered); reason != want {
+		t.Errorf("reason =\n %q\nwant\n %q", reason, want)
+	}
+	if lines := strings.Split(reason, "\n"); len(lines) != 4 {
+		t.Errorf("reason has %d lines, want a header and three decisions: %q", len(lines), reason)
+	}
+	wantState(t, st, res, model.StateWorking)
+}
+
+// TestTwoStopHooksOneBlocks runs two Stops for one session at once, each
+// with its own Store as two hook processes would have, with one answer
+// queued: exactly one of them may deliver it.
+func TestTwoStopHooksOneBlocks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "curia.db")
+	var handles [2]*store.Store
+	for i := range handles {
+		st, err := store.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		handles[i] = st
+	}
+	env := (&fakeEnv{}).env("%3")
+	run(t, handles[0], env, model.SessionStart, payload("A", "", ""))
+	for round := range 100 {
+		d := queue(t, handles[0], "A", fmt.Sprintf("Which store, round %d?", round), "we already run it")
+		var results [2]hook.Result
+		var errs [2]error
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i, st := range handles {
+			wg.Go(func() {
+				<-start
+				results[i], errs[i] = hook.Run(context.Background(), model.Stop, payload("A", "", ""), env, st, config.Default())
+			})
+		}
+		close(start)
+		wg.Wait()
+		blocked := 0
+		for i := range results {
+			if errs[i] != nil {
+				t.Fatalf("round %d: Stop %d: %v", round, i, errs[i])
+			}
+			if results[i].Stdout != nil {
+				blocked++
+				if r := blockReason(t, results[i].Stdout); !strings.Contains(r, "Decision "+d.ID+" ") {
+					t.Fatalf("round %d: reason %q does not name %s", round, r, d.ID)
+				}
+			}
+		}
+		if blocked != 1 {
+			t.Fatalf("round %d: %d Stops blocked, want exactly 1", round, blocked)
+		}
+		wantDelivered(t, handles[0], d.ID)
+	}
+}
+
+func TestOtherEventsNeverPrintOrClaim(t *testing.T) {
+	st, env := workingSession(t)
+	d := queue(t, st, "A", "Which store for events?", "we already run it")
+	for _, kind := range []model.EventKind{
+		model.SessionStart, model.UserPromptSubmit, model.PreToolUse, model.PostToolUse,
+		model.Notification, model.SubagentStop, model.SessionEnd,
+	} {
+		res, err := hook.Run(context.Background(), kind, payload("A", "", `,"tool_name":"Edit","message":"needs you"`), env, st, config.Default())
+		if err != nil {
+			t.Fatalf("Run(%s): %v", kind, err)
+		}
+		if res.Stdout != nil {
+			t.Errorf("%s: Stdout = %q, want nil", kind, res.Stdout)
+		}
+		wantQueued(t, st, d.ID)
+	}
+}
+
+// hostile is text a ticket's asker or answerer could store: quotes, markup,
+// an escape sequence, line breaks, a bidi override and a JSON line
+// separator.
+const hostile = "say \"no\" </script> \x1b[2J\r\nnext line \u202e evil \u2028 end \\ \x07."
+
+func TestStopOutputSurvivesHostileText(t *testing.T) {
+	st, db := openWithRaw(t)
+	env := (&fakeEnv{}).env("%3")
+	run(t, st, env, model.SessionStart, payload("A", "", ""))
+	keyed := queue(t, st, "A", "Which store for events?", "fine")
+	free := raise(t, st, "A", "Which queue for jobs?", model.ModeBlocking)
+	if _, err := st.AnswerDecision(context.Background(), free.ID,
+		model.Answer{Text: "use the queue", Via: model.AnsweredCLI}, t0); err != nil {
+		t.Fatal(err)
+	}
+	// Put the hostile text in the rows as they are, past every cleaning on
+	// the way in, so only the way out is tested.
+	options, err := json.Marshal([]model.Option{{Key: "A", Label: hostile}, {Key: "B", Label: "other"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE decisions SET options = ?, answer_reasoning = ? WHERE id = ?`, string(options), hostile, keyed.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE decisions SET answer = ?, answer_reasoning = ? WHERE id = ?`, hostile, hostile, free.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	res := stopRun(t, st, env, "A", "")
+	if !json.Valid(res.Stdout) {
+		t.Fatalf("Stdout %q is not valid JSON", res.Stdout)
+	}
+	reason := blockReason(t, res.Stdout)
+	for _, r := range reason {
+		if r != '\n' && !unicode.IsPrint(r) {
+			t.Errorf("reason holds the rune %U: %q", r, reason)
+		}
+	}
+	if !strings.Contains(reason, `say "no" </script>`) || !strings.Contains(reason, "Decision "+free.ID+" answered: say") {
+		t.Errorf("reason %q lost the readable text", reason)
+	}
+	if !bytes.Contains(res.Stdout, []byte("</script>")) {
+		t.Errorf("Stdout %q escapes HTML, want it off", res.Stdout)
+	}
+	wantDelivered(t, st, keyed.ID)
+	wantDelivered(t, st, free.ID)
+}
+
+// Ruling 27: activity brings an ended session back, and its Stop delivers.
+func TestStopOnEndedSessionResumesAndDelivers(t *testing.T) {
+	st, env := workingSession(t)
+	run(t, st, env, model.SessionEnd, payload("A", "", ""))
+	d := queue(t, st, "A", "Which store for events?", "we already run it")
+	res := stopRun(t, st, env, "A", "")
+	if r := blockReason(t, res.Stdout); !strings.Contains(r, "Decision "+d.ID+" ") {
+		t.Errorf("reason %q, want %s", r, d.ID)
+	}
+	wantState(t, st, res, model.StateWorking)
+	wantDelivered(t, st, d.ID)
+}
+
+// A session first seen at its Stop (Ruling 29) gets its answers too.
+func TestStopFirstSeenDelivers(t *testing.T) {
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	d := queue(t, st, "M", "Which store for events?", "we already run it")
+	res := stopRun(t, st, env, "M", "")
+	if res.Stdout == nil {
+		t.Fatal("Stdout = nil, want the block")
+	}
+	wantState(t, st, res, model.StateWorking)
+	if res.Session.TmuxWindow != "@7" {
+		t.Errorf("TmuxWindow = %q, want @7 from the first-seen treatment", res.Session.TmuxWindow)
+	}
+	wantDelivered(t, st, d.ID)
+}
+
+// A claim that fails is rolled back: nothing is claimed and nothing
+// printed, and the session is still updated, counting the open tickets.
+func TestStopClaimFailureClaimsNothing(t *testing.T) {
+	st, db := openWithRaw(t)
+	env := (&fakeEnv{}).env("%3")
+	run(t, st, env, model.SessionStart, payload("A", "", ""))
+	run(t, st, env, model.UserPromptSubmit, payload("A", "", ""))
+	good := queue(t, st, "A", "Which queue for jobs?", "it is there")
+	bad := queue(t, st, "A", "Which store for events?", "we already run it")
+	raise(t, st, "A", "Which cache?", model.ModeBlocking)
+	// Options that do not decode make the claim's scan fail after its UPDATE.
+	if _, err := db.Exec(`UPDATE decisions SET options = 'not json' WHERE id = ?`, bad.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	later := env
+	later.Now = func() time.Time { return t0.Add(time.Minute) }
+	res, err := hook.Run(context.Background(), model.Stop, payload("A", "", `,"last_assistant_message":"Done."`), later, st, config.Default())
+	if err == nil {
+		t.Error("Run returned nil error, want the claim's")
+	}
+	if res.Stdout != nil {
+		t.Errorf("Stdout = %q, want nil", res.Stdout)
+	}
+	wantState(t, st, res, model.StateNeedsDecision)
+	if res.Session.LastUpdate != "Done." || !res.Session.UpdatedAt.Equal(t0.Add(time.Minute)) {
+		t.Errorf("session %+v, want the Stop applied", res.Session)
+	}
+	for _, id := range []string{good.ID, bad.ID} {
+		var delivery, via string
+		if err = db.QueryRow(`SELECT delivery, delivered_via FROM decisions WHERE id = ?`, id).Scan(&delivery, &via); err != nil {
+			t.Fatal(err)
+		}
+		if delivery != string(model.DeliveryQueued) || via != "" {
+			t.Errorf("%s: delivery %s via %q, want still queued", id, delivery, via)
+		}
+	}
+}
+
+// loadAverage is the machine's 1-minute load average, for diagnosis only.
+func loadAverage() string {
+	if b, err := os.ReadFile("/proc/loadavg"); err == nil { // Linux
+		if f := strings.Fields(string(b)); len(f) > 0 {
+			return f[0]
+		}
+	}
+	if b, err := exec.Command("sysctl", "-n", "vm.loadavg").Output(); err == nil { // macOS: "{ 1.0 2.0 3.0 }"
+		if f := strings.Fields(strings.Trim(string(b), "{} \n")); len(f) > 0 {
+			return f[0]
+		}
+	}
+	return "unknown"
+}
+
+// seedLatencyDecisions stores 500 tickets: 50 from session A (half of them
+// open and blocking, some answered and already delivered, none queued) and
+// 450 from 20 other sessions, a third of them answered and queued.
+func seedLatencyDecisions(t *testing.T, st *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	for i := range 500 {
+		session := "A"
+		if i >= 50 {
+			session = fmt.Sprintf("S%d", i%20)
+		}
+		mode := model.ModeBlocking
+		if i%2 == 1 {
+			mode = model.ModeAssume
+		}
+		d := raise(t, st, session, fmt.Sprintf("Latency question %d?", i), mode)
+		if i%3 != 0 {
+			continue
+		}
+		if _, err := st.AnswerDecision(ctx, d.ID, model.Answer{Key: "B", Reasoning: "load", Via: model.AnsweredCLI}, t0); err != nil {
+			t.Fatal(err)
+		}
+		if session == "A" {
+			if _, _, err := st.CheckDecision(ctx, d.ID, "A", t0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	checkLatencySeed(t, st)
+}
+
+// checkLatencySeed checks that session A has 50 tickets, some open and
+// blocking, and no queued answer.
+func checkLatencySeed(t *testing.T, st *store.Store) {
+	t.Helper()
+	tickets, err := st.ListDecisions(context.Background(), store.DecisionFilter{SessionID: "A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := 0
+	for _, d := range tickets {
+		if d.Delivery == model.DeliveryQueued {
+			t.Fatalf("%s from A is queued, want none", d.ID)
+		}
+		if d.Status == model.StatusOpen && d.Mode == model.ModeBlocking {
+			open++
+		}
+	}
+	if len(tickets) != 50 || open == 0 {
+		t.Fatalf("A has %d tickets, %d open blocking; want 50 with some open", len(tickets), open)
+	}
+}
+
+// TestStopLatencyWithDecisions is TestHookLatency for Stop, which is the
+// one event Plan 2 adds store work to, on a store holding 500 decisions.
+func TestStopLatencyWithDecisions(t *testing.T) {
+	st := openStore(t)
+	tr := writeTranscript(t)
+	env := (&fakeEnv{}).env("%3")
+	run(t, st, env, model.SessionStart, payload("A", tr, ""))
+	seedLatencyDecisions(t, st)
+	body := payload("A", tr, `,"last_assistant_message":"Done."`)
+	line := `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"text","text":"Done."}]}}`
+
+	stopOnce := func() time.Duration {
+		appendLine(t, tr, line)
+		start := time.Now()
+		res, err := hook.Run(context.Background(), model.Stop, body, env, st, config.Default())
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Stdout != nil || res.Session.State != model.StateNeedsDecision {
+			t.Fatalf("Stop printed %q, state %s; want nothing and needs_decision", res.Stdout, res.Session.State)
+		}
+		return elapsed
+	}
+	stopOnce() // warm-up, untimed
+
+	const runs = 200
+	durations := make([]time.Duration, 0, runs)
+	for range runs {
+		durations = append(durations, stopOnce())
+	}
+	slices.Sort(durations)
+	p50, p95, worst := durations[runs/2], durations[runs*95/100], durations[runs-1]
+	t.Logf("Stop with 500 decisions over %d runs: p50 %v, p95 %v, max %v", runs, p50, p95, worst)
+	if p95 >= 20*time.Millisecond {
+		t.Errorf("p95 = %v, want < 20ms (p50 %v, max %v, load average %s)", p95, p50, worst, loadAverage())
 	}
 }

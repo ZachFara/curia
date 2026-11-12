@@ -7,7 +7,9 @@ import "github.com/ZachFara/curia/internal/model"
 const maxLastUpdateRunes = 80
 
 // Apply returns s after applying ev. openDecision reports whether the
-// transcript ends in an open decision, which turns a Stop into needs_decision.
+// session has an open blocking decision ticket, which turns a Stop into
+// needs_decision unless ev.StopBlocked (the hook is blocking the Stop to
+// deliver answers), which makes it working.
 // It is pure: no I/O and no clock. An ended session ignores SubagentStop and
 // SessionEnd and is returned unchanged (see Ignores); any other event is
 // applied as usual and brings it back.
@@ -94,10 +96,18 @@ func sessionStart(s *model.Session, ev model.Event) {
 	}
 }
 
+// stop ends a turn. A Stop the hook blocks to deliver answers does not
+// end it: Claude goes on with the answers, so the session is working.
+// Otherwise an open blocking ticket makes it needs_decision; with none it
+// is idle.
 func stop(s *model.Session, ev model.Event, openDecision bool) {
-	s.State = model.StateIdle
-	if openDecision {
+	switch {
+	case ev.StopBlocked:
+		s.State = model.StateWorking
+	case openDecision:
 		s.State = model.StateNeedsDecision
+	default:
+		s.State = model.StateIdle
 	}
 	if ev.Message != "" {
 		s.LastUpdate = truncate(ev.Message)
