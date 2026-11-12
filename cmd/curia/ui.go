@@ -25,10 +25,12 @@ func init() {
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "ui",
 		Short: "Show every session and jump to one (run in a tmux popup)",
-		Long: "Lists every session, most in need of you first, refreshed every second.\n" +
-			"j/k or the arrows move, Enter or a click jumps to the session's pane and\n" +
-			"closes the popup, / filters on repo, branch and last update, x then y kills\n" +
-			"the pane, q or Esc quits.",
+		Long: "Lists every session, most in need of you first, refreshed every second, with\n" +
+			"each session's open decisions (DEC, red when one blocks). j/k or the arrows\n" +
+			"move, Enter or a click jumps to the session's pane and closes the popup, d\n" +
+			"opens the session's decisions to answer them (not inside an agent session),\n" +
+			"/ filters on repo, branch and last update, x then y kills the pane, q or Esc\n" +
+			"quits.",
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			return runDashboard(ui.ModePopup, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -58,7 +60,22 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 	defer func() { _ = st.Close() }()
 	client := newTmuxClient()
 	src := storeSource{st: st, tm: client, cfg: cfg}
-	return runProgram(ui.New(src, client, cfg, clock, mode), opts...)
+	m := ui.New(src, client, cfg, clock, mode)
+	// d answers through curia decide's path, so it refuses inside an agent
+	// session as curia decide does (spec section 7): no factory is set,
+	// and the dashboard says why when d is pressed.
+	if mode == ui.ModePopup && refuseInsideAgent() == nil {
+		logger, closeLog, err := openLog(cfg.LogPath)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = closeLog() }()
+		dsrc, via := newDecideSource(st, client, logger), decideVia()
+		m = m.WithDecide(func(id string) tea.Model {
+			return ui.NewDecide(dsrc, clock, ui.DecideOptions{SessionID: id, Embedded: true, Via: via})
+		})
+	}
+	return runProgram(m, opts...)
 }
 
 // storeSource is the dashboard's ui.Source: on every read it reconciles
@@ -81,4 +98,14 @@ func (s storeSource) Sessions(ctx context.Context) ([]model.Session, error) {
 		return nil, err
 	}
 	return fleet.Rank(sessions), nil
+}
+
+// OpenDecisions expires the assume tickets that are due, then counts the
+// open tickets by session and mode.
+func (s storeSource) OpenDecisions(ctx context.Context) (map[string]model.OpenCount, error) {
+	now := clock()
+	if _, err := s.st.ExpireDecisions(ctx, now); err != nil {
+		return nil, err
+	}
+	return s.st.OpenCounts(ctx, now)
 }

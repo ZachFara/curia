@@ -171,12 +171,17 @@ func runDecideView() error {
 		return err
 	}
 	defer func() { _ = closeLog() }()
-	via := model.AnsweredPopup
-	if os.Getenv("SSH_CONNECTION") != "" {
-		via = model.AnsweredSSH
-	}
 	src := newDecideSource(st, newTmuxClient(), logger)
-	return runProgram(ui.NewDecide(src, clock, ui.DecideOptions{Via: via}), tea.WithAltScreen())
+	return runProgram(ui.NewDecide(src, clock, ui.DecideOptions{Via: decideVia()}), tea.WithAltScreen())
+}
+
+// decideVia is how an answer given in a view is recorded: over SSH when
+// SSH_CONNECTION is set, else in the popup.
+func decideVia() model.AnsweredVia {
+	if os.Getenv("SSH_CONNECTION") != "" {
+		return model.AnsweredSSH
+	}
+	return model.AnsweredPopup
 }
 
 // decideSource is the decide view's ui.DecideSource over the store.
