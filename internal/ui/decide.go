@@ -369,11 +369,11 @@ func (m DecideModel) close() tea.Cmd {
 // it clears a queue change; leaving a ticket drops what was staged for it.
 func (m DecideModel) move(i int) DecideModel {
 	before, had := m.current()
-	m = m.moveTo(i)
-	m.changed, m.quietUntil = false, time.Time{}
-	if m.selected != before.ID {
-		m.reasoning, m.scope, m.draft = "", "", ""
+	if m = m.moveTo(i); m.selected == before.ID {
+		return m // at the edge of the queue: nothing moved, nothing cleared
 	}
+	m.changed, m.quietUntil = false, time.Time{}
+	m.reasoning, m.scope, m.draft = "", "", ""
 	return m.markShown(before, had)
 }
 
@@ -392,8 +392,7 @@ func (m DecideModel) answerOption(i int) (DecideModel, tea.Cmd) {
 		return m, nil
 	}
 	if i >= m.optionsShown() {
-		m.notice = fmt.Sprintf("option %d not shown: window too short", i+1)
-		return m, nil
+		return m.refuse(fmt.Sprintf("option %d not shown: window too short", i+1)), nil
 	}
 	return m.startAnswer(t, model.Answer{Key: t.Options[i].Key})
 }
@@ -409,33 +408,39 @@ func (m DecideModel) answerRecommended() (DecideModel, tea.Cmd) {
 		return m, nil
 	}
 	if i >= m.optionsShown() {
-		m.notice = "enter=" + sanitize.Line(t.Recommendation, decision.MaxKey) + " not shown: window too short"
-		return m, nil
+		return m.refuse("enter=" + sanitize.Line(t.Recommendation, decision.MaxKey) + " not shown: window too short"), nil
 	}
 	return m.startAnswer(t, model.Answer{Key: t.Recommendation})
 }
 
 // guard reports whether an answer may start now. It refuses while an answer
 // is in flight; during the quiet period after one's own answer, restarting
-// it; before the ticket on screen has been there for the dwell; and once
-// after a refresh changed the ticket on screen.
+// it; once after a refresh changed the ticket on screen, using up the flag;
+// and before the ticket on screen has been there for the dwell. Every
+// refusal restarts the dwell (refuse).
 func (m DecideModel) guard() (DecideModel, bool) {
 	now := m.now()
 	switch {
 	case m.sending:
-		m.notice = "still sending the last answer"
-		return m, false
+		return m.refuse("still sending the last answer"), false
 	case now.Before(m.quietUntil):
-		m.quietUntil, m.notice = now.Add(quietPeriod), noticeChanged
-		return m, false
-	case now.Sub(m.shownSince) < dwell:
-		m.notice = noticeChanged
-		return m, false
+		m.quietUntil = now.Add(quietPeriod)
+		return m.refuse(noticeChanged), false
 	case m.changed:
-		m.changed, m.notice = false, noticeChanged
-		return m, false
+		m.changed = false
+		return m.refuse(noticeChanged), false
+	case now.Sub(m.shownSince) < dwell:
+		return m.refuse(noticeChanged), false
 	}
 	return m, true
+}
+
+// refuse ignores an answer key with notice and restarts the dwell, so a
+// held, repeating key never gets through: it must be let go for the dwell
+// first (Ruling 67).
+func (m DecideModel) refuse(notice string) DecideModel {
+	m.notice, m.shownSince = notice, m.now()
+	return m
 }
 
 // startAnswer begins answering t with a's key. A blocking ticket with no
@@ -517,7 +522,7 @@ func (m DecideModel) submitInput() (DecideModel, tea.Cmd) {
 	switch m.input {
 	case inputReason:
 		if t, ok := m.current(); !ok || !sameTicket(t, p.ticket) {
-			m.notice = noticeChanged // typed for a ticket no longer on screen
+			m = m.refuse(noticeChanged) // typed for a ticket no longer on screen
 			break
 		}
 		m.reasoning = text
@@ -565,8 +570,8 @@ func (m DecideModel) confirmKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cm
 // screen; otherwise the answer is dropped with the queue-change notice.
 func (m DecideModel) send(p pendingAnswer) (DecideModel, tea.Cmd) {
 	if t, ok := m.current(); !ok || !sameTicket(t, p.ticket) {
-		m.changed, m.notice = false, noticeChanged
-		return m, nil
+		m.changed = false
+		return m.refuse(noticeChanged), nil
 	}
 	m.sending = true
 	src, tk, a := m.src, p.ticket, p.a

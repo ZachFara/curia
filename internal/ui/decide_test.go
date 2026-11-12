@@ -1189,7 +1189,7 @@ func TestRefreshChangeDuringQuietNeedsOwnPress(t *testing.T) {
 		t.Errorf("status line = %q, want the notice:\n%s", s, m.View())
 	}
 	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
-	decideClock.advance(100 * time.Millisecond)
+	decideClock.advance(250 * time.Millisecond) // the ignored press restarted the dwell (Ruling 67)
 	send(t, m, dkey("1"))
 	if got := src.calls(); len(got) != 2 || got[1].id != "D-3" {
 		t.Errorf("calls = %+v, want D-3 answered", got)
@@ -1361,4 +1361,102 @@ func TestProseCannotPassForOption(t *testing.T) {
 			}
 		}
 	}
+}
+
+// holdKey presses k every interval for d, the auto-repeat of a held key.
+func holdKey(t *testing.T, m tea.Model, k string, interval, d time.Duration) tea.Model {
+	t.Helper()
+	for held := time.Duration(0); held < d; held += interval {
+		decideClock.advance(interval)
+		m = send(t, m, dkey(k))
+	}
+	return m
+}
+
+// Ruling 67: a key held across a refresh-caused change never answers the
+// new ticket; it must be released for the dwell first.
+func TestHeldKeyAcrossRefreshChangeNeverAnswers(t *testing.T) {
+	for _, mode := range []model.Mode{model.ModeAssume, model.ModeBlocking} {
+		src := &fakeDecideSource{}
+		ts := []model.Ticket{ticket(1, mode, model.ReversCheap), ticket(2, mode, model.ReversCheap)}
+		src.set(ts...)
+		m := newDecide(t, src, popup)
+		src.set(ts[1]) // D-1 withdrawn
+		m = reload(t, m)
+		decideClock.advance(10 * time.Millisecond)
+		m = holdKey(t, m, "enter", 30*time.Millisecond, 2*time.Second)
+		wantCalls(t, src)
+		if s := lastLine(m); s != "queue changed; press again" {
+			t.Errorf("%s: status line = %q after the hold, want the notice", mode, s)
+		}
+		decideClock.advance(250 * time.Millisecond)
+		m = send(t, m, dkey("enter"))
+		if mode == model.ModeBlocking {
+			if s := lastLine(m); s != "reasoning for B (enter sends): _" {
+				t.Errorf("status line = %q, want the reasoning prompt", s)
+			}
+			decideClock.advance(keyGap)
+			send(t, m, dkey("enter"))
+		}
+		wantCalls(t, src, answerCall{"D-2", model.Answer{Key: "B", Via: model.AnsweredPopup}})
+	}
+}
+
+// Ruling 67: a submission dropped for a changed ticket restarts the dwell,
+// so the held Enter that follows neither opens a prompt nor sends.
+func TestDroppedSubmissionRestartsDwell(t *testing.T) {
+	src := &fakeDecideSource{}
+	ts := []model.Ticket{ticket(1, model.ModeBlocking, model.ReversCheap), ticket(2, model.ModeBlocking, model.ReversCheap)}
+	src.set(ts...)
+	m := newDecide(t, src, popup)
+	m = dpress(t, m, "1") // the reasoning prompt for D-1
+	src.set(ts[1])
+	m = reload(t, m)
+	decideClock.advance(keyGap)
+	m = holdKey(t, m, "enter", 30*time.Millisecond, time.Second)
+	wantCalls(t, src)
+	if s := lastLine(m); s != "queue changed; press again" {
+		t.Errorf("status line = %q, want the notice and no prompt", s)
+	}
+}
+
+// Ruling 67: a number key refused because its option is not drawn
+// restarts the dwell too.
+func TestUndrawnOptionRestartsDwell(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(longTicket())
+	m := newDecide(t, src, popup)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 6})
+	m = send(t, m, dkey("2"), dkey("1"))
+	wantCalls(t, src)
+	decideClock.advance(250 * time.Millisecond)
+	send(t, m, dkey("1"))
+	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+}
+
+// Ruling 67: j or k at the edge of the queue moves nothing, so it clears
+// neither a refresh-caused change nor the quiet period.
+func TestEdgeMoveKeepsGuards(t *testing.T) {
+	src := &fakeDecideSource{}
+	ts := assumeTickets(2)
+	src.set(ts...)
+	m := newDecide(t, src, popup)
+	src.set(ts[1])
+	m = reload(t, m)
+	m = dpress(t, m, "k", "j") // one ticket: neither moves
+	m = dpress(t, m, "1")
+	wantCalls(t, src)
+	if s := lastLine(m); s != "queue changed; press again" {
+		t.Errorf("status line = %q, want the change still pending", s)
+	}
+
+	src = &fakeDecideSource{}
+	src.set(assumeTickets(2)...)
+	m = newDecide(t, src, popup)
+	m = send(t, m, dkey("1")) // D-2 shown, quiet period started
+	decideClock.advance(100 * time.Millisecond)
+	m = send(t, m, dkey("k"))
+	decideClock.advance(300 * time.Millisecond)
+	send(t, m, dkey("1"))
+	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
 }
