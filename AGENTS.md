@@ -104,6 +104,7 @@ Rules for the toolchain:
 - **A test points the built binary at a private tmux server by setting `TMUX` to `<socket_path>,<server pid>,0`** (from `display-message -p '#{socket_path},#{pid},0'`); no flag or variable of Curia's own is needed.
 - **`CLAUDECODE=1` is set in every command Claude Code runs;** tests that run `curia decide` must unset it.
 - **An FTS5 `MATCH` argument is never built from raw text;** use `precedent.MatchExpr`.
+- **Every `cmd/curia` test runs behind `TestMain`'s guard** (`cmd/curia/main_test.go`, plan section 6.8): temp `HOME` and `CURIA_DB`, no reachable tmux server, agent variables cleared. A test that needs tmux uses `useFakeTmux`. A new `tmux.Client` method needs one more line on the guard's `unreachableTmux`.
 
 ## Owner's rules (verbatim)
 
