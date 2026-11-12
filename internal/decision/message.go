@@ -98,7 +98,8 @@ func Retraction(d model.Decision) string {
 // pane for decided ticket d, at most 600 runes. The option key, label, free
 // text and reasoning go through sanitize.Keys, so the line holds only
 // letters, digits, spaces and ". , : - _ /", has no line break and always
-// starts with the fixed words "Decision D-<n>" (Ruling 51). When Keys
+// starts with the fixed words "Decision D-<n>" (Ruling 51); the label also
+// loses its "." and ":", so it cannot forge the sentence (Ruling 83). When Keys
 // dropped or cut anything, the line ends with " Exact wording: call
 // check_decision D-<n>.". A confirmed ticket gets the answered wording, and
 // a superseded one the Retraction.
@@ -117,7 +118,13 @@ func TypedMessage(d model.Decision) string {
 	id := idOf(d)
 	var choice string
 	if d.AnswerKey != "" {
-		choice = join(", ", join(" ", "option", keys(d.AnswerKey, MaxKey)), keys(labelOf(d), typedLabel))
+		label := keys(labelOf(d), typedLabel)
+		// A label is agent-written: its "." and ":" could forge the
+		// sentence's structure, such as a "Reasoning:" (Ruling 83).
+		if inert := strings.Join(strings.FieldsFunc(label, isStructure), " "); inert != label {
+			label, lossy = inert, true
+		}
+		choice = join(", ", join(" ", "option", keys(d.AnswerKey, MaxKey)), label)
 	} else {
 		choice = keys(d.Answer, typedText)
 	}
@@ -127,6 +134,14 @@ func TypedMessage(d model.Decision) string {
 	}
 	return msg
 }
+
+// isStructure reports whether r is "." or ":", which a typed option label
+// must not hold (Ruling 83), or a space, which separates its words.
+func isStructure(r rune) bool { return r == '.' || r == ':' || r == ' ' }
+
+// labelBrackets replaces square brackets in a Stop line's label, so the
+// pair around it always delimits it (Ruling 83).
+var labelBrackets = strings.NewReplacer("[", "(", "]", ")")
 
 // flat cleans s with sanitize.Text and joins its lines with one space.
 func flat(s string, limit int) string {
@@ -143,9 +158,10 @@ func dropPeriod(s string) string {
 }
 
 // stopLine is the line of d in a stop reason: the typed-line wording with
-// the full label in square brackets after the key (kept as is, brackets
-// and all) and the full free text and reasoning, each flattened to one
-// line (Ruling 59). A superseded decision gets the Retraction.
+// the full label in square brackets after the key (its own brackets turned
+// into parentheses, Ruling 83) and the full free text and reasoning, each
+// flattened to one line (Ruling 59). A superseded decision gets the
+// Retraction.
 func stopLine(d model.Decision) string {
 	if !d.SupersededAt.IsZero() {
 		return Retraction(d)
@@ -153,7 +169,7 @@ func stopLine(d model.Decision) string {
 	var choice string
 	if d.AnswerKey != "" {
 		choice = join(" ", "option", flat(d.AnswerKey, MaxKey))
-		if label := flat(labelOf(d), MaxLabel); label != "" {
+		if label := labelBrackets.Replace(flat(labelOf(d), MaxLabel)); label != "" {
 			choice += " [" + label + "]"
 		}
 	} else {
