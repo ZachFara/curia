@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -997,9 +998,43 @@ func TestHostileTextIsInertInARealShell(t *testing.T) {
 		}
 	}
 	// The shell ran the typed line as one command named "Decision" and
-	// nothing else.
-	screen, err := raw("capture-pane", "-p", "-t", pane.ID)
-	if err != nil || strings.Count(screen, "not found") != 1 || !strings.Contains(screen, "Decision: command not found") {
-		t.Errorf("pane shows %q (%v), want the shell to run only the typed line, as a command named Decision", screen, err)
+	// nothing else: exactly one line of the screen says a command was not
+	// found, and it is the shell saying so of "Decision".
+	screen, err := raw("capture-pane", "-p", "-J", "-t", pane.ID)
+	if err != nil {
+		t.Fatalf("capture-pane: %v: %s", err, screen)
+	}
+	var notFound []string
+	for _, line := range strings.Split(screen, "\n") {
+		if strings.Contains(line, "not found") {
+			notFound = append(notFound, line)
+		}
+	}
+	if len(notFound) != 1 || !shellNotFound.MatchString(notFound[0]) {
+		t.Errorf("pane shows %q, want exactly one line saying the command Decision was not found", screen)
+	}
+}
+
+// shellNotFound matches a POSIX shell's one line for an unknown command
+// named Decision: "sh: Decision: command not found" from bash as sh (macOS)
+// and "/bin/sh: 1: Decision: not found" from dash (Debian, Ubuntu).
+var shellNotFound = regexp.MustCompile(`^[^ ]+: (?:(?:line )?[0-9]+: )?Decision: (?:command )?not found$`)
+
+// TestShellNotFoundPattern pins what shellNotFound accepts, so the shell
+// test proves the same thing on every platform.
+func TestShellNotFoundPattern(t *testing.T) {
+	for line, want := range map[string]bool{
+		"sh: Decision: command not found":           true,
+		"/bin/sh: 1: Decision: not found":           true,
+		"bash: line 1: Decision: command not found": true,
+		"sh: touch: command not found":              false,
+		"sh: Decisions: not found":                  false,
+		"$ Decision: not found":                     false,
+		"sh: Decision: not found; touch":            false,
+		"Decision: not found":                       false,
+	} {
+		if got := shellNotFound.MatchString(line); got != want {
+			t.Errorf("shellNotFound(%q) = %v, want %v", line, got, want)
+		}
 	}
 }
