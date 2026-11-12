@@ -48,7 +48,8 @@ type Result struct {
 	Stdout  []byte
 }
 
-// Run records one hook event and returns the session as stored. In order it
+// Run records one hook event and returns a Result: the session as stored,
+// and on a Stop that claimed answers the line to print. In order it
 // parses the payload, appends the raw event, and on SessionStart, or for a
 // session it has no row for yet (one first seen mid-run, Ruling 29), ends any
 // other session in the pane and asks git and tmux about it. Then in one store
@@ -58,8 +59,8 @@ type Result struct {
 // while the write lock is held, and only once per session besides
 // SessionStart.
 //
-// On Stop the same transaction also claims the session's queued answers and
-// counts its open blocking tickets (plan sections 4.3 and 4.9): claimed
+// On Stop the same transaction also counts the session's open blocking
+// tickets and claims its queued answers (plan sections 4.3 and 4.9): claimed
 // answers block the stop (Result.Stdout) and leave the session working;
 // otherwise an open blocking ticket makes it needs_decision. No other event
 // reads the decisions.
@@ -67,7 +68,8 @@ type Result struct {
 // A transcript that cannot be read does not stop the update: the session is
 // written without it and the read error is returned with it. The same holds
 // for a claim that fails (it is rolled back, so nothing is claimed or
-// printed) and for a count that fails (it counts as none).
+// printed) and for a decision read that fails (it counts as no open ticket
+// and nothing queued).
 func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st *store.Store, cfg config.Config) (Result, error) {
 	ev, err := Parse(kind, payload, env.Pane, env.Now())
 	if err != nil {
@@ -134,15 +136,20 @@ func runStop(ctx context.Context, ev model.Event, start *startInfo, st *store.St
 	return res, errs
 }
 
-// decide claims, on tx at ev's time, the queued answers of ev's session and
-// counts its open blocking tickets, and sets ev.StopBlocked when it claimed
+// decide reads, on tx at ev's time, the open blocking tickets of ev's
+// session and whether it has queued answers, in one small statement; only
+// when something is queued does it claim the queued answers, so the common
+// Stop never prepares the claim. It sets ev.StopBlocked when it claimed
 // any. A failed claim has been rolled back and claims nothing; a failed
-// count counts as none. Both errors are returned.
+// read counts as no ticket and nothing queued. Errors are returned.
 func decide(ctx context.Context, tx *store.Tx, ev *model.Event) ([]model.Decision, bool, error) {
-	claimed, claimErr := tx.ClaimDeliveries(ctx, ev.SessionID, ev.At)
-	n, countErr := tx.OpenBlocking(ctx, ev.SessionID, ev.At)
+	open, queued, err := tx.StopCheck(ctx, ev.SessionID, ev.At)
+	var claimed []model.Decision
+	if queued {
+		claimed, err = tx.ClaimDeliveries(ctx, ev.SessionID, ev.At)
+	}
 	ev.StopBlocked = len(claimed) > 0
-	return claimed, n > 0, errors.Join(claimErr, countErr)
+	return claimed, open > 0, err
 }
 
 // blockLine is the hook output that blocks a Stop to deliver claimed: one
