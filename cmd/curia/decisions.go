@@ -117,7 +117,15 @@ func runDecisionsLs(cmd *cobra.Command, _ []string) error {
 	if decisionsJSON {
 		return decisionsPrintJSON(cmd.OutOrStdout(), ds)
 	}
-	return decisionsPrintTable(cmd.OutOrStdout(), ds, now)
+	sessions, err := st.ListSessions(cmd.Context(), store.ListFilter{IncludeEnded: true})
+	if err != nil {
+		return err
+	}
+	states := make(map[string]model.State, len(sessions))
+	for _, s := range sessions {
+		states[s.ID] = s.State
+	}
+	return decisionsPrintTable(cmd.OutOrStdout(), ds, states, now)
 }
 
 // decisionsRow is one ticket in `curia decisions ls --json`. Its keys are
@@ -201,8 +209,9 @@ func decisionsPrintJSON(w io.Writer, ds []model.Decision) error {
 func decisionsCell(s string, limit int) string { return ui.Cell(sanitize.Line(s, limit)) }
 
 // decisionsPrintTable prints one row per ticket, in allocation (id) order,
-// with where it was answered (VIA) and how far its delivery got (M3).
-func decisionsPrintTable(w io.Writer, ds []model.Decision, now time.Time) error {
+// with where it was answered (VIA) and how far its delivery got (M3);
+// states holds the state of each known session.
+func decisionsPrintTable(w io.Writer, ds []model.Decision, states map[string]model.State, now time.Time) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ID\tSTATUS\tMODE\tAGE\tREPO\tQUESTION\tANSWER\tVIA\tDELIVERY")
 	for _, d := range ds {
@@ -211,7 +220,7 @@ func decisionsPrintTable(w io.Writer, ds []model.Decision, now time.Time) error 
 			decisionsCell(string(d.Mode), decisionsQuestionLimit), decisionsCell(ui.Age(d.CreatedAt, now), decisionsQuestionLimit), decisionsCell(ui.RepoName(d.Repo), decisionsQuestionLimit),
 			decisionsCell(d.Question, decisionsQuestionLimit),
 			decisionsCell(d.Answer, decisionsAnswerLimit), decisionsCell(decisionsOr(string(d.AnsweredVia), "-"), decisionsQuestionLimit),
-			decisionsCell(decisionsDeliveryText(d), decisionsQuestionLimit))
+			decisionsCell(decisionsDeliveryText(d, states), decisionsQuestionLimit))
 	}
 	return tw.Flush()
 }
@@ -234,15 +243,26 @@ func decisionsStatusText(d model.Decision) string {
 
 // decisionsDeliveryText is how far d's delivery got: "delivered
 // (stop_hook)", "typed, unconfirmed" for a typed answer no submitted prompt
-// or check_decision has confirmed yet (Ruling 86), "queued" or "none".
-func decisionsDeliveryText(d model.Decision) string {
+// or check_decision has confirmed yet (Ruling 86), "queued" or "none". An
+// answer not delivered yet whose session (in states) has ended, gone stale
+// or has no row is marked so: it is not on the badge (live check 3).
+func decisionsDeliveryText(d model.Decision, states map[string]model.State) string {
+	text := string(d.Delivery)
 	switch {
 	case d.Delivery == model.DeliveryDelivered && d.DeliveredVia == model.ViaSendKeys && d.ConfirmedAt.IsZero():
-		return "typed, unconfirmed"
+		text = "typed, unconfirmed"
 	case d.Delivery == model.DeliveryDelivered && d.DeliveredVia != "":
-		return string(d.Delivery) + " (" + string(d.DeliveredVia) + ")"
+		return text + " (" + string(d.DeliveredVia) + ")"
+	case d.Delivery != model.DeliveryQueued:
+		return text
 	}
-	return string(d.Delivery)
+	switch state, known := states[d.SessionID]; {
+	case !known:
+		return text + " (no session row)"
+	case state == model.StateEnded || state == model.StateStale:
+		return text + " (session " + string(state) + ")"
+	}
+	return text
 }
 
 func runDecisionsEdit(cmd *cobra.Command, args []string) error {

@@ -366,14 +366,20 @@ GROUP BY d.session_id`, formatTime(now), formatTime(now), formatTime(now))
 
 // badgeCounts is the status badge's one statement: the blocking tickets
 // open at its parameter (by the decisions_status_created index), and the
-// answers not yet delivered (by the decisions_undelivered index).
+// answers not yet delivered to a session that exists and is neither ended
+// nor stale (by the decisions_undelivered index, then one session lookup
+// each).
 const badgeCounts = `
 SELECT
   (SELECT count(*) FROM decisions d WHERE d.mode = 'blocking' AND ` + openAt + `),
-  (SELECT count(*) FROM decisions WHERE ` + undelivered + `)`
+  (SELECT count(*) FROM decisions JOIN sessions s ON s.id = decisions.session_id
+   WHERE ` + undelivered + ` AND COALESCE(s.state, '') NOT IN ('ended', 'stale'))`
 
 // BadgeCounts counts, in one statement, the blocking tickets open at now
-// and the answers the asking agents have not got yet (Ruling 89).
+// and the answers the asking agents have not got yet (Ruling 89), counting
+// only answers to a session that can still collect them: one that has
+// ended, gone stale or has no row would leave a Q on the badge for good
+// (live check 3 ended on Q10). decisions ls still lists those.
 func (s *Store) BadgeCounts(ctx context.Context, now time.Time) (openBlocking, undeliveredAnswers int, err error) {
 	err = s.db.QueryRowContext(ctx, badgeCounts, formatTime(now)).Scan(&openBlocking, &undeliveredAnswers)
 	if err != nil {

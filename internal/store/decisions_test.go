@@ -1425,8 +1425,28 @@ func TestOpenCountsAndBlockingCount(t *testing.T) {
 	if want := map[string]model.OpenCount{"S1": {Blocking: 2, Assume: 1}, "S2": {Assume: 1, Undelivered: 1}}; !reflect.DeepEqual(counts, want) {
 		t.Errorf("OpenCounts = %v, want %v", counts, want)
 	}
-	if n, q, err := s.BadgeCounts(ctx, now); err != nil || n != 2 || q != 1 {
-		t.Errorf("BadgeCounts = %d, %d, %v; want 2, 1, nil", n, q, err)
+	// S2 has no session row, so its queued answer is not on the badge.
+	if n, q, err := s.BadgeCounts(ctx, now); err != nil || n != 2 || q != 0 {
+		t.Errorf("BadgeCounts = %d, %d, %v; want 2, 0, nil", n, q, err)
+	}
+}
+
+// Live check 3, defect 7a: the badge's Q counts only answers whose session
+// can still collect them: one that exists and is neither ended nor stale.
+func TestBadgeCountsOnlyCollectableAnswers(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	for id, state := range map[string]model.State{"live": model.StateIdle, "ended": model.StateEnded, "stale": model.StateStale} {
+		liveSession(t, s, id, "%"+id, state)
+		queued(t, s, "Queued for "+id+"?", id)
+	}
+	queued(t, s, "Queued for a session with no row?", "gone")
+	if _, q, err := s.BadgeCounts(ctx, tClaim); err != nil || q != 1 {
+		t.Errorf("BadgeCounts undelivered = %d, %v; want 1 (the live session's)", q, err)
+	}
+	ds, err := s.ListDecisions(ctx, store.DecisionFilter{Statuses: []model.DecisionStatus{model.StatusOpen}, Undelivered: true})
+	if err != nil || len(ds) != 4 {
+		t.Errorf("open and undelivered = %d rows, %v; want all 4 listed", len(ds), err)
 	}
 }
 

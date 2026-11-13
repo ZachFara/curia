@@ -564,10 +564,45 @@ func TestEditSupersedeForGoneSessionRetractsNothing(t *testing.T) {
 		if d := decisionsGet(t, db, "D-3"); d.Delivery != model.DeliveryDelivered || d.SupersededAt.IsZero() {
 			t.Errorf("%s: D-3 = delivery %s, superseded at %v; want still delivered, superseded", name, d.Delivery, d.SupersededAt)
 		}
-		// D-1 and D-2 are open; D-4's answer is queued in the seed; D-3
-		// adds no Q.
-		if out, err := runRoot(t, "status"); err != nil || out != "D1 Q1" {
-			t.Errorf("%s: status = %q, %v; want %q", name, out, err, "D1 Q1")
+		// D-1 and D-2 are open. D-4's answer is queued in the seed, but for
+		// a session that has ended or has no row, so it is not on the badge
+		// either; D-3 adds nothing.
+		if out, err := runRoot(t, "status"); err != nil || out != "D1" {
+			t.Errorf("%s: status = %q, %v; want %q", name, out, err, "D1")
+		}
+	}
+}
+
+// Live check 3, defect 7a: an answer not delivered yet whose session has
+// ended, gone stale or has no row is still listed, marked so, and not
+// counted on the badge.
+func TestDecisionsLsMarksAnswersNobodyCanCollect(t *testing.T) {
+	for state, mark := range map[model.State]string{
+		model.StateEnded: "queued (session ended)",
+		model.StateStale: "queued (session stale)",
+		"":               "queued (no session row)",
+		model.StateIdle:  "queued",
+	} {
+		db := decisionsHome(t, decisionsSpecs()...)
+		if state != "" {
+			seedSessions(t, db, statusSession(state))
+		}
+		out, err := runRoot(t, "decisions", "ls")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var row string
+		for _, l := range strings.Split(out, "\n") {
+			if strings.HasPrefix(l, "D-4 ") {
+				row = strings.Join(strings.Fields(l), " ")
+			}
+		}
+		if !strings.HasSuffix(row, "popup "+mark) {
+			t.Errorf("session %q: D-4 row = %q, want it to end %q", state, row, "popup "+mark)
+		}
+		want := map[bool]string{true: "D1 Q1", false: "D1"}[state == model.StateIdle]
+		if got, err := runRoot(t, "status"); err != nil || got != want {
+			t.Errorf("session %q: status = %q, %v; want %q", state, got, err, want)
 		}
 	}
 }
