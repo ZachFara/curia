@@ -228,7 +228,7 @@ Eighteen features, grouped by the four jobs from section 1 plus a cost layer: se
 
 **What:** I know something needs me without opening anything.
 
-- **Status bar badge:** `#(curia status)` in status-right shows counts, e.g. `D2 Q1 W1 R1` (decisions, answers not yet delivered, waiting, reviews). Hidden when all zero. (amended, Ruling 91: the format is `D<n> Q<n> W<n> R<n>`, Q = answers not yet delivered)
+- **Status bar badge:** `#(curia status)` in status-right shows counts, e.g. `D2 Q1 W1 R1` (decisions, answers not yet received, waiting, reviews). Hidden when all zero. (amended, Ruling 91: the format is `D<n> Q<n> W<n> R<n>`, Q = answers a live session has not yet received)
 - **Window flags:** window names get a colored marker: red for needs\_decision or waiting, blue for review-ready, none otherwise. Cleared when I focus the pane (`pane-focus-in` hook marks it seen).
 - **Jump to next:** `prefix + N` jumps to the highest-priority pane in the F3 sort order.
 - **Optional bell and macOS notification** when a blocking decision opens, rate-limited to one per 30 seconds.
