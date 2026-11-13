@@ -72,7 +72,7 @@ func Tokens(s string) []string {
 }
 
 // MatchExpr turns untrusted text into an FTS5 expression: the first MaxTokens
-// tokens, each in double quotes, joined by " OR ". Tokens hold only letters
+// tokens, each in double quotes, joined by " OR ". Tokens hold only
 // letters, marks and numbers, so no input reaches FTS5 syntax. An empty result
 // means there is nothing to search for: do not run MATCH (an empty MATCH
 // argument is an FTS5 syntax error).
@@ -119,13 +119,12 @@ func Strong(question string, candidates []model.Decision) []model.Decision {
 		d model.Decision
 		j float64
 	}
-	tq := Tokens(question)
 	var hits []scored
 	for _, c := range candidates {
-		shared, union := overlap(tq, Tokens(c.Question))
-		// StrongJaccard (3/5) compared in integers so the boundary is exact.
-		if shared >= StrongShared && 5*shared >= 3*union {
-			hits = append(hits, scored{c, float64(shared) / float64(union)})
+		// A ratio equal to 3/5 divides to the nearest double to 0.6, which
+		// is StrongJaccard, so the boundary is exact (TestStrongThreshold).
+		if j, shared := Similarity(question, c.Question); shared >= StrongShared && j >= StrongJaccard {
+			hits = append(hits, scored{c, j})
 		}
 	}
 	sort.SliceStable(hits, func(i, k int) bool { return hits[i].j > hits[k].j })
