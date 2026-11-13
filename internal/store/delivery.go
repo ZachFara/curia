@@ -88,9 +88,9 @@ ORDER BY n LIMIT 1`,
 // inherits that pane, and one that died without SessionEnd stays idle or
 // needs_decision while the outer session is alive there, perhaps at a
 // permission prompt (Ruling 73).
-func sharesPane(ctx context.Context, tx *sql.Tx, sess model.Session) (bool, error) {
+func sharesPane(ctx context.Context, q dbtx, sess model.Session) (bool, error) {
 	var n int
-	err := tx.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 SELECT count(*) FROM sessions
 WHERE tmux_pane = ? AND id != ? AND COALESCE(state, '') NOT IN (?, ?)`,
 		sess.Pane, sess.ID, model.StateEnded, model.StateStale).Scan(&n)
@@ -137,6 +137,32 @@ func (s *Store) ClaimTyping(ctx context.Context, id string, now time.Time) (Typi
 		return TypingClaim{}, fail("claim typing", id, err)
 	}
 	return c, nil
+}
+
+// StillTypable re-reads session sessionID for a claim already made, just
+// before typing into pane (re-review m3): it is why the session may no
+// longer be typed into (state, subagents, pane binding, a shared pane), or
+// TypingClaimed. A hook event that landed since the claim is seen. A row
+// gone, or bound to another pane now, is TypingNoPane.
+func (s *Store) StillTypable(ctx context.Context, sessionID, pane string) (TypingRefusal, error) {
+	sess, found, err := getSession(ctx, s.db, sessionID)
+	switch {
+	case err != nil:
+		return 0, fail("recheck typing for", sessionID, err)
+	case !found || sess.Pane != pane:
+		return TypingNoPane, nil
+	}
+	if why := typingRefusal(sess); why != TypingClaimed {
+		return why, nil
+	}
+	shared, err := sharesPane(ctx, s.db, sess)
+	if err != nil {
+		return 0, fail("recheck typing for", sessionID, err)
+	}
+	if shared {
+		return TypingSharedPane, nil
+	}
+	return TypingClaimed, nil
 }
 
 // TypingClaim is what ClaimTyping did with an answer: the decision and its

@@ -226,7 +226,17 @@ func (r *delivery) paneRefusal(ctx context.Context, d model.Decision, sess model
 // the pane shows an empty input prompt.
 func (r *delivery) typeLine(ctx context.Context, d model.Decision, sess model.Session) model.Outcome {
 	if why := r.paneRefusal(ctx, d, sess); why != "" {
-		return r.requeue(ctx, d, why)
+		return r.requeue(ctx, d, why, queuedNote(why, d))
+	}
+	// m3: a hook event may have landed while the pane was captured.
+	switch why, err := r.st.StillTypable(ctx, sess.ID, sess.Pane); {
+	case err != nil:
+		r.log.Warn("deliver: recheck before typing failed; not typing", "id", d.ID, "err", err.Error())
+		const what = "could not check the session again; nothing typed"
+		return r.requeue(ctx, d, what, queuedNote(what, d))
+	case why != store.TypingClaimed:
+		r.log.Info("deliver: the session changed while its pane was read; not typing", "id", d.ID, "why", int(why))
+		return r.requeue(ctx, d, "the session changed while its pane was read", refusalNote(store.TypingClaim{Decision: d, Refusal: why}))
 	}
 	err := r.tm.SendKeys(ctx, sess.Pane, decision.TypedMessage(d))
 	switch {
@@ -239,28 +249,34 @@ func (r *delivery) typeLine(ctx context.Context, d model.Decision, sess model.Se
 		return model.Outcome{Decision: d, Note: partialNote(d, sess)}
 	}
 	r.log.Warn("deliver: typing failed", "id", d.ID, "pane", sess.Pane, "err", err.Error())
-	return r.requeue(ctx, d, "typing failed")
+	return r.requeue(ctx, d, "typing failed", queuedNote("typing failed", d))
 }
 
 // requeue undoes the typing claim of d, after which nothing was typed, for
-// the reason why. It runs even if ctx ran out, or the answer would read as
-// delivered and no path would deliver it.
-func (r *delivery) requeue(ctx context.Context, d model.Decision, why string) model.Outcome {
+// the reason why, and notes it with note. It runs even if ctx ran out, or
+// the answer would read as delivered and no path would deliver it. An
+// answer the agent read with check_decision meanwhile stays delivered
+// (re-review m1) and needs no note.
+func (r *delivery) requeue(ctx context.Context, d model.Decision, why, note string) model.Outcome {
 	qctx, cancel := settled(ctx, settleTimeout)
 	defer cancel()
 	if rerr := r.st.RequeueDelivery(qctx, d.ID); rerr != nil {
 		r.log.Warn("deliver: requeue failed; the answer reads as delivered", "id", d.ID, "err", rerr.Error())
 		return model.Outcome{Decision: d, Note: why + " and the answer could not be queued again; " + askCheck(d.ID)}
 	}
-	r.log.Info("deliver: answer queued again", "id", d.ID)
 	stored, found, err := r.st.GetDecision(qctx, d.ID)
-	if err != nil || !found {
+	switch {
+	case err != nil || !found:
 		r.log.Warn("deliver: re-read after requeue", "id", d.ID, "found", found, "err", errText(err))
-		// The requeue went through: report the row it wrote.
+		// Report the row the requeue wrote.
 		d.Delivery, d.DeliveredVia, d.DeliveredAt = model.DeliveryQueued, "", time.Time{}
-		return model.Outcome{Decision: d, Note: queuedNote(why, d)}
+		return model.Outcome{Decision: d, Note: note}
+	case stored.Delivery != model.DeliveryQueued:
+		r.log.Info("deliver: answer read with check_decision meanwhile; not queued again", "id", d.ID)
+		return model.Outcome{Decision: stored}
 	}
-	return model.Outcome{Decision: stored, Note: queuedNote(why, d)}
+	r.log.Info("deliver: answer queued again", "id", d.ID)
+	return model.Outcome{Decision: stored, Note: note}
 }
 
 // errText is err's text, or "" for nil.

@@ -923,6 +923,46 @@ func TestSynchronizedWindowIsNotTyped(t *testing.T) {
 		"nothing typed; queued for the Stop hook, or tell the agent to call check_decision D-1")
 }
 
+// changingTmux's capture shows the empty prompt while a hook event moves
+// the session to state, as a UserPromptSubmit landing during the capture
+// would.
+type changingTmux struct {
+	*tmux.Fake
+	st    *store.Store
+	state model.State
+}
+
+func (c changingTmux) CapturePane(ctx context.Context, pane string) (tmux.Capture, error) {
+	capt, err := c.Fake.CapturePane(ctx, pane)
+	if err == nil {
+		err = c.st.UpdateSession(ctx, "s1", func(s model.Session, _ bool) model.Session {
+			s.State = c.state
+			return s
+		})
+	}
+	return capt, err
+}
+
+// Re-review m3: the session is read again after the capture, so a hook
+// event that landed meanwhile stops the typing.
+func TestSessionChangeDuringCaptureIsNotTyped(t *testing.T) {
+	for state, note := range map[model.State]string{model.StateWorking: noteWorking, model.StateWaiting: noteWaiting} {
+		st := openStore(t)
+		seedSession(t, st, asker())
+		d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+		fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
+		log, _ := testLog()
+		out, err := deliver.Answer(context.Background(), st, changingTmux{fake, st, state}, log, d.ID, answerA, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+			t.Errorf("%s: typed into a session that changed during the capture: %q", state, got)
+		}
+		wantQueued(t, st, out, d.ID, note)
+	}
+}
+
 // The capture is the last step before typing: after the claim, right
 // before SendKeys.
 func TestPaneCapturedRightBeforeTyping(t *testing.T) {
