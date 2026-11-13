@@ -97,11 +97,12 @@ type DecideModel struct {
 	loaded   bool           // a read has succeeded
 	changed  bool           // a refresh changed the ticket on screen: the next answer key is ignored
 
-	quietUntil  time.Time // answer keys before this are ignored (after one's own answer)
-	shownSince  time.Time // when the selected ticket, as it is now, came on screen
-	promptSince time.Time // when the confirmation opened
-	inputSince  time.Time // when the input opened, or last refused a too early Enter
-	lastEnter   time.Time // when the last Enter came, acted on or not
+	quietUntil   time.Time // answer keys before this are ignored (after one's own answer)
+	shownSince   time.Time // when the selected ticket, as it is now, came on screen
+	promptSince  time.Time // when the confirmation opened
+	inputSince   time.Time // when the input opened, or last refused a too early Enter
+	inputByEnter bool      // an Enter opened the reasoning input
+	lastEnter    time.Time // when the last Enter came, acted on or not
 
 	issued, applied int // sequence numbers of the last refresh started and applied
 
@@ -357,12 +358,13 @@ func (m DecideModel) updateKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cmd
 }
 
 // enterRepeated records an Enter and reports whether it came within the
-// dwell of the Enter before it, as a held or doubled Enter does: no key-up
-// reaches a terminal program, so a gap is the only sign it was let go
-// (Ruling 88, defect 5).
+// quiet period of the Enter before it, as a held or doubled Enter does: no
+// key-up reaches a terminal program, so a gap is the only sign it was let
+// go, and a held key's first repeat comes after the keyboard's repeat
+// delay, up to 660 ms (Ruling 88, defect 5; see quietPeriod).
 func (m *DecideModel) enterRepeated() bool {
 	now := m.now()
-	repeated := !m.lastEnter.IsZero() && now.Sub(m.lastEnter) < dwell
+	repeated := !m.lastEnter.IsZero() && now.Sub(m.lastEnter) < quietPeriod
 	m.lastEnter = now
 	return repeated
 }
@@ -537,6 +539,7 @@ func (m DecideModel) startAnswer(t model.Ticket, a model.Answer) (DecideModel, t
 // askWhy opens the reasoning input for p, which waits in pending.
 func (m DecideModel) askWhy(p pendingAnswer) DecideModel {
 	m.pending, m.input, m.buf, m.inputSince = p, inputWhy, nil, m.now()
+	m.inputByEnter = m.lastEnter.Equal(m.inputSince)
 	return m
 }
 
@@ -552,7 +555,7 @@ func (m DecideModel) openText() DecideModel {
 	}
 	a := model.Answer{Reasoning: m.reasoning, Scope: m.scope, Via: m.opts.Via}
 	m.pending, m.input, m.buf = pendingAnswer{ticket: t, a: a}, inputText, []rune(m.draft)
-	m.inputSince = m.now()
+	m.inputSince, m.inputByEnter = m.now(), false
 	return m
 }
 
@@ -561,7 +564,7 @@ func (m DecideModel) openText() DecideModel {
 func (m DecideModel) openReason() DecideModel {
 	if t, ok := m.current(); ok {
 		m.pending, m.input, m.buf = pendingAnswer{ticket: t}, inputReason, []rune(m.reasoning)
-		m.inputSince = m.now()
+		m.inputSince, m.inputByEnter = m.now(), false
 	}
 	return m
 }
@@ -603,11 +606,17 @@ func (m DecideModel) cancelInput() DecideModel {
 }
 
 // submitInput takes what was typed, on an Enter that came the dwell after
-// the input opened. A free-text answer to a blocking ticket with no staged
-// reasoning then asks for the reasoning, as an option answer does (Ruling
-// 88, defect 4: a reason typed after it was read as commands).
+// the input opened, or the quiet period after it when an Enter opened it (a
+// held Enter's first repeat must not submit it, Ruling 88). A free-text
+// answer to a blocking ticket with no staged reasoning then asks for the
+// reasoning, as an option answer does (Ruling 88, defect 4: a reason typed
+// after it was read as commands).
 func (m DecideModel) submitInput() (DecideModel, tea.Cmd) {
-	if m.now().Sub(m.inputSince) < dwell {
+	wait := dwell
+	if m.inputByEnter {
+		wait = quietPeriod
+	}
+	if m.now().Sub(m.inputSince) < wait {
 		return m.tooSoon(), nil
 	}
 	text := strings.TrimSpace(string(m.buf))

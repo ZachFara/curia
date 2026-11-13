@@ -1251,7 +1251,7 @@ func TestConfirmNeedsDwell(t *testing.T) {
 	if s := lastLine(m); s != "answer canceled" {
 		t.Errorf("status line = %q, want the cancel", s)
 	}
-	decideClock.advance(250 * time.Millisecond) // not a repeat of the first Enter (Ruling 88)
+	decideClock.advance(750 * time.Millisecond) // not a repeat of the first Enter (Ruling 88)
 	m = send(t, m, dkey("enter"))
 	decideClock.advance(250 * time.Millisecond)
 	send(t, m, dkey("y"))
@@ -1597,11 +1597,14 @@ func TestDroppedSubmissionStartsQuietPeriod(t *testing.T) {
 	}
 }
 
-// typeText sends each rune of s as its own key, gap apart.
-func typeText(t *testing.T, m tea.Model, s string, gap time.Duration) tea.Model {
+// typingGap is the pace of typing at normal speed.
+const typingGap = 80 * time.Millisecond
+
+// typeText sends each rune of s as its own key, typingGap apart.
+func typeText(t *testing.T, m tea.Model, s string) tea.Model {
 	t.Helper()
 	for _, r := range s {
-		decideClock.advance(gap)
+		decideClock.advance(typingGap)
 		m = send(t, m, dkey(string(r)))
 	}
 	return m
@@ -1617,14 +1620,14 @@ func TestDefect4FreeTextAnswerAsksForReason(t *testing.T) {
 	src.set(ticket(16, model.ModeBlocking, model.ReversCheap), ticket(13, model.ModeAssume, model.ReversCheap))
 	m := newDecide(t, src, popup)
 	m = dpress(t, m, "w")
-	m = typeText(t, m, "Name it curia-cli", 80*time.Millisecond)
+	m = typeText(t, m, "Name it curia-cli")
 	m = dpress(t, m, "enter")
 	wantCalls(t, src) // waiting for the reasoning
 	if s := lastLine(m); !strings.HasPrefix(s, `reasoning for "Name it curia-cli`) {
 		t.Errorf("status line = %q, want the reasoning input", s)
 	}
 	decideClock.advance(1040 * time.Millisecond)
-	m = typeText(t, m, "Use 2 tabs", 80*time.Millisecond)
+	m = typeText(t, m, "Use 2 tabs")
 	decideClock.advance(80 * time.Millisecond)
 	send(t, m, dkey("enter"))
 	wantCalls(t, src, answerCall{"D-16", model.Answer{Text: "Name it curia-cli", Reasoning: "Use 2 tabs", Via: model.AnsweredPopup}})
@@ -1641,7 +1644,7 @@ func TestDefect4TypingAfterAnswerActsOnNothing(t *testing.T) {
 	m = dpress(t, m, "2")
 	wantCalls(t, src, answerCall{"D-13", model.Answer{Key: "B", Via: model.AnsweredPopup}})
 	decideClock.advance(1040 * time.Millisecond)
-	m = typeText(t, m, "Use 2 tabs", 80*time.Millisecond)
+	m = typeText(t, m, "Use 2 tabs")
 	decideClock.advance(80 * time.Millisecond)
 	m = send(t, m, dkey("enter"))
 	wantCalls(t, src, answerCall{"D-13", model.Answer{Key: "B", Via: model.AnsweredPopup}})
@@ -1650,26 +1653,36 @@ func TestDefect4TypingAfterAnswerActsOnNothing(t *testing.T) {
 	}
 }
 
-// Ruling 88, defect 5: the live check's sequence, 15 Enters 30 ms apart on
-// a blocking ticket with no staged reasoning, answers nothing: the first
-// opens the reasoning input, and every repeat comes inside the dwell of the
-// one before. Once the key is let go, one Enter sends.
+// Ruling 88, defect 5 (re-review N1): a held Enter on a blocking ticket
+// with no staged reasoning answers nothing, whether its repeats start at
+// once (the live check's 15 Enters 30 ms apart) or after a keyboard's
+// repeat delay of 400 to 660 ms. The first Enter opens the reasoning input;
+// every repeat comes within the quiet period of the one before. Once the key
+// is let go, the input is still open, waiting for a reason.
 func TestDefect5HeldEnterAnswersNothing(t *testing.T) {
-	src := &fakeDecideSource{}
-	src.set(ticket(18, model.ModeBlocking, model.ReversCheap), ticket(19, model.ModeBlocking, model.ReversCheap))
-	m := newDecide(t, src, popup)
-	for range 15 {
+	for _, first := range []time.Duration{30, 400, 500, 660} {
+		src := &fakeDecideSource{}
+		src.set(ticket(18, model.ModeBlocking, model.ReversCheap), ticket(19, model.ModeBlocking, model.ReversCheap))
+		m := newDecide(t, src, popup)
 		m = send(t, m, dkey("enter"))
-		decideClock.advance(30 * time.Millisecond)
+		decideClock.advance(first * time.Millisecond)
+		for range 30 {
+			m = send(t, m, dkey("enter"))
+			decideClock.advance(30 * time.Millisecond)
+		}
+		if got := src.calls(); len(got) != 0 {
+			t.Errorf("first repeat after %dms: the held Enter answered %+v", first, got)
+		}
+		decideClock.advance(time.Second) // let go
+		if s := lastLine(m); !strings.HasPrefix(s, "reasoning for B (enter sends): ") {
+			t.Errorf("first repeat after %dms: status line = %q, want the reasoning input still open", first, s)
+		}
+		m = typeText(t, m, "fits")
+		decideClock.advance(time.Second)
+		send(t, m, dkey("enter"))
+		wantCalls(t, src, answerCall{"D-18", model.Answer{Key: "B", Reasoning: "fits", Via: model.AnsweredPopup}})
 	}
-	wantCalls(t, src)
-	decideClock.advance(dwellForTest)
-	send(t, m, dkey("enter"))
-	wantCalls(t, src, answerCall{"D-18", model.Answer{Key: "B", Via: model.AnsweredPopup}})
 }
-
-// dwellForTest is the decide view's dwell (250 ms) and a little more.
-const dwellForTest = 260 * time.Millisecond
 
 // Ruling 88, defect 11: an answer key pressed the moment the view draws is
 // refused with a notice that does not say the queue changed.
