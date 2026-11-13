@@ -6,7 +6,7 @@ Read this first. It is the working agreement for every human and agent in this r
 
 `curia` is one Go binary that turns tmux into a control plane for parallel coding agents. Claude Code hooks call `curia hook <Event>`; the hook parses the payload, applies a pure state machine and upserts one row per session in a local SQLite store (WAL mode). Every view reads that store: `curia status` (status-bar badge), window markers, `curia next` (jump to the session that needs you), `curia ls`, and the `curia ui` popup / `curia sidebar`. Nothing scrapes panes. tmux is driven through a small `tmux.Client` interface so logic is testable without tmux.
 
-Plan 2 adds decisions. `curia mcp` is a stdio MCP server, one process per Claude Code session, whose four tools let an agent search precedent and raise, check or withdraw a decision ticket in the store's `decisions` table; no MCP tool can answer one. `curia decide` (a popup, or flags for scripts) is the only place an answer is written, and it refuses to run inside an agent session. An answer is delivered at most once, by one of three paths, each a claim in one write transaction: `curia decide` typing it into the agent's idle pane, `curia hook Stop` blocking the stop with the answer as its reason, or the agent's own `check_decision` (which also returns an answer already delivered).
+Plan 2 adds decisions. `curia mcp` is a stdio MCP server, one process per Claude Code session, whose four tools let an agent search precedent and raise, check or withdraw a decision ticket in the store's `decisions` table; no MCP tool can answer one. `curia decide` (a popup, or flags for scripts) is the only place an answer is written, and it refuses to run inside an agent session; `curia decisions` (`ls`, `edit`) lists and curates tickets and is user-only too. The status badge reads `D<n> Q<n> W<n> R<n>` (open blocking tickets, answers not yet delivered, waiting sessions, reviews). An answer is delivered at most once, by one of three paths, each a claim in one write transaction: `curia decide` typing it into the agent's idle pane, `curia hook Stop` blocking the stop with the answer as its reason, or the agent's own `check_decision` (which also returns an answer already delivered).
 
 Sources of truth:
 
@@ -123,6 +123,53 @@ Rules for the toolchain:
 - **Never read a value in an unusual way to get past a lint rule** (for example `os.LookupEnv` to dodge gosec's taint check): that is loosening a check. Use the ordinary call and satisfy the rule, or record the finding (Ruling 70).
 - **`go test` runs packages in parallel unless given `-p 1`,** which matters for latency gates: they measured other packages' load and failed on CI. `make check` uses `-p 1` (Ruling 76).
 - **A `merge` helper must not treat a failed check as "no checks yet".** A failed check must stop the merge.
+
+- **An answer is typed only after the pane is seen to hold Claude Code's empty input prompt** (`deliver.readPrompt` over `tmux.Client.CapturePane`, Ruling 85). The stored state alone is not enough: a background subagent's permission dialog can be on screen while the row says `needs_decision`, a draft is glued to the typed line, and a line typed into the Rewind menu is lost. Anything not recognised types nothing, and a Claude Code UI change turns typing off (the note says "prompt not recognized"; the answer then waits for the Stop hook or `check_decision`). Never send a clearing keystroke. Typing is also refused when the window has `synchronize-panes` on.
+- **The typing path, final order of conditions** (`deliver.Answer`):
+  1. `AnswerDecision` stores the answer. Nothing more happens if the ticket has no session or its delivery is not `queued`.
+  2. `ListPanes` (1 s), then `fleet.Reconcile`, which marks stale the sessions whose pane is gone or recycled.
+  3. `store.ClaimTyping`, in one write transaction, in this order: the decision is `queued`; the session is not `working`, `waiting` or `ended`, has a pane and is `idle` or `needs_decision` (so not stale); `subagents_active == 0` (Ruling 84); no other live session is bound to the pane (Ruling 73); the session has no `send_keys` answer that is still unconfirmed (Ruling 86). Then the decision is marked delivered by `send_keys` and unconfirmed. A refusal comes back as a `store.TypingRefusal`, and the note says why and what the user can do (every note for a queued answer ends with "tell the agent to call check_decision D-n").
+  4. `CapturePane` (1 s), then `readPrompt`: the screen must end with a rule line, one `❯` line (plus a no-break space) with nothing after it, a rule line, and at most two known idle footer lines; no dialog or menu hint in the bottom 20 lines; no "Waiting for ... background agent" line above the box. Otherwise the claim is undone (`RequeueDelivery`) and the note says why.
+  5. `SendKeys`: `copy-mode -q` (1 s), `send-keys -l -- <TypedMessage>` (1 s, also ends with the caller's context), `send-keys Enter` (2 s, on a context detached from the caller's cancellation) (Ruling 81). `ErrPartialSend` keeps the claim, so nothing is retyped (Rulings 54, 58); any other error requeues.
+  6. The answer stays unconfirmed until a UserPromptSubmit whose prompt names it ("Decision D-n" then a space or a colon), or the asking session's own `check_decision`, sets `decisions.confirmed_at` (Ruling 86, migration 0003). Until then it counts in the badge's `Q`, `ls` shows `typed, unconfirmed`, nothing more is typed into that session, and the Stop hook does not deliver it again.
+- **Claude Code's helper agents send `SubagentStop` with `agent_type` present and empty,** with no Agent `PreToolUse` before it. Only stops that name a type lower `subagents_active`. A Stop's `background_tasks` lists the subagents still running and the count is set from it (Ruling 87). `SubagentStop`'s own `background_tasks` still lists the stopping agent as running.
+- **A superseded answer is never delivered as live** (Ruling 82): the typed line, the Stop line and `check_decision` say the fixed retraction sentence instead, and `check_decision` adds `"superseded": true`. The typed option label loses `.` and `:`, and Stop labels get `(` `)` for `[` `]` (Ruling 83), because the label is agent-written and arrives as a user message.
+- **The decide view ignores an Enter within 250 ms of the Enter before it or of an input opening,** measures Enter repeats against the 750 ms quiet period (a held key's first repeat comes 375 to 660 ms after the press, and terminals send no key-up), treats typed text that is no command and pastes as starting a quiet period, and asks for the reasoning of a free-text answer to a blocking ticket (Ruling 88).
+- **Settling from the transcript (Rulings 77, 79, 80):** a session is set idle only when the last conversational line is a `user` line with exactly one text block equal to `[Request interrupted by user]` or `[Request interrupted by user for tool use]`, with a timestamp later than the session's `UpdatedAt`. Remaining false-settle window: a denial "with feedback" continues the same turn, and between the marker and the next hook event or assistant line the session is really working while `status` (every 2 s) can mark it idle (or `needs_decision` with an open blocking ticket). A permission dialog cannot be on screen then unless a `PreToolUse` commits in the few milliseconds between the claim and the keystrokes, and a running turn drawn as "esc to interrupt" is refused by the pane check. A resumed turn with no committed hook event and no later transcript line yet is the same window.
+- **Ruling 74a's window:** a compaction revives an ended row as `idle`, which is typable, while auto-compaction is usually mid-turn. The pane check (a running turn shows "esc to interrupt") covers it.
+- **tmux leaves a server's socket file behind after `kill-server`.** Test helpers ask for `#{socket_path}` before killing the server and remove the entry through `os.Root` on its directory (Ruling 92). The e2e panes stand in for Claude Code by drawing its empty prompt box and redrawing it after each line they record; a plain `cat` pane is no longer typed into.
+- **golangci's misspell wants US spelling** ("recognized", "canceled").
+- **Claude Code labels Stop-hook delivery "Stop hook error"** and shows "Stop hook error occurred" in the footer; it is how the `{"decision":"block"}` route looks, not a failure. A retraction goes out under the same header.
+
+Facts established by the live checks (Claude Code 2.1.323, tmux 3.8; evidence in `.superpowers/sdd/2026-11-11-curia-plan-2-decisions/live-check-2-report.md` and `live-check-3-report.md`):
+
+- **Keys in Claude Code's prompt:**
+  - Text typed while a draft is in the prompt is appended to the draft and submitted with it, with no separator.
+  - `C-u` deletes from the cursor to the start of the current line only; on a multi-line draft it removes only the last line.
+  - `C-a` then `C-k` clears a single-line draft.
+  - One `Escape` leaves the draft and shows `Esc again to clear`; two `Escape`s within a short interval (about 10 ms apart; 1 s apart does not) clear it, and the cleared draft goes into history.
+  - Two quick `Escape`s on an empty prompt open the Rewind menu; Enter on `(current)` closes it and text typed into it is lost.
+  - `Escape` before a turn's first output restores the submitted prompt into the input and writes no interrupt marker.
+- **Permission dialog options are numbered 1 to 3 and a single digit key selects at once,** without Enter; the dialog's hints do not say so.
+- **No `permission_prompt` Notification arrives after a quick denial** (denied 0.52 s after the dialog appeared: none in the next 14 s). When the dialog stays open it comes about 6 s after `PreToolUse`.
+- **No `PostToolUse` fires for an interrupted tool or a denied one.**
+- **A typed prompt's transcript entry is timestamped 15 to 38 ms before its UserPromptSubmit hook's recorded time.**
+- **A denial in one subagent does not abort a sibling subagent.** This Claude Code version ran every subagent in the background, even when told not to.
+- **The idle footer line per permission mode** (live check 3, width 200 unless noted; the reader at `2d0f494` recognised all but manual):
+
+| Mode | Footer line seen |
+| --- | --- |
+| auto | `  ⏵⏵ auto mode on (shift+tab to cycle)` |
+| manual ("ask before edits") | `  ⏸ manual mode on · ? for shortcuts` |
+| accept edits | `  ⏵⏵ accept edits on (shift+tab to cycle)` |
+| plan | `  ⏸ plan mode on (shift+tab to cycle)` |
+
+  - On a fresh session before its first prompt the footer gains `· ← for agents`; it is gone after the first turn.
+  - While background agents run, the footer gains `· ↓ to manage` and an agent list under the box.
+  - At 34 columns Claude Code cuts the footer (`⏵⏵ auto mode on (shift+tab to`).
+  - A fresh prompt shows a dim placeholder suggestion (`❯ Try "fix typecheck errors"`); `capture-pane -p` without `-e` cannot tell it from a draft.
+  - The slash menu is drawn above the input box, and the box holds `❯ /`.
+  - `capture-pane -p` shows the live screen, not tmux's copy-mode view; `#{pane_in_mode}` reports copy mode, and `SendKeys` leaves copy mode before typing.
 
 ## Owner's amendments (2026-11-12)
 
