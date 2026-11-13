@@ -1,0 +1,40 @@
+  answered while you were
+  working.
+  Decision D-2 answered:
+  option B [Spaces].
+  Reasoning: Spaces
+  everywhere here.
+  Continue.
+
+⏺ OK D-2
+
+✻ Brewed for 4s · done 7:41 PM
+
+❯ Decision D-4 answered: option
+  B, Hi. Reasoning: Casual team.
+  Continue.
+
+⏺ OK D-4
+
+✻ Brewed for 3s · done 7:41 PM
+
+❯ Decision D-5 answered: option
+  A, narrow-alpha. Reasoning:
+  fine. Continue.
+
+⏺ OK D-5
+
+✻ Brewed for 2s · done 7:42 PM
+
+❯ Decision D-6 answered: option
+  B, wide-beta. Reasoning: wide.
+  Continue.
+
+⏺ OK D-6
+
+✻ Cooked for 1s · done 7:43 PM
+
+──────────────────────────────────
+❯ 
+──────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to

@@ -128,6 +128,10 @@ func (unreachableTmux) KillPane(context.Context, string) error { return errTmuxU
 
 func (unreachableTmux) SendKeys(context.Context, string, string) error { return errTmuxUnreachable }
 
+func (unreachableTmux) CapturePane(context.Context, string) (tmux.Capture, error) {
+	return tmux.Capture{}, errTmuxUnreachable
+}
+
 func (unreachableTmux) Bell(context.Context, string) error { return errTmuxUnreachable }
 
 func TestGuardIsolatesEnvironment(t *testing.T) {

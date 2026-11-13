@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -205,7 +206,7 @@ func TestUIDKeyAnswersSessionTickets(t *testing.T) {
 		if !strings.Contains(queue, "Run a && b?") {
 			t.Errorf("d did not open s1's tickets:\n%s", queue)
 		}
-		if !strings.Contains(run.view, "D-1 answered") {
+		if !strings.Contains(run.view, "D-1 overridden") { // the stored status word (M2)
 			t.Errorf("view after the answer:\n%s", run.view)
 		}
 		d := decisionsGet(t, db, "D-1")
@@ -236,6 +237,34 @@ func TestUIInsideAgentCannotAnswer(t *testing.T) {
 	}
 	lines := strings.Split(run.view, "\n")
 	if s := lines[len(lines)-1]; !strings.Contains(s, "agent session") {
+		t.Errorf("status line = %q, want why d cannot answer", s)
+	}
+	if d := decisionsGet(t, db, "D-1"); d.Status != model.StatusOpen {
+		t.Errorf("D-1 = %s, want still open", d.Status)
+	}
+}
+
+// T16: without its log file the dashboard still starts, and d says why
+// it cannot answer.
+func TestUIStartsWithoutLogFile(t *testing.T) {
+	db, _ := decideHome(t, decisionsSpecs()[1])
+	logPath := config.Default().LogPath
+	if err := os.MkdirAll(logPath, 0o700); err != nil { // a directory cannot be opened for append
+		t.Fatal(err)
+	}
+	var list string
+	run := uiDriveProgram(t, func(m tea.Model) tea.Model {
+		list = m.View()
+		return uiPress(m, "d")
+	})
+	if _, err := runRoot(t, "ui"); err != nil {
+		t.Fatalf("curia ui without a log file = %v, want the dashboard", err)
+	}
+	if !strings.Contains(list, "work:@1") {
+		t.Errorf("dashboard lists no session:\n%s", list)
+	}
+	lines := strings.Split(run.view, "\n")
+	if s := lines[len(lines)-1]; !strings.Contains(s, "log file cannot be opened") {
 		t.Errorf("status line = %q, want why d cannot answer", s)
 	}
 	if d := decisionsGet(t, db, "D-1"); d.Status != model.StatusOpen {

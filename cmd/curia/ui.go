@@ -64,10 +64,11 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 	// d answers through curia decide's path, so it refuses inside an agent
 	// session as curia decide does (spec section 7): no factory is set,
 	// and the dashboard says why when d is pressed.
+	// T16: without its log file the dashboard still starts, without d.
 	if mode == ui.ModePopup && refuseInsideAgent() == nil {
 		logger, closeLog, err := openLog(cfg.LogPath)
 		if err != nil {
-			return err
+			return runProgram(m.WithoutDecide("decisions cannot be answered here: the log file cannot be opened"), opts...)
 		}
 		defer func() { _ = closeLog() }()
 		dsrc, via := newDecideSource(st, client, logger), decideVia()

@@ -38,9 +38,15 @@ func decideHome(t *testing.T, specs ...decisionsSpec) (string, *tmux.Fake) {
 	seedSessions(t, db, decideSessionS1())
 	fake := useFakeTmux(t)
 	fake.Panes = []tmux.Pane{{ID: "%1", Session: "work", WindowID: "@1", ServerStart: at(8, 0)}}
+	fake.Screen = decideIdleScreen
 	decideResetFlags(t)
 	return db, fake
 }
+
+// decideIdleScreen is the bottom of Claude Code's screen with its input
+// prompt empty, the only screen an answer is typed into (Ruling 85).
+var decideIdleScreen = "✻ Cooked for 7s\n\n" + strings.Repeat("─", 80) + "\n❯\u00a0\n" +
+	strings.Repeat("─", 80) + "\n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
 
 // decideResetFlags restores the decide flag variables after the test.
 func decideResetFlags(t *testing.T) {
@@ -164,7 +170,7 @@ func TestDecideTextAndReasonFromStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "D-1 answered: use the queue · queued: agent is working; the Stop hook will deliver it\n"; out != want {
+	if want := "D-1 answered: use the queue · queued: agent is working; the Stop hook will deliver it, or tell the agent to call check_decision D-1\n"; out != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
 	d := decisionsGet(t, db, "D-1")
@@ -463,7 +469,7 @@ func TestDecideDeliveryFailureIsReportedNotFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decide = %v, want success", err)
 	}
-	if want := "D-1 answered: A: Postgres · queued: tmux unreachable; queued for the Stop hook\n"; out != want {
+	if want := "D-1 answered: A: Postgres · queued: tmux unreachable; queued for the Stop hook, or tell the agent to call check_decision D-1\n"; out != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
 	if d := decisionsGet(t, db, "D-1"); d.Status != model.StatusAnswered || d.Delivery != model.DeliveryQueued {
@@ -481,6 +487,7 @@ func decidePartialTmux(t *testing.T) *tmux.Fake {
 	fake := useFakeTmux(t)
 	fake.Panes = []tmux.Pane{{ID: "%1", Session: "work", WindowID: "@1", ServerStart: at(8, 0)}}
 	fake.SendKeysErr = tmux.ErrPartialSend
+	fake.Screen = decideIdleScreen
 	return fake
 }
 

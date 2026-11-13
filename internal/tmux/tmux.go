@@ -45,8 +45,20 @@ type Client interface {
 	// submitted; the caller must not retry by typing again. Any other error
 	// means nothing was typed, as far as tmux reported.
 	SendKeys(ctx context.Context, pane, text string) error
+	// CapturePane returns the visible text of the pane, one line per row
+	// and no escape sequences, and whether its window has synchronize-panes
+	// on. It refuses a pane that is not a pane id.
+	CapturePane(ctx context.Context, pane string) (Capture, error)
 	// Bell rings the pane's bell.
 	Bell(ctx context.Context, pane string) error
+}
+
+// Capture is what CapturePane read of a pane.
+type Capture struct {
+	Screen string // the visible text, one line per row
+	// Synchronized is set when the pane's window has synchronize-panes on:
+	// keys sent to the pane then reach every pane of the window.
+	Synchronized bool
 }
 
 // ErrNoWindow is wrapped by an error for a window that does not exist.

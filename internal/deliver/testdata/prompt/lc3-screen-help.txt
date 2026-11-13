@@ -1,0 +1,50 @@
+
+
+❯ Decision D-6 answered: option B, wide-beta. Reasoning: wide. Continue.
+
+⏺ OK D-6
+
+✻ Cooked for 1s · done 7:43 PM
+
+❯ Call check_decision for D-7 and tell me the answer in one line.
+
+  Called curia
+
+⏺ D-7 is answered: option A, "tiny-alpha", with the reasoning "tiny".
+
+✻ Sautéed for 5s · done 7:43 PM
+
+❯ Decision D-8 answered: option A, first-alpha. Reasoning: one. Continue.
+
+⏺ OK D-8
+
+⏺ Ran 1 stop hook
+  ⎿  Stop hook error: Curia: decisions answered while you were working.
+  Decision D-9 answered: option B [second-beta]. Reasoning: two. Continue.
+
+⏺ OK D-9
+
+✻ Cogitated for 2s · done 7:43 PM
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Help  General   Commands   Custom commands
+
+
+   Claude understands your codebase, makes edits with your permission, and executes commands — right from your terminal.
+
+   New here? Run /powerup to learn the features most people miss.
+
+   Shortcuts
+   ! for shell mode          double tap esc to clear input        ctrl + shift + _ to undo
+   / for commands            shift + tab to auto-accept edits     ctrl + z to suspend
+   @ for file paths          ctrl + x =/- to change effort        ctrl + v to paste images
+   /btw for side question    ctrl + o for verbose output          opt + p to switch model
+                             ctrl + t to toggle tasks             ctrl + s to stash prompt
+                             \⏎ for newline                       ctrl + g to edit in $EDITOR
+                                                                  /keybindings to customize
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+
+   Esc to cancel

@@ -681,8 +681,9 @@ func TestStdoutOnlyOnBlockedStop(t *testing.T) {
 	if res.stdout != want {
 		t.Errorf("Stop wrote\n %q\nwant\n %q", res.stdout, want)
 	}
-	if res.log != nil {
-		t.Errorf("log = %q, want none", res.log)
+	// M8: the one log line names what the Stop delivered.
+	if len(res.log) != 1 || !strings.Contains(res.log[0], `level=INFO msg="hook Stop delivered answers" ids=D-1`) {
+		t.Errorf("log = %q, want one INFO line naming D-1", res.log)
 	}
 	if got, via := hookDelivery(t, db, id); got != model.DeliveryDelivered || via != model.ViaStopHook {
 		t.Errorf("after Stop %s is %s via %q, want delivered via stop_hook", id, got, via)

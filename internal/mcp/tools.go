@@ -211,9 +211,13 @@ func rfc3339(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// decidedInstruction is the instruction for a decided ticket.
-func decidedInstruction(s model.DecisionStatus) string {
-	if s == model.StatusOverridden {
+// decidedInstruction is the instruction for decided ticket d: the
+// retraction when the user superseded it (Ruling 82).
+func decidedInstruction(d model.Decision) string {
+	switch {
+	case !d.SupersededAt.IsZero():
+		return decision.Retraction(d)
+	case d.Status == model.StatusOverridden:
 		return instrOverridden
 	}
 	return instrDecided
@@ -265,7 +269,8 @@ func (t *tools) search(ctx context.Context, args json.RawMessage, _ time.Time) (
 }
 
 // requestResult is request_decision's result. The answer fields are set
-// only for a duplicate that is already decided.
+// only for a duplicate that is already decided, and superseded only when
+// the user also retracted that answer.
 type requestResult struct {
 	ID          string               `json:"id"`
 	Status      model.DecisionStatus `json:"status"`
@@ -276,6 +281,7 @@ type requestResult struct {
 	AnswerKey   *string              `json:"answer_key,omitempty"`
 	Answer      *string              `json:"answer,omitempty"`
 	Reasoning   *string              `json:"reasoning,omitempty"`
+	Superseded  bool                 `json:"superseded,omitempty"`
 }
 
 // request is request_decision: it validates the normalized ticket, stores
@@ -396,8 +402,9 @@ func duplicateResult(d model.Decision) requestResult {
 		Instruction: instrOpenDuplicate,
 	}
 	if decision.IsDecided(d.Status) {
-		res.Instruction = decidedInstruction(d.Status)
+		res.Instruction = decidedInstruction(d)
 		res.AnswerKey, res.Answer, res.Reasoning = &d.AnswerKey, &d.Answer, &d.AnswerReasoning
+		res.Superseded = !d.SupersededAt.IsZero()
 	}
 	return res
 }
@@ -415,6 +422,8 @@ type checkResult struct {
 	Reasoning      string               `json:"reasoning"`
 	WithdrawReason string               `json:"withdraw_reason"`
 	Instruction    string               `json:"instruction"`
+	// Superseded is set when the user retracted the answer (Ruling 82).
+	Superseded bool `json:"superseded,omitempty"`
 }
 
 // check is check_decision. Asked by the ticket's own session, it also
@@ -440,11 +449,12 @@ func (t *tools) check(ctx context.Context, args json.RawMessage, now time.Time) 
 	case d.Status == model.StatusOpen:
 		instr = instrStillOpen
 	case decision.IsDecided(d.Status):
-		instr = decidedInstruction(d.Status)
+		instr = decidedInstruction(d)
 	}
 	return checkResult{
 		ID: d.ID, Status: d.Status, Mode: d.Mode, AnswerKey: d.AnswerKey, Answer: d.Answer,
 		Reasoning: d.AnswerReasoning, WithdrawReason: d.WithdrawReason, Instruction: instr,
+		Superseded: decision.IsDecided(d.Status) && !d.SupersededAt.IsZero(),
 	}, nil
 }
 

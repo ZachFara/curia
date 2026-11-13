@@ -30,6 +30,12 @@ func TestLineStripsEscapeSequences(t *testing.T) {
 		{"lone esc", "a\x1b", "a"},
 		{"esc esc", "a\x1b\x1b[31mb", "ab"},
 		{"csi aborted by esc", "a\x1b[31\x1b[0mb", "ab"},
+		// T1: an escape with intermediate bytes takes its final letter too.
+		{"charset designation", "a\x1b(Bb", "ab"},
+		{"charset designation G1", "a\x1b)0b", "ab"},
+		{"two intermediates", "a\x1b$(Bb", "ab"},
+		{"line size", "a\x1b#8b", "ab"},
+		{"unterminated nF", "a\x1b(", "a"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -55,7 +61,7 @@ func TestLineOneLine(t *testing.T) {
 }
 
 func TestLineDropsInvisible(t *testing.T) {
-	for _, r := range []rune{0x202E, 0x2066, 0x200B, 0xFEFF, 0x0000, 0x007F, 0x0085} {
+	for _, r := range []rune{0x202E, 0x2066, 0x200B, 0xFEFF, 0x0000, 0x007F} {
 		in := "a" + string(r) + "b"
 		if got := Line(in, 0); got != "ab" {
 			t.Errorf("Line(%q) = %q, want %q", in, got, "ab")
@@ -325,5 +331,20 @@ func TestLargeInputIsLinear(t *testing.T) {
 	}
 	if d := time.Since(start); d > 2*time.Second {
 		t.Errorf("1 MiB inputs took %v, want under 2s", d)
+	}
+}
+
+// T1: NEL, U+2028 and U+2029 separate lines: Line and Keys make them
+// spaces, so words either side are not glued, and Text line breaks.
+func TestLineSeparatorsSeparate(t *testing.T) {
+	in := "a\u2028b\u2029c\u0085d"
+	if got := Line(in, 0); got != "a b c d" {
+		t.Errorf("Line(%q) = %q, want %q", in, got, "a b c d")
+	}
+	if got, lossy := Keys(in, 0); got != "a b c d" || lossy {
+		t.Errorf("Keys(%q) = %q, %v, want %q, not lossy", in, got, lossy, "a b c d")
+	}
+	if got := Text(in, 0); got != "a\nb\nc\nd" {
+		t.Errorf("Text(%q) = %q, want %q", in, got, "a\nb\nc\nd")
 	}
 }

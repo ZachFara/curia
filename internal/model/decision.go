@@ -81,7 +81,10 @@ type Option struct {
 	Tradeoffs string `json:"tradeoffs"`
 }
 
-// Decision is one row of the decisions table.
+// Decision is one row of the decisions table. ConfirmedAt is, for an
+// answer delivered by send_keys, when the agent was seen to get it (its
+// prompt naming the decision was submitted, or it called check_decision);
+// zero while the typed answer is unconfirmed (Ruling 86).
 type Decision struct {
 	N                                          int64
 	ID, SessionID, TaskID, Repo                string
@@ -101,7 +104,7 @@ type Decision struct {
 	Delivery                                   Delivery
 	DeliveredVia                               DeliveryVia
 	CreatedAt, ExpiresAt, AnsweredAt, ClosedAt time.Time
-	SupersededAt, DeliveredAt                  time.Time
+	SupersededAt, DeliveredAt, ConfirmedAt     time.Time
 }
 
 // Ticket is an open decision with what the queue shows about its session.
@@ -127,8 +130,9 @@ type Outcome struct {
 	Note     string // "" when delivered; otherwise why it is still queued or needs none
 }
 
-// OpenCount counts open tickets by mode.
-type OpenCount struct{ Blocking, Assume int }
+// OpenCount counts open tickets by mode, and the answers not yet delivered
+// to the agent (queued, or typed and not confirmed).
+type OpenCount struct{ Blocking, Assume, Undelivered int }
 
 // DecisionEdit rescopes and/or supersedes a decided ticket.
 type DecisionEdit struct {

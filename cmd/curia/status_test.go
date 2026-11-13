@@ -86,13 +86,15 @@ func TestBadgeIgnoresAssumeAndPastDeadline(t *testing.T) {
 			{"live", model.ModeAssume, "2026-11-11T08:00:00" + z, "2026-11-12T08:00:00" + z, decisionsEnd{}},
 			{"past deadline", model.ModeAssume, "2026-11-11T09:00:00" + z, "2026-11-11T11:00:00" + z, decisionsEnd{}},
 		},
+		// D-4's answer is queued, which Q counts (Ruling 89).
 		"none open": decisionsSpecs()[2:],
 	} {
 		t.Run(name, func(t *testing.T) {
 			db := decisionsHome(t, specs...)
 			seedSessions(t, db, statusSession(model.StateNeedsDecision))
-			if out, err := runRoot(t, "status"); err != nil || out != "" {
-				t.Errorf("status = %q, %v, want no D part (and nothing else)", out, err)
+			want := map[string]string{"assume only": "", "none open": "Q1"}[name]
+			if out, err := runRoot(t, "status"); err != nil || out != want {
+				t.Errorf("status = %q, %v, want %q: no D part", out, err, want)
 			}
 			if name != "assume only" {
 				return

@@ -120,7 +120,7 @@ func realTmux(ctx context.Context, t *testing.T) func(args ...string) (string, e
 		return string(out), err
 	}
 	// Cleanup runs after the caller's deferred cancel, so it must not use ctx.
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", realSocket, "kill-server").Run() })
+	t.Cleanup(func() { killServer(realSocket) })
 	_, _ = tm("kill-server") // clear a leftover server from an aborted run
 	if out, err := tm("new-session", "-d", "-s", "t", "-n", "win dow"); err != nil {
 		t.Fatalf("new-session: %v: %s", err, out)
@@ -255,7 +255,7 @@ func focusServers(ctx context.Context, t *testing.T) (tm func(args ...string) (s
 	}
 	t.Cleanup(func() {
 		for _, s := range []string{outer, inner} {
-			_ = exec.Command("tmux", "-L", s, "kill-server").Run()
+			killServer(s)
 		}
 	})
 	for _, s := range []string{outer, inner} {
@@ -438,13 +438,14 @@ func TestSendKeysStopsAtFirstFailure(t *testing.T) {
 	}
 }
 
-// TestSendKeysWhenContextEnds: the context ends during step cancelAt (1
-// copy-mode, 2 text, 3 Enter). The runner records every step SendKeys asks
-// for and acts like exec.CommandContext: it refuses to start one once the
-// context is done, and with killed set, the step running when the context
-// ends fails as a killed process would, after tmux may already have typed the
-// text (Ruling 58). SendKeys itself must not ask for the text step once the
-// context is done.
+// TestSendKeysWhenContextEnds: the caller's context ends during step
+// cancelAt (1 copy-mode, 2 text, 3 Enter). The runner records every step
+// SendKeys asks for and acts like exec.CommandContext: it refuses to start one
+// once the step's context is done, and with killed set, the step running when
+// its context ends fails as a killed process would, after tmux may already
+// have typed the text (Ruling 58). SendKeys itself must not ask for the text
+// step once the context is done; once the text step has succeeded, Enter runs
+// whatever happens to the caller's context (Ruling 81).
 func TestSendKeysWhenContextEnds(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -452,20 +453,24 @@ func TestSendKeysWhenContextEnds(t *testing.T) {
 		killed   bool
 		runs     int
 		partial  bool
+		canceled bool // the error wraps context.Canceled; false: no error
 	}{
-		{name: "during copy-mode, which fails", cancelAt: 1, killed: true, runs: 1},
-		{name: "after copy-mode, before the text step starts", cancelAt: 1, runs: 1},
-		{name: "during the text step, which is killed", cancelAt: 2, killed: true, runs: 2, partial: true},
-		{name: "after the text step, so Enter never starts", cancelAt: 2, runs: 3, partial: true},
-		{name: "during Enter, which is killed", cancelAt: 3, killed: true, runs: 3, partial: true},
+		{name: "during copy-mode, which fails", cancelAt: 1, killed: true, runs: 1, canceled: true},
+		{name: "after copy-mode, before the text step starts", cancelAt: 1, runs: 1, canceled: true},
+		{name: "during the text step, which is killed", cancelAt: 2, killed: true, runs: 2, partial: true, canceled: true},
+		{name: "after the text step, so Enter still runs", cancelAt: 2, runs: 3},
+		{name: "during Enter, which is not killed", cancelAt: 3, killed: true, runs: 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			r := &cancellingRunner{cancel: cancel, cancelAt: tc.cancelAt, killed: tc.killed}
 			err := (&execClient{runner: r.run}).SendKeys(ctx, "%5", "hello")
-			if !errors.Is(err, context.Canceled) {
+			if tc.canceled && !errors.Is(err, context.Canceled) {
 				t.Errorf("err = %v, want it to wrap context.Canceled", err)
+			}
+			if !tc.canceled && err != nil {
+				t.Errorf("err = %v, want nil: Enter ran after the text step", err)
 			}
 			if got := errors.Is(err, ErrPartialSend); got != tc.partial {
 				t.Errorf("errors.Is(err, ErrPartialSend) = %v, want %v (err %v)", got, tc.partial, err)
@@ -492,11 +497,70 @@ func (r *cancellingRunner) run(ctx context.Context, args ...string) (string, err
 	}
 	if len(r.runs) == r.cancelAt {
 		r.cancel()
-		if r.killed {
+		if r.killed && ctx.Err() != nil {
 			return "", fmt.Errorf("tmux %s: signal: killed: %w", args[0], ctx.Err())
 		}
 	}
 	return "", nil
+}
+
+// TestSendKeysStepBudgets: each of SendKeys's three tmux invocations gets
+// its own deadline, the copy-mode and text steps at most keysStepTimeout away
+// and Enter at most enterTimeout away, whatever the caller's deadline; a
+// shorter caller deadline shortens the first two steps but not Enter, and a
+// caller canceled after the text step leaves Enter's context live (Ruling 81).
+func TestSendKeysStepBudgets(t *testing.T) {
+	caller, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	steps := budgetSteps(caller, t, cancel)
+	for k, s := range steps[:2] {
+		s.within(t, fmt.Sprintf("step %d", k+1), 0, 400*time.Millisecond)
+	}
+	if steps[2].err != nil {
+		t.Errorf("Enter ran on a done context: %v", steps[2].err)
+	}
+	steps[2].within(t, "Enter", time.Second, enterTimeout)
+
+	for k, s := range budgetSteps(context.Background(), t, func() {})[:2] {
+		s.within(t, fmt.Sprintf("no caller deadline: step %d", k+1), 0, keysStepTimeout)
+	}
+}
+
+// budgetStep is what one tmux invocation of SendKeys saw of its context.
+type budgetStep struct {
+	left time.Duration // until the deadline
+	has  bool          // a deadline is set
+	err  error         // ctx.Err() when the step started
+}
+
+// within fails unless the step had a deadline more than lo and at most hi away.
+func (s budgetStep) within(t *testing.T, what string, lo, hi time.Duration) {
+	t.Helper()
+	if !s.has || s.left <= lo || s.left > hi {
+		t.Errorf("%s: deadline in %v (set %v), want in (%v, %v]", what, s.left, s.has, lo, hi)
+	}
+}
+
+// budgetSteps runs SendKeys on ctx, calling afterText once the text step is
+// done, and returns what each of its three steps saw.
+func budgetSteps(ctx context.Context, t *testing.T, afterText func()) []budgetStep {
+	t.Helper()
+	var steps []budgetStep
+	runner := func(sctx context.Context, _ ...string) (string, error) {
+		d, ok := sctx.Deadline()
+		steps = append(steps, budgetStep{time.Until(d), ok, sctx.Err()})
+		if len(steps) == 2 {
+			afterText()
+		}
+		return "", nil
+	}
+	if err := (&execClient{runner: runner}).SendKeys(ctx, "%5", "hello"); err != nil {
+		t.Fatalf("SendKeys = %v, want nil", err)
+	}
+	if len(steps) != 3 {
+		t.Fatalf("steps = %d, want 3", len(steps))
+	}
+	return steps
 }
 
 func TestSendKeysAcceptsEightHundredRunes(t *testing.T) {
@@ -776,5 +840,109 @@ func TestBellUnknownPaneFails(t *testing.T) {
 	realTmux(ctx, t)
 	if err := NewExec(realSocket).Bell(ctx, "%99"); err == nil {
 		t.Fatal("Bell(%99): want an error for a missing pane")
+	}
+}
+
+func TestCapturePaneRefusesBadPane(t *testing.T) {
+	for _, pane := range []string{"", "%", "1", "%1;kill-server", "t:0"} {
+		c, r := recordingClient()
+		if _, err := c.CapturePane(context.Background(), pane); err == nil {
+			t.Errorf("CapturePane(%q): want an error", pane)
+		}
+		if len(r.runs) != 0 {
+			t.Errorf("CapturePane(%q) ran tmux: %v", pane, r.runs)
+		}
+	}
+}
+
+func TestCapturePaneInRealTmux(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	id, err := tm("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "t:", "/bin/sh", "-c", `printf '%s\n' "$1"; exec cat`, "sh", "❯ draft #{pane_id} %H")
+	if err != nil {
+		t.Fatalf("new-window: %v: %s", err, id)
+	}
+	pane := strings.TrimSpace(id)
+	c := NewExec(realSocket)
+	var capt Capture
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(capt.Screen, "❯ draft"); time.Sleep(20 * time.Millisecond) {
+		if capt, err = c.CapturePane(ctx, pane); err != nil {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("CapturePane = %q, want the printed line", capt.Screen)
+		}
+	}
+	if !strings.Contains(capt.Screen, "❯ draft #{pane_id} %H\n") || strings.Contains(capt.Screen, "\x1b") {
+		t.Errorf("CapturePane = %q, want the line as printed, with no escapes", capt.Screen)
+	}
+	if capt.Synchronized {
+		t.Error("CapturePane: Synchronized set for a window without synchronize-panes")
+	}
+	if _, err := c.CapturePane(ctx, "%99"); err == nil {
+		t.Error("CapturePane(%99): want an error for a missing pane")
+	}
+}
+
+// Re-review N5: with synchronize-panes on, send-keys to one pane reaches
+// every pane of the window, so CapturePane says so.
+func TestCapturePaneReportsSynchronizePanes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	id, err := tm("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "t:", "/bin/sh", "-c", "exec cat")
+	if err != nil {
+		t.Fatalf("new-window: %v: %s", err, id)
+	}
+	pane := strings.TrimSpace(id)
+	for _, args := range [][]string{
+		{"split-window", "-d", "-t", pane, "/bin/sh", "-c", "exec cat"},
+		{"set-window-option", "-t", pane, "synchronize-panes", "on"},
+	} {
+		if out, terr := tm(args...); terr != nil {
+			t.Fatalf("%s: %v: %s", args[0], terr, out)
+		}
+	}
+	capt, err := NewExec(realSocket).CapturePane(ctx, pane)
+	if err != nil || !capt.Synchronized {
+		t.Errorf("CapturePane = synchronized %v, %v; want true", capt.Synchronized, err)
+	}
+}
+
+// CapturePane refuses an answer that does not name the pane asked about,
+// as tmux gives for an unknown target, before capturing anything.
+func TestCapturePaneRefusesUnknownPaneAnswer(t *testing.T) {
+	for _, out := range []string{"", "\t\n", "%6\t0\n", "%5\n"} {
+		c, r := recordingClient()
+		r.out = out
+		if _, err := c.CapturePane(context.Background(), "%5"); err == nil {
+			t.Errorf("answer %q: want an error", out)
+		}
+		if len(r.runs) != 1 {
+			t.Errorf("answer %q: runs = %q, want only the display-message", out, r.runs)
+		}
+	}
+}
+
+// killServer stops the private test server on socket and removes its
+// socket file, which tmux leaves behind. The directory is asked of the
+// server before it goes, or else built from TMUX_TMPDIR as tmux builds it,
+// and only the entry named socket in it is removed (os.Root keeps the
+// removal inside that directory).
+func killServer(socket string) {
+	out, err := exec.Command("tmux", "-L", socket, "display-message", "-p", "#{socket_path}").Output()
+	dir := filepath.Dir(strings.TrimSpace(string(out)))
+	if err != nil || dir == "." {
+		tmp := os.Getenv("TMUX_TMPDIR")
+		if tmp == "" {
+			tmp = "/tmp"
+		}
+		dir = filepath.Join(tmp, fmt.Sprintf("tmux-%d", os.Getuid()))
+	}
+	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	if root, rerr := os.OpenRoot(dir); rerr == nil {
+		_ = root.Remove(socket)
+		_ = root.Close()
 	}
 }

@@ -19,6 +19,10 @@ import (
 	"github.com/ZachFara/curia/internal/ui"
 )
 
+// tooSoon is the notice for a key ignored because it came too soon
+// (Ruling 88, defect 11: it does not say the queue changed).
+const tooSoon = "too soon; pause, then press again"
+
 // decideNow is the fixed clock of the decide view tests.
 var decideNow = time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
 
@@ -63,7 +67,7 @@ func (f *fakeDecideSource) Answer(_ context.Context, id string, a model.Answer) 
 	}
 	d := f.tickets[i].Decision
 	f.tickets = slices.Delete(f.tickets, i, i+1)
-	d.AnswerKey, d.Answer = a.Key, a.Text
+	d.AnswerKey, d.Answer, d.Status = a.Key, a.Text, model.StatusAnswered
 	return model.Outcome{Decision: d, Note: f.note}, nil
 }
 
@@ -141,8 +145,8 @@ func (c *testClock) advance(d time.Duration) { c.set(c.now().Add(d)) }
 var decideClock testClock
 
 // keyGap is how far dpress moves the clock before each key: the pace of a
-// person reading, longer than the quiet period after an answer.
-const keyGap = time.Second
+// person reading, longer than the quiet period after an answer (2 s).
+const keyGap = 2500 * time.Millisecond
 
 // newDecide returns a decide view over src after its first refresh, with
 // the clock moved on by keyGap: the first ticket has been read.
@@ -872,7 +876,7 @@ func TestDecideBurstMoveThenAnswerIgnored(t *testing.T) {
 	m := newDecide(t, src, popup)
 	m = send(t, m, dkey("j2")) // one message with both runes
 	wantCalls(t, src)
-	if s := lastLine(m); s != "queue changed; press again" {
+	if s := lastLine(m); s != tooSoon {
 		t.Errorf("status line = %q, want the notice", s)
 	}
 	dpress(t, m, "2")
@@ -1134,7 +1138,7 @@ func TestOwnAnswerQuietPeriod(t *testing.T) {
 	src.set(assumeTickets(2)...)
 	m := newDecide(t, src, popup)
 	m = send(t, m, dkey("1"))
-	decideClock.advance(800 * time.Millisecond)
+	decideClock.advance(2100 * time.Millisecond) // after the 2 s quiet period (re-review N2)
 	send(t, m, dkey("1"))
 	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}},
 		answerCall{"D-2", model.Answer{Key: "A", Via: model.AnsweredPopup}})
@@ -1143,15 +1147,15 @@ func TestOwnAnswerQuietPeriod(t *testing.T) {
 	src.set(assumeTickets(2)...)
 	m = newDecide(t, src, popup)
 	m = send(t, m, dkey("1"))
-	for _, d := range []time.Duration{300, 700} { // the second lands after the first period would have ended
+	for _, d := range []time.Duration{300, 1900} { // the second lands after the first period would have ended
 		decideClock.advance(d * time.Millisecond)
 		m = send(t, m, dkey("1"))
-		if s := lastLine(m); s != "queue changed; press again" {
+		if s := lastLine(m); s != tooSoon {
 			t.Errorf("+%dms: status line = %q, want the notice", d, s)
 		}
 	}
 	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
-	decideClock.advance(800 * time.Millisecond)
+	decideClock.advance(2100 * time.Millisecond)
 	send(t, m, dkey("1"))
 	if got := src.calls(); len(got) != 2 || got[1].id != "D-2" {
 		t.Errorf("calls = %+v, want D-2 answered after the quiet period", got)
@@ -1183,7 +1187,7 @@ func TestRefreshChangeDuringQuietNeedsOwnPress(t *testing.T) {
 	m = reload(t, m)
 	decideClock.advance(100 * time.Millisecond)
 	m = send(t, m, dkey("1")) // in the quiet period: ignored, restarts it
-	decideClock.advance(800 * time.Millisecond)
+	decideClock.advance(2100 * time.Millisecond)
 	m = send(t, m, dkey("1")) // after it: ignored for the change
 	if s := lastLine(m); s != "queue changed; press again" {
 		t.Errorf("status line = %q, want the notice:\n%s", s, m.View())
@@ -1247,6 +1251,7 @@ func TestConfirmNeedsDwell(t *testing.T) {
 	if s := lastLine(m); s != "answer canceled" {
 		t.Errorf("status line = %q, want the cancel", s)
 	}
+	decideClock.advance(750 * time.Millisecond) // not a repeat of the first Enter (Ruling 88)
 	m = send(t, m, dkey("enter"))
 	decideClock.advance(250 * time.Millisecond)
 	send(t, m, dkey("y"))
@@ -1261,8 +1266,10 @@ func TestConfirmNeedsDwellAfterReasoning(t *testing.T) {
 	m := newDecide(t, src, popup)
 	m = send(t, m, dkey("1"), dkey("enter"), dkey("y"))
 	wantCalls(t, src)
-	if s := lastLine(m); s != "answer canceled" {
-		t.Errorf("status line = %q, want the cancel", s)
+	// The Enter came inside the dwell of the reasoning input, so it was
+	// ignored (Ruling 88) and the "y" was typed into the input.
+	if s := lastLine(m); s != "reasoning for B (enter sends): y_" && s != "reasoning for A (enter sends): y_" {
+		t.Errorf("status line = %q, want the reasoning input holding y", s)
 	}
 }
 
@@ -1273,7 +1280,7 @@ func TestMoveThenAnswerNeedsDwell(t *testing.T) {
 	m := newDecide(t, src, popup)
 	m = send(t, m, dkey("j"), dkey("2"))
 	wantCalls(t, src)
-	if s := lastLine(m); s != "queue changed; press again" {
+	if s := lastLine(m); s != tooSoon {
 		t.Errorf("status line = %q, want the notice", s)
 	}
 	decideClock.advance(250 * time.Millisecond)
@@ -1289,7 +1296,7 @@ func TestJustOpenedIgnoresAnswerKey(t *testing.T) {
 	m := reload(t, ui.NewDecide(src, decideClock.now, popup))
 	for _, k := range []string{"1", "enter", "w"} {
 		m = send(t, m, dkey(k))
-		if s := lastLine(m); s != "queue changed; press again" {
+		if s := lastLine(m); s != tooSoon {
 			t.Errorf("%q: status line = %q, want the notice", k, s)
 		}
 	}
@@ -1390,13 +1397,13 @@ func TestHeldKeyAcrossRefreshChangeNeverAnswers(t *testing.T) {
 		decideClock.advance(10 * time.Millisecond)
 		m = holdEnter(t, m, 2*time.Second)
 		wantCalls(t, src)
-		if s := lastLine(m); s != "queue changed; press again" {
+		if s := lastLine(m); s != tooSoon {
 			t.Errorf("%s: status line = %q after the hold, want the notice", mode, s)
 		}
 		decideClock.advance(250 * time.Millisecond)
 		m = send(t, m, dkey("enter")) // past the dwell, inside the quiet period
 		wantCalls(t, src)
-		if s := lastLine(m); s != "queue changed; press again" {
+		if s := lastLine(m); s != tooSoon {
 			t.Errorf("%s: status line = %q 250ms after the hold, want the notice", mode, s)
 		}
 		decideClock.advance(750 * time.Millisecond)
@@ -1425,7 +1432,7 @@ func TestDroppedSubmissionRestartsDwell(t *testing.T) {
 	decideClock.advance(keyGap)
 	m = holdEnter(t, m, time.Second)
 	wantCalls(t, src)
-	if s := lastLine(m); s != "queue changed; press again" {
+	if s := lastLine(m); s != tooSoon {
 		t.Errorf("status line = %q, want the notice and no prompt", s)
 	}
 }
@@ -1491,7 +1498,7 @@ func TestHeldKeyWithRepeatDelayAcrossRefreshChange(t *testing.T) {
 			if got := src.calls(); len(got) != 0 {
 				t.Errorf("%s: answered during the hold: %+v", name, got)
 			}
-			if s := lastLine(m); s != "queue changed; press again" {
+			if s := lastLine(m); s != tooSoon {
 				t.Errorf("%s: status line = %q after the hold, want the notice", name, s)
 			}
 		}
@@ -1523,7 +1530,7 @@ func TestRefreshChangeStartsQuietPeriod(t *testing.T) {
 	for _, d := range []time.Duration{300, 500} { // the second lands after the first period would have ended
 		decideClock.advance(d * time.Millisecond)
 		m = send(t, m, dkey("1"))
-		if s := lastLine(m); s != "queue changed; press again" {
+		if s := lastLine(m); s != tooSoon {
 			t.Errorf("+%dms: status line = %q, want the notice", d, s)
 		}
 	}
@@ -1584,8 +1591,225 @@ func TestDroppedSubmissionStartsQuietPeriod(t *testing.T) {
 		if got := src.calls(); len(got) != 0 {
 			t.Errorf("first repeat at %dms: answered during the hold: %+v", delay, got)
 		}
-		if s := lastLine(m); s != "queue changed; press again" {
+		if s := lastLine(m); s != tooSoon {
 			t.Errorf("first repeat at %dms: status line = %q, want the notice and no prompt", delay, s)
+		}
+	}
+}
+
+// typingGap is the pace of typing at normal speed.
+const typingGap = 80 * time.Millisecond
+
+// typeText sends each rune of s as its own key, typingGap apart.
+func typeText(t *testing.T, m tea.Model, s string) tea.Model {
+	t.Helper()
+	for _, r := range s {
+		decideClock.advance(typingGap)
+		m = send(t, m, dkey(string(r)))
+	}
+	return m
+}
+
+// Ruling 88, defect 4: the live check's sequence. A free-text answer to a
+// blocking ticket asks for the reasoning, as an option answer does, so the
+// reason typed after it ("Use 2 tabs", out of habit) is the reasoning, and
+// never commands on the next ticket (it overrode an assume ticket with "2"
+// and set its scope with the "s").
+func TestDefect4FreeTextAnswerAsksForReason(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(ticket(16, model.ModeBlocking, model.ReversCheap), ticket(13, model.ModeAssume, model.ReversCheap))
+	m := newDecide(t, src, popup)
+	m = dpress(t, m, "w")
+	m = typeText(t, m, "Name it curia-cli")
+	m = dpress(t, m, "enter")
+	wantCalls(t, src) // waiting for the reasoning
+	if s := lastLine(m); !strings.HasPrefix(s, `reasoning for "Name it curia-cli`) {
+		t.Errorf("status line = %q, want the reasoning input", s)
+	}
+	decideClock.advance(1040 * time.Millisecond)
+	m = typeText(t, m, "Use 2 tabs")
+	decideClock.advance(80 * time.Millisecond)
+	send(t, m, dkey("enter"))
+	wantCalls(t, src, answerCall{"D-16", model.Answer{Text: "Name it curia-cli", Reasoning: "Use 2 tabs", Via: model.AnsweredPopup}})
+}
+
+// Ruling 88, defect 4, where no reason is asked (an assume ticket): text
+// typed into the queue 1.04 s after the answer (the live check's gap) falls
+// in the quiet period, whose every ignored key restarts it, so its "s" and
+// "2" neither rescope nor answer the next ticket.
+func TestDefect4TypingAfterAnswerActsOnNothing(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(ticket(13, model.ModeAssume, model.ReversCheap), ticket(14, model.ModeAssume, model.ReversCheap))
+	m := newDecide(t, src, popup)
+	m = dpress(t, m, "2")
+	wantCalls(t, src, answerCall{"D-13", model.Answer{Key: "B", Via: model.AnsweredPopup}})
+	decideClock.advance(1040 * time.Millisecond)
+	m = typeText(t, m, "Use 2 tabs")
+	decideClock.advance(80 * time.Millisecond)
+	m = send(t, m, dkey("enter"))
+	wantCalls(t, src, answerCall{"D-13", model.Answer{Key: "B", Via: model.AnsweredPopup}})
+	if strings.Contains(m.View(), "staged scope") {
+		t.Errorf("typed text staged a scope:\n%s", m.View())
+	}
+}
+
+// Ruling 88, defect 5 (re-review N1): a held Enter on a blocking ticket
+// with no staged reasoning answers nothing, whether its repeats start at
+// once (the live check's 15 Enters 30 ms apart) or after a keyboard's
+// repeat delay of 400 to 660 ms. The first Enter opens the reasoning input;
+// every repeat comes within the quiet period of the one before. Once the key
+// is let go, the input is still open, waiting for a reason.
+func TestDefect5HeldEnterAnswersNothing(t *testing.T) {
+	for _, first := range []time.Duration{30, 400, 500, 660} {
+		src := &fakeDecideSource{}
+		src.set(ticket(18, model.ModeBlocking, model.ReversCheap), ticket(19, model.ModeBlocking, model.ReversCheap))
+		m := newDecide(t, src, popup)
+		m = send(t, m, dkey("enter"))
+		decideClock.advance(first * time.Millisecond)
+		for range 30 {
+			m = send(t, m, dkey("enter"))
+			decideClock.advance(30 * time.Millisecond)
+		}
+		if got := src.calls(); len(got) != 0 {
+			t.Errorf("first repeat after %dms: the held Enter answered %+v", first, got)
+		}
+		decideClock.advance(time.Second) // let go
+		if s := lastLine(m); !strings.HasPrefix(s, "reasoning for B (enter sends): ") {
+			t.Errorf("first repeat after %dms: status line = %q, want the reasoning input still open", first, s)
+		}
+		m = typeText(t, m, "fits")
+		decideClock.advance(time.Second)
+		send(t, m, dkey("enter"))
+		wantCalls(t, src, answerCall{"D-18", model.Answer{Key: "B", Reasoning: "fits", Via: model.AnsweredPopup}})
+	}
+}
+
+// Ruling 88, defect 11: an answer key pressed the moment the view draws is
+// refused with a notice that does not say the queue changed.
+func TestDefect11RefusalSaysTooSoon(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(assumeTickets(1)...)
+	decideClock.set(decideNow)
+	m := reload(t, ui.NewDecide(src, decideClock.now, popup))
+	m = send(t, m, dkey("1"))
+	if s := lastLine(m); s != tooSoon {
+		t.Errorf("status line = %q, want %q", s, tooSoon)
+	}
+}
+
+// M1: Ctrl+C with an answer in flight waits for it, standalone and
+// embedded, then quits the program.
+func TestCtrlCWaitsForAnswerInFlight(t *testing.T) {
+	for _, opts := range []ui.DecideOptions{popup, {Via: model.AnsweredPopup, Embedded: true}} {
+		src := &fakeDecideSource{}
+		src.set(assumeTickets(2)...)
+		m := newDecide(t, src, opts)
+		m, answer := m.Update(dkey("1"))
+		m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		if cmd != nil {
+			t.Fatalf("embedded %v: Ctrl+C quit with an answer in flight", opts.Embedded)
+		}
+		if s := lastLine(m); s != "closing once the answer is sent" {
+			t.Errorf("embedded %v: status line = %q", opts.Embedded, s)
+		}
+		_, cmd = m.Update(answer())
+		if cmd == nil {
+			t.Fatalf("embedded %v: nothing after the answer", opts.Embedded)
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Errorf("embedded %v: did not quit after the answer", opts.Embedded)
+		}
+	}
+}
+
+// M2: an outcome with a note is shown, not closed over, when q was pressed
+// during the flight; the note is wrapped over several lines in the error
+// style when the answer was not delivered, and says the stored status.
+func TestOutcomeNoteShownInFull(t *testing.T) {
+	src := &fakeDecideSource{note: "typing may not have finished: check the agent's pane (tmux session work, window @7); " +
+		"press Enter if the line is there, otherwise tell it to call check_decision D-1"}
+	src.set(assumeTickets(2)...)
+	m := newDecide(t, src, popup)
+	m = send(t, m, tea.WindowSizeMsg{Width: 60, Height: 30})
+	m, answer := m.Update(dkey("1"))
+	m, _ = m.Update(dkey("q"))
+	m, cmd := m.Update(answer())
+	if cmd != nil {
+		if _, quit := cmd().(tea.QuitMsg); quit {
+			t.Fatal("closed over the outcome's note")
+		}
+	}
+	view := m.View()
+	for _, want := range []string{"D-1 answered: A · typing may not have finished", "check_decision D-1"} {
+		if !strings.Contains(strings.Join(strings.Fields(view), " "), want) {
+			t.Errorf("view lacks %q:\n%s", want, view)
+		}
+	}
+	for i, l := range strings.Split(view, "\n") {
+		if w := lipgloss.Width(l); w > 60 {
+			t.Errorf("line %d is %d cells wide, over 60: %q", i, w, l)
+		}
+	}
+	if n := len(strings.Split(view, "\n")); n > 30 {
+		t.Errorf("view is %d lines, over the window's 30", n)
+	}
+}
+
+// M6: the detail line says who asks: the tmux session and window, the
+// branch, and the session's state when it is not live.
+func TestDetailShowsAsker(t *testing.T) {
+	tk := ticket(1, model.ModeBlocking, model.ReversCostly)
+	tk.TmuxSession, tk.TmuxWindow, tk.Branch, tk.SessionState = "work", "@7", "feat/queue", model.StateEnded
+	src := &fakeDecideSource{}
+	src.set(tk)
+	if view := newDecide(t, src, popup).View(); !strings.Contains(view, "costly · blocking · scope task · from work:@7 · on feat/queue · session ended") {
+		t.Errorf("detail line does not say who asks:\n%s", view)
+	}
+	tk.SessionState = model.StateIdle
+	src.set(tk)
+	if view := newDecide(t, src, popup).View(); strings.Contains(view, "session idle") || !strings.Contains(view, "from work:@7") {
+		t.Errorf("a live session's state is shown, or the asker is not:\n%s", view)
+	}
+}
+
+// Ruling 88, re-review N2: text typed or pasted out of habit 1.04 s after an
+// answer that asked for no reason never moves, stages or answers, also when
+// it begins with a command key ("2", "w") or is pasted and followed by
+// Enter. Each sequence leaves only the first answer.
+func TestDefect4HabitTextAfterAnswerActsOnNothing(t *testing.T) {
+	type step func(tea.Model) tea.Model
+	typed := func(text string) step {
+		return func(m tea.Model) tea.Model {
+			m = typeText(t, m, text)
+			decideClock.advance(typingGap)
+			return send(t, m, dkey("enter"))
+		}
+	}
+	pasted := func(m tea.Model) tea.Model {
+		m = send(t, m, paste("Use 2 tabs"))
+		decideClock.advance(300 * time.Millisecond)
+		return send(t, m, dkey("enter"))
+	}
+	for name, after := range map[string]step{
+		"2 tabs please":           typed("2 tabs please"),
+		"we use tabs, Enter":      typed("we use tabs"),
+		"pasted reason, Enter":    pasted,
+		"Use 2 tabs (no command)": typed("Use 2 tabs"),
+	} {
+		src := &fakeDecideSource{}
+		src.set(ticket(13, model.ModeAssume, model.ReversCheap), ticket(14, model.ModeAssume, model.ReversCheap))
+		m := newDecide(t, src, popup)
+		m = dpress(t, m, "2")
+		decideClock.advance(1040 * time.Millisecond)
+		m = after(m)
+		if got := src.calls(); len(got) != 1 || got[0].id != "D-13" {
+			t.Errorf("%s: answers = %+v, want only D-13's", name, got)
+		}
+		if view := m.View(); strings.Contains(view, "staged scope") || strings.Contains(view, "staged reasoning") {
+			t.Errorf("%s: typed text staged something:\n%s", name, view)
+		}
+		if s := lastLine(m); strings.HasPrefix(s, "answer (enter sends)") {
+			t.Errorf("%s: a free-text input was opened: %q", name, s)
 		}
 	}
 }

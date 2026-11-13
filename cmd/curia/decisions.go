@@ -43,12 +43,13 @@ func init() {
 		Use:   "ls",
 		Short: "List decision tickets",
 		Long: "Expires assume tickets that are due, then lists tickets by --status: open\n" +
-			"(the default), decided (answered, confirmed, overridden), closed (withdrawn,\n" +
-			"expired) or all, in allocation (id) order. --json prints a JSON array.",
+			"(the default; with it every answer the agent has not got yet), decided\n" +
+			"(answered, confirmed, overridden), closed (withdrawn, expired) or all, in\n" +
+			"allocation (id) order. --json prints a JSON array.",
 		Args: cobra.NoArgs,
 		RunE: runDecisionsLs,
 	}
-	ls.Flags().StringVar(&decisionsStatus, "status", "open", "open, decided, closed or all")
+	ls.Flags().StringVar(&decisionsStatus, "status", "open", "open (and answers not yet delivered), decided, closed or all")
 	ls.Flags().BoolVar(&decisionsJSON, "json", false, "print a JSON array instead of a table")
 	edit := &cobra.Command{
 		Use:   "edit <id>",
@@ -107,14 +108,24 @@ func runDecisionsLs(cmd *cobra.Command, _ []string) error {
 	if _, err = st.ExpireDecisions(cmd.Context(), now); err != nil {
 		return err
 	}
-	ds, err := st.ListDecisions(cmd.Context(), store.DecisionFilter{Statuses: statuses})
+	// The default listing also shows the answers the agent has not got yet:
+	// an agent may be waiting on one with nothing else showing it (M3).
+	ds, err := st.ListDecisions(cmd.Context(), store.DecisionFilter{Statuses: statuses, Undelivered: decisionsStatus == "open"})
 	if err != nil {
 		return err
 	}
 	if decisionsJSON {
 		return decisionsPrintJSON(cmd.OutOrStdout(), ds)
 	}
-	return decisionsPrintTable(cmd.OutOrStdout(), ds, now)
+	sessions, err := st.ListSessions(cmd.Context(), store.ListFilter{IncludeEnded: true})
+	if err != nil {
+		return err
+	}
+	states := make(map[string]model.State, len(sessions))
+	for _, s := range sessions {
+		states[s.ID] = s.State
+	}
+	return decisionsPrintTable(cmd.OutOrStdout(), ds, states, now)
 }
 
 // decisionsRow is one ticket in `curia decisions ls --json`. Its keys are
@@ -153,6 +164,7 @@ type decisionsRow struct {
 	ClosedAt       *time.Time           `json:"closed_at"`
 	SupersededAt   *time.Time           `json:"superseded_at"`
 	DeliveredAt    *time.Time           `json:"delivered_at"`
+	ConfirmedAt    *time.Time           `json:"confirmed_at"`
 }
 
 func decisionsToRow(d model.Decision) decisionsRow {
@@ -173,6 +185,7 @@ func decisionsToRow(d model.Decision) decisionsRow {
 		ArgsHash: d.ArgsHash, Delivery: d.Delivery, DeliveredVia: d.DeliveredVia,
 		CreatedAt: jsonTime(d.CreatedAt), ExpiresAt: jsonTime(d.ExpiresAt), AnsweredAt: jsonTime(d.AnsweredAt),
 		ClosedAt: jsonTime(d.ClosedAt), SupersededAt: jsonTime(d.SupersededAt), DeliveredAt: jsonTime(d.DeliveredAt),
+		ConfirmedAt: jsonTime(d.ConfirmedAt),
 	}
 }
 
@@ -195,19 +208,61 @@ func decisionsPrintJSON(w io.Writer, ds []model.Decision) error {
 // decisionsCell makes ticket text, which is untrusted, safe as one table cell.
 func decisionsCell(s string, limit int) string { return ui.Cell(sanitize.Line(s, limit)) }
 
-// decisionsPrintTable prints one row per ticket, in allocation (id) order.
-
-func decisionsPrintTable(w io.Writer, ds []model.Decision, now time.Time) error {
+// decisionsPrintTable prints one row per ticket, in allocation (id) order,
+// with where it was answered (VIA) and how far its delivery got (M3);
+// states holds the state of each known session.
+func decisionsPrintTable(w io.Writer, ds []model.Decision, states map[string]model.State, now time.Time) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "ID\tSTATUS\tMODE\tAGE\tREPO\tQUESTION\tANSWER\tDELIVERY")
+	_, _ = fmt.Fprintln(tw, "ID\tSTATUS\tMODE\tAGE\tREPO\tQUESTION\tANSWER\tVIA\tDELIVERY")
 	for _, d := range ds {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			decisionsCell(d.ID, decisionsQuestionLimit), decisionsCell(string(d.Status), decisionsQuestionLimit),
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			decisionsCell(d.ID, decisionsQuestionLimit), decisionsCell(decisionsStatusText(d), decisionsQuestionLimit),
 			decisionsCell(string(d.Mode), decisionsQuestionLimit), decisionsCell(ui.Age(d.CreatedAt, now), decisionsQuestionLimit), decisionsCell(ui.RepoName(d.Repo), decisionsQuestionLimit),
 			decisionsCell(d.Question, decisionsQuestionLimit),
-			decisionsCell(d.Answer, decisionsAnswerLimit), decisionsCell(string(d.Delivery), decisionsQuestionLimit))
+			decisionsCell(d.Answer, decisionsAnswerLimit), decisionsCell(decisionsOr(string(d.AnsweredVia), "-"), decisionsQuestionLimit),
+			decisionsCell(decisionsDeliveryText(d, states), decisionsQuestionLimit))
 	}
 	return tw.Flush()
+}
+
+// decisionsOr is s, or alt when s is empty.
+func decisionsOr(s, alt string) string {
+	if s == "" {
+		return alt
+	}
+	return s
+}
+
+// decisionsStatusText is d's status, marked when the user superseded it.
+func decisionsStatusText(d model.Decision) string {
+	if !d.SupersededAt.IsZero() {
+		return string(d.Status) + " (superseded)"
+	}
+	return string(d.Status)
+}
+
+// decisionsDeliveryText is how far d's delivery got: "delivered
+// (stop_hook)", "typed, unconfirmed" for a typed answer no submitted prompt
+// or check_decision has confirmed yet (Ruling 86), "queued" or "none". An
+// answer not delivered yet whose session (in states) has ended, gone stale
+// or has no row is marked so: it is not on the badge (live check 3).
+func decisionsDeliveryText(d model.Decision, states map[string]model.State) string {
+	text := string(d.Delivery)
+	switch {
+	case d.Delivery == model.DeliveryDelivered && d.DeliveredVia == model.ViaSendKeys && d.ConfirmedAt.IsZero():
+		text = "typed, unconfirmed"
+	case d.Delivery == model.DeliveryDelivered && d.DeliveredVia != "":
+		return text + " (" + string(d.DeliveredVia) + ")"
+	case d.Delivery != model.DeliveryQueued:
+		return text
+	}
+	switch state, known := states[d.SessionID]; {
+	case !known:
+		return text + " (no session row)"
+	case state == model.StateEnded || state == model.StateStale:
+		return text + " (session " + string(state) + ")"
+	}
+	return text
 }
 
 func runDecisionsEdit(cmd *cobra.Command, args []string) error {
@@ -231,7 +286,8 @@ func runDecisionsEdit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	// The previous scope is only for the message; EditDecision decides.
+	// The previous scope and supersession are only for the messages;
+	// EditDecision decides.
 	before, _, err := st.GetDecision(cmd.Context(), id)
 	if err != nil {
 		return err
@@ -240,7 +296,13 @@ func runDecisionsEdit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", id, err)
 	}
-	out := cmd.OutOrStdout()
+	decisionsPrintEdit(cmd.OutOrStdout(), id, e, before, after)
+	return nil
+}
+
+// decisionsPrintEdit says what edit e changed in ticket id, from before to
+// after, and where a supersession's retraction goes.
+func decisionsPrintEdit(out io.Writer, id string, e model.DecisionEdit, before, after model.Decision) {
 	if e.Scope != "" {
 		_, _ = fmt.Fprintf(out, "%s scope %s -> %s\n", id, before.Scope, after.Scope)
 	}
@@ -250,7 +312,15 @@ func runDecisionsEdit(cmd *cobra.Command, args []string) error {
 	case e.Supersede:
 		_, _ = fmt.Fprintf(out, "%s superseded\n", id)
 	}
-	return nil
+	switch {
+	case !e.Supersede || after.SessionID == "":
+	case after.Delivery == model.DeliveryQueued:
+		// The retraction goes by the Stop hook or check_decision (Ruling 82).
+		_, _ = fmt.Fprintf(out, "%s retraction queued for the agent's Stop hook, or tell the agent to call check_decision %s\n", id, id)
+	case before.SupersededAt.IsZero() && after.Delivery == model.DeliveryDelivered:
+		// N3: the asking session has ended or gone; nobody could collect it.
+		_, _ = fmt.Fprintf(out, "%s: its session has ended; nothing to retract\n", id)
+	}
 }
 
 // decisionsEditFromFlags builds the edit the flags ask for.

@@ -108,6 +108,7 @@ type Model struct {
 	chain int // the refresh chain that is live; messages of earlier chains are dropped
 
 	open     func(sessionID string) tea.Model // builds the decide view; nil: d cannot answer
+	noAnswer string                           // why d cannot answer; "": inside an agent session
 	child    tea.Model                        // the decide view while it is shown
 	childGen int                              // which child is (or was last) shown
 }
@@ -150,6 +151,12 @@ func New(src Source, tm tmux.Client, cfg config.Config, now func() time.Time, mo
 // it sends DecideClosedMsg. Without it, d says why it cannot answer.
 func (m Model) WithDecide(open func(sessionID string) tea.Model) Model {
 	m.open = open
+	return m
+}
+
+// WithoutDecide returns m with the d key disabled, saying why when pressed.
+func (m Model) WithoutDecide(why string) Model {
+	m.open, m.noAnswer = nil, why
 	return m
 }
 
@@ -253,6 +260,9 @@ func (m Model) openDecide() (Model, tea.Cmd) {
 	}
 	if m.open == nil {
 		m.notice = noticeNoAnswer
+		if m.noAnswer != "" {
+			m.notice = m.noAnswer
+		}
 		return m, nil
 	}
 	m.childGen++

@@ -43,7 +43,8 @@
     "answered_at": "<time>",
     "closed_at": null,
     "superseded_at": null,
-    "delivered_at": "<time>"
+    "delivered_at": "<time>",
+    "confirmed_at": "<time>"
   },
   {
     "id": "D-2",
@@ -89,7 +90,8 @@
     "answered_at": "<time>",
     "closed_at": null,
     "superseded_at": null,
-    "delivered_at": "<time>"
+    "delivered_at": "<time>",
+    "confirmed_at": null
   },
   {
     "id": "D-3",
@@ -135,7 +137,8 @@
     "answered_at": null,
     "closed_at": "<time>",
     "superseded_at": null,
-    "delivered_at": null
+    "delivered_at": null,
+    "confirmed_at": null
   },
   {
     "id": "D-4",
@@ -181,7 +184,8 @@
     "answered_at": "<time>",
     "closed_at": null,
     "superseded_at": null,
-    "delivered_at": null
+    "delivered_at": null,
+    "confirmed_at": null
   },
   {
     "id": "D-5",
@@ -227,7 +231,8 @@
     "answered_at": "<time>",
     "closed_at": null,
     "superseded_at": null,
-    "delivered_at": "<time>"
+    "delivered_at": "<time>",
+    "confirmed_at": null
   },
   {
     "id": "D-6",
@@ -273,6 +278,7 @@
     "answered_at": "<time>",
     "closed_at": null,
     "superseded_at": null,
-    "delivered_at": "<time>"
+    "delivered_at": "<time>",
+    "confirmed_at": null
   }
 ]

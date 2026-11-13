@@ -1097,7 +1097,7 @@ func TestEmbeddedDecideKeepsItsGates(t *testing.T) {
 	if len(dsrc.answers) != 1 || dsrc.answers[0].Key != "B" || dsrc.answers[0].Via != model.AnsweredPopup {
 		t.Errorf("answers = %+v, want one B via popup", dsrc.answers)
 	}
-	if !strings.Contains(m.View(), "D-1 answered") {
+	if !strings.Contains(m.View(), "D-1 overridden") { // the stored status word (M2)
 		t.Errorf("decide view did not get its answer result:\n%s", m.View())
 	}
 
@@ -1138,5 +1138,22 @@ func TestDKeyInBurstDropsTheRest(t *testing.T) {
 	}
 	if len(*got) != 0 {
 		t.Errorf("child got %#v from the burst, want nothing", *got)
+	}
+}
+
+// Ruling 89, defect 8: the DEC cell counts the answers a session has not
+// got yet apart from its open tickets.
+func TestDefect8DecCellShowsUndelivered(t *testing.T) {
+	src := &fakeSource{sessions: decSessions(), counts: map[string]model.OpenCount{
+		"S1": {Blocking: 1, Undelivered: 1}, "S2": {Undelivered: 2},
+	}}
+	m := refresh(t, New(src, &tmux.Fake{}, config.Default(), func() time.Time { return testNow }, ModePopup))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	view := m.View()
+	lines := strings.Split(view, "\n")
+	for id, want := range map[string]string{"S1": "  1 Q1  ", "S2": "  Q2  "} {
+		if i := lineWith(view, "model-"+id); i < 0 || !strings.Contains(lines[i], want) {
+			t.Errorf("%s's row lacks the DEC cell %q:\n%s", id, strings.TrimSpace(want), view)
+		}
 	}
 }
