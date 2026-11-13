@@ -205,7 +205,7 @@ func TestUIDKeyAnswersSessionTickets(t *testing.T) {
 		if !strings.Contains(queue, "Run a && b?") {
 			t.Errorf("d did not open s1's tickets:\n%s", queue)
 		}
-		if !strings.Contains(run.view, "D-1 answered") {
+		if !strings.Contains(run.view, "D-1 overridden") { // the stored status word (M2)
 			t.Errorf("view after the answer:\n%s", run.view)
 		}
 		d := decisionsGet(t, db, "D-1")

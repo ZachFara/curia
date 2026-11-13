@@ -59,14 +59,15 @@ var detailPlans = []detailPlan{
 func (m DecideModel) View() string {
 	w := m.textWidth()
 	queue := m.renderQueue(w)
+	status := m.renderStatus(w)
 	detail, _ := m.detail(w, m.detailRoom(len(queue)))
 	lines := append([]string{m.renderHeader()}, queue...)
 	lines = append(lines, "")
 	lines = append(lines, detail...)
-	for m.height > 0 && len(lines) < m.height-1 {
+	for m.height > 0 && len(lines) < m.height-len(status) {
 		lines = append(lines, "")
 	}
-	lines = append(lines, m.renderStatus(w))
+	lines = append(lines, status...)
 	clip := lipgloss.NewStyle().MaxWidth(w)
 	for i, l := range lines {
 		lines[i] = clip.Render(l)
@@ -95,7 +96,8 @@ func (m DecideModel) detailRoom(queueLines int) int {
 	if m.height <= 0 {
 		return 0
 	}
-	return max(m.height-queueLines-3, 1) // header, separator, status line
+	// The header, the separator and the status lines.
+	return max(m.height-queueLines-2-len(m.renderStatus(m.textWidth())), 1)
 }
 
 func (m DecideModel) renderHeader() string {
@@ -194,11 +196,11 @@ func (m DecideModel) detailLines(t model.Ticket, w int, p detailPlan) []string {
 	out := styled(questionStyle, indent(capLines(question, p.question, pw)))
 	if !p.bare {
 		out = append(out, styled(stakesStyle, indent(para(decision.Stakes(t, m.now()), pw, p.oneLine)))...)
-		meta := strings.Join([]string{
+		meta := strings.Join(append([]string{
 			sanitize.Line(string(t.Reversibility), maxWordCells),
 			sanitize.Line(string(t.Mode), maxWordCells),
 			"scope " + sanitize.Line(string(t.Scope), maxWordCells),
-		}, " · ")
+		}, asker(t)...), " · ")
 		out = append(out, styled(helpStyle, indent(para(meta, pw, p.oneLine)))...)
 		if p.context >= 0 {
 			out = append(out, indent(capLines(wrap(sanitize.Text(t.Context, decision.MaxContext), pw), p.context, pw))...)
@@ -207,6 +209,30 @@ func (m DecideModel) detailLines(t model.Ticket, w int, p detailPlan) []string {
 	out = append(out, optionLines(t, w, p)...)
 	if !p.bare {
 		out = append(out, indent(m.tailLines(t, pw, p))...)
+	}
+	return out
+}
+
+// asker says who asks for t (M6): the tmux session and window and the
+// branch of its session, and the session's state when it is not live, so
+// two agents on one repository can be told apart.
+func asker(t model.Ticket) []string {
+	if t.SessionID == "" {
+		return []string{"no session"}
+	}
+	var out []string
+	where := sanitize.Line(t.TmuxSession, maxRepoCells) + ":" + sanitize.Line(t.TmuxWindow, maxIDCells)
+	if where = strings.Trim(where, ":"); where != "" {
+		out = append(out, "from "+where)
+	}
+	if b := sanitize.Line(t.Branch, maxRepoCells); b != "" {
+		out = append(out, "on "+b)
+	}
+	switch t.SessionState {
+	case model.StateEnded, model.StateStale:
+		out = append(out, "session "+string(t.SessionState))
+	case "":
+		out = append(out, "session unknown")
 	}
 	return out
 }
@@ -305,9 +331,15 @@ func para(s string, w int, oneLine bool) []string {
 	return []string{truncate(strings.ReplaceAll(s, "\n", " "), w)}
 }
 
-// renderStatus is the bottom line: the pending confirmation, the text being
-// typed, the last outcome or notice, the last refresh error, or the keys.
-func (m DecideModel) renderStatus(w int) string {
+// maxNoticeLines bounds the lines a notice is wrapped over.
+const maxNoticeLines = 4
+
+// renderStatus is the bottom of the view: the pending confirmation, the
+// text being typed, the last outcome or notice, the last refresh error, or
+// the keys. A notice is wrapped over as many lines as it needs, up to
+// maxNoticeLines (M2: an outcome note tells the user what to do); the rest
+// is one line.
+func (m DecideModel) renderStatus(w int) []string {
 	style, text := helpStyle, m.helpText(w)
 	switch {
 	case m.closing:
@@ -315,16 +347,17 @@ func (m DecideModel) renderStatus(w int) string {
 	case m.confirming:
 		style, text = lipgloss.NewStyle(), m.confirmText(w)
 	case m.input != inputNone:
-		return m.inputLine(w)
+		return []string{m.inputLine(w)}
 	case m.notice != "":
-		style, text = lipgloss.NewStyle(), sanitize.Line(m.notice, maxNote)
+		style = lipgloss.NewStyle()
 		if m.noticeErr {
 			style = errorStyle
 		}
+		return styled(style, capLines(wrap(sanitize.Line(m.notice, maxNote), w), maxNoticeLines, w))
 	case m.err != nil:
 		style, text = errorStyle, "refresh failed: "+sanitize.Line(m.err.Error(), maxNote)
 	}
-	return style.Render(truncate(text, w))
+	return []string{style.Render(truncate(text, w))}
 }
 
 // helpText is the keys line. It names the key Enter sends, and is shorter
@@ -365,14 +398,26 @@ func answerText(a model.Answer) string {
 	return `"` + sanitize.Line(a.Text, 24) + `"`
 }
 
-// outcomeText is the status line after an answer: "D-9 answered: B ·
-// delivered", or the outcome's note in place of "delivered".
+// outcomeText is the status after an answer: "D-9 answered: B ·
+// delivered", with the stored status word (confirmed, overridden) and the
+// outcome's note in place of "delivered" (M2).
 func outcomeText(msg decideAnsweredMsg) string {
 	note := "delivered"
 	if msg.out.Note != "" {
 		note = msg.out.Note
 	}
-	return sanitize.Line(msg.id, maxIDCells) + " answered: " + answerText(msg.a) + " · " + sanitize.Line(note, maxNote)
+	word := sanitize.Line(string(msg.out.Decision.Status), maxWordCells)
+	if word == "" {
+		word = string(model.StatusAnswered)
+	}
+	return sanitize.Line(msg.id, maxIDCells) + " " + word + ": " + answerText(msg.a) + " · " + sanitize.Line(note, maxNote)
+}
+
+// undelivered reports whether out's note says its answer was not delivered,
+// or not for certain: it is drawn as an error. A note on an answer with
+// nothing to deliver is not.
+func undelivered(out model.Outcome) bool {
+	return out.Note != "" && out.Decision.Delivery != model.DeliveryNone && out.Decision.Delivery != ""
 }
 
 // inputLine is the prompt and the end of the text being typed, with a cursor.

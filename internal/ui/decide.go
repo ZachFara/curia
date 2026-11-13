@@ -694,13 +694,16 @@ func (m DecideModel) applyAnswer(msg decideAnsweredMsg) (DecideModel, tea.Cmd) {
 		}
 		return m.refresh(false)
 	}
-	if m.closing {
+	// M2: an outcome with a note (not delivered, or not for certain) is
+	// shown before the view closes.
+	if m.closing && msg.out.Note == "" {
 		if m.quitting {
 			return m, tea.Quit
 		}
 		return m, m.close()
 	}
-	m.notice = outcomeText(msg)
+	m.closing, m.quitting = false, false
+	m.notice, m.noticeErr = outcomeText(msg), undelivered(msg.out)
 	m.reasoning, m.scope, m.draft = "", "", ""
 	before, had := m.current()
 	m.tickets = slices.DeleteFunc(slices.Clone(m.tickets), func(t model.Ticket) bool { return t.ID == msg.id })

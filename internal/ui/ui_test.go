@@ -1097,7 +1097,7 @@ func TestEmbeddedDecideKeepsItsGates(t *testing.T) {
 	if len(dsrc.answers) != 1 || dsrc.answers[0].Key != "B" || dsrc.answers[0].Via != model.AnsweredPopup {
 		t.Errorf("answers = %+v, want one B via popup", dsrc.answers)
 	}
-	if !strings.Contains(m.View(), "D-1 answered") {
+	if !strings.Contains(m.View(), "D-1 overridden") { // the stored status word (M2)
 		t.Errorf("decide view did not get its answer result:\n%s", m.View())
 	}
 

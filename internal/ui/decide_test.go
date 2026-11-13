@@ -67,7 +67,7 @@ func (f *fakeDecideSource) Answer(_ context.Context, id string, a model.Answer) 
 	}
 	d := f.tickets[i].Decision
 	f.tickets = slices.Delete(f.tickets, i, i+1)
-	d.AnswerKey, d.Answer = a.Key, a.Text
+	d.AnswerKey, d.Answer, d.Status = a.Key, a.Text, model.StatusAnswered
 	return model.Outcome{Decision: d, Note: f.note}, nil
 }
 
@@ -1706,5 +1706,55 @@ func TestCtrlCWaitsForAnswerInFlight(t *testing.T) {
 		if _, ok := cmd().(tea.QuitMsg); !ok {
 			t.Errorf("embedded %v: did not quit after the answer", opts.Embedded)
 		}
+	}
+}
+
+// M2: an outcome with a note is shown, not closed over, when q was pressed
+// during the flight; the note is wrapped over several lines in the error
+// style when the answer was not delivered, and says the stored status.
+func TestOutcomeNoteShownInFull(t *testing.T) {
+	src := &fakeDecideSource{note: "typing may not have finished: check the agent's pane (tmux session work, window @7); " +
+		"press Enter if the line is there, otherwise tell it to call check_decision D-1"}
+	src.set(assumeTickets(2)...)
+	m := newDecide(t, src, popup)
+	m = send(t, m, tea.WindowSizeMsg{Width: 60, Height: 30})
+	m, answer := m.Update(dkey("1"))
+	m, _ = m.Update(dkey("q"))
+	m, cmd := m.Update(answer())
+	if cmd != nil {
+		if _, quit := cmd().(tea.QuitMsg); quit {
+			t.Fatal("closed over the outcome's note")
+		}
+	}
+	view := m.View()
+	for _, want := range []string{"D-1 answered: A · typing may not have finished", "check_decision D-1"} {
+		if !strings.Contains(strings.Join(strings.Fields(view), " "), want) {
+			t.Errorf("view lacks %q:\n%s", want, view)
+		}
+	}
+	for i, l := range strings.Split(view, "\n") {
+		if w := lipgloss.Width(l); w > 60 {
+			t.Errorf("line %d is %d cells wide, over 60: %q", i, w, l)
+		}
+	}
+	if n := len(strings.Split(view, "\n")); n > 30 {
+		t.Errorf("view is %d lines, over the window's 30", n)
+	}
+}
+
+// M6: the detail line says who asks: the tmux session and window, the
+// branch, and the session's state when it is not live.
+func TestDetailShowsAsker(t *testing.T) {
+	tk := ticket(1, model.ModeBlocking, model.ReversCostly)
+	tk.TmuxSession, tk.TmuxWindow, tk.Branch, tk.SessionState = "work", "@7", "feat/queue", model.StateEnded
+	src := &fakeDecideSource{}
+	src.set(tk)
+	if view := newDecide(t, src, popup).View(); !strings.Contains(view, "costly · blocking · scope task · from work:@7 · on feat/queue · session ended") {
+		t.Errorf("detail line does not say who asks:\n%s", view)
+	}
+	tk.SessionState = model.StateIdle
+	src.set(tk)
+	if view := newDecide(t, src, popup).View(); strings.Contains(view, "session idle") || !strings.Contains(view, "from work:@7") {
+		t.Errorf("a live session's state is shown, or the asker is not:\n%s", view)
 	}
 }
