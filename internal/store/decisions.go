@@ -517,15 +517,16 @@ func (s *Store) ExpireDecisions(ctx context.Context, now time.Time) (int, error)
 	return int(n), nil
 }
 
-// edited is decided ticket cur after edit e at now, as EditDecision says.
-func edited(cur model.Decision, e model.DecisionEdit, now time.Time) model.Decision {
+// edited is decided ticket cur after edit e at now, as EditDecision says;
+// live reports whether cur's session can still collect a retraction.
+func edited(cur model.Decision, e model.DecisionEdit, now time.Time, live bool) model.Decision {
 	next := cur
 	if e.Scope != "" {
 		next.Scope = e.Scope
 	}
 	if (e.Supersede || e.SupersededBy != "") && next.SupersededAt.IsZero() {
 		next.SupersededAt = now
-		if cur.Delivery == model.DeliveryDelivered && cur.SessionID != "" {
+		if cur.Delivery == model.DeliveryDelivered && live {
 			next.Delivery, next.DeliveredVia = model.DeliveryQueued, ""
 			next.DeliveredAt, next.ConfirmedAt = time.Time{}, time.Time{}
 		}
@@ -536,6 +537,16 @@ func edited(cur model.Decision, e model.DecisionEdit, now time.Time) model.Decis
 	return next
 }
 
+// sessionLive reports whether session id has a row that is neither ended
+// nor stale. An empty id has none.
+func sessionLive(ctx context.Context, q dbtx, id string) (bool, error) {
+	if id == "" {
+		return false, nil
+	}
+	sess, found, err := getSession(ctx, q, id)
+	return found && sess.State != model.StateEnded && sess.State != model.StateStale, err
+}
+
 // EditDecision rescopes and/or supersedes decided ticket id at now, in one
 // write transaction. The ticket must exist (ErrNotFound) and be decided
 // (ErrNotDecided). A non-empty e.SupersededBy must name another decided
@@ -544,8 +555,9 @@ func edited(cur model.Decision, e model.DecisionEdit, now time.Time) model.Decis
 // the ticket is superseded: superseded_at becomes now unless it is already
 // set, and a non-empty e.SupersededBy is recorded (an empty one never
 // clears it). On the first supersession of an answer already delivered to a
-// known session, the delivery is queued again, so the retraction reaches the
-// agent by the usual paths (Ruling 82). The status never changes. It
+// session that still exists and is neither ended nor stale, the delivery is
+// queued again, so the retraction reaches the agent by the usual paths
+// (Ruling 82); a session that has gone could never collect it (re-review N3). The status never changes. It
 // returns the stored row.
 func (s *Store) EditDecision(ctx context.Context, id string, e model.DecisionEdit, now time.Time) (model.Decision, error) {
 	tx, err := s.begin(ctx)
@@ -563,8 +575,12 @@ func (s *Store) EditDecision(ctx context.Context, id string, e model.DecisionEdi
 	case e.SupersededBy != "":
 		err = requireDecided(ctx, tx, e.SupersededBy, id)
 	}
+	var live bool
 	if err == nil {
-		next := edited(cur, e, now)
+		live, err = sessionLive(ctx, tx, cur.SessionID)
+	}
+	if err == nil {
+		next := edited(cur, e, now, live)
 		_, err = tx.ExecContext(ctx, `
 UPDATE decisions SET scope = ?, superseded_at = ?, superseded_by = ?, delivery = ?, delivered_via = ?,
   delivered_at = ?, confirmed_at = ?

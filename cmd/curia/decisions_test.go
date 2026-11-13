@@ -328,6 +328,7 @@ func TestEditRescope(t *testing.T) {
 
 func TestEditSupersedeSetsSupersededAt(t *testing.T) {
 	db := decisionsHome(t, decisionsSpecs()...)
+	seedSessions(t, db, decideSessionS1()) // a live session, which can collect a retraction
 	out, err := runRoot(t, "decisions", "edit", "D-4", "--supersede")
 	if err != nil || out != "D-4 superseded\nD-4 retraction queued for the agent's Stop hook, or tell the agent to call check_decision D-4\n" {
 		t.Fatalf("edit = %q, %v", out, err)
@@ -542,5 +543,31 @@ func TestDecisionsLsShowsViaDeliveryAndSupersession(t *testing.T) {
 	decisionsStatus = "open"
 	if got := strings.Join(decisionsIDs(t), " "); got != "D-1 D-2 D-4 D-8" {
 		t.Errorf("default listing = %s, want the open tickets and the undelivered answers D-4 and D-8", got)
+	}
+}
+
+// Re-review N3: superseding an answer delivered to a session that has
+// ended, or has no row, queues no retraction nobody could collect, says so,
+// and leaves the badge without a Q.
+func TestEditSupersedeForGoneSessionRetractsNothing(t *testing.T) {
+	for name, sessions := range map[string][]model.Session{
+		"ended":  {statusSession(model.StateEnded)},
+		"no row": nil,
+	} {
+		db := decisionsHome(t, decisionsSpecs()...)
+		seedSessions(t, db, sessions...)
+		out, err := runRoot(t, "decisions", "edit", "D-3", "--supersede")
+		decisionsSupersede = false
+		if want := "D-3 superseded\nD-3: its session has ended; nothing to retract\n"; err != nil || out != want {
+			t.Errorf("%s: edit = %q, %v; want %q", name, out, err, want)
+		}
+		if d := decisionsGet(t, db, "D-3"); d.Delivery != model.DeliveryDelivered || d.SupersededAt.IsZero() {
+			t.Errorf("%s: D-3 = delivery %s, superseded at %v; want still delivered, superseded", name, d.Delivery, d.SupersededAt)
+		}
+		// D-1 and D-2 are open; D-4's answer is queued in the seed; D-3
+		// adds no Q.
+		if out, err := runRoot(t, "status"); err != nil || out != "D1 Q1" {
+			t.Errorf("%s: status = %q, %v; want %q", name, out, err, "D1 Q1")
+		}
 	}
 }

@@ -1274,6 +1274,38 @@ func deliverBy(t *testing.T, s *store.Store, path, id string, via model.Delivery
 	}
 }
 
+// Re-review N3: the first supersession of an answer delivered to a session
+// that has ended, is stale or has no row queues nothing: no retraction
+// that nobody could collect, and no lasting Q on the badge.
+func TestSupersedeForGoneSessionQueuesNothing(t *testing.T) {
+	for _, state := range []model.State{model.StateEnded, model.StateStale, ""} {
+		path := dbPath(t)
+		s := open(t, path)
+		ctx := context.Background()
+		if state != "" {
+			liveSession(t, s, "s1", "%3", state)
+		}
+		now := t0.Add(time.Hour)
+		d := answer(t, s, create(t, s, ticket(t, "Old policy?", model.ModeBlocking, "s1", t0)).ID, keyA, now)
+		via := model.ViaStopHook
+		if state == "" {
+			via = model.ViaCheck // a Stop claim would create the session's row
+		}
+		deliverBy(t, s, path, d.ID, via, now)
+		_, before, err := s.BadgeCounts(ctx, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := supersede(t, s, d.ID, now.Add(24*time.Hour))
+		if got.Delivery != model.DeliveryDelivered {
+			t.Errorf("session %q: superseded delivery %s, want still delivered", state, got.Delivery)
+		}
+		if _, after, err := s.BadgeCounts(ctx, now.Add(25*time.Hour)); err != nil || after != before {
+			t.Errorf("session %q: badge Q before %d, after the supersession %d (%v); want unchanged", state, before, after, err)
+		}
+	}
+}
+
 func TestEditSupersededByImpliesSupersede(t *testing.T) {
 	// Ruling 65: a non-empty SupersededBy supersedes; superseding again
 	// keeps the first superseded_at and never clears superseded_by.

@@ -266,7 +266,8 @@ func runDecisionsEdit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	// The previous scope is only for the message; EditDecision decides.
+	// The previous scope and supersession are only for the messages;
+	// EditDecision decides.
 	before, _, err := st.GetDecision(cmd.Context(), id)
 	if err != nil {
 		return err
@@ -275,7 +276,13 @@ func runDecisionsEdit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", id, err)
 	}
-	out := cmd.OutOrStdout()
+	decisionsPrintEdit(cmd.OutOrStdout(), id, e, before, after)
+	return nil
+}
+
+// decisionsPrintEdit says what edit e changed in ticket id, from before to
+// after, and where a supersession's retraction goes.
+func decisionsPrintEdit(out io.Writer, id string, e model.DecisionEdit, before, after model.Decision) {
 	if e.Scope != "" {
 		_, _ = fmt.Fprintf(out, "%s scope %s -> %s\n", id, before.Scope, after.Scope)
 	}
@@ -285,11 +292,15 @@ func runDecisionsEdit(cmd *cobra.Command, args []string) error {
 	case e.Supersede:
 		_, _ = fmt.Fprintf(out, "%s superseded\n", id)
 	}
-	if e.Supersede && after.SessionID != "" && after.Delivery == model.DeliveryQueued {
+	switch {
+	case !e.Supersede || after.SessionID == "":
+	case after.Delivery == model.DeliveryQueued:
 		// The retraction goes by the Stop hook or check_decision (Ruling 82).
 		_, _ = fmt.Fprintf(out, "%s retraction queued for the agent's Stop hook, or tell the agent to call check_decision %s\n", id, id)
+	case before.SupersededAt.IsZero() && after.Delivery == model.DeliveryDelivered:
+		// N3: the asking session has ended or gone; nobody could collect it.
+		_, _ = fmt.Fprintf(out, "%s: its session has ended; nothing to retract\n", id)
 	}
-	return nil
 }
 
 // decisionsEditFromFlags builds the edit the flags ask for.
