@@ -92,7 +92,7 @@ func asker() model.Session {
 
 // idleScreen is a capture of Claude Code's empty input prompt (live check
 // 2), the only screen typed into (Ruling 85).
-var idleScreen = mustRead(filepath.Join("testdata", "prompt", "live-idle.txt"))
+var idleScreen = mustRead(filepath.Join("testdata", "prompt", "lc3-idle-auto-200col.txt"))
 
 // mustRead reads a fixture file at package initialisation.
 func mustRead(path string) string {
@@ -874,13 +874,16 @@ func TestDefects123PaneCheckedBeforeTyping(t *testing.T) {
 		capErr  error
 		why     string
 	}{
-		{fixture: "built-draft.txt", why: "prompt has a draft; nothing typed"},
-		{fixture: "live-dialog-subagent.txt", why: "a dialog or menu is open in the agent's pane; nothing typed"},
-		{fixture: "built-rewind.txt", why: "a dialog or menu is open in the agent's pane; nothing typed"},
-		{fixture: "live-busy.txt", why: "agent's pane shows a running turn; nothing typed"},
+		{fixture: "lc3-draft-oneline.txt", why: "prompt has a draft; nothing typed"},
+		{fixture: "lc3-dialog-subagent-main-stopped.txt", why: "a dialog or menu is open in the agent's pane; nothing typed"},
+		{fixture: "lc3-menu-rewind.txt", why: "a dialog or menu is open in the agent's pane; nothing typed"},
+		{fixture: "lc3-screen-config.txt", why: "a dialog or menu is open in the agent's pane; nothing typed"},
+		{fixture: "lc3-busy-running-turn.txt", why: "agent's pane shows a running turn; nothing typed"},
+		{fixture: "lc3-agents-listed-main-stopped.txt", why: "the agent's prompt lists background agents (or offers them); nothing typed"},
 		{fixture: "built-waiting-background.txt", why: "agent is waiting for background subagents; nothing typed"},
-		{fixture: "built-shell.txt", why: "prompt not recognized (Claude Code's screen may have changed); nothing typed"},
-		{fixture: "live-idle.txt", capErr: errors.New("tmux capture-pane: can't find pane: %5"), why: "could not read the agent's pane; nothing typed"},
+		{fixture: "lc3-shell-after-kill.txt", why: "the pane shows a shell: the session's Claude Code is not at its prompt; nothing typed"},
+		{fixture: "lc3-idle-auto-34col.txt", why: "prompt not recognized (Claude Code's screen may have changed); nothing typed"},
+		{fixture: "lc3-idle-auto-200col.txt", capErr: errors.New("tmux capture-pane: can't find pane: %5"), why: "could not read the agent's pane; nothing typed"},
 	} {
 		t.Run(c.fixture, func(t *testing.T) {
 			st := openStore(t)

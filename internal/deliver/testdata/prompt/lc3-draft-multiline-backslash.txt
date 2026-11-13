@@ -1,0 +1,50 @@
+  ⎿  Stop hook error: Curia: decisions answered while you were working.
+  Decision D-2 answered: option B [Spaces]. Reasoning: Spaces everywhere here. Continue.
+
+⏺ OK D-2
+
+✻ Brewed for 4s · done 7:41 PM
+
+❯ Decision D-4 answered: option B, Hi. Reasoning: Casual team. Continue.
+
+⏺ OK D-4
+
+✻ Brewed for 3s · done 7:41 PM
+
+❯ Decision D-5 answered: option A, narrow-alpha. Reasoning: fine. Continue.
+
+⏺ OK D-5
+
+✻ Brewed for 2s · done 7:42 PM
+
+❯ Decision D-6 answered: option B, wide-beta. Reasoning: wide. Continue.
+
+⏺ OK D-6
+
+✻ Cooked for 1s · done 7:43 PM
+
+❯ Call check_decision for D-7 and tell me the answer in one line.
+
+  Called curia
+
+⏺ D-7 is answered: option A, "tiny-alpha", with the reasoning "tiny".
+
+✻ Sautéed for 5s · done 7:43 PM
+
+❯ Decision D-8 answered: option A, first-alpha. Reasoning: one. Continue.
+
+⏺ OK D-8
+
+⏺ Ran 1 stop hook
+  ⎿  Stop hook error: Curia: decisions answered while you were working.
+  Decision D-9 answered: option B [second-beta]. Reasoning: two. Continue.
+
+⏺ OK D-9
+
+✻ Cogitated for 2s · done 7:43 PM
+                                                                                                                                                                             ctrl+g to edit in VS Code
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ line one
+  line two
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

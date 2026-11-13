@@ -192,6 +192,8 @@ var promptNotes = map[promptState]string{
 	promptDialog:    "a dialog or menu is open in the agent's pane; nothing typed",
 	promptBusy:      "agent's pane shows a running turn; nothing typed",
 	promptSubagents: "agent is waiting for background subagents; nothing typed",
+	promptAgents:    "the agent's prompt lists background agents (or offers them); nothing typed",
+	promptShell:     "the pane shows a shell: the session's Claude Code is not at its prompt; nothing typed",
 }
 
 // noteSynchronized is the refusal for a window with synchronize-panes on.

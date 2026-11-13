@@ -1,10 +1,50 @@
-⏺ ./inner.sh printed: Filed blocking ticket D-11 (terse vs. verbose inner report, recommending terse); waiting on the answer.
+claude --settings /work/x --setting-sources project --mcp-config /work
+host% claude --settings /work/x --setting-sources project --mcp
+-config /work/x --strict-mcp-config --model haiku --permission-mode manual
+ ▐▛███▛█   Claude Code v2.1.323
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /work/x
 
-✻ Cooked for 7s · done 6:06 PM
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-❯ line one
-  line two
+❯ Try "fix typecheck errors"
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ⏵⏵ auto mode on (shift+tab to cycle)
+  ⏸ manual mode on · ? for shortcuts · ← for agents                                                                                                                                 ◐ medium · /effort
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

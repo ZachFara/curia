@@ -2,6 +2,7 @@ package deliver
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -31,12 +32,18 @@ const (
 	// promptSubagents: the main agent waits for background subagents, one
 	// of which may open a permission dialog at any moment.
 	promptSubagents
+	// promptAgents: the footer offers or lists background agents ("← for
+	// agents", "↓ to manage" with the agents listed under the box).
+	promptAgents
+	// promptShell: the pane shows a shell prompt: the session's Claude Code
+	// has exited or died.
+	promptShell
 )
 
 // The parts of Claude Code's screen these rules read, as captured from
-// Claude Code 2.1.323 (live check 2; fixtures in testdata/prompt). The
-// input box is a rule line, one line starting "❯" (an empty prompt is "❯"
-// and a no-break space), another rule line, then at most two footer lines.
+// Claude Code 2.1.323 (live checks 2 and 3; fixtures in testdata/prompt).
+// The input box is a rule line, one line starting "❯" (an empty prompt is
+// "❯" and a no-break space), another rule line, then the footer.
 const (
 	promptMark   = "❯"
 	ruleRune     = '─'
@@ -50,27 +57,50 @@ const (
 	aboveScan = 3
 )
 
-// dialogHints are texts only a dialog or menu shows: the permission
-// dialog's "Esc to cancel · Tab to amend", Rewind's "Enter to continue · Esc
-// to cancel".
-var dialogHints = []string{"Esc to cancel", "Enter to continue", "Enter to confirm", "Enter to select"}
+// dialogHints are texts only a dialog, menu or full-screen view shows, as
+// captured: the permission dialog's and /help's "Esc to cancel", Rewind's
+// "Enter to continue", the trust dialog's "Enter to confirm", /config's
+// "Esc to clear" (filtering) and "Esc to close".
+var dialogHints = []string{
+	"Esc to cancel", "Enter to continue", "Enter to confirm", "Enter to select", "Esc to clear", "Esc to close",
+}
+
+// agentHints are what the footer shows when it offers or lists background
+// agents: "← for agents" on a fresh session, "↓ to manage" with the agents
+// listed under the input box (live check 3). They are read under the box
+// only (underBox).
+var agentHints = []string{"← for agents", "↓ to manage"}
+
+// shellPrompt matches the last line of a pane that shows a shell prompt,
+// such as "host%", "sh-3.2$" or "$": Claude Code has exited or died there.
+var shellPrompt = regexp.MustCompile(`^[\w.@:~/-]*[%$#]$`)
 
 // numberedChoice matches a dialog's highlighted numbered option, "❯ 1. Yes".
 var numberedChoice = regexp.MustCompile(`^\s*❯\s*[0-9]+\.\s`)
 
-// idleFooter matches the footer lines of an idle prompt: the permission
-// mode line ("⏵⏵ auto mode on (shift+tab to cycle)", the one captured) and
-// the shortcuts hint. A running turn appends " · esc to interrupt", which
-// this does not match.
-var idleFooter = regexp.MustCompile(`^(?:(?:⏵⏵|⏸) [a-z]+(?: [a-z]+)* on \(shift\+tab to cycle\)|\? for shortcuts)$`)
+// idleFooters are the footer lines of an idle prompt, one per permission
+// mode, exactly as captured at 60 to 320 columns (live check 3). Nothing
+// else is accepted: a running turn appends " · esc to interrupt", a fresh
+// session " · ← for agents", a narrow pane cuts the line short.
+var idleFooters = []string{
+	"⏵⏵ auto mode on (shift+tab to cycle)",
+	"⏵⏵ accept edits on (shift+tab to cycle)",
+	"⏸ plan mode on (shift+tab to cycle)",
+	"⏸ manual mode on · ? for shortcuts",
+}
 
 // readPrompt says what screen, a capture of an agent's pane, shows about
 // typing into it. It is strict: the input box must be the last thing on
 // screen, empty, with only a known idle footer under it.
 func readPrompt(screen string) promptState {
 	lines := screenLines(screen)
-	if hasDialog(lines) {
+	switch {
+	case len(lines) > 0 && shellPrompt.MatchString(strings.TrimSpace(lines[len(lines)-1])):
+		return promptShell
+	case hasHint(lines, dialogHints) || hasNumberedChoice(lines):
 		return promptDialog
+	case hasHint(underBox(lines), agentHints):
+		return promptAgents
 	}
 	bottom := lastRule(lines, len(lines))
 	if bottom < 0 || len(lines)-1-bottom > maxFooter {
@@ -106,20 +136,32 @@ func screenLines(screen string) []string {
 	return lines
 }
 
-// hasDialog reports whether the bottom of the screen shows a dialog's or a
-// menu's hints or numbered choices.
-func hasDialog(lines []string) bool {
+// hasHint reports whether the bottom of the screen holds one of hints.
+func hasHint(lines, hints []string) bool {
 	for _, l := range lines[max(0, len(lines)-dialogScan):] {
-		if numberedChoice.MatchString(l) {
-			return true
-		}
-		for _, h := range dialogHints {
+		for _, h := range hints {
 			if strings.Contains(l, h) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// underBox is the lines after the last rule line: the footer, and whatever
+// Claude Code lists under it. The transcript above the box can quote any
+// hint, so only these are read for the agents' hints.
+func underBox(lines []string) []string {
+	if bottom := lastRule(lines, len(lines)); bottom >= 0 {
+		return lines[bottom+1:]
+	}
+	return nil
+}
+
+// hasNumberedChoice reports whether the bottom of the screen shows a
+// dialog's highlighted numbered option.
+func hasNumberedChoice(lines []string) bool {
+	return slices.ContainsFunc(lines[max(0, len(lines)-dialogScan):], numberedChoice.MatchString)
 }
 
 // lastRule is the index of the last rule line before index end, or -1.
@@ -144,9 +186,10 @@ func isRule(l string) bool {
 	return n >= minRuleRunes
 }
 
-// footerState reads the lines under the input box: promptEmpty when each is
-// a known idle footer.
+// footerState reads the lines under the input box: promptEmpty when they
+// are exactly one known idle footer line.
 func footerState(footer []string) promptState {
+	idle := 0
 	for _, l := range footer {
 		l = strings.TrimSpace(l)
 		switch {
@@ -154,9 +197,14 @@ func footerState(footer []string) promptState {
 			return promptBusy
 		case strings.Contains(l, "Esc again to clear"):
 			return promptDraft // shown only while the prompt holds a draft
-		case l != "" && !idleFooter.MatchString(l):
+		case slices.Contains(idleFooters, l):
+			idle++
+		case l != "":
 			return promptUnknown
 		}
+	}
+	if idle != 1 { // every captured idle prompt has exactly one footer line
+		return promptUnknown
 	}
 	return promptEmpty
 }
