@@ -42,10 +42,19 @@ func fail(op, id string, err error) error {
 
 // DecisionFilter selects which decisions ListDecisions returns.
 type DecisionFilter struct {
-	Statuses  []model.DecisionStatus // empty: all
-	SessionID string                 // empty: all
-	Limit     int                    // 0: no limit; newest first when set
+	Statuses []model.DecisionStatus // empty: all
+	// Undelivered also selects, whatever their status, the answers the
+	// agent has not got yet (undelivered).
+	Undelivered bool
+	SessionID   string // empty: all
+	Limit       int    // 0: no limit; newest first when set
 }
+
+// undelivered matches the answers the asking agent has not got yet: queued
+// for delivery, or typed into its pane and not confirmed (Rulings 86 and
+// 89). It is the WHERE clause of the decisions_undelivered index, word for
+// word, so a count that uses it reads only that index.
+const undelivered = `(delivery = 'queued' OR (delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL))`
 
 // decisionColumns are the columns of a decision in scanDecision's order,
 // read from the alias d.
@@ -252,7 +261,7 @@ func (s *Store) GetDecision(ctx context.Context, id string) (model.Decision, boo
 const (
 	listDecisions = selectDecisions + `
 FROM decisions d
-WHERE (? = 0 OR d.status IN (SELECT value FROM json_each(?)))
+WHERE (? = 0 OR d.status IN (SELECT value FROM json_each(?)) OR (? AND ` + undelivered + `))
   AND (? = '' OR d.session_id = ?)`
 	listDecisionsAll    = listDecisions + ` ORDER BY d.n`
 	listDecisionsNewest = listDecisions + ` ORDER BY d.n DESC LIMIT ?`
@@ -269,7 +278,7 @@ func (s *Store) ListDecisions(ctx context.Context, f DecisionFilter) ([]model.De
 	if err != nil {
 		return nil, fail("list decisions", "", err)
 	}
-	q, args := listDecisionsAll, []any{len(f.Statuses), string(js), f.SessionID, f.SessionID}
+	q, args := listDecisionsAll, []any{len(f.Statuses), string(js), f.Undelivered, f.SessionID, f.SessionID}
 	if f.Limit > 0 {
 		q, args = listDecisionsNewest, append(args, f.Limit)
 	}
@@ -327,13 +336,15 @@ ORDER BY d.n`, formatTime(now))
 	return out, nil
 }
 
-// OpenCounts counts the tickets open at now by session id ("" for tickets
-// from an unknown caller) and mode. Sessions with none are absent.
+// OpenCounts counts, by session id ("" for tickets from an unknown
+// caller), the tickets open at now by mode and the answers the agent has
+// not got yet (Ruling 89). Sessions with none are absent.
 func (s *Store) OpenCounts(ctx context.Context, now time.Time) (map[string]model.OpenCount, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT d.session_id, SUM(d.mode = 'blocking'), SUM(d.mode = 'assume')
-FROM decisions d WHERE `+openAt+`
-GROUP BY d.session_id`, formatTime(now))
+SELECT d.session_id, SUM(d.mode = 'blocking' AND `+openAt+`), SUM(d.mode = 'assume' AND `+openAt+`),
+  SUM(`+undelivered+`)
+FROM decisions d WHERE `+openAt+` OR `+undelivered+`
+GROUP BY d.session_id`, formatTime(now), formatTime(now), formatTime(now))
 	if err != nil {
 		return nil, fail("open counts", "", err)
 	}
@@ -342,7 +353,7 @@ GROUP BY d.session_id`, formatTime(now))
 	for rows.Next() {
 		var id string
 		var c model.OpenCount
-		if err := rows.Scan(&id, &c.Blocking, &c.Assume); err != nil {
+		if err := rows.Scan(&id, &c.Blocking, &c.Assume, &c.Undelivered); err != nil {
 			return nil, fail("open counts", "", err)
 		}
 		out[id] = c
@@ -353,15 +364,22 @@ GROUP BY d.session_id`, formatTime(now))
 	return out, nil
 }
 
-// CountOpenBlocking counts the blocking tickets open at now.
-func (s *Store) CountOpenBlocking(ctx context.Context, now time.Time) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM decisions d WHERE d.mode = 'blocking' AND `+openAt,
-		formatTime(now)).Scan(&n)
+// badgeCounts is the status badge's one statement: the blocking tickets
+// open at its parameter (by the decisions_status_created index), and the
+// answers not yet delivered (by the decisions_undelivered index).
+const badgeCounts = `
+SELECT
+  (SELECT count(*) FROM decisions d WHERE d.mode = 'blocking' AND ` + openAt + `),
+  (SELECT count(*) FROM decisions WHERE ` + undelivered + `)`
+
+// BadgeCounts counts, in one statement, the blocking tickets open at now
+// and the answers the asking agents have not got yet (Ruling 89).
+func (s *Store) BadgeCounts(ctx context.Context, now time.Time) (openBlocking, undeliveredAnswers int, err error) {
+	err = s.db.QueryRowContext(ctx, badgeCounts, formatTime(now)).Scan(&openBlocking, &undeliveredAnswers)
 	if err != nil {
-		return 0, fail("count open blocking", "", err)
+		return 0, 0, fail("count for the badge", "", err)
 	}
-	return n, nil
+	return openBlocking, undeliveredAnswers, nil
 }
 
 // loadOpen loads decision id inside tx and requires it open at now.

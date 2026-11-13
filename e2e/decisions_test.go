@@ -187,12 +187,17 @@ func (r *decisionsRun) typedIntoIdlePane(t *testing.T) {
 		t.Errorf("curia decide D-1 = %q, want one line ending %q", out, "delivered (send_keys)")
 	}
 	r.waitForPane(t, "s1", r.goldenPaneLines(t, 1))
-	if got := r.h.mustRun(t, "status"); got != "" {
-		t.Errorf("curia status after D-1 = %q, want nothing", got)
+	// Typed but not confirmed: the badge counts it as not delivered yet.
+	if got := r.h.mustRun(t, "status"); got != "Q1" {
+		t.Errorf("curia status after typing D-1 = %q, want %q", got, "Q1")
 	}
 	// Claude Code submits the typed line: its UserPromptSubmit names D-1,
-	// which confirms the typing (Ruling 86), so S1 may be typed into again.
+	// which confirms the typing (Ruling 86), so S1 may be typed into again,
+	// and the badge clears.
 	r.quietHook(t, "UserPromptSubmit", "%0")
+	if got := r.h.mustRun(t, "status"); got != "" {
+		t.Errorf("curia status after D-1 was submitted = %q, want nothing", got)
+	}
 }
 
 // Step 6: D-2's answer waits while S2 works, then blocks S2's next Stop

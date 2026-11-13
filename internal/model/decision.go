@@ -130,8 +130,9 @@ type Outcome struct {
 	Note     string // "" when delivered; otherwise why it is still queued or needs none
 }
 
-// OpenCount counts open tickets by mode.
-type OpenCount struct{ Blocking, Assume int }
+// OpenCount counts open tickets by mode, and the answers not yet delivered
+// to the agent (queued, or typed and not confirmed).
+type OpenCount struct{ Blocking, Assume, Undelivered int }
 
 // DecisionEdit rescopes and/or supersedes a decided ticket.
 type DecisionEdit struct {

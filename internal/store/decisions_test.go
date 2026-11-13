@@ -1389,11 +1389,53 @@ func TestOpenCountsAndBlockingCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := map[string]model.OpenCount{"S1": {Blocking: 2, Assume: 1}, "S2": {Assume: 1}}; !reflect.DeepEqual(counts, want) {
+	// S2's answer is queued: not delivered yet (Ruling 89).
+	if want := map[string]model.OpenCount{"S1": {Blocking: 2, Assume: 1}, "S2": {Assume: 1, Undelivered: 1}}; !reflect.DeepEqual(counts, want) {
 		t.Errorf("OpenCounts = %v, want %v", counts, want)
 	}
-	if n, err := s.CountOpenBlocking(ctx, now); err != nil || n != 2 {
-		t.Errorf("CountOpenBlocking = %d, %v; want 2, nil", n, err)
+	if n, q, err := s.BadgeCounts(ctx, now); err != nil || n != 2 || q != 1 {
+		t.Errorf("BadgeCounts = %d, %d, %v; want 2, 1, nil", n, q, err)
+	}
+}
+
+// Ruling 89, defect 8: an answer the agent has not got yet, queued or typed
+// and not confirmed, is counted for the badge and the dashboard, and listed
+// with the open tickets; a delivered or confirmed one is not.
+func TestDefect8UndeliveredAnswersCounted(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	liveSession(t, s, "s1", "%3", model.StateIdle)
+	liveSession(t, s, "s2", "%4", model.StateIdle)
+	confirmed := queued(t, s, "Typed and confirmed?", "s1")
+	claimTyping(t, s, confirmed.ID, tClaim)
+	confirmTyped(t, s, decision.TypedMessage(confirmed), tClaim)
+	queuedOne := queued(t, s, "Still queued?", "s1")
+	typed := queued(t, s, "Typed, not confirmed?", "s2")
+	claimTyping(t, s, typed.ID, tClaim)
+	stopped := queued(t, s, "Delivered by the Stop hook?", "s3")
+	claimStop(t, s, "s3", tClaim)
+	if got := getDecision(t, s, stopped.ID); got.DeliveredVia != model.ViaStopHook {
+		t.Fatalf("setup: %s via %q, want stop_hook", stopped.ID, got.DeliveredVia)
+	}
+	openOne := create(t, s, ticket(t, "Still open?", model.ModeBlocking, "s1", t0))
+
+	n, q, err := s.BadgeCounts(ctx, tClaim)
+	if err != nil || n != 1 || q != 2 {
+		t.Errorf("BadgeCounts = %d, %d, %v; want 1 open blocking, 2 undelivered", n, q, err)
+	}
+	counts, err := s.OpenCounts(ctx, tClaim)
+	if want := map[string]model.OpenCount{"s1": {Blocking: 1, Undelivered: 1}, "s2": {Undelivered: 1}}; err != nil || !reflect.DeepEqual(counts, want) {
+		t.Errorf("OpenCounts = %v, %v; want %v", counts, err, want)
+	}
+	ds, err := s.ListDecisions(ctx, store.DecisionFilter{Statuses: []model.DecisionStatus{model.StatusOpen}, Undelivered: true})
+	if got, want := decisionIDs(ds), []string{queuedOne.ID, typed.ID, openOne.ID}; err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("open and undelivered = %v, %v; want %v", got, err, want)
+	}
+	if _, _, err := s.CheckDecision(ctx, typed.ID, "s2", tClaim.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, q, err := s.BadgeCounts(ctx, tClaim); err != nil || q != 1 {
+		t.Errorf("after check_decision confirmed the typed answer: undelivered = %d, %v; want 1", q, err)
 	}
 }
 

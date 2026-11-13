@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -199,8 +200,9 @@ func TestDecisionsLsStatusFilter(t *testing.T) {
 		args []string
 		want string
 	}{
-		{nil, "D-1 D-2"},
-		{[]string{"--status", "open"}, "D-1 D-2"},
+		// D-4's answer is still queued: listed with the open ones (M3).
+		{nil, "D-1 D-2 D-4"},
+		{[]string{"--status", "open"}, "D-1 D-2 D-4"},
 		{[]string{"--status", "decided"}, "D-3 D-4 D-7"},
 		{[]string{"--status", "closed"}, "D-5 D-6"},
 		{[]string{"--status", "all"}, "D-1 D-2 D-3 D-4 D-5 D-6 D-7"},
@@ -458,7 +460,7 @@ func TestEditRefusesInsideAgent(t *testing.T) {
 		t.Errorf("scope = %s, want repo", d.Scope)
 	}
 	decisionsScope = ""
-	if got := decisionsIDs(t); strings.Join(got, " ") != "D-1 D-2" {
+	if got := decisionsIDs(t); strings.Join(got, " ") != "D-1 D-2 D-4" {
 		t.Errorf("ls inside agent = %v", got)
 	}
 }
@@ -494,5 +496,51 @@ func TestRefuseInsideAgent(t *testing.T) {
 	t.Setenv("CLAUDECODE", "1")
 	if err := refuseInsideAgent(); err == nil {
 		t.Error("CLAUDECODE=1: no error")
+	}
+}
+
+// M3, Ruling 89: the table says where each ticket was answered (VIA) and
+// how far its delivery got, marks a superseded one, and the default
+// listing holds the answers the agent has not got yet.
+func TestDecisionsLsShowsViaDeliveryAndSupersession(t *testing.T) {
+	const z = ".000000000Z"
+	specs := append(decisionsSpecs(), decisionsSpec{"Typed, not confirmed?", model.ModeBlocking, "2026-11-11T10:00:00" + z, "", decisionsEnd{
+		status: "answered", key: "A", answer: "A: Postgres", via: "popup", answered: "2026-11-11T10:30:00" + z,
+		delivery: "delivered", dvia: "send_keys", delivered: "2026-11-11T10:30:01" + z,
+	}})
+	decisionsHome(t, specs...)
+	out, err := runRoot(t, "decisions", "ls", "--status", "all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := func(id string) string {
+		for _, l := range strings.Split(out, "\n") {
+			if strings.HasPrefix(l, id+" ") {
+				return strings.Join(strings.Fields(l), " ")
+			}
+		}
+		t.Fatalf("no row %s in:\n%s", id, out)
+		return ""
+	}
+	if h := strings.Fields(strings.SplitN(out, "\n", 2)[0]); !slices.Equal(h, []string{"ID", "STATUS", "MODE", "AGE", "REPO", "QUESTION", "ANSWER", "VIA", "DELIVERY"}) {
+		t.Errorf("header = %q", h)
+	}
+	for id, want := range map[string]string{
+		"D-1": "open blocking",
+		"D-3": "cli delivered (stop_hook)",
+		"D-4": "popup queued",
+		"D-7": "confirmed (superseded)",
+		"D-8": "popup typed, unconfirmed",
+	} {
+		if got := fields(id); !strings.Contains(got, want) {
+			t.Errorf("%s row = %q, want it to hold %q", id, got, want)
+		}
+	}
+	if got := fields("D-7"); !strings.HasSuffix(got, "ssh delivered (check)") {
+		t.Errorf("D-7 row = %q, want via ssh, delivered by check", got)
+	}
+	decisionsStatus = "open"
+	if got := strings.Join(decisionsIDs(t), " "); got != "D-1 D-2 D-4 D-8" {
+		t.Errorf("default listing = %s, want the open tickets and the undelivered answers D-4 and D-8", got)
 	}
 }
