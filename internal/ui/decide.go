@@ -22,6 +22,16 @@ const answerTimeout = 5 * time.Second
 // on screen changed.
 const noticeChanged = "queue changed; press again"
 
+// noticeTooSoon is shown when a key is ignored because it came too soon:
+// before the ticket on screen or the open input was there for the dwell,
+// during the quiet period, or as a repeat of Enter (Ruling 88, defect 11:
+// nothing changed, so it must not say the queue did).
+const noticeTooSoon = "too soon; pause, then press again"
+
+// noticeTyped is shown when typed text that is no command is ignored; it
+// starts the quiet period, so the rest of the text cannot act (Ruling 88).
+const noticeTyped = "typing ignored; press w to write an answer, r to give a reason"
+
 // quietPeriod is how long answer keys are ignored after one's own answer
 // (Ruling 63) and after an answer key refused for a change the user did not
 // cause (Ruling 68), so a key pressed twice or held never answers the next
@@ -90,6 +100,8 @@ type DecideModel struct {
 	quietUntil  time.Time // answer keys before this are ignored (after one's own answer)
 	shownSince  time.Time // when the selected ticket, as it is now, came on screen
 	promptSince time.Time // when the confirmation opened
+	inputSince  time.Time // when the input opened, or last refused a too early Enter
+	lastEnter   time.Time // when the last Enter came, acted on or not
 
 	issued, applied int // sequence numbers of the last refresh started and applied
 
@@ -104,7 +116,8 @@ type DecideModel struct {
 	pending    pendingAnswer
 	confirming bool // pending waits for "y"
 	sending    bool // an answer is in flight
-	closing    bool // close once the answer in flight returns
+	closing    bool // close once the answer in flight returns, unless it has a note
+	quitting   bool // closing was asked by Ctrl+C: quit the program, even embedded
 
 	notice    string // the last outcome or message, cleared by the next key
 	noticeErr bool   // notice is an error
@@ -322,9 +335,16 @@ func (m DecideModel) prompting() bool {
 // of several.
 func (m DecideModel) updateKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
+		if m.sending { // M1: quitting now could cut a delivery short
+			m.closing, m.quitting = true, true
+			return m, nil
+		}
 		return m, tea.Quit
 	}
 	m.notice, m.noticeErr = "", false
+	if msg.Type == tea.KeyEnter && m.enterRepeated() {
+		return m.tooSoon(), nil
+	}
 	switch {
 	case m.confirming:
 		return m.confirmKey(msg, split)
@@ -334,6 +354,29 @@ func (m DecideModel) updateKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cmd
 		return m, nil
 	}
 	return m.commandKey(msg)
+}
+
+// enterRepeated records an Enter and reports whether it came within the
+// dwell of the Enter before it, as a held or doubled Enter does: no key-up
+// reaches a terminal program, so a gap is the only sign it was let go
+// (Ruling 88, defect 5).
+func (m *DecideModel) enterRepeated() bool {
+	now := m.now()
+	repeated := !m.lastEnter.IsZero() && now.Sub(m.lastEnter) < dwell
+	m.lastEnter = now
+	return repeated
+}
+
+// tooSoon ignores a key that came too soon: it restarts the dwell of the
+// ticket and of an open input, so a repeating key never gets through, and
+// it extends a running quiet period.
+func (m DecideModel) tooSoon() DecideModel {
+	now := m.now()
+	if now.Before(m.quietUntil) {
+		m.quietUntil = now.Add(quietPeriod)
+	}
+	m.inputSince = now
+	return m.refuse(noticeTooSoon)
 }
 
 func (m DecideModel) commandKey(msg tea.KeyMsg) (DecideModel, tea.Cmd) {
@@ -354,12 +397,32 @@ func (m DecideModel) commandKey(msg tea.KeyMsg) (DecideModel, tea.Cmd) {
 		return m.answerRecommended()
 	case "w":
 		return m.openText(), nil
-	case "r":
-		return m.openReason(), nil
-	case "s":
+	case "r", "s":
+		// Both stage part of the next answer, so they wait like an answer
+		// key (defect 4: typed text changed a ticket's scope).
+		var ok bool
+		if m, ok = m.guard(); !ok {
+			return m, nil
+		}
+		if k == "r" {
+			return m.openReason(), nil
+		}
 		m.scope = nextScope(m.scope)
+	default:
+		if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+			return m.typedText(), nil
+		}
 	}
 	return m, nil
+}
+
+// typedText ignores a key that is no command, as when the user types a
+// reason into the queue out of habit, and starts the quiet period, so the
+// rest of what is typed cannot answer or stage anything (Ruling 88, defect
+// 4). Each key restarts it, as an ignored answer key does.
+func (m DecideModel) typedText() DecideModel {
+	m.quietUntil = m.now().Add(quietPeriod)
+	return m.refuse(noticeTyped)
 }
 
 // close quits, or when embedded tells the dashboard the view closed.
@@ -430,11 +493,11 @@ func (m DecideModel) guard() (DecideModel, bool) {
 		return m.refuse("still sending the last answer"), false
 	case now.Before(m.quietUntil):
 		m.quietUntil = now.Add(quietPeriod)
-		return m.refuse(noticeChanged), false
+		return m.refuse(noticeTooSoon), false
 	case m.changed:
 		return m.refuseChanged(), false
 	case now.Sub(m.shownSince) < dwell:
-		return m.refuse(noticeChanged), false
+		return m.refuse(noticeTooSoon), false
 	}
 	return m, true
 }
@@ -466,10 +529,15 @@ func (m DecideModel) startAnswer(t model.Ticket, a model.Answer) (DecideModel, t
 	a.Reasoning, a.Scope, a.Via = m.reasoning, m.scope, m.opts.Via
 	p := pendingAnswer{ticket: t, a: a}
 	if t.Mode == model.ModeBlocking && a.Reasoning == "" {
-		m.pending, m.input, m.buf = p, inputWhy, nil
-		return m, nil
+		return m.askWhy(p), nil
 	}
 	return m.proceed(p)
+}
+
+// askWhy opens the reasoning input for p, which waits in pending.
+func (m DecideModel) askWhy(p pendingAnswer) DecideModel {
+	m.pending, m.input, m.buf, m.inputSince = p, inputWhy, nil, m.now()
+	return m
 }
 
 // openText opens the free-text answer input for the selected ticket.
@@ -484,6 +552,7 @@ func (m DecideModel) openText() DecideModel {
 	}
 	a := model.Answer{Reasoning: m.reasoning, Scope: m.scope, Via: m.opts.Via}
 	m.pending, m.input, m.buf = pendingAnswer{ticket: t, a: a}, inputText, []rune(m.draft)
+	m.inputSince = m.now()
 	return m
 }
 
@@ -492,6 +561,7 @@ func (m DecideModel) openText() DecideModel {
 func (m DecideModel) openReason() DecideModel {
 	if t, ok := m.current(); ok {
 		m.pending, m.input, m.buf = pendingAnswer{ticket: t}, inputReason, []rune(m.reasoning)
+		m.inputSince = m.now()
 	}
 	return m
 }
@@ -523,13 +593,23 @@ func (m DecideModel) inputCap() int {
 
 func (m DecideModel) cancelInput() DecideModel {
 	if m.input != inputReason {
+		if m.pending.a.Text != "" {
+			m.draft = m.pending.a.Text // "w" offers it again
+		}
 		m.pending, m.notice = pendingAnswer{}, "answer canceled"
 	}
 	m.input, m.buf = inputNone, nil
 	return m
 }
 
+// submitInput takes what was typed, on an Enter that came the dwell after
+// the input opened. A free-text answer to a blocking ticket with no staged
+// reasoning then asks for the reasoning, as an option answer does (Ruling
+// 88, defect 4: a reason typed after it was read as commands).
 func (m DecideModel) submitInput() (DecideModel, tea.Cmd) {
+	if m.now().Sub(m.inputSince) < dwell {
+		return m.tooSoon(), nil
+	}
 	text := strings.TrimSpace(string(m.buf))
 	p := m.pending
 	switch m.input {
@@ -549,8 +629,11 @@ func (m DecideModel) submitInput() (DecideModel, tea.Cmd) {
 	}
 	kind := m.input
 	m.input, m.buf, m.pending = inputNone, nil, pendingAnswer{}
-	if kind == inputReason {
+	switch {
+	case kind == inputReason:
 		return m, nil
+	case kind == inputText && p.ticket.Mode == model.ModeBlocking && p.a.Reasoning == "":
+		return m.askWhy(p), nil
 	}
 	return m.proceed(p)
 }
@@ -604,7 +687,7 @@ func (m DecideModel) send(p pendingAnswer) (DecideModel, tea.Cmd) {
 func (m DecideModel) applyAnswer(msg decideAnsweredMsg) (DecideModel, tea.Cmd) {
 	m.sending = false
 	if msg.err != nil {
-		m.closing = false
+		m.closing, m.quitting = false, false
 		m.notice, m.noticeErr = "answer failed: "+msg.err.Error(), true
 		if t, ok := m.current(); ok && sameTicket(t, msg.ticket) {
 			m.reasoning, m.scope, m.draft = msg.a.Reasoning, msg.a.Scope, msg.a.Text
@@ -612,6 +695,9 @@ func (m DecideModel) applyAnswer(msg decideAnsweredMsg) (DecideModel, tea.Cmd) {
 		return m.refresh(false)
 	}
 	if m.closing {
+		if m.quitting {
+			return m, tea.Quit
+		}
 		return m, m.close()
 	}
 	m.notice = outcomeText(msg)
