@@ -32,15 +32,24 @@ const noticeTooSoon = "too soon; pause, then press again"
 // starts the quiet period, so the rest of the text cannot act (Ruling 88).
 const noticeTyped = "typing ignored; press w to write an answer, r to give a reason"
 
-// quietPeriod is how long answer keys are ignored after one's own answer
-// (Ruling 63) and after an answer key refused for a change the user did not
-// cause (Ruling 68), so a key pressed twice or held never answers the next
-// ticket unread. Each ignored key restarts it. A terminal sends no key-up,
-// so a held key is told from presses by time alone: the period is longer
-// than the usual delay before a held key starts repeating (375 to 660 ms).
-// Accepted residue: a keyboard set to a repeat delay above 750 ms can still
-// get a repeat through.
+// quietPeriod is how long answer keys are ignored after an answer key
+// refused for a change the user did not cause (Ruling 68), and how close an
+// Enter may follow the one before and still count as its repeat, so a key
+// pressed twice or held never answers a ticket unread. Each ignored key
+// restarts it. A terminal sends no key-up, so a held key is told from
+// presses by time alone: the period is longer than the usual delay before
+// a held key starts repeating (375 to 660 ms). Accepted residue: a keyboard
+// set to a repeat delay above 750 ms can still get a repeat through.
 const quietPeriod = 750 * time.Millisecond
+
+// answeredQuiet is how long every key but q and Esc is ignored after one's
+// own answer (Ruling 63), after typed text that is no command, and after a
+// paste: long enough to cover a reason typed or pasted out of habit right
+// after an answer that asked for none, which the live check saw begin 1.04 s
+// after it (Ruling 88, re-review N2). Each ignored key restarts it, so text
+// typed at any normal pace never acts; the next ticket is answered after a
+// pause of this length.
+const answeredQuiet = 2 * time.Second
 
 // dwell is how long a ticket must have been on screen before an answer key
 // acts on it, and a confirmation open before "y" gives it (Ruling 66). The
@@ -97,12 +106,13 @@ type DecideModel struct {
 	loaded   bool           // a read has succeeded
 	changed  bool           // a refresh changed the ticket on screen: the next answer key is ignored
 
-	quietUntil   time.Time // answer keys before this are ignored (after one's own answer)
-	shownSince   time.Time // when the selected ticket, as it is now, came on screen
-	promptSince  time.Time // when the confirmation opened
-	inputSince   time.Time // when the input opened, or last refused a too early Enter
-	inputByEnter bool      // an Enter opened the reasoning input
-	lastEnter    time.Time // when the last Enter came, acted on or not
+	quietUntil   time.Time     // keys before this are ignored (see quietPeriod, answeredQuiet)
+	quietFor     time.Duration // the length of the running quiet period, which a refused key restarts
+	shownSince   time.Time     // when the selected ticket, as it is now, came on screen
+	promptSince  time.Time     // when the confirmation opened
+	inputSince   time.Time     // when the input opened, or last refused a too early Enter
+	inputByEnter bool          // an Enter opened the reasoning input
+	lastEnter    time.Time     // when the last Enter came, acted on or not
 
 	issued, applied int // sequence numbers of the last refresh started and applied
 
@@ -351,8 +361,8 @@ func (m DecideModel) updateKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cmd
 		return m.confirmKey(msg, split)
 	case m.input != inputNone:
 		return m.inputKey(msg)
-	case msg.Paste: // pasted text is never a command
-		return m, nil
+	case msg.Paste: // pasted text is never a command, and starts a quiet period (N2)
+		return m.quiet(answeredQuiet).refuse(noticeTyped), nil
 	}
 	return m.commandKey(msg)
 }
@@ -375,14 +385,25 @@ func (m *DecideModel) enterRepeated() bool {
 func (m DecideModel) tooSoon() DecideModel {
 	now := m.now()
 	if now.Before(m.quietUntil) {
-		m.quietUntil = now.Add(quietPeriod)
+		m.quietUntil = now.Add(m.quietFor)
 	}
 	m.inputSince = now
 	return m.refuse(noticeTooSoon)
 }
 
+// inQuiet reports whether command key k comes within a quiet period: then
+// every key but q and Esc is ignored and restarts it (tooSoon), so text
+// typed after an answer never moves, stages or answers (re-review N2).
+func (m DecideModel) inQuiet(k string) bool {
+	return m.now().Before(m.quietUntil) && k != "q" && k != "esc"
+}
+
 func (m DecideModel) commandKey(msg tea.KeyMsg) (DecideModel, tea.Cmd) {
-	switch k := msg.String(); k {
+	k := msg.String()
+	if m.inQuiet(k) {
+		return m.tooSoon(), nil
+	}
+	switch k {
 	case "q", "esc":
 		if m.sending { // quitting now could cut a delivery short
 			m.closing = true
@@ -423,8 +444,13 @@ func (m DecideModel) commandKey(msg tea.KeyMsg) (DecideModel, tea.Cmd) {
 // rest of what is typed cannot answer or stage anything (Ruling 88, defect
 // 4). Each key restarts it, as an ignored answer key does.
 func (m DecideModel) typedText() DecideModel {
-	m.quietUntil = m.now().Add(quietPeriod)
-	return m.refuse(noticeTyped)
+	return m.quiet(answeredQuiet).refuse(noticeTyped)
+}
+
+// quiet starts a quiet period of d.
+func (m DecideModel) quiet(d time.Duration) DecideModel {
+	m.quietUntil, m.quietFor = m.now().Add(d), d
+	return m
 }
 
 // close quits, or when embedded tells the dashboard the view closed.
@@ -494,7 +520,7 @@ func (m DecideModel) guard() (DecideModel, bool) {
 	case m.sending:
 		return m.refuse("still sending the last answer"), false
 	case now.Before(m.quietUntil):
-		m.quietUntil = now.Add(quietPeriod)
+		m.quietUntil = now.Add(m.quietFor)
 		return m.refuse(noticeTooSoon), false
 	case m.changed:
 		return m.refuseChanged(), false
@@ -517,7 +543,8 @@ func (m DecideModel) refuse(notice string) DecideModel {
 // repeats of a held key are ignored however late the first one comes
 // (Ruling 68; see quietPeriod for what is left).
 func (m DecideModel) refuseChanged() DecideModel {
-	m.changed, m.quietUntil = false, m.now().Add(quietPeriod)
+	m.changed = false
+	m = m.quiet(quietPeriod)
 	return m.refuse(noticeChanged)
 }
 
@@ -717,7 +744,7 @@ func (m DecideModel) applyAnswer(msg decideAnsweredMsg) (DecideModel, tea.Cmd) {
 	before, had := m.current()
 	m.tickets = slices.DeleteFunc(slices.Clone(m.tickets), func(t model.Ticket) bool { return t.ID == msg.id })
 	m = m.reselect().markShown(before, had)
-	m.quietUntil = m.now().Add(quietPeriod)
+	m = m.quiet(answeredQuiet)
 	m, cmd := m.refresh(false)
 	m.applied = m.issued
 	return m, cmd

@@ -145,8 +145,8 @@ func (c *testClock) advance(d time.Duration) { c.set(c.now().Add(d)) }
 var decideClock testClock
 
 // keyGap is how far dpress moves the clock before each key: the pace of a
-// person reading, longer than the quiet period after an answer.
-const keyGap = time.Second
+// person reading, longer than the quiet period after an answer (2 s).
+const keyGap = 2500 * time.Millisecond
 
 // newDecide returns a decide view over src after its first refresh, with
 // the clock moved on by keyGap: the first ticket has been read.
@@ -1138,7 +1138,7 @@ func TestOwnAnswerQuietPeriod(t *testing.T) {
 	src.set(assumeTickets(2)...)
 	m := newDecide(t, src, popup)
 	m = send(t, m, dkey("1"))
-	decideClock.advance(800 * time.Millisecond)
+	decideClock.advance(2100 * time.Millisecond) // after the 2 s quiet period (re-review N2)
 	send(t, m, dkey("1"))
 	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}},
 		answerCall{"D-2", model.Answer{Key: "A", Via: model.AnsweredPopup}})
@@ -1147,7 +1147,7 @@ func TestOwnAnswerQuietPeriod(t *testing.T) {
 	src.set(assumeTickets(2)...)
 	m = newDecide(t, src, popup)
 	m = send(t, m, dkey("1"))
-	for _, d := range []time.Duration{300, 700} { // the second lands after the first period would have ended
+	for _, d := range []time.Duration{300, 1900} { // the second lands after the first period would have ended
 		decideClock.advance(d * time.Millisecond)
 		m = send(t, m, dkey("1"))
 		if s := lastLine(m); s != tooSoon {
@@ -1155,7 +1155,7 @@ func TestOwnAnswerQuietPeriod(t *testing.T) {
 		}
 	}
 	wantCalls(t, src, answerCall{"D-1", model.Answer{Key: "A", Via: model.AnsweredPopup}})
-	decideClock.advance(800 * time.Millisecond)
+	decideClock.advance(2100 * time.Millisecond)
 	send(t, m, dkey("1"))
 	if got := src.calls(); len(got) != 2 || got[1].id != "D-2" {
 		t.Errorf("calls = %+v, want D-2 answered after the quiet period", got)
@@ -1187,7 +1187,7 @@ func TestRefreshChangeDuringQuietNeedsOwnPress(t *testing.T) {
 	m = reload(t, m)
 	decideClock.advance(100 * time.Millisecond)
 	m = send(t, m, dkey("1")) // in the quiet period: ignored, restarts it
-	decideClock.advance(800 * time.Millisecond)
+	decideClock.advance(2100 * time.Millisecond)
 	m = send(t, m, dkey("1")) // after it: ignored for the change
 	if s := lastLine(m); s != "queue changed; press again" {
 		t.Errorf("status line = %q, want the notice:\n%s", s, m.View())
@@ -1634,9 +1634,9 @@ func TestDefect4FreeTextAnswerAsksForReason(t *testing.T) {
 }
 
 // Ruling 88, defect 4, where no reason is asked (an assume ticket): text
-// typed into the queue after the answer starts the quiet period with its
-// first key that is no command, so its "s" and "2" neither rescope nor
-// answer the next ticket, however long after the answer it comes.
+// typed into the queue 1.04 s after the answer (the live check's gap) falls
+// in the quiet period, whose every ignored key restarts it, so its "s" and
+// "2" neither rescope nor answer the next ticket.
 func TestDefect4TypingAfterAnswerActsOnNothing(t *testing.T) {
 	src := &fakeDecideSource{}
 	src.set(ticket(13, model.ModeAssume, model.ReversCheap), ticket(14, model.ModeAssume, model.ReversCheap))
@@ -1769,5 +1769,47 @@ func TestDetailShowsAsker(t *testing.T) {
 	src.set(tk)
 	if view := newDecide(t, src, popup).View(); strings.Contains(view, "session idle") || !strings.Contains(view, "from work:@7") {
 		t.Errorf("a live session's state is shown, or the asker is not:\n%s", view)
+	}
+}
+
+// Ruling 88, re-review N2: text typed or pasted out of habit 1.04 s after an
+// answer that asked for no reason never moves, stages or answers, also when
+// it begins with a command key ("2", "w") or is pasted and followed by
+// Enter. Each sequence leaves only the first answer.
+func TestDefect4HabitTextAfterAnswerActsOnNothing(t *testing.T) {
+	type step func(tea.Model) tea.Model
+	typed := func(text string) step {
+		return func(m tea.Model) tea.Model {
+			m = typeText(t, m, text)
+			decideClock.advance(typingGap)
+			return send(t, m, dkey("enter"))
+		}
+	}
+	pasted := func(m tea.Model) tea.Model {
+		m = send(t, m, paste("Use 2 tabs"))
+		decideClock.advance(300 * time.Millisecond)
+		return send(t, m, dkey("enter"))
+	}
+	for name, after := range map[string]step{
+		"2 tabs please":           typed("2 tabs please"),
+		"we use tabs, Enter":      typed("we use tabs"),
+		"pasted reason, Enter":    pasted,
+		"Use 2 tabs (no command)": typed("Use 2 tabs"),
+	} {
+		src := &fakeDecideSource{}
+		src.set(ticket(13, model.ModeAssume, model.ReversCheap), ticket(14, model.ModeAssume, model.ReversCheap))
+		m := newDecide(t, src, popup)
+		m = dpress(t, m, "2")
+		decideClock.advance(1040 * time.Millisecond)
+		m = after(m)
+		if got := src.calls(); len(got) != 1 || got[0].id != "D-13" {
+			t.Errorf("%s: answers = %+v, want only D-13's", name, got)
+		}
+		if view := m.View(); strings.Contains(view, "staged scope") || strings.Contains(view, "staged reasoning") {
+			t.Errorf("%s: typed text staged something:\n%s", name, view)
+		}
+		if s := lastLine(m); strings.HasPrefix(s, "answer (enter sends)") {
+			t.Errorf("%s: a free-text input was opened: %q", name, s)
+		}
 	}
 }
