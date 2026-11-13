@@ -817,3 +817,25 @@ func txConfirmTyped(s *store.Store, prompt string, at time.Time) (int64, error) 
 	})
 	return n, err
 }
+
+// Re-review m1: when the owner's check_decision confirms a typed answer in
+// the moment between the claim and a refused pane check, the requeue
+// leaves it alone, so the Stop hook does not hand it over a second time.
+func TestRequeueLeavesAnAnswerCheckConfirmed(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	liveSession(t, s, "s1", "%3", model.StateIdle)
+	d := queued(t, s, "Typed?", "s1")
+	claimTyping(t, s, d.ID, tClaim)
+	got, _, err := s.CheckDecision(ctx, d.ID, "s1", tClaim.Add(time.Millisecond))
+	if err != nil || got.ConfirmedAt.IsZero() {
+		t.Fatalf("check_decision = confirmed at %v, %v; want confirmed", got.ConfirmedAt, err)
+	}
+	if err := s.RequeueDelivery(ctx, d.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertDelivered(t, s, d.ID, model.ViaSendKeys, tClaim)
+	if claimed := claimStop(t, s, "s1", tClaim.Add(time.Second)); len(claimed) != 0 {
+		t.Errorf("the Stop hook handed over again an answer check_decision returned: %v", decisionIDs(claimed))
+	}
+}

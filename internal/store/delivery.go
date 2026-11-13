@@ -170,12 +170,14 @@ func claimRefusal(ctx context.Context, tx *sql.Tx, d model.Decision, sess model.
 }
 
 // RequeueDelivery undoes a typing claim whose typing failed: a decision
-// delivered by send_keys is queued again, with no delivery path or time.
-// Any other decision, or none, is left as it is.
+// delivered by send_keys and not confirmed is queued again, with no
+// delivery path or time. Any other decision, or none, is left as it is: an
+// answer the agent has read with check_decision since the claim (re-review
+// m1) is delivered.
 func (s *Store) RequeueDelivery(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `
-UPDATE decisions SET delivery = 'queued', delivered_via = '', delivered_at = NULL, confirmed_at = NULL
-WHERE id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys'`, id)
+UPDATE decisions SET delivery = 'queued', delivered_via = '', delivered_at = NULL
+WHERE id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL`, id)
 	if err != nil {
 		return fmt.Errorf("store: requeue delivery of %s: %w", id, err)
 	}
