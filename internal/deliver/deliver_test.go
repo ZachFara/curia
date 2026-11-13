@@ -1081,7 +1081,7 @@ func realServer(t *testing.T, dir string, argv ...string) (tmux.Client, func(arg
 		out, err := exec.Command("tmux", append([]string{"-L", realSocket, "-f", os.DevNull}, args...)...).CombinedOutput()
 		return string(out), err
 	}
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", realSocket, "kill-server").Run() })
+	t.Cleanup(func() { killServer(realSocket) })
 	_, _ = raw("kill-server") // clear a leftover server from an aborted run
 	args := append([]string{"new-session", "-d", "-s", "t", "-x", "200", "-y", "50", "-c", dir, "--"}, argv...)
 	if out, err := raw(args...); err != nil {
@@ -1245,5 +1245,27 @@ func TestShellNotFoundPattern(t *testing.T) {
 		if got := shellNotFound.MatchString(line); got != want {
 			t.Errorf("shellNotFound(%q) = %v, want %v", line, got, want)
 		}
+	}
+}
+
+// killServer stops the private test server on socket and removes its
+// socket file, which tmux leaves behind. The directory is asked of the
+// server before it goes, or else built from TMUX_TMPDIR as tmux builds it,
+// and only the entry named socket in it is removed (os.Root keeps the
+// removal inside that directory).
+func killServer(socket string) {
+	out, err := exec.Command("tmux", "-L", socket, "display-message", "-p", "#{socket_path}").Output()
+	dir := filepath.Dir(strings.TrimSpace(string(out)))
+	if err != nil || dir == "." {
+		tmp := os.Getenv("TMUX_TMPDIR")
+		if tmp == "" {
+			tmp = "/tmp"
+		}
+		dir = filepath.Join(tmp, fmt.Sprintf("tmux-%d", os.Getuid()))
+	}
+	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	if root, rerr := os.OpenRoot(dir); rerr == nil {
+		_ = root.Remove(socket)
+		_ = root.Close()
 	}
 }
