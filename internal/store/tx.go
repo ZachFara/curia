@@ -80,7 +80,7 @@ const returnedDecision = `
   recommendation, rationale, reversibility, mode, assumption, scope, tags, status,
   answer_key, answer, answer_reasoning, answered_via, precedent_of, differs_from,
   differs_why, withdraw_reason, superseded_by, args_hash, delivery, delivered_via,
-  created_at, expires_at, answered_at, closed_at, superseded_at, delivered_at`
+  created_at, expires_at, answered_at, closed_at, superseded_at, delivered_at, confirmed_at`
 
 // claimDeliveries marks the session's oldest claimCap queued answers
 // delivered by the Stop hook and returns them. Parameters: now, the

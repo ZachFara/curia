@@ -42,10 +42,19 @@ func fail(op, id string, err error) error {
 
 // DecisionFilter selects which decisions ListDecisions returns.
 type DecisionFilter struct {
-	Statuses  []model.DecisionStatus // empty: all
-	SessionID string                 // empty: all
-	Limit     int                    // 0: no limit; newest first when set
+	Statuses []model.DecisionStatus // empty: all
+	// Undelivered also selects, whatever their status, the answers the
+	// agent has not got yet (undelivered).
+	Undelivered bool
+	SessionID   string // empty: all
+	Limit       int    // 0: no limit; newest first when set
 }
+
+// undelivered matches the answers the asking agent has not got yet: queued
+// for delivery, or typed into its pane and not confirmed (Rulings 86 and
+// 89). It is the WHERE clause of the decisions_undelivered index, word for
+// word, so a count that uses it reads only that index.
+const undelivered = `(delivery = 'queued' OR (delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL))`
 
 // decisionColumns are the columns of a decision in scanDecision's order,
 // read from the alias d.
@@ -54,7 +63,7 @@ const decisionColumns = `
   d.recommendation, d.rationale, d.reversibility, d.mode, d.assumption, d.scope, d.tags, d.status,
   d.answer_key, d.answer, d.answer_reasoning, d.answered_via, d.precedent_of, d.differs_from,
   d.differs_why, d.withdraw_reason, d.superseded_by, d.args_hash, d.delivery, d.delivered_via,
-  d.created_at, d.expires_at, d.answered_at, d.closed_at, d.superseded_at, d.delivered_at`
+  d.created_at, d.expires_at, d.answered_at, d.closed_at, d.superseded_at, d.delivered_at, d.confirmed_at`
 
 // selectDecisions is the column list every reader of decisions uses. A
 // query adds "FROM decisions d" after it, or first the columns of a join,
@@ -75,13 +84,13 @@ const decided = `d.status IN ('answered', 'confirmed', 'overridden')`
 func scanDecision(sc scanner, extra ...any) (model.Decision, error) {
 	var d model.Decision
 	var options, tags string
-	var created, expires, answered, closed, superseded, delivered sql.NullString
+	var created, expires, answered, closed, superseded, delivered, confirmed sql.NullString
 	dest := append([]any{
 		&d.N, &d.ID, &d.SessionID, &d.TaskID, &d.Repo, &d.Question, &d.Context, &options,
 		&d.Recommendation, &d.Rationale, &d.Reversibility, &d.Mode, &d.Assumption, &d.Scope, &tags, &d.Status,
 		&d.AnswerKey, &d.Answer, &d.AnswerReasoning, &d.AnsweredVia, &d.PrecedentOf, &d.DiffersFrom,
 		&d.DiffersWhy, &d.WithdrawReason, &d.SupersededBy, &d.ArgsHash, &d.Delivery, &d.DeliveredVia,
-		&created, &expires, &answered, &closed, &superseded, &delivered,
+		&created, &expires, &answered, &closed, &superseded, &delivered, &confirmed,
 	}, extra...)
 	if err := sc.Scan(dest...); err != nil {
 		return model.Decision{}, err
@@ -100,6 +109,7 @@ func scanDecision(sc scanner, extra ...any) (model.Decision, error) {
 		{&d.ClosedAt, closed},
 		{&d.SupersededAt, superseded},
 		{&d.DeliveredAt, delivered},
+		{&d.ConfirmedAt, confirmed},
 	} {
 		t, err := parseTime(f.src)
 		if err != nil {
@@ -251,7 +261,7 @@ func (s *Store) GetDecision(ctx context.Context, id string) (model.Decision, boo
 const (
 	listDecisions = selectDecisions + `
 FROM decisions d
-WHERE (? = 0 OR d.status IN (SELECT value FROM json_each(?)))
+WHERE (? = 0 OR d.status IN (SELECT value FROM json_each(?)) OR (? AND ` + undelivered + `))
   AND (? = '' OR d.session_id = ?)`
 	listDecisionsAll    = listDecisions + ` ORDER BY d.n`
 	listDecisionsNewest = listDecisions + ` ORDER BY d.n DESC LIMIT ?`
@@ -268,7 +278,7 @@ func (s *Store) ListDecisions(ctx context.Context, f DecisionFilter) ([]model.De
 	if err != nil {
 		return nil, fail("list decisions", "", err)
 	}
-	q, args := listDecisionsAll, []any{len(f.Statuses), string(js), f.SessionID, f.SessionID}
+	q, args := listDecisionsAll, []any{len(f.Statuses), string(js), f.Undelivered, f.SessionID, f.SessionID}
 	if f.Limit > 0 {
 		q, args = listDecisionsNewest, append(args, f.Limit)
 	}
@@ -326,13 +336,15 @@ ORDER BY d.n`, formatTime(now))
 	return out, nil
 }
 
-// OpenCounts counts the tickets open at now by session id ("" for tickets
-// from an unknown caller) and mode. Sessions with none are absent.
+// OpenCounts counts, by session id ("" for tickets from an unknown
+// caller), the tickets open at now by mode and the answers the agent has
+// not got yet (Ruling 89). Sessions with none are absent.
 func (s *Store) OpenCounts(ctx context.Context, now time.Time) (map[string]model.OpenCount, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT d.session_id, SUM(d.mode = 'blocking'), SUM(d.mode = 'assume')
-FROM decisions d WHERE `+openAt+`
-GROUP BY d.session_id`, formatTime(now))
+SELECT d.session_id, SUM(d.mode = 'blocking' AND `+openAt+`), SUM(d.mode = 'assume' AND `+openAt+`),
+  SUM(`+undelivered+`)
+FROM decisions d WHERE `+openAt+` OR `+undelivered+`
+GROUP BY d.session_id`, formatTime(now), formatTime(now), formatTime(now))
 	if err != nil {
 		return nil, fail("open counts", "", err)
 	}
@@ -341,7 +353,7 @@ GROUP BY d.session_id`, formatTime(now))
 	for rows.Next() {
 		var id string
 		var c model.OpenCount
-		if err := rows.Scan(&id, &c.Blocking, &c.Assume); err != nil {
+		if err := rows.Scan(&id, &c.Blocking, &c.Assume, &c.Undelivered); err != nil {
 			return nil, fail("open counts", "", err)
 		}
 		out[id] = c
@@ -352,15 +364,28 @@ GROUP BY d.session_id`, formatTime(now))
 	return out, nil
 }
 
-// CountOpenBlocking counts the blocking tickets open at now.
-func (s *Store) CountOpenBlocking(ctx context.Context, now time.Time) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM decisions d WHERE d.mode = 'blocking' AND `+openAt,
-		formatTime(now)).Scan(&n)
+// badgeCounts is the status badge's one statement: the blocking tickets
+// open at its parameter (by the decisions_status_created index), and the
+// answers not yet delivered to a session that exists and is neither ended
+// nor stale (by the decisions_undelivered index, then one session lookup
+// each).
+const badgeCounts = `
+SELECT
+  (SELECT count(*) FROM decisions d WHERE d.mode = 'blocking' AND ` + openAt + `),
+  (SELECT count(*) FROM decisions JOIN sessions s ON s.id = decisions.session_id
+   WHERE ` + undelivered + ` AND COALESCE(s.state, '') NOT IN ('ended', 'stale'))`
+
+// BadgeCounts counts, in one statement, the blocking tickets open at now
+// and the answers the asking agents have not got yet (Ruling 89), counting
+// only answers to a session that can still collect them: one that has
+// ended, gone stale or has no row would leave a Q on the badge for good
+// (live check 3 ended on Q10). decisions ls still lists those.
+func (s *Store) BadgeCounts(ctx context.Context, now time.Time) (openBlocking, undeliveredAnswers int, err error) {
+	err = s.db.QueryRowContext(ctx, badgeCounts, formatTime(now)).Scan(&openBlocking, &undeliveredAnswers)
 	if err != nil {
-		return 0, fail("count open blocking", "", err)
+		return 0, 0, fail("count for the badge", "", err)
 	}
-	return n, nil
+	return openBlocking, undeliveredAnswers, nil
 }
 
 // loadOpen loads decision id inside tx and requires it open at now.
@@ -498,6 +523,36 @@ func (s *Store) ExpireDecisions(ctx context.Context, now time.Time) (int, error)
 	return int(n), nil
 }
 
+// edited is decided ticket cur after edit e at now, as EditDecision says;
+// live reports whether cur's session can still collect a retraction.
+func edited(cur model.Decision, e model.DecisionEdit, now time.Time, live bool) model.Decision {
+	next := cur
+	if e.Scope != "" {
+		next.Scope = e.Scope
+	}
+	if (e.Supersede || e.SupersededBy != "") && next.SupersededAt.IsZero() {
+		next.SupersededAt = now
+		if cur.Delivery == model.DeliveryDelivered && live {
+			next.Delivery, next.DeliveredVia = model.DeliveryQueued, ""
+			next.DeliveredAt, next.ConfirmedAt = time.Time{}, time.Time{}
+		}
+	}
+	if e.SupersededBy != "" {
+		next.SupersededBy = e.SupersededBy
+	}
+	return next
+}
+
+// sessionLive reports whether session id has a row that is neither ended
+// nor stale. An empty id has none.
+func sessionLive(ctx context.Context, q dbtx, id string) (bool, error) {
+	if id == "" {
+		return false, nil
+	}
+	sess, found, err := getSession(ctx, q, id)
+	return found && sess.State != model.StateEnded && sess.State != model.StateStale, err
+}
+
 // EditDecision rescopes and/or supersedes decided ticket id at now, in one
 // write transaction. The ticket must exist (ErrNotFound) and be decided
 // (ErrNotDecided). A non-empty e.SupersededBy must name another decided
@@ -505,7 +560,11 @@ func (s *Store) ExpireDecisions(ctx context.Context, now time.Time) (int, error)
 // e.Supersede, or a non-empty e.SupersededBy, which implies it (Ruling 65),
 // the ticket is superseded: superseded_at becomes now unless it is already
 // set, and a non-empty e.SupersededBy is recorded (an empty one never
-// clears it). The status never changes. It returns the stored row.
+// clears it). On the first supersession of an answer already delivered to a
+// session that still exists and is neither ended nor stale, the delivery is
+// queued again, so the retraction reaches the agent by the usual paths
+// (Ruling 82); a session that has gone could never collect it (re-review N3). The status never changes. It
+// returns the stored row.
 func (s *Store) EditDecision(ctx context.Context, id string, e model.DecisionEdit, now time.Time) (model.Decision, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -522,19 +581,18 @@ func (s *Store) EditDecision(ctx context.Context, id string, e model.DecisionEdi
 	case e.SupersededBy != "":
 		err = requireDecided(ctx, tx, e.SupersededBy, id)
 	}
+	var live bool
 	if err == nil {
-		next := cur
-		if e.Scope != "" {
-			next.Scope = e.Scope
-		}
-		if (e.Supersede || e.SupersededBy != "") && next.SupersededAt.IsZero() {
-			next.SupersededAt = now
-		}
-		if e.SupersededBy != "" {
-			next.SupersededBy = e.SupersededBy
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE decisions SET scope = ?, superseded_at = ?, superseded_by = ? WHERE n = ?`,
-			next.Scope, formatTime(next.SupersededAt), next.SupersededBy, cur.N)
+		live, err = sessionLive(ctx, tx, cur.SessionID)
+	}
+	if err == nil {
+		next := edited(cur, e, now, live)
+		_, err = tx.ExecContext(ctx, `
+UPDATE decisions SET scope = ?, superseded_at = ?, superseded_by = ?, delivery = ?, delivered_via = ?,
+  delivered_at = ?, confirmed_at = ?
+WHERE n = ?`,
+			next.Scope, formatTime(next.SupersededAt), next.SupersededBy,
+			next.Delivery, next.DeliveredVia, formatTime(next.DeliveredAt), formatTime(next.ConfirmedAt), cur.N)
 	}
 	if err != nil {
 		return model.Decision{}, fail("edit decision", id, err)

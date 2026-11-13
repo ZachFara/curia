@@ -288,6 +288,56 @@ func TestSubagentCountNeverNegative(t *testing.T) {
 	}
 }
 
+// Ruling 87, defect 7: the event order of live check 2's two-subagent run
+// (events 116 to 151) and of its run L3 (182 to 187). A helper agent's
+// SubagentStop does not lower the count, and a Stop sets it to the
+// background subagents its payload lists as running, so the session never
+// reads as having no subagent while one still works.
+func TestSubagentCountFollowsLiveRuns(t *testing.T) {
+	ev := func(kind model.EventKind, f func(*model.Event)) model.Event {
+		e := model.Event{Kind: kind, SessionID: "s1", At: t1}
+		if f != nil {
+			f(&e)
+		}
+		return e
+	}
+	agentTool := ev(model.PreToolUse, func(e *model.Event) { e.ToolName = "Agent" })
+	stopWith := func(n int) model.Event {
+		return ev(model.Stop, func(e *model.Event) { e.BackgroundKnown, e.RunningSubagents = true, n })
+	}
+	agentStop := ev(model.SubagentStop, nil)
+	helperStop := ev(model.SubagentStop, func(e *model.Event) { e.HelperAgent = true })
+	for name, run := range map[string]struct {
+		events []model.Event
+		counts []int
+	}{
+		"two background subagents": {
+			[]model.Event{agentTool, agentTool, stopWith(2), agentStop, helperStop, agentStop},
+			[]int{1, 2, 2, 1, 1, 0},
+		},
+		"Stop before the subagent's dialog": {
+			[]model.Event{agentTool, stopWith(1), agentStop},
+			[]int{1, 1, 0},
+		},
+		"Stop lists more than were counted": {
+			[]model.Event{helperStop, stopWith(1), helperStop, agentStop},
+			[]int{0, 1, 1, 0},
+		},
+		"Stop without a list keeps the count": {
+			[]model.Event{agentTool, ev(model.Stop, nil), agentStop},
+			[]int{1, 1, 0},
+		},
+	} {
+		s := base()
+		for k, e := range run.events {
+			s = state.Apply(s, e, false)
+			if s.SubagentsActive != run.counts[k] {
+				t.Errorf("%s: after event %d (%s) SubagentsActive = %d, want %d", name, k+1, e.Kind, s.SubagentsActive, run.counts[k])
+			}
+		}
+	}
+}
+
 func TestStopWithOpenDecision(t *testing.T) {
 	got := state.Apply(base(), model.Event{Kind: model.Stop, SessionID: "s1", At: t1}, true)
 	if got.State != model.StateNeedsDecision {

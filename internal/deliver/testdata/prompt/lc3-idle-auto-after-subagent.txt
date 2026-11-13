@@ -1,0 +1,50 @@
+claude --settings /work/x --setting-sources project --mcp-config /work
+host% claude --settings /work/x --setting-sources project --mcp
+-config /work/x --strict-mcp-config --model haiku
+ ▐▛███▛█   Claude Code v2.1.323
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /work/x
+
+
+❯ Start ONE subagent with the Agent tool in the background that reads f1.txt, f2.txt and f3.txt and reports their first lines. Wait for it to finish, then reply with its report in one line and end
+  your turn.
+
+⏺ Agent(Read first lines of f1-f3)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+⏺ The subagent is running in the background. I'll wait for its report before replying.
+
+✻ Waiting for 1 background agent to finish
+
+› Message from @general-purpose (ctrl+o to expand)
+
+⏺ f1.txt: "file 1", f2.txt: "file 2", f3.txt: "file 3"; no files were modified.
+
+⏺ Agent "Read first lines of f1-f3" finished · 3s
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

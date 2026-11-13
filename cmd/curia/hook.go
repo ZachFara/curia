@@ -184,6 +184,10 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	if len(res.Stdout) > 0 {
 		if eerr := emit(res.Stdout); eerr != nil {
 			logger.Error("hook output", "event", string(kind), "err", eerr.Error())
+		} else if len(res.Claimed) > 0 {
+			// M8: a "delivered (stop_hook)" that never reached Claude Code
+			// can be told from one that did.
+			logger.Info("hook Stop delivered answers", "ids", strings.Join(res.Claimed, " "))
 		}
 	}
 	sess := res.Session

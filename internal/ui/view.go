@@ -178,13 +178,18 @@ func (m Model) cells(s model.Session, cols []column) []string {
 	return out
 }
 
-// decText is the number of s's open tickets of both modes, empty when none.
+// decText is the number of s's open tickets of both modes, then "Q<n>" for
+// its answers not yet delivered (Ruling 89), empty when there are neither.
 func (m Model) decText(s model.Session) string {
 	c := m.counts[s.ID]
+	var parts []string
 	if n := c.Blocking + c.Assume; n > 0 {
-		return strconv.Itoa(n)
+		parts = append(parts, strconv.Itoa(n))
 	}
-	return ""
+	if c.Undelivered > 0 {
+		parts = append(parts, "Q"+strconv.Itoa(c.Undelivered))
+	}
+	return strings.Join(parts, " ")
 }
 
 func (m Model) cellText(s model.Session, c column) string {

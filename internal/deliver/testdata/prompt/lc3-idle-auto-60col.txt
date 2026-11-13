@@ -1,0 +1,40 @@
+  LICENSE file, or an existing greeting string beyond a
+  quick look, so they may not match what the project already
+  uses. When an answer arrives, I'll reply with "OK" and
+  the ticket id.
+
+✻ Crunched for 13s · done 7:40 PM
+
+❯ Decision D-1 answered: option B, 3000. Reasoning: Matches
+  the other services. Continue.
+
+⏺ OK D-1
+
+✻ Brewed for 1s · done 7:40 PM
+
+❯ Decision D-3 answered: option A, MIT. Reasoning:
+  Permissive is fine. Continue.
+
+⏺ OK D-3
+
+⏺ Ran 1 stop hook
+  ⎿  Stop hook error: Curia: decisions answered
+  while you were working.
+  Decision D-2 answered: option B [Spaces].
+  Reasoning: Spaces everywhere here. Continue.
+
+⏺ OK D-2
+
+✻ Brewed for 4s · done 7:41 PM
+
+❯ Decision D-4 answered: option B, Hi. Reasoning: Casual
+  team. Continue.
+
+⏺ OK D-4
+
+✻ Brewed for 3s · done 7:41 PM
+
+────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

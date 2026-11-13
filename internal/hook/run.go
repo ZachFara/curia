@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,9 @@ type startInfo struct {
 type Result struct {
 	Session model.Session
 	Stdout  []byte
+	// Claimed holds the ids of the answers a Stop claimed, which Stdout
+	// delivers; the caller logs them (M8).
+	Claimed []string
 }
 
 // Run records one hook event and returns a Result: the session as stored,
@@ -63,8 +67,10 @@ type Result struct {
 // On Stop the same transaction also counts the session's open blocking
 // tickets and claims its queued answers (plan sections 4.3 and 4.9): claimed
 // answers block the stop (Result.Stdout) and leave the session working;
-// otherwise an open blocking ticket makes it needs_decision. No other event
-// reads the decisions.
+// otherwise an open blocking ticket makes it needs_decision. A
+// UserPromptSubmit whose prompt names a decision typed into the session
+// confirms it (store.ConfirmTyped, Ruling 86); no other event touches the
+// decisions.
 //
 // A transcript that cannot be read does not stop the update: the session is
 // written without it and the read error is returned with it. The same holds
@@ -100,11 +106,33 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 	if kind == model.Stop {
 		return runStop(ctx, ev, start, st, cfg)
 	}
+	if kind == model.UserPromptSubmit && strings.Contains(ev.Prompt, "Decision D-") {
+		return runConfirming(ctx, ev, start, st, cfg)
+	}
 	var out model.Session
 	var readErr error
 	err = st.UpdateSession(ctx, ev.SessionID, func(s model.Session, _ bool) model.Session {
 		out, readErr = apply(s, ev, start, cfg, nil)
 		return out
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Session: out}, readErr
+}
+
+// runConfirming is Run's transaction for a UserPromptSubmit whose prompt
+// may name a typed answer (Ruling 86): the session update and the
+// confirmation are one write, so a busy database cannot let the update
+// through and lose the confirmation (re-review N4). Only such a prompt
+// costs the statement.
+func runConfirming(ctx context.Context, ev model.Event, start *startInfo, st *store.Store, cfg config.Config) (Result, error) {
+	var out model.Session
+	var readErr error
+	err := st.UpdateSessionTx(ctx, ev.SessionID, func(tx *store.Tx, s model.Session, _ bool) (model.Session, error) {
+		out, readErr = apply(s, ev, start, cfg, nil)
+		_, cerr := tx.ConfirmTyped(ctx, ev.SessionID, ev.Prompt, ev.At)
+		return out, cerr
 	})
 	if err != nil {
 		return Result{}, err
@@ -137,6 +165,9 @@ func runStop(ctx context.Context, ev model.Event, start *startInfo, st *store.St
 	if len(claimed) > 0 {
 		res.Stdout, err = blockLine(claimed)
 		errs = errors.Join(errs, err)
+		for _, d := range claimed {
+			res.Claimed = append(res.Claimed, d.ID)
+		}
 	}
 	return res, errs
 }

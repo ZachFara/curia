@@ -1,0 +1,13 @@
+❯ Run ./inner.sh with the Bash tool, with a 180000 ms timeout, in the foreground, and report its output in one line. Do nothing else.
+
+  Bash(./inner.sh)
+  ⎿  Running… (22s · timeout 3m)
+     (ctrl+b ctrl+b (twice) to run in background)
+
+✶ Cultivating… (24s · ↓ 185 tokens)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt
+

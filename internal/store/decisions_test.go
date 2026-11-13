@@ -329,14 +329,55 @@ func assertPlan1Runs(t *testing.T, db *sql.DB, at string) {
 	}
 }
 
+// Ruling 86: a database migrated to 0003 counts answers typed before it as
+// confirmed when they were typed, and leaves every other row unconfirmed.
+func TestMigrationConfirmsEarlierTyping(t *testing.T) {
+	path := dbPath(t)
+	const at = "2026-11-11T14:00:05.000000000Z"
+	db := plan1Database(t, path, at)
+	schema, err := os.ReadFile("migrations/0002_decisions.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		string(schema),
+		`INSERT INTO schema_migrations (name, applied_at) VALUES ('0002_decisions.sql', '` + at + `')`,
+		`INSERT INTO decisions (id, question, options, recommendation, rationale, reversibility, mode, scope, status,
+		  args_hash, delivery, delivered_via, delivered_at, created_at)
+		 VALUES ('D-1', 'Typed?', '[]', 'A', 'r', 'cheap', 'blocking', 'repo', 'answered', 'h1', 'delivered', 'send_keys', '` + at + `', '` + at + `'),
+		        ('D-2', 'Stopped?', '[]', 'A', 'r', 'cheap', 'blocking', 'repo', 'answered', 'h2', 'delivered', 'stop_hook', '` + at + `', '` + at + `')`,
+	} {
+		if _, err = db.Exec(q); err != nil {
+			t.Fatalf("building the Plan 2 database: %v", err)
+		}
+	}
+	s := open(t, path)
+	if got := getDecision(t, s, "D-1"); !got.ConfirmedAt.Equal(decisionsTime(t, at)) {
+		t.Errorf("D-1 typed before the migration: confirmed at %v, want %s", got.ConfirmedAt, at)
+	}
+	if got := getDecision(t, s, "D-2"); !got.ConfirmedAt.IsZero() {
+		t.Errorf("D-2 (stop_hook): confirmed at %v, want zero", got.ConfirmedAt)
+	}
+}
+
+// decisionsTime parses a stored timestamp.
+func decisionsTime(t *testing.T, s string) time.Time {
+	t.Helper()
+	ts, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ts
+}
+
 func TestMigrationOnPlan1Database(t *testing.T) {
 	path := dbPath(t)
 	const at = "2026-11-11T14:00:05.000000000Z"
 	db := plan1Database(t, path, at)
 
 	s := open(t, path)
-	if n := countMigrations(t, path); n != 2 {
-		t.Errorf("schema_migrations has %d rows, want 2", n)
+	if n := countMigrations(t, path); n != 3 {
+		t.Errorf("schema_migrations has %d rows, want 3", n)
 	}
 	sess := get(t, s, "old")
 	want := model.Session{
@@ -1162,6 +1203,109 @@ func TestEditRescopeAndSupersede(t *testing.T) {
 	}
 }
 
+// Ruling 82: superseding an answer still queued leaves it queued (it is
+// delivered as the retraction); the first supersession of an answer already
+// delivered to a known session queues it again, once; an answer with no
+// session, or one never delivered (a confirmation), is left as it is.
+func TestSupersedeQueuesTheRetraction(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	now := t0.Add(time.Hour)
+	edited := now.Add(time.Hour)
+
+	still := answer(t, s, create(t, s, ticket(t, "Still queued?", model.ModeBlocking, "s1", t0)).ID, keyA, now)
+	if got := supersede(t, s, still.ID, edited); got.Delivery != model.DeliveryQueued {
+		t.Errorf("queued answer superseded: delivery %s, want queued", got.Delivery)
+	}
+
+	for _, via := range []model.DeliveryVia{model.ViaStopHook, model.ViaCheck, model.ViaSendKeys} {
+		d := answer(t, s, create(t, s, ticket(t, "Delivered by "+string(via)+"?", model.ModeBlocking, "s1", t0)).ID, keyA, now)
+		deliverBy(t, s, path, d.ID, via, now)
+		got := supersede(t, s, d.ID, edited)
+		if got.Delivery != model.DeliveryQueued || got.DeliveredVia != "" || !got.DeliveredAt.IsZero() {
+			t.Errorf("delivered by %s, superseded: delivery %s via %q at %v; want queued again", via, got.Delivery, got.DeliveredVia, got.DeliveredAt)
+		}
+		assertQueued(t, s, d.ID)
+		// The Stop hook delivers it once more, as the retraction; a second
+		// supersession does not queue it again.
+		if claimed := claimStop(t, s, "s1", edited.Add(time.Minute)); len(claimed) != 1 || claimed[0].ID != d.ID {
+			t.Fatalf("Stop after supersession claimed %v, want [%s]", decisionIDs(claimed), d.ID)
+		}
+		if again := supersede(t, s, d.ID, edited.Add(2*time.Minute)); again.Delivery != model.DeliveryDelivered {
+			t.Errorf("second supersession: delivery %s, want delivered (not queued again)", again.Delivery)
+		}
+	}
+
+	orphan := create(t, s, ticket(t, "Nobody asked?", model.ModeBlocking, "", t0))
+	if got := supersede(t, s, answer(t, s, orphan.ID, keyA, now).ID, edited); got.Delivery != model.DeliveryNone {
+		t.Errorf("answer with no session superseded: delivery %s, want none", got.Delivery)
+	}
+	confirmed := answer(t, s, create(t, s, ticket(t, "Assumed right?", model.ModeAssume, "s1", t0)).ID, keyA, now)
+	if confirmed.Status != model.StatusConfirmed {
+		t.Fatalf("setup: status %s, want confirmed", confirmed.Status)
+	}
+	if got := supersede(t, s, confirmed.ID, edited); got.Delivery != model.DeliveryNone {
+		t.Errorf("confirmation superseded: delivery %s, want none", got.Delivery)
+	}
+}
+
+// supersede supersedes decided ticket id at at and returns the stored row.
+func supersede(t *testing.T, s *store.Store, id string, at time.Time) model.Decision {
+	t.Helper()
+	got, err := s.EditDecision(context.Background(), id, model.DecisionEdit{Supersede: true}, at)
+	if err != nil {
+		t.Fatalf("EditDecision(%s): %v", id, err)
+	}
+	return got
+}
+
+// deliverBy delivers queued answer id of session s1 by path via at now.
+func deliverBy(t *testing.T, s *store.Store, path, id string, via model.DeliveryVia, now time.Time) {
+	t.Helper()
+	if via == model.ViaCheck {
+		if _, _, err := s.CheckDecision(context.Background(), id, "s1", now); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	claimStop(t, s, "s1", now)
+	if via == model.ViaSendKeys {
+		rawExec(t, path, `UPDATE decisions SET delivered_via = 'send_keys' WHERE id = ?`, id)
+	}
+}
+
+// Re-review N3: the first supersession of an answer delivered to a session
+// that has ended, is stale or has no row queues nothing: no retraction
+// that nobody could collect, and no lasting Q on the badge.
+func TestSupersedeForGoneSessionQueuesNothing(t *testing.T) {
+	for _, state := range []model.State{model.StateEnded, model.StateStale, ""} {
+		path := dbPath(t)
+		s := open(t, path)
+		ctx := context.Background()
+		if state != "" {
+			liveSession(t, s, "s1", "%3", state)
+		}
+		now := t0.Add(time.Hour)
+		d := answer(t, s, create(t, s, ticket(t, "Old policy?", model.ModeBlocking, "s1", t0)).ID, keyA, now)
+		via := model.ViaStopHook
+		if state == "" {
+			via = model.ViaCheck // a Stop claim would create the session's row
+		}
+		deliverBy(t, s, path, d.ID, via, now)
+		_, before, err := s.BadgeCounts(ctx, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := supersede(t, s, d.ID, now.Add(24*time.Hour))
+		if got.Delivery != model.DeliveryDelivered {
+			t.Errorf("session %q: superseded delivery %s, want still delivered", state, got.Delivery)
+		}
+		if _, after, err := s.BadgeCounts(ctx, now.Add(25*time.Hour)); err != nil || after != before {
+			t.Errorf("session %q: badge Q before %d, after the supersession %d (%v); want unchanged", state, before, after, err)
+		}
+	}
+}
+
 func TestEditSupersededByImpliesSupersede(t *testing.T) {
 	// Ruling 65: a non-empty SupersededBy supersedes; superseding again
 	// keeps the first superseded_at and never clears superseded_by.
@@ -1277,11 +1421,73 @@ func TestOpenCountsAndBlockingCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := map[string]model.OpenCount{"S1": {Blocking: 2, Assume: 1}, "S2": {Assume: 1}}; !reflect.DeepEqual(counts, want) {
+	// S2's answer is queued: not delivered yet (Ruling 89).
+	if want := map[string]model.OpenCount{"S1": {Blocking: 2, Assume: 1}, "S2": {Assume: 1, Undelivered: 1}}; !reflect.DeepEqual(counts, want) {
 		t.Errorf("OpenCounts = %v, want %v", counts, want)
 	}
-	if n, err := s.CountOpenBlocking(ctx, now); err != nil || n != 2 {
-		t.Errorf("CountOpenBlocking = %d, %v; want 2, nil", n, err)
+	// S2 has no session row, so its queued answer is not on the badge.
+	if n, q, err := s.BadgeCounts(ctx, now); err != nil || n != 2 || q != 0 {
+		t.Errorf("BadgeCounts = %d, %d, %v; want 2, 0, nil", n, q, err)
+	}
+}
+
+// Live check 3, defect 7a: the badge's Q counts only answers whose session
+// can still collect them: one that exists and is neither ended nor stale.
+func TestBadgeCountsOnlyCollectableAnswers(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	for id, state := range map[string]model.State{"live": model.StateIdle, "ended": model.StateEnded, "stale": model.StateStale} {
+		liveSession(t, s, id, "%"+id, state)
+		queued(t, s, "Queued for "+id+"?", id)
+	}
+	queued(t, s, "Queued for a session with no row?", "gone")
+	if _, q, err := s.BadgeCounts(ctx, tClaim); err != nil || q != 1 {
+		t.Errorf("BadgeCounts undelivered = %d, %v; want 1 (the live session's)", q, err)
+	}
+	ds, err := s.ListDecisions(ctx, store.DecisionFilter{Statuses: []model.DecisionStatus{model.StatusOpen}, Undelivered: true})
+	if err != nil || len(ds) != 4 {
+		t.Errorf("open and undelivered = %d rows, %v; want all 4 listed", len(ds), err)
+	}
+}
+
+// Ruling 89, defect 8: an answer the agent has not got yet, queued or typed
+// and not confirmed, is counted for the badge and the dashboard, and listed
+// with the open tickets; a delivered or confirmed one is not.
+func TestDefect8UndeliveredAnswersCounted(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	liveSession(t, s, "s1", "%3", model.StateIdle)
+	liveSession(t, s, "s2", "%4", model.StateIdle)
+	confirmed := queued(t, s, "Typed and confirmed?", "s1")
+	claimTyping(t, s, confirmed.ID, tClaim)
+	confirmTyped(t, s, decision.TypedMessage(confirmed), tClaim)
+	queuedOne := queued(t, s, "Still queued?", "s1")
+	typed := queued(t, s, "Typed, not confirmed?", "s2")
+	claimTyping(t, s, typed.ID, tClaim)
+	stopped := queued(t, s, "Delivered by the Stop hook?", "s3")
+	claimStop(t, s, "s3", tClaim)
+	if got := getDecision(t, s, stopped.ID); got.DeliveredVia != model.ViaStopHook {
+		t.Fatalf("setup: %s via %q, want stop_hook", stopped.ID, got.DeliveredVia)
+	}
+	openOne := create(t, s, ticket(t, "Still open?", model.ModeBlocking, "s1", t0))
+
+	n, q, err := s.BadgeCounts(ctx, tClaim)
+	if err != nil || n != 1 || q != 2 {
+		t.Errorf("BadgeCounts = %d, %d, %v; want 1 open blocking, 2 undelivered", n, q, err)
+	}
+	counts, err := s.OpenCounts(ctx, tClaim)
+	if want := map[string]model.OpenCount{"s1": {Blocking: 1, Undelivered: 1}, "s2": {Undelivered: 1}}; err != nil || !reflect.DeepEqual(counts, want) {
+		t.Errorf("OpenCounts = %v, %v; want %v", counts, err, want)
+	}
+	ds, err := s.ListDecisions(ctx, store.DecisionFilter{Statuses: []model.DecisionStatus{model.StatusOpen}, Undelivered: true})
+	if got, want := decisionIDs(ds), []string{queuedOne.ID, typed.ID, openOne.ID}; err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("open and undelivered = %v, %v; want %v", got, err, want)
+	}
+	if _, _, err := s.CheckDecision(ctx, typed.ID, "s2", tClaim.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, q, err := s.BadgeCounts(ctx, tClaim); err != nil || q != 1 {
+		t.Errorf("after check_decision confirmed the typed answer: undelivered = %d, %v; want 1", q, err)
 	}
 }
 

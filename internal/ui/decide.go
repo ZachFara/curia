@@ -22,15 +22,34 @@ const answerTimeout = 5 * time.Second
 // on screen changed.
 const noticeChanged = "queue changed; press again"
 
-// quietPeriod is how long answer keys are ignored after one's own answer
-// (Ruling 63) and after an answer key refused for a change the user did not
-// cause (Ruling 68), so a key pressed twice or held never answers the next
-// ticket unread. Each ignored key restarts it. A terminal sends no key-up,
-// so a held key is told from presses by time alone: the period is longer
-// than the usual delay before a held key starts repeating (375 to 660 ms).
-// Accepted residue: a keyboard set to a repeat delay above 750 ms can still
-// get a repeat through.
+// noticeTooSoon is shown when a key is ignored because it came too soon:
+// before the ticket on screen or the open input was there for the dwell,
+// during the quiet period, or as a repeat of Enter (Ruling 88, defect 11:
+// nothing changed, so it must not say the queue did).
+const noticeTooSoon = "too soon; pause, then press again"
+
+// noticeTyped is shown when typed text that is no command is ignored; it
+// starts the quiet period, so the rest of the text cannot act (Ruling 88).
+const noticeTyped = "typing ignored; press w to write an answer, r to give a reason"
+
+// quietPeriod is how long answer keys are ignored after an answer key
+// refused for a change the user did not cause (Ruling 68), and how close an
+// Enter may follow the one before and still count as its repeat, so a key
+// pressed twice or held never answers a ticket unread. Each ignored key
+// restarts it. A terminal sends no key-up, so a held key is told from
+// presses by time alone: the period is longer than the usual delay before
+// a held key starts repeating (375 to 660 ms). Accepted residue: a keyboard
+// set to a repeat delay above 750 ms can still get a repeat through.
 const quietPeriod = 750 * time.Millisecond
+
+// answeredQuiet is how long every key but q and Esc is ignored after one's
+// own answer (Ruling 63), after typed text that is no command, and after a
+// paste: long enough to cover a reason typed or pasted out of habit right
+// after an answer that asked for none, which the live check saw begin 1.04 s
+// after it (Ruling 88, re-review N2). Each ignored key restarts it, so text
+// typed at any normal pace never acts; the next ticket is answered after a
+// pause of this length.
+const answeredQuiet = 2 * time.Second
 
 // dwell is how long a ticket must have been on screen before an answer key
 // acts on it, and a confirmation open before "y" gives it (Ruling 66). The
@@ -87,9 +106,13 @@ type DecideModel struct {
 	loaded   bool           // a read has succeeded
 	changed  bool           // a refresh changed the ticket on screen: the next answer key is ignored
 
-	quietUntil  time.Time // answer keys before this are ignored (after one's own answer)
-	shownSince  time.Time // when the selected ticket, as it is now, came on screen
-	promptSince time.Time // when the confirmation opened
+	quietUntil   time.Time     // keys before this are ignored (see quietPeriod, answeredQuiet)
+	quietFor     time.Duration // the length of the running quiet period, which a refused key restarts
+	shownSince   time.Time     // when the selected ticket, as it is now, came on screen
+	promptSince  time.Time     // when the confirmation opened
+	inputSince   time.Time     // when the input opened, or last refused a too early Enter
+	inputByEnter bool          // an Enter opened the reasoning input
+	lastEnter    time.Time     // when the last Enter came, acted on or not
 
 	issued, applied int // sequence numbers of the last refresh started and applied
 
@@ -104,7 +127,8 @@ type DecideModel struct {
 	pending    pendingAnswer
 	confirming bool // pending waits for "y"
 	sending    bool // an answer is in flight
-	closing    bool // close once the answer in flight returns
+	closing    bool // close once the answer in flight returns, unless it has a note
+	quitting   bool // closing was asked by Ctrl+C: quit the program, even embedded
 
 	notice    string // the last outcome or message, cleared by the next key
 	noticeErr bool   // notice is an error
@@ -322,22 +346,64 @@ func (m DecideModel) prompting() bool {
 // of several.
 func (m DecideModel) updateKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
+		if m.sending { // M1: quitting now could cut a delivery short
+			m.closing, m.quitting = true, true
+			return m, nil
+		}
 		return m, tea.Quit
 	}
 	m.notice, m.noticeErr = "", false
+	if msg.Type == tea.KeyEnter && m.enterRepeated() {
+		return m.tooSoon(), nil
+	}
 	switch {
 	case m.confirming:
 		return m.confirmKey(msg, split)
 	case m.input != inputNone:
 		return m.inputKey(msg)
-	case msg.Paste: // pasted text is never a command
-		return m, nil
+	case msg.Paste: // pasted text is never a command, and starts a quiet period (N2)
+		return m.quiet(answeredQuiet).refuse(noticeTyped), nil
 	}
 	return m.commandKey(msg)
 }
 
+// enterRepeated records an Enter and reports whether it came within the
+// quiet period of the Enter before it, as a held or doubled Enter does: no
+// key-up reaches a terminal program, so a gap is the only sign it was let
+// go, and a held key's first repeat comes after the keyboard's repeat
+// delay, up to 660 ms (Ruling 88, defect 5; see quietPeriod).
+func (m *DecideModel) enterRepeated() bool {
+	now := m.now()
+	repeated := !m.lastEnter.IsZero() && now.Sub(m.lastEnter) < quietPeriod
+	m.lastEnter = now
+	return repeated
+}
+
+// tooSoon ignores a key that came too soon: it restarts the dwell of the
+// ticket and of an open input, so a repeating key never gets through, and
+// it extends a running quiet period.
+func (m DecideModel) tooSoon() DecideModel {
+	now := m.now()
+	if now.Before(m.quietUntil) {
+		m.quietUntil = now.Add(m.quietFor)
+	}
+	m.inputSince = now
+	return m.refuse(noticeTooSoon)
+}
+
+// inQuiet reports whether command key k comes within a quiet period: then
+// every key but q and Esc is ignored and restarts it (tooSoon), so text
+// typed after an answer never moves, stages or answers (re-review N2).
+func (m DecideModel) inQuiet(k string) bool {
+	return m.now().Before(m.quietUntil) && k != "q" && k != "esc"
+}
+
 func (m DecideModel) commandKey(msg tea.KeyMsg) (DecideModel, tea.Cmd) {
-	switch k := msg.String(); k {
+	k := msg.String()
+	if m.inQuiet(k) {
+		return m.tooSoon(), nil
+	}
+	switch k {
 	case "q", "esc":
 		if m.sending { // quitting now could cut a delivery short
 			m.closing = true
@@ -354,12 +420,37 @@ func (m DecideModel) commandKey(msg tea.KeyMsg) (DecideModel, tea.Cmd) {
 		return m.answerRecommended()
 	case "w":
 		return m.openText(), nil
-	case "r":
-		return m.openReason(), nil
-	case "s":
+	case "r", "s":
+		// Both stage part of the next answer, so they wait like an answer
+		// key (defect 4: typed text changed a ticket's scope).
+		var ok bool
+		if m, ok = m.guard(); !ok {
+			return m, nil
+		}
+		if k == "r" {
+			return m.openReason(), nil
+		}
 		m.scope = nextScope(m.scope)
+	default:
+		if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+			return m.typedText(), nil
+		}
 	}
 	return m, nil
+}
+
+// typedText ignores a key that is no command, as when the user types a
+// reason into the queue out of habit, and starts the quiet period, so the
+// rest of what is typed cannot answer or stage anything (Ruling 88, defect
+// 4). Each key restarts it, as an ignored answer key does.
+func (m DecideModel) typedText() DecideModel {
+	return m.quiet(answeredQuiet).refuse(noticeTyped)
+}
+
+// quiet starts a quiet period of d.
+func (m DecideModel) quiet(d time.Duration) DecideModel {
+	m.quietUntil, m.quietFor = m.now().Add(d), d
+	return m
 }
 
 // close quits, or when embedded tells the dashboard the view closed.
@@ -429,12 +520,12 @@ func (m DecideModel) guard() (DecideModel, bool) {
 	case m.sending:
 		return m.refuse("still sending the last answer"), false
 	case now.Before(m.quietUntil):
-		m.quietUntil = now.Add(quietPeriod)
-		return m.refuse(noticeChanged), false
+		m.quietUntil = now.Add(m.quietFor)
+		return m.refuse(noticeTooSoon), false
 	case m.changed:
 		return m.refuseChanged(), false
 	case now.Sub(m.shownSince) < dwell:
-		return m.refuse(noticeChanged), false
+		return m.refuse(noticeTooSoon), false
 	}
 	return m, true
 }
@@ -452,7 +543,8 @@ func (m DecideModel) refuse(notice string) DecideModel {
 // repeats of a held key are ignored however late the first one comes
 // (Ruling 68; see quietPeriod for what is left).
 func (m DecideModel) refuseChanged() DecideModel {
-	m.changed, m.quietUntil = false, m.now().Add(quietPeriod)
+	m.changed = false
+	m = m.quiet(quietPeriod)
 	return m.refuse(noticeChanged)
 }
 
@@ -466,10 +558,16 @@ func (m DecideModel) startAnswer(t model.Ticket, a model.Answer) (DecideModel, t
 	a.Reasoning, a.Scope, a.Via = m.reasoning, m.scope, m.opts.Via
 	p := pendingAnswer{ticket: t, a: a}
 	if t.Mode == model.ModeBlocking && a.Reasoning == "" {
-		m.pending, m.input, m.buf = p, inputWhy, nil
-		return m, nil
+		return m.askWhy(p), nil
 	}
 	return m.proceed(p)
+}
+
+// askWhy opens the reasoning input for p, which waits in pending.
+func (m DecideModel) askWhy(p pendingAnswer) DecideModel {
+	m.pending, m.input, m.buf, m.inputSince = p, inputWhy, nil, m.now()
+	m.inputByEnter = m.lastEnter.Equal(m.inputSince)
+	return m
 }
 
 // openText opens the free-text answer input for the selected ticket.
@@ -484,6 +582,7 @@ func (m DecideModel) openText() DecideModel {
 	}
 	a := model.Answer{Reasoning: m.reasoning, Scope: m.scope, Via: m.opts.Via}
 	m.pending, m.input, m.buf = pendingAnswer{ticket: t, a: a}, inputText, []rune(m.draft)
+	m.inputSince, m.inputByEnter = m.now(), false
 	return m
 }
 
@@ -492,6 +591,7 @@ func (m DecideModel) openText() DecideModel {
 func (m DecideModel) openReason() DecideModel {
 	if t, ok := m.current(); ok {
 		m.pending, m.input, m.buf = pendingAnswer{ticket: t}, inputReason, []rune(m.reasoning)
+		m.inputSince, m.inputByEnter = m.now(), false
 	}
 	return m
 }
@@ -523,13 +623,29 @@ func (m DecideModel) inputCap() int {
 
 func (m DecideModel) cancelInput() DecideModel {
 	if m.input != inputReason {
+		if m.pending.a.Text != "" {
+			m.draft = m.pending.a.Text // "w" offers it again
+		}
 		m.pending, m.notice = pendingAnswer{}, "answer canceled"
 	}
 	m.input, m.buf = inputNone, nil
 	return m
 }
 
+// submitInput takes what was typed, on an Enter that came the dwell after
+// the input opened, or the quiet period after it when an Enter opened it (a
+// held Enter's first repeat must not submit it, Ruling 88). A free-text
+// answer to a blocking ticket with no staged reasoning then asks for the
+// reasoning, as an option answer does (Ruling 88, defect 4: a reason typed
+// after it was read as commands).
 func (m DecideModel) submitInput() (DecideModel, tea.Cmd) {
+	wait := dwell
+	if m.inputByEnter {
+		wait = quietPeriod
+	}
+	if m.now().Sub(m.inputSince) < wait {
+		return m.tooSoon(), nil
+	}
 	text := strings.TrimSpace(string(m.buf))
 	p := m.pending
 	switch m.input {
@@ -549,8 +665,11 @@ func (m DecideModel) submitInput() (DecideModel, tea.Cmd) {
 	}
 	kind := m.input
 	m.input, m.buf, m.pending = inputNone, nil, pendingAnswer{}
-	if kind == inputReason {
+	switch {
+	case kind == inputReason:
 		return m, nil
+	case kind == inputText && p.ticket.Mode == model.ModeBlocking && p.a.Reasoning == "":
+		return m.askWhy(p), nil
 	}
 	return m.proceed(p)
 }
@@ -604,22 +723,28 @@ func (m DecideModel) send(p pendingAnswer) (DecideModel, tea.Cmd) {
 func (m DecideModel) applyAnswer(msg decideAnsweredMsg) (DecideModel, tea.Cmd) {
 	m.sending = false
 	if msg.err != nil {
-		m.closing = false
+		m.closing, m.quitting = false, false
 		m.notice, m.noticeErr = "answer failed: "+msg.err.Error(), true
 		if t, ok := m.current(); ok && sameTicket(t, msg.ticket) {
 			m.reasoning, m.scope, m.draft = msg.a.Reasoning, msg.a.Scope, msg.a.Text
 		}
 		return m.refresh(false)
 	}
-	if m.closing {
+	// M2: an outcome with a note (not delivered, or not for certain) is
+	// shown before the view closes.
+	if m.closing && msg.out.Note == "" {
+		if m.quitting {
+			return m, tea.Quit
+		}
 		return m, m.close()
 	}
-	m.notice = outcomeText(msg)
+	m.closing, m.quitting = false, false
+	m.notice, m.noticeErr = outcomeText(msg), undelivered(msg.out)
 	m.reasoning, m.scope, m.draft = "", "", ""
 	before, had := m.current()
 	m.tickets = slices.DeleteFunc(slices.Clone(m.tickets), func(t model.Ticket) bool { return t.ID == msg.id })
 	m = m.reselect().markShown(before, had)
-	m.quietUntil = m.now().Add(quietPeriod)
+	m = m.quiet(answeredQuiet)
 	m, cmd := m.refresh(false)
 	m.applied = m.issued
 	return m, cmd

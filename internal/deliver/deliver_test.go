@@ -27,13 +27,14 @@ import (
 // now is the fixed clock of every test.
 var now = time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
 
-// Delivery notes of plan section 4.9 and Rulings 54 and 58.
+// Delivery notes of plan section 4.9 and Rulings 54 and 58. Every note for
+// an answer an idle agent would never collect ends with what the user can do.
 const (
-	noteWorking  = "agent is working; the Stop hook will deliver it"
-	noteWaiting  = "agent is at a prompt of its own; queued until it next stops"
-	notePaneGone = "pane gone; the agent gets it from check_decision"
-	noteNoTmux   = "tmux unreachable; queued for the Stop hook"
-	noteFailed   = "typing failed; queued for the Stop hook"
+	noteWorking  = "agent is working; the Stop hook will deliver it, or tell the agent to call check_decision D-1"
+	noteWaiting  = "agent is at a prompt of its own; queued until it next stops, or tell the agent to call check_decision D-1"
+	notePaneGone = "pane gone; tell the agent to call check_decision D-1"
+	noteNoTmux   = "tmux unreachable; queued for the Stop hook, or tell the agent to call check_decision D-1"
+	noteFailed   = "typing failed; queued for the Stop hook, or tell the agent to call check_decision D-1"
 )
 
 func openStore(t *testing.T) *store.Store {
@@ -87,6 +88,19 @@ func asker() model.Session {
 		ID: "s1", Agent: "claude", State: model.StateNeedsDecision, Pane: "%5", TmuxSession: "work",
 		TmuxWindow: "@7", StartedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-30 * time.Minute),
 	}
+}
+
+// idleScreen is a capture of Claude Code's empty input prompt (live check
+// 2), the only screen typed into (Ruling 85).
+var idleScreen = mustRead(filepath.Join("testdata", "prompt", "lc3-idle-auto-200col.txt"))
+
+// mustRead reads a fixture file at package initialisation.
+func mustRead(path string) string {
+	b, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 // livePane is pane %5 on a server started before the asking session.
@@ -196,7 +210,7 @@ func TestIdleSessionGetsTypedLine(t *testing.T) {
 	st := openStore(t)
 	seedSession(t, st, asker())
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, _ := testLog()
 	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
 	if err != nil {
@@ -232,7 +246,7 @@ func TestNeverTypesIntoWaitingOrWorking(t *testing.T) {
 			s.State = c.state
 			seedSession(t, st, s)
 			d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-			fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+			fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 			log, _ := testLog()
 			out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
 			if err != nil {
@@ -277,7 +291,7 @@ func TestStateChangeBeforeClaimIsNotTyped(t *testing.T) {
 			s.State = model.StateIdle
 			seedSession(t, st, s)
 			d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-			fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+			fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 			log, _ := testLog()
 			out, err := deliver.Answer(context.Background(), st, racingTmux{fake, st, c.state}, log, d.ID, answerA, now)
 			if err != nil {
@@ -316,7 +330,7 @@ func TestAnswerDeliveredElsewhereIsNotTyped(t *testing.T) {
 	s.State = model.StateIdle
 	seedSession(t, st, s)
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, _ := testLog()
 	out, err := deliver.Answer(context.Background(), st, claimingTmux{fake, st, d.ID}, log, d.ID, answerA, now)
 	if err != nil {
@@ -376,7 +390,7 @@ func TestSessionOutsideTmuxLeavesQueued(t *testing.T) {
 	s.State, s.Pane, s.TmuxSession, s.TmuxWindow = model.StateIdle, "", "", ""
 	seedSession(t, st, s)
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, _ := testLog()
 	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
 	if err != nil {
@@ -389,15 +403,21 @@ func TestSessionOutsideTmuxLeavesQueued(t *testing.T) {
 }
 
 // Ended and stale sessions are never typed into, even with a live pane id.
+// Defect 10: an ended session's pane may live on (a nested session that
+// exited leaves it to the outer one), so its note says the session ended,
+// not that the pane is gone.
 func TestEndedOrStaleSessionLeavesQueued(t *testing.T) {
-	for _, state := range []model.State{model.StateEnded, model.StateStale} {
+	for state, note := range map[model.State]string{
+		model.StateEnded: "the asking session has ended; it can read the answer with check_decision D-1 if it is resumed",
+		model.StateStale: notePaneGone,
+	} {
 		t.Run(string(state), func(t *testing.T) {
 			st := openStore(t)
 			s := asker()
 			s.State = state
 			seedSession(t, st, s)
 			d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-			fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+			fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 			log, _ := testLog()
 			out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
 			if err != nil {
@@ -406,7 +426,7 @@ func TestEndedOrStaleSessionLeavesQueued(t *testing.T) {
 			if got := sendKeysCalls(fake.Calls); len(got) != 0 {
 				t.Errorf("typed into a %s session: %q", state, got)
 			}
-			wantQueued(t, st, out, d.ID, notePaneGone)
+			wantQueued(t, st, out, d.ID, note)
 		})
 	}
 }
@@ -415,7 +435,7 @@ func TestEndedOrStaleSessionLeavesQueued(t *testing.T) {
 func TestUnknownSessionLeavesQueued(t *testing.T) {
 	st := openStore(t)
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, _ := testLog()
 	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
 	if err != nil {
@@ -439,7 +459,7 @@ func TestTmuxUnreachableLeavesQueued(t *testing.T) {
 	st := openStore(t)
 	seedSession(t, st, asker())
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, buf := testLog()
 	out, err := deliver.Answer(context.Background(), st, downTmux{fake}, log, d.ID, answerA, now)
 	if err != nil {
@@ -458,7 +478,7 @@ func TestSendKeysFailureRequeues(t *testing.T) {
 	st := openStore(t)
 	seedSession(t, st, asker())
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}, SendKeysErr: errors.New("tmux send-keys: can't find pane: %5")}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}, SendKeysErr: errors.New("tmux send-keys: can't find pane: %5")}
 	log, buf := testLog()
 	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
 	if err != nil {
@@ -482,7 +502,7 @@ func TestPartialSendIsNotRequeued(t *testing.T) {
 	seedSession(t, st, asker())
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
 	partial := fmt.Errorf("%w: tmux send-keys: exit status 1", tmux.ErrPartialSend)
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}, SendKeysErr: partial}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}, SendKeysErr: partial}
 	log, buf := testLog()
 	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
 	if err != nil {
@@ -523,7 +543,7 @@ func TestConfirmDeliversNothing(t *testing.T) {
 	s.State = model.StateIdle
 	seedSession(t, st, s)
 	d := seedTicket(t, st, model.ModeAssume, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, _ := testLog()
 	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, model.Answer{Key: "A", Via: model.AnsweredCLI}, now)
 	if err != nil {
@@ -546,7 +566,7 @@ func TestConfirmDeliversNothing(t *testing.T) {
 func TestNoSessionDeliversNothing(t *testing.T) {
 	st := openStore(t)
 	d := seedTicketFor(t, st, "", model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, _ := testLog()
 	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
 	if err != nil {
@@ -566,7 +586,7 @@ func TestOverrideTypesRevertInstruction(t *testing.T) {
 	s.State = model.StateIdle
 	seedSession(t, st, s)
 	d := seedTicket(t, st, model.ModeAssume, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, _ := testLog()
 	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, model.Answer{Key: "B", Via: model.AnsweredCLI}, now)
 	if err != nil {
@@ -586,7 +606,7 @@ func TestMarkerReappliedAfterAnswer(t *testing.T) {
 	st := openStore(t)
 	seedSession(t, st, asker()) // needs_decision, never seen: window @7 is red
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, _ := testLog()
 	if _, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now); err != nil {
 		t.Fatal(err)
@@ -606,7 +626,7 @@ func TestMarkerReappliedForReconciledWindows(t *testing.T) {
 		StartedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Minute),
 	})
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, _ := testLog()
 	if _, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now); err != nil {
 		t.Fatal(err)
@@ -629,7 +649,7 @@ func TestMarkerFailureIsWarnedNotReturned(t *testing.T) {
 	st := openStore(t)
 	seedSession(t, st, asker())
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, buf := testLog()
 	out, err := deliver.Answer(context.Background(), st, markerFailingTmux{fake}, log, d.ID, answerA, now)
 	if err != nil {
@@ -644,7 +664,7 @@ func TestMarkerFailureIsWarnedNotReturned(t *testing.T) {
 func TestAnswerErrorDeliversNothing(t *testing.T) {
 	st := openStore(t)
 	seedSession(t, st, asker())
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, _ := testLog()
 	_, err := deliver.Answer(context.Background(), st, fake, log, "D-99", answerA, now)
 	if !errors.Is(err, store.ErrNotFound) {
@@ -661,7 +681,7 @@ func TestSecondAnswerIsNotDelivered(t *testing.T) {
 	st := openStore(t)
 	seedSession(t, st, asker())
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, _ := testLog()
 	if _, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now); err != nil {
 		t.Fatal(err)
@@ -683,7 +703,7 @@ func TestPartialSendNoteWithoutWindow(t *testing.T) {
 	s.TmuxSession, s.TmuxWindow = "", ""
 	seedSession(t, st, s)
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}, SendKeysErr: tmux.ErrPartialSend}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}, SendKeysErr: tmux.ErrPartialSend}
 	log, _ := testLog()
 	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
 	if err != nil {
@@ -707,7 +727,7 @@ func TestSharedPaneIsNotTyped(t *testing.T) {
 			outer.ID, outer.State = "outer", other
 			seedSession(t, st, outer)
 			d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-			fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+			fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 			log, _ := testLog()
 			out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
 			if err != nil {
@@ -716,8 +736,250 @@ func TestSharedPaneIsNotTyped(t *testing.T) {
 			if got := sendKeysCalls(fake.Calls); len(got) != 0 {
 				t.Errorf("typed into a pane shared with a %s session: %q", other, got)
 			}
-			wantQueued(t, st, out, d.ID, "pane is shared by another session; queued for the Stop hook")
+			wantQueued(t, st, out, d.ID, "pane is shared by another session; queued for the Stop hook, or tell the agent to call check_decision D-1")
 		})
+	}
+}
+
+// Ruling 84: a session with subagents running is never typed into, since a
+// subagent's permission dialog may be on screen; the note says why and what
+// the user can do.
+func TestSubagentsRunningIsNotTyped(t *testing.T) {
+	st := openStore(t)
+	s := asker()
+	s.SubagentsActive = 1
+	seedSession(t, st, s)
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
+	log, _ := testLog()
+	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+		t.Errorf("typed into a session with a subagent running: %q", got)
+	}
+	wantQueued(t, st, out, d.ID,
+		"agent has subagents running; it gets the answer when they finish, or tell the agent to call check_decision D-1")
+}
+
+// Rulings 81 and 86: after a partial send the line may sit in the prompt,
+// so the next answer for the session is not typed (it would be glued to the
+// line) until a submitted prompt names the first; then it is.
+func TestNoTypingOverAnUnsubmittedLine(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, asker())
+	first := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	second := seedTicket(t, st, model.ModeBlocking, "Postgres view")
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}, SendKeysErr: tmux.ErrPartialSend}
+	log, _ := testLog()
+	if _, err := deliver.Answer(context.Background(), st, fake, log, first.ID, answerA, now); err != nil {
+		t.Fatal(err)
+	}
+	fake.SendKeysErr, fake.Calls = nil, nil
+	// The partial send left the session idle (AnswerDecision cleared
+	// needs_decision), with no hook event since.
+	out, err := deliver.Answer(context.Background(), st, fake, log, second.ID, answerA, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+		t.Errorf("typed over an unsubmitted line: %q", got)
+	}
+	// Re-review N4: the note names the answer that blocks, D-1: only reading
+	// it unblocks the session.
+	wantQueued(t, st, out, second.ID, "D-1 was typed but not confirmed (it may sit unsubmitted in the agent's prompt); "+
+		"tell the agent to call check_decision D-1; D-2 is queued for the Stop hook")
+
+	// The user pressed Enter: the UserPromptSubmit named D-1 (Ruling 86).
+	err = st.UpdateSessionTx(context.Background(), "s1", func(tx *store.Tx, s model.Session, _ bool) (model.Session, error) {
+		_, cerr := tx.ConfirmTyped(context.Background(), "s1", decision.TypedMessage(getDecision(t, st, first.ID)), now.Add(2*time.Minute))
+		return s, cerr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third := seedTicket(t, st, model.ModeBlocking, "Postgres log")
+	out, err = deliver.Answer(context.Background(), st, fake, log, third.ID, answerA, now.Add(3*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 1 || out.Decision.DeliveredVia != model.ViaSendKeys {
+		t.Errorf("after a hook event: SendKeys calls %q, via %q; want D-3 typed", got, out.Decision.DeliveredVia)
+	}
+}
+
+// deadlineTmux records the deadline of the context SendKeys is given.
+type deadlineTmux struct {
+	*tmux.Fake
+	left *time.Duration
+}
+
+func (d deadlineTmux) SendKeys(ctx context.Context, pane, text string) error {
+	if dl, ok := ctx.Deadline(); ok {
+		*d.left = time.Until(dl)
+	}
+	return d.Fake.SendKeys(ctx, pane, text)
+}
+
+// Ruling 81: typing is not squeezed into one second for all three tmux
+// steps; SendKeys bounds each step itself and gets the caller's context.
+func TestTypingKeepsTheCallersDeadline(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, asker())
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
+	log, _ := testLog()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	var left time.Duration
+	if _, err := deliver.Answer(ctx, st, deadlineTmux{fake, &left}, log, d.ID, answerA, now); err != nil {
+		t.Fatal(err)
+	}
+	if left < 30*time.Second {
+		t.Errorf("SendKeys got a deadline %v away, want the caller's minute", left)
+	}
+}
+
+// goneWindowTmux fails every marker write as tmux does for a closed window.
+type goneWindowTmux struct{ *tmux.Fake }
+
+func (goneWindowTmux) SetWindowOption(context.Context, string, string, string) error {
+	return fmt.Errorf("%w: tmux set-option: no such window: @7", tmux.ErrNoWindow)
+}
+
+// A window that closed is not worth a warning (as for applyMarkers).
+func TestMarkerOnGoneWindowIsNotWarned(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, asker())
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
+	log, buf := testLog()
+	if _, err := deliver.Answer(context.Background(), st, goneWindowTmux{fake}, log, d.ID, answerA, now); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("log warns about a gone window:\n%s", buf)
+	}
+}
+
+// Ruling 85, defects 1, 2 and 3: the pane is captured after the claim and
+// just before typing, and an answer is typed only when the capture shows
+// the empty input prompt. A draft, a dialog, a menu, a running turn, a
+// screen not recognized or a failed capture types nothing; the answer is
+// queued again and the note says why.
+func TestDefects123PaneCheckedBeforeTyping(t *testing.T) {
+	for _, c := range []struct {
+		fixture string
+		capErr  error
+		why     string
+	}{
+		{fixture: "lc3-draft-oneline.txt", why: "prompt has a draft; nothing typed"},
+		{fixture: "lc3-dialog-subagent-main-stopped.txt", why: "a dialog or menu is open in the agent's pane; nothing typed"},
+		{fixture: "lc3-menu-rewind.txt", why: "a dialog or menu is open in the agent's pane; nothing typed"},
+		{fixture: "lc3-screen-config.txt", why: "a dialog or menu is open in the agent's pane; nothing typed"},
+		{fixture: "lc3-busy-running-turn.txt", why: "agent's pane shows a running turn; nothing typed"},
+		{fixture: "lc3-agents-listed-main-stopped.txt", why: "the agent's prompt lists background agents (or offers them); nothing typed"},
+		{fixture: "built-waiting-background.txt", why: "agent is waiting for background subagents; nothing typed"},
+		{fixture: "lc3-shell-after-kill.txt", why: "the pane shows a shell: the session's Claude Code is not at its prompt; nothing typed"},
+		{fixture: "lc3-idle-auto-34col.txt", why: "prompt not recognized (Claude Code's screen may have changed); nothing typed"},
+		{fixture: "lc3-idle-auto-200col.txt", capErr: errors.New("tmux capture-pane: can't find pane: %5"), why: "could not read the agent's pane; nothing typed"},
+	} {
+		t.Run(c.fixture, func(t *testing.T) {
+			st := openStore(t)
+			seedSession(t, st, asker())
+			d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+			fake := &tmux.Fake{Screen: mustRead(filepath.Join("testdata", "prompt", c.fixture)), CaptureErr: c.capErr, Panes: []tmux.Pane{livePane}}
+			log, _ := testLog()
+			out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+				t.Errorf("typed into %s: %q", c.fixture, got)
+			}
+			if !slices.Contains(fake.Calls, "CapturePane %5") {
+				t.Errorf("tmux calls = %q, want the pane captured", fake.Calls)
+			}
+			wantQueued(t, st, out, d.ID, c.why+"; queued for the Stop hook, or tell the agent to call check_decision D-1")
+		})
+	}
+}
+
+// Re-review N5: a window with synchronize-panes on is never typed into:
+// the keys would reach every pane of it, none of which but the asking
+// session's was captured.
+func TestSynchronizedWindowIsNotTyped(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, asker())
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Screen: idleScreen, Synchronized: true, Panes: []tmux.Pane{livePane}}
+	log, _ := testLog()
+	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+		t.Errorf("typed into a synchronized window: %q", got)
+	}
+	wantQueued(t, st, out, d.ID, "the agent's window has synchronize-panes on, so typing would reach every pane in it; "+
+		"nothing typed; queued for the Stop hook, or tell the agent to call check_decision D-1")
+}
+
+// changingTmux's capture shows the empty prompt while a hook event moves
+// the session to state, as a UserPromptSubmit landing during the capture
+// would.
+type changingTmux struct {
+	*tmux.Fake
+	st    *store.Store
+	state model.State
+}
+
+func (c changingTmux) CapturePane(ctx context.Context, pane string) (tmux.Capture, error) {
+	capt, err := c.Fake.CapturePane(ctx, pane)
+	if err == nil {
+		err = c.st.UpdateSession(ctx, "s1", func(s model.Session, _ bool) model.Session {
+			s.State = c.state
+			return s
+		})
+	}
+	return capt, err
+}
+
+// Re-review m3: the session is read again after the capture, so a hook
+// event that landed meanwhile stops the typing.
+func TestSessionChangeDuringCaptureIsNotTyped(t *testing.T) {
+	for state, note := range map[model.State]string{model.StateWorking: noteWorking, model.StateWaiting: noteWaiting} {
+		st := openStore(t)
+		seedSession(t, st, asker())
+		d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+		fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
+		log, _ := testLog()
+		out, err := deliver.Answer(context.Background(), st, changingTmux{fake, st, state}, log, d.ID, answerA, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+			t.Errorf("%s: typed into a session that changed during the capture: %q", state, got)
+		}
+		wantQueued(t, st, out, d.ID, note)
+	}
+}
+
+// The capture is the last step before typing: after the claim, right
+// before SendKeys.
+func TestPaneCapturedRightBeforeTyping(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, asker())
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
+	log, _ := testLog()
+	if _, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now); err != nil {
+		t.Fatal(err)
+	}
+	i := slices.Index(fake.Calls, "CapturePane %5")
+	if i < 0 || i+1 >= len(fake.Calls) || !strings.HasPrefix(fake.Calls[i+1], "SendKeys %5 ") || fake.Calls[0] != "ListPanes" {
+		t.Errorf("tmux calls = %q, want ListPanes, then CapturePane %%5 directly before SendKeys", fake.Calls)
 	}
 }
 
@@ -737,7 +999,7 @@ func TestRequeueSurvivesCallerDeadline(t *testing.T) {
 	st := openStore(t)
 	seedSession(t, st, asker())
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	log, buf := testLog()
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
@@ -788,14 +1050,14 @@ func (l lockingTmux) ListPanes(ctx context.Context) ([]tmux.Pane, error) {
 // A store error in Reconcile or ClaimTyping types nothing and leaves the
 // answer queued.
 func TestStoreErrorBeforeClaimTypesNothing(t *testing.T) {
-	const noteNoCheck = "could not check the session; queued for the Stop hook"
+	const noteNoCheck = "could not check the session; queued for the Stop hook, or tell the agent to call check_decision D-1"
 	t.Run("reconcile", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "curia.db")
 		st := openStoreAt(t, path)
 		seedSession(t, st, asker())
 		d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
 		doomed := openStoreAt(t, path)
-		fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+		fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 		log, buf := testLog()
 		out, err := deliver.Answer(context.Background(), doomed, closingTmux{fake, doomed}, log, d.ID, answerA, now)
 		if err != nil {
@@ -812,7 +1074,7 @@ func TestStoreErrorBeforeClaimTypesNothing(t *testing.T) {
 		st := openStoreAt(t, path)
 		seedSession(t, st, asker())
 		d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-		fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+		fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 		var release func()
 		lock := func() { release = lockStore(t, path) }
 		log, buf := testLog()
@@ -850,7 +1112,7 @@ func TestFailedRequeueSaysSo(t *testing.T) {
 	st := openStoreAt(t, path)
 	seedSession(t, st, asker())
 	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
-	fake := &tmux.Fake{Panes: []tmux.Pane{livePane}}
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{livePane}}
 	var release func()
 	lock := func() { release = lockStore(t, path) }
 	log, buf := testLog()
@@ -859,7 +1121,7 @@ func TestFailedRequeueSaysSo(t *testing.T) {
 		t.Fatal(err)
 	}
 	release()
-	want := "typing failed and the answer could not be queued again; the agent can read it with check_decision"
+	want := "typing failed and the answer could not be queued again; tell the agent to call check_decision D-1"
 	if out.Note != want {
 		t.Errorf("note = %q, want %q", out.Note, want)
 	}
@@ -888,7 +1150,7 @@ func realServer(t *testing.T, dir string, argv ...string) (tmux.Client, func(arg
 		out, err := exec.Command("tmux", append([]string{"-L", realSocket, "-f", os.DevNull}, args...)...).CombinedOutput()
 		return string(out), err
 	}
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", realSocket, "kill-server").Run() })
+	t.Cleanup(func() { killServer(realSocket) })
 	_, _ = raw("kill-server") // clear a leftover server from an aborted run
 	args := append([]string{"new-session", "-d", "-s", "t", "-x", "200", "-y", "50", "-c", dir, "--"}, argv...)
 	if out, err := raw(args...); err != nil {
@@ -921,6 +1183,15 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// waitForPrompt waits until pane shows the drawn empty prompt.
+func waitForPrompt(t *testing.T, raw func(args ...string) (string, error), pane tmux.Pane) {
+	t.Helper()
+	waitFor(t, "the drawn prompt", func() bool {
+		screen, err := raw("capture-pane", "-p", "-t", pane.ID)
+		return err == nil && strings.Contains(screen, "auto mode on")
+	})
+}
+
 func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
@@ -933,7 +1204,10 @@ func TestTypedLineReachesRealPane(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	file := filepath.Join(dir, "typed")
-	client, _, pane := realServer(t, dir, "/bin/sh", "-c", `exec cat > "$1"`, "sh", file)
+	// The pane draws Claude Code's empty prompt (Ruling 85), then records
+	// what is typed.
+	client, raw, pane := realServer(t, dir, "/bin/sh", "-c", `printf '%s' "$2"; exec cat > "$1"`, "sh", file, idleScreen)
+	waitForPrompt(t, raw, pane)
 	st := openStore(t)
 	seedSession(t, st, realAsker(pane))
 	label := "B $(touch " + filepath.Join(dir, "pwned") + "); echo"
@@ -969,7 +1243,11 @@ func TestHostileTextIsInertInARealShell(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	p := func(name string) string { return filepath.Join(dir, name) }
-	client, raw, pane := realServer(t, dir, "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME="+dir, "PS1=$ ", "/bin/sh")
+	// The shell is started under a drawn empty Claude Code prompt, with no
+	// prompt of its own, so the pane check (Ruling 85) lets the line through.
+	client, raw, pane := realServer(t, dir, "/bin/sh", "-c",
+		`printf '%s' "$1"; exec /usr/bin/env -i PATH=/usr/bin:/bin HOME="$2" PS1= /bin/sh`, "sh", idleScreen, dir)
+	waitForPrompt(t, raw, pane)
 	st := openStore(t)
 	seedSession(t, st, realAsker(pane))
 	d := seedTicket(t, st, model.ModeBlocking, "$(touch "+p("pwned")+")")
@@ -1036,5 +1314,27 @@ func TestShellNotFoundPattern(t *testing.T) {
 		if got := shellNotFound.MatchString(line); got != want {
 			t.Errorf("shellNotFound(%q) = %v, want %v", line, got, want)
 		}
+	}
+}
+
+// killServer stops the private test server on socket and removes its
+// socket file, which tmux leaves behind. The directory is asked of the
+// server before it goes, or else built from TMUX_TMPDIR as tmux builds it,
+// and only the entry named socket in it is removed (os.Root keeps the
+// removal inside that directory).
+func killServer(socket string) {
+	out, err := exec.Command("tmux", "-L", socket, "display-message", "-p", "#{socket_path}").Output()
+	dir := filepath.Dir(strings.TrimSpace(string(out)))
+	if err != nil || dir == "." {
+		tmp := os.Getenv("TMUX_TMPDIR")
+		if tmp == "" {
+			tmp = "/tmp"
+		}
+		dir = filepath.Join(tmp, fmt.Sprintf("tmux-%d", os.Getuid()))
+	}
+	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	if root, rerr := os.OpenRoot(dir); rerr == nil {
+		_ = root.Remove(socket)
+		_ = root.Close()
 	}
 }
