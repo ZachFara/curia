@@ -865,20 +865,63 @@ func TestCapturePaneInRealTmux(t *testing.T) {
 	}
 	pane := strings.TrimSpace(id)
 	c := NewExec(realSocket)
-	var screen string
-	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(screen, "❯ draft"); time.Sleep(20 * time.Millisecond) {
-		if screen, err = c.CapturePane(ctx, pane); err != nil {
+	var capt Capture
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(capt.Screen, "❯ draft"); time.Sleep(20 * time.Millisecond) {
+		if capt, err = c.CapturePane(ctx, pane); err != nil {
 			t.Fatal(err)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("CapturePane = %q, want the printed line", screen)
+			t.Fatalf("CapturePane = %q, want the printed line", capt.Screen)
 		}
 	}
-	if !strings.Contains(screen, "❯ draft #{pane_id} %H\n") || strings.Contains(screen, "\x1b") {
-		t.Errorf("CapturePane = %q, want the line as printed, with no escapes", screen)
+	if !strings.Contains(capt.Screen, "❯ draft #{pane_id} %H\n") || strings.Contains(capt.Screen, "\x1b") {
+		t.Errorf("CapturePane = %q, want the line as printed, with no escapes", capt.Screen)
+	}
+	if capt.Synchronized {
+		t.Error("CapturePane: Synchronized set for a window without synchronize-panes")
 	}
 	if _, err := c.CapturePane(ctx, "%99"); err == nil {
 		t.Error("CapturePane(%99): want an error for a missing pane")
+	}
+}
+
+// Re-review N5: with synchronize-panes on, send-keys to one pane reaches
+// every pane of the window, so CapturePane says so.
+func TestCapturePaneReportsSynchronizePanes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	id, err := tm("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "t:", "/bin/sh", "-c", "exec cat")
+	if err != nil {
+		t.Fatalf("new-window: %v: %s", err, id)
+	}
+	pane := strings.TrimSpace(id)
+	for _, args := range [][]string{
+		{"split-window", "-d", "-t", pane, "/bin/sh", "-c", "exec cat"},
+		{"set-window-option", "-t", pane, "synchronize-panes", "on"},
+	} {
+		if out, terr := tm(args...); terr != nil {
+			t.Fatalf("%s: %v: %s", args[0], terr, out)
+		}
+	}
+	capt, err := NewExec(realSocket).CapturePane(ctx, pane)
+	if err != nil || !capt.Synchronized {
+		t.Errorf("CapturePane = synchronized %v, %v; want true", capt.Synchronized, err)
+	}
+}
+
+// CapturePane refuses an answer that does not name the pane asked about,
+// as tmux gives for an unknown target, before capturing anything.
+func TestCapturePaneRefusesUnknownPaneAnswer(t *testing.T) {
+	for _, out := range []string{"", "\t\n", "%6\t0\n", "%5\n"} {
+		c, r := recordingClient()
+		r.out = out
+		if _, err := c.CapturePane(context.Background(), "%5"); err == nil {
+			t.Errorf("answer %q: want an error", out)
+		}
+		if len(r.runs) != 1 {
+			t.Errorf("answer %q: runs = %q, want only the display-message", out, r.runs)
+		}
 	}
 }
 

@@ -226,11 +226,28 @@ func (c *execClient) runFor(ctx context.Context, timeout time.Duration, args ...
 	return err
 }
 
-func (c *execClient) CapturePane(ctx context.Context, pane string) (string, error) {
+// syncFormat is what CapturePane asks about a pane before capturing it. The
+// pane id tells a real pane from an unknown target, which tmux expands to
+// empty fields.
+const syncFormat = "#{pane_id}\t#{synchronize-panes}"
+
+func (c *execClient) CapturePane(ctx context.Context, pane string) (Capture, error) {
 	if !paneIDPattern.MatchString(pane) {
-		return "", fmt.Errorf("tmux capture-pane: refusing target %q: not a pane id", pane)
+		return Capture{}, fmt.Errorf("tmux capture-pane: refusing target %q: not a pane id", pane)
 	}
-	return c.run(ctx, "capture-pane", "-p", "-t", pane)
+	out, err := c.run(ctx, "display-message", "-p", "-t", pane, syncFormat)
+	if err != nil {
+		return Capture{}, err
+	}
+	f := strings.Split(strings.TrimSuffix(out, "\n"), "\t")
+	if len(f) != 2 || f[0] != pane {
+		return Capture{}, fmt.Errorf("tmux capture-pane: unexpected answer %q for %q", out, pane)
+	}
+	screen, err := c.run(ctx, "capture-pane", "-p", "-t", pane)
+	if err != nil {
+		return Capture{}, err
+	}
+	return Capture{Screen: screen, Synchronized: f[1] == "1"}, nil
 }
 
 // ttyPattern matches a pane's tty as tmux reports it: a pty, named

@@ -194,18 +194,27 @@ var promptNotes = map[promptState]string{
 	promptSubagents: "agent is waiting for background subagents; nothing typed",
 }
 
+// noteSynchronized is the refusal for a window with synchronize-panes on.
+const noteSynchronized = "the agent's window has synchronize-panes on, so typing would reach every pane in it; nothing typed"
+
 // paneRefusal captures the pane of sess just before typing and returns why
 // it must not be typed into, or "" when it shows Claude Code's empty input
 // prompt (Ruling 85).
 func (r *delivery) paneRefusal(ctx context.Context, d model.Decision, sess model.Session) string {
 	cctx, cancel := context.WithTimeout(ctx, tmuxTimeout)
-	screen, err := r.tm.CapturePane(cctx, sess.Pane)
+	capt, err := r.tm.CapturePane(cctx, sess.Pane)
 	cancel()
 	if err != nil {
 		r.log.Warn("deliver: could not read the agent's pane; not typing", "id", d.ID, "pane", sess.Pane, "err", err.Error())
 		return "could not read the agent's pane; nothing typed"
 	}
-	state := readPrompt(screen)
+	if capt.Synchronized {
+		// N5: the keys would reach every pane of the window, none of which
+		// but this one was captured.
+		r.log.Info("deliver: not typing into a synchronized window", "id", d.ID, "pane", sess.Pane)
+		return noteSynchronized
+	}
+	state := readPrompt(capt.Screen)
 	if state == promptEmpty {
 		return ""
 	}

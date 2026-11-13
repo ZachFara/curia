@@ -903,6 +903,26 @@ func TestDefects123PaneCheckedBeforeTyping(t *testing.T) {
 	}
 }
 
+// Re-review N5: a window with synchronize-panes on is never typed into:
+// the keys would reach every pane of it, none of which but the asking
+// session's was captured.
+func TestSynchronizedWindowIsNotTyped(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, asker())
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Screen: idleScreen, Synchronized: true, Panes: []tmux.Pane{livePane}}
+	log, _ := testLog()
+	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+		t.Errorf("typed into a synchronized window: %q", got)
+	}
+	wantQueued(t, st, out, d.ID, "the agent's window has synchronize-panes on, so typing would reach every pane in it; "+
+		"nothing typed; queued for the Stop hook, or tell the agent to call check_decision D-1")
+}
+
 // The capture is the last step before typing: after the claim, right
 // before SendKeys.
 func TestPaneCapturedRightBeforeTyping(t *testing.T) {
