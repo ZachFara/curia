@@ -60,7 +60,9 @@ var (
 // TestDecisionsEndToEnd runs steps 1 to 11 of Plan 2's acceptance script:
 // tickets raised over MCP, answered with `curia decide`, delivered by
 // typing into an idle pane, by blocking a Stop, and by check_decision, and
-// found again as precedent.
+// found again as precedent; then the final review's steps 12 and 13: a
+// second answer refused, a superseded answer retracted and a forged label
+// kept inside its brackets.
 func TestDecisionsEndToEnd(t *testing.T) {
 	root, err := filepath.Abs("..")
 	if err != nil {
@@ -83,7 +85,61 @@ func TestDecisionsEndToEnd(t *testing.T) {
 	r.paneGone(t)                 // 9
 	r.checkDecisionsList(t)       // 10
 	r.checkClients(t)             // every client's responses
+	r.secondAnswerRefused(t)      // 12
+	r.retractionAndBrackets(t)    // 13
 	checkNoErrors(t, r.h.logPath) // 11
+}
+
+// Step 12 (review T17): a second answer to D-1 is refused, and nothing is
+// typed again.
+func (r *decisionsRun) secondAnswerRefused(t *testing.T) {
+	t.Helper()
+	before := readFile(t, r.paneFile("s1"))
+	stdout, _, _, err := r.h.run(nil, "decide", "D-1", "--option", "B", "--reason", "changed my mind")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 || stdout != "" {
+		t.Errorf("second curia decide D-1: stdout %q, err %v, want a refusal with exit status 1", stdout, err)
+	}
+	time.Sleep(200 * time.Millisecond) // a typing would have landed by now
+	if got := readFile(t, r.paneFile("s1")); got != before {
+		t.Errorf("pane_s1.txt after the refused answer = %q, want unchanged %q", got, before)
+	}
+}
+
+// Step 13 (Rulings 82 and 83): S2 works again and raises D-7, whose option
+// label tries to close the Stop line's brackets early. While it works the
+// user answers D-7 and supersedes D-2, which S2 already got. S2's next Stop
+// delivers D-2's retraction, not its answer, and D-7 with the label's
+// brackets turned into parentheses; check_decision says D-2 was retracted.
+func (r *decisionsRun) retractionAndBrackets(t *testing.T) {
+	t.Helper()
+	r.quietHook(t, "PreToolUse", "%1")
+	d := r.startClient(t, "client_d", "TMUX_PANE=%1")
+	d.handshake(t)
+	d.call(t) // request_decision: D-7
+	if out := r.h.mustRun(t, "decide", "D-7", "--option", "A", "--reason", "not ready"); !strings.Contains(out, "queued: agent is working") {
+		t.Errorf("curia decide D-7 = %q, want it queued for the working session", out)
+	}
+	out := r.h.mustRun(t, "decisions", "edit", "D-2", "--supersede")
+	if want := "D-2 superseded\nD-2 retraction queued for the agent's Stop hook, or tell the agent to call check_decision D-2\n"; out != want {
+		t.Errorf("curia decisions edit D-2 --supersede = %q, want %q", out, want)
+	}
+	want := readGolden(t, r.root, "stop_s2_retraction.golden.json")
+	if got := r.hook(t, "Stop", "%1"); got != want {
+		t.Errorf("curia hook Stop for S2 printed:\n%q\nwant (stop_s2_retraction.golden.json):\n%q", got, want)
+	}
+	r.quietHook(t, "Stop", "%1")
+	d.call(t) // check_decision D-2: superseded, the retraction
+	d.close(t)
+	wantLines := strings.Split(strings.TrimSuffix(readGolden(t, r.root, "client_d.golden.jsonl"), "\n"), "\n")
+	got := make([]string, len(d.responses))
+	for i, line := range d.responses {
+		got[i] = clientNormalise(line)
+	}
+	compareLines(t, d.name, got, wantLines)
+	if got := readFile(t, r.paneFile("s2")); got != "" {
+		t.Errorf("pane_s2.txt = %q, want nothing typed", got)
+	}
 }
 
 // decisionsRun is one run of the script.
@@ -560,7 +616,8 @@ type tmuxServer struct {
 }
 
 // startTmux starts the server with one window per pane file, each pane
-// running `cat` into its file, and checks the panes are %0, %1 and %2.
+// drawing Claude Code's empty prompt and recording each line typed into
+// it in its file, and checks the panes are %0, %1 and %2.
 func startTmux(t *testing.T, home string, paneFiles ...string) *tmuxServer {
 	t.Helper()
 	// A unix socket path holds about 100 bytes, so not t.TempDir().
@@ -569,7 +626,7 @@ func startTmux(t *testing.T, home string, paneFiles ...string) *tmuxServer {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	if err := os.Mkdir(home, 0o700); err != nil {
+	if err = os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	s := &tmuxServer{
@@ -577,7 +634,12 @@ func startTmux(t *testing.T, home string, paneFiles ...string) *tmuxServer {
 		dir:  dir,
 		env:  []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "TMUX_TMPDIR=" + dir},
 	}
-	if sock := filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), s.name); len(sock) > maxSocketPath {
+	// The socket's path is the resolved one (macOS's /var is /private/var).
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sock := filepath.Join(resolved, fmt.Sprintf("tmux-%d", os.Getuid()), s.name); len(sock) > maxSocketPath {
 		t.Fatalf("tmux socket path %s is %d bytes, over %d", sock, len(sock), maxSocketPath)
 	}
 	t.Cleanup(func() { _, _ = s.run("kill-server") })
