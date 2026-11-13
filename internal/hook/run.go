@@ -47,6 +47,9 @@ type startInfo struct {
 type Result struct {
 	Session model.Session
 	Stdout  []byte
+	// Claimed holds the ids of the answers a Stop claimed, which Stdout
+	// delivers; the caller logs them (M8).
+	Claimed []string
 }
 
 // Run records one hook event and returns a Result: the session as stored,
@@ -146,6 +149,9 @@ func runStop(ctx context.Context, ev model.Event, start *startInfo, st *store.St
 	if len(claimed) > 0 {
 		res.Stdout, err = blockLine(claimed)
 		errs = errors.Join(errs, err)
+		for _, d := range claimed {
+			res.Claimed = append(res.Claimed, d.ID)
+		}
 	}
 	return res, errs
 }
