@@ -786,11 +786,17 @@ func TestNoTypingOverAnUnsubmittedLine(t *testing.T) {
 	if got := sendKeysCalls(fake.Calls); len(got) != 0 {
 		t.Errorf("typed over an unsubmitted line: %q", got)
 	}
-	wantQueued(t, st, out, second.ID, "an answer typed earlier is not confirmed yet (it may sit unsubmitted in the agent's prompt); "+
-		"queued for the Stop hook, or tell the agent to call check_decision D-2")
+	// Re-review N4: the note names the answer that blocks, D-1: only reading
+	// it unblocks the session.
+	wantQueued(t, st, out, second.ID, "D-1 was typed but not confirmed (it may sit unsubmitted in the agent's prompt); "+
+		"tell the agent to call check_decision D-1; D-2 is queued for the Stop hook")
 
 	// The user pressed Enter: the UserPromptSubmit named D-1 (Ruling 86).
-	if _, err = st.ConfirmTyped(context.Background(), "s1", decision.TypedMessage(getDecision(t, st, first.ID)), now.Add(2*time.Minute)); err != nil {
+	err = st.UpdateSessionTx(context.Background(), "s1", func(tx *store.Tx, s model.Session, _ bool) (model.Session, error) {
+		_, cerr := tx.ConfirmTyped(context.Background(), "s1", decision.TypedMessage(getDecision(t, st, first.ID)), now.Add(2*time.Minute))
+		return s, cerr
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	third := seedTicket(t, st, model.ModeBlocking, "Postgres log")

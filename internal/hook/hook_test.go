@@ -1109,8 +1109,8 @@ func TestDefect3PromptNamingTypedAnswerConfirmsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, why, err := st.ClaimTyping(ctx, d.ID, t0); err != nil || why != store.TypingClaimed {
-		t.Fatalf("ClaimTyping = %v, %v", why, err)
+	if c, err := st.ClaimTyping(ctx, d.ID, t0); err != nil || c.Refusal != store.TypingClaimed {
+		t.Fatalf("ClaimTyping = %v, %v", c.Refusal, err)
 	}
 	prompt := func(text string) []byte {
 		b, err := json.Marshal(text)

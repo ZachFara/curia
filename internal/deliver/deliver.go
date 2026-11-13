@@ -54,10 +54,11 @@ func queuedNote(why string, d model.Decision) string {
 	return why + "; queued for the Stop hook, or " + askCheck(d.ID)
 }
 
-// refusalNote says why store.ClaimTyping refused to claim answer d. An
+// refusalNote says why store.ClaimTyping refused to claim the answer in c. An
 // answer another path delivered first needs no note.
-func refusalNote(why store.TypingRefusal, d model.Decision) string {
-	switch why {
+func refusalNote(c store.TypingClaim) string {
+	d := c.Decision
+	switch c.Refusal {
 	case store.TypingNotQueued:
 		if d.Delivery == model.DeliveryDelivered {
 			return ""
@@ -76,7 +77,9 @@ func refusalNote(why store.TypingRefusal, d model.Decision) string {
 	case store.TypingSharedPane:
 		return queuedNote("pane is shared by another session", d) // Ruling 73
 	case store.TypingUnsubmitted:
-		return queuedNote("an answer typed earlier is not confirmed yet (it may sit unsubmitted in the agent's prompt)", d)
+		// N4: only reading the blocking answer unblocks the session.
+		return c.Unconfirmed + " was typed but not confirmed (it may sit unsubmitted in the agent's prompt); tell the agent to call check_decision " +
+			c.Unconfirmed + "; " + d.ID + " is queued for the Stop hook"
 	}
 	return "pane gone; " + askCheck(d.ID) // stale, no pane or no row
 }
@@ -170,15 +173,15 @@ func (r *delivery) deliver(ctx context.Context, d model.Decision) model.Outcome 
 		r.log.Warn("deliver: reconcile failed, answer left queued", "id", d.ID, "err", err.Error())
 		return model.Outcome{Decision: d, Note: queuedNote("could not check the session", d)}
 	}
-	claimed, sess, why, err := r.st.ClaimTyping(ctx, d.ID, r.now)
+	c, err := r.st.ClaimTyping(ctx, d.ID, r.now)
 	if err != nil {
 		r.log.Warn("deliver: typing claim failed, answer left queued", "id", d.ID, "err", err.Error())
 		return model.Outcome{Decision: d, Note: queuedNote("could not check the session", d)}
 	}
-	if why != store.TypingClaimed {
-		return model.Outcome{Decision: claimed, Note: refusalNote(why, claimed)}
+	if c.Refusal != store.TypingClaimed {
+		return model.Outcome{Decision: c.Decision, Note: refusalNote(c)}
 	}
-	return r.typeLine(ctx, claimed, sess)
+	return r.typeLine(ctx, c.Decision, c.Session)
 }
 
 // promptNotes say why a capture of the agent's pane refused typing

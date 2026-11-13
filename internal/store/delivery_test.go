@@ -137,7 +137,7 @@ func checkClaimTyping(t *testing.T, state model.State, pane string, subagents in
 		// AnswerDecision cleared needs_decision; put the row back.
 		store1()
 	}
-	got, gotSess, why, err := s.ClaimTyping(context.Background(), d.ID, tClaim)
+	got, gotSess, why, err := claim4(context.Background(), s, d.ID, tClaim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func checkClaimTyping(t *testing.T, state model.State, pane string, subagents in
 	}
 	assertDelivered(t, s, d.ID, model.ViaSendKeys, tClaim)
 	assertDecision(t, got, getDecision(t, s, d.ID))
-	if _, _, again, err := s.ClaimTyping(context.Background(), d.ID, tClaim.Add(time.Second)); err != nil || again != store.TypingNotQueued {
+	if _, _, again, err := claim4(context.Background(), s, d.ID, tClaim.Add(time.Second)); err != nil || again != store.TypingNotQueued {
 		t.Errorf("second claim = %v, %v; want TypingNotQueued, nil", again, err)
 	}
 	assertDelivered(t, s, d.ID, model.ViaSendKeys, tClaim)
@@ -219,6 +219,24 @@ func TestDefect3TypedAnswerUnconfirmedUntilPromptNamesIt(t *testing.T) {
 	}
 }
 
+// Re-review N4: a refusal for an unconfirmed typed answer names it, the
+// oldest when there are several, so the user can unblock the session.
+func TestClaimTypingNamesTheUnconfirmedAnswer(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	liveSession(t, s, "s1", "%3", model.StateIdle)
+	typed := queued(t, s, "Typed?", "s1")
+	next := queued(t, s, "Next?", "s1")
+	claimTyping(t, s, typed.ID, tClaim)
+	c, err := s.ClaimTyping(ctx, next.ID, tClaim.Add(time.Second))
+	if err != nil || c.Refusal != store.TypingUnsubmitted || c.Unconfirmed != typed.ID {
+		t.Errorf("claim = %v, unconfirmed %q, %v; want TypingUnsubmitted naming %s", c.Refusal, c.Unconfirmed, err, typed.ID)
+	}
+	if c, err := s.ClaimTyping(ctx, typed.ID, tClaim); err != nil || c.Unconfirmed != "" {
+		t.Errorf("claim of the typed one = unconfirmed %q, %v; want none named", c.Unconfirmed, err)
+	}
+}
+
 // Ruling 86: the asking session's own check_decision confirms a typed
 // answer; another session's, or an unknown caller's, does not.
 func TestDefect3CheckDecisionConfirmsTypedAnswer(t *testing.T) {
@@ -255,7 +273,7 @@ func TestDefect3CheckDecisionConfirmsTypedAnswer(t *testing.T) {
 // claimTyping is ClaimTyping, failing the test on an error.
 func claimTyping(t *testing.T, s *store.Store, id string, at time.Time) (model.Decision, store.TypingRefusal) {
 	t.Helper()
-	d, _, why, err := s.ClaimTyping(context.Background(), id, at)
+	d, _, why, err := claim4(context.Background(), s, id, at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +283,7 @@ func claimTyping(t *testing.T, s *store.Store, id string, at time.Time) (model.D
 // confirmTyped is ConfirmTyped for session s1, failing the test on an error.
 func confirmTyped(t *testing.T, s *store.Store, prompt string, at time.Time) int64 {
 	t.Helper()
-	n, err := s.ConfirmTyped(context.Background(), "s1", prompt, at)
+	n, err := txConfirmTyped(s, prompt, at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,11 +294,11 @@ func TestClaimTypingNothingToClaim(t *testing.T) {
 	s := open(t, dbPath(t))
 	ctx := context.Background()
 	sess := liveSession(t, s, "s1", "%3", model.StateIdle)
-	if _, gotSess, why, err := s.ClaimTyping(ctx, "D-99", tClaim); err != nil || why != store.TypingNotQueued || !reflect.DeepEqual(gotSess, model.Session{}) {
+	if _, gotSess, why, err := claim4(ctx, s, "D-99", tClaim); err != nil || why != store.TypingNotQueued || !reflect.DeepEqual(gotSess, model.Session{}) {
 		t.Errorf("missing decision = %+v, %v, %v; want zero session, TypingNotQueued, nil", gotSess, why, err)
 	}
 	d := create(t, s, ticket(t, "Still open?", model.ModeBlocking, "s1", t0))
-	got, gotSess, why, err := s.ClaimTyping(ctx, d.ID, tClaim)
+	got, gotSess, why, err := claim4(ctx, s, d.ID, tClaim)
 	if err != nil || why != store.TypingNotQueued {
 		t.Fatalf("open ticket = %v, %v; want TypingNotQueued, nil", why, err)
 	}
@@ -315,7 +333,7 @@ func TestClaimTypingRefusesSharedPane(t *testing.T) {
 				liveSession(t, s, "s2", c.pane, c.other)
 			}
 			d := queued(t, s, "Type the answer?", "s1")
-			_, gotSess, why, err := s.ClaimTyping(context.Background(), d.ID, tClaim)
+			_, gotSess, why, err := claim4(context.Background(), s, d.ID, tClaim)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -341,7 +359,7 @@ func TestRequeueOnlyUndoesTyping(t *testing.T) {
 	liveSession(t, s, "s2", "%4", model.StateIdle)
 
 	typed := queued(t, s, "Typed?", "s1")
-	if _, _, why, err := s.ClaimTyping(ctx, typed.ID, tClaim); err != nil || why != store.TypingClaimed {
+	if _, _, why, err := claim4(ctx, s, typed.ID, tClaim); err != nil || why != store.TypingClaimed {
 		t.Fatalf("ClaimTyping = %v, %v", why, err)
 	}
 	if err := s.RequeueDelivery(ctx, typed.ID); err != nil {
@@ -502,7 +520,7 @@ func claimRace(t *testing.T, hs []*store.Store, id string, lead int) []model.Del
 	release := func() { once.Do(func() { close(ahead) }) }
 	race := []func() error{
 		func() error {
-			_, _, why, err := hs[0].ClaimTyping(ctx, id, at(0))
+			_, _, why, err := claim4(ctx, hs[0], id, at(0))
 			claimed[0] = why == store.TypingClaimed
 			return err
 		},
@@ -605,7 +623,7 @@ func TestDeliveryClaimedExactlyOnce(t *testing.T) {
 			t.Fatalf("%s: stored %s via %q, want delivered via the winner %s", d.ID, got.Delivery, got.DeliveredVia, won[0])
 		}
 		// The typed line is submitted, so the next round may type (Ruling 86).
-		if _, err := hs[0].ConfirmTyped(context.Background(), "s1", decision.TypedMessage(got), tClaim.Add(time.Second)); err != nil {
+		if _, err := txConfirmTyped(hs[0], decision.TypedMessage(got), tClaim.Add(time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -779,4 +797,23 @@ func TestClaimCapIsWhatOneStopReasonNames(t *testing.T) {
 	if n := named(longest(store.ClaimCap + 1)); n != store.ClaimCap {
 		t.Errorf("a reason for %d worst-case answers names %d, want exactly the cap %d", store.ClaimCap+1, n, store.ClaimCap)
 	}
+}
+
+// claim4 is ClaimTyping as its four parts: the decision, the session, the
+// refusal and the error.
+func claim4(ctx context.Context, s *store.Store, id string, at time.Time) (model.Decision, model.Session, store.TypingRefusal, error) {
+	c, err := s.ClaimTyping(ctx, id, at)
+	return c.Decision, c.Session, c.Refusal, err
+}
+
+// txConfirmTyped runs Tx.ConfirmTyped for session s1 as curia hook
+// UserPromptSubmit does, inside UpdateSessionTx.
+func txConfirmTyped(s *store.Store, prompt string, at time.Time) (int64, error) {
+	var n int64
+	err := s.UpdateSessionTx(context.Background(), "s1", func(tx *store.Tx, sess model.Session, _ bool) (model.Session, error) {
+		var err error
+		n, err = tx.ConfirmTyped(context.Background(), "s1", prompt, at)
+		return sess, err
+	})
+	return n, err
 }

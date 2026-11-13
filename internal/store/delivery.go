@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -63,18 +64,22 @@ func typingRefusal(sess model.Session) TypingRefusal {
 	return TypingClaimed
 }
 
-// unconfirmed reports whether an answer typed into sess (delivered by
-// send_keys) is not yet confirmed: no prompt naming it has been submitted
-// and the agent has not read it with check_decision (Ruling 86). Its line
-// may still sit in the prompt, or be lost, and a second line would be glued
-// to it (Ruling 81).
-func unconfirmed(ctx context.Context, tx *sql.Tx, sess model.Session) (bool, error) {
-	var n int
+// unconfirmed returns the id of the oldest answer typed into sess
+// (delivered by send_keys) that is not yet confirmed: no prompt naming it
+// has been submitted and the agent has not read it with check_decision
+// (Ruling 86), or "" when there is none. Its line may still sit in the
+// prompt, or be lost, and a second line would be glued to it (Ruling 81).
+func unconfirmed(ctx context.Context, tx *sql.Tx, sess model.Session) (string, error) {
+	var id string
 	err := tx.QueryRowContext(ctx, `
-SELECT count(*) FROM decisions
-WHERE session_id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL`,
-		sess.ID).Scan(&n)
-	return n > 0, err
+SELECT id FROM decisions
+WHERE session_id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL
+ORDER BY n LIMIT 1`,
+		sess.ID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
 }
 
 // sharesPane reports whether a session row other than sess is bound to
@@ -99,54 +104,69 @@ WHERE tmux_pane = ? AND id != ? AND COALESCE(state, '') NOT IN (?, ?)`,
 // nor stale may be bound to that pane (Ruling 73); and no answer typed into
 // the session earlier may be unconfirmed (Rulings 81 and 86). Then the
 // decision is marked delivered by send_keys, unconfirmed, and returned with
-// TypingClaimed and the session. Otherwise nothing changes, and the refusal
-// says why, with both rows as stored (zero when absent).
-func (s *Store) ClaimTyping(ctx context.Context, id string, now time.Time) (d model.Decision, sess model.Session, why TypingRefusal, err error) {
+// TypingClaimed and the session. Otherwise nothing changes, and the claim
+// says why, with both rows as stored (zero when absent) and, for
+// TypingUnsubmitted, the id of the unconfirmed answer that blocks it.
+func (s *Store) ClaimTyping(ctx context.Context, id string, now time.Time) (TypingClaim, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
-		return model.Decision{}, model.Session{}, 0, fail("claim typing", id, err)
+		return TypingClaim{}, fail("claim typing", id, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	var c TypingClaim
 	d, found, err := getDecision(ctx, tx, id)
 	if err == nil && found && d.SessionID != "" {
-		sess, _, err = getSession(ctx, tx, d.SessionID)
+		c.Session, _, err = getSession(ctx, tx, d.SessionID)
 	}
+	c.Decision = d
 	if err == nil {
-		why, err = claimRefusal(ctx, tx, d, sess)
+		c.Refusal, c.Unconfirmed, err = claimRefusal(ctx, tx, d, c.Session)
 	}
 	if err != nil {
-		return model.Decision{}, model.Session{}, 0, fail("claim typing", id, err)
+		return TypingClaim{}, fail("claim typing", id, err)
 	}
-	if why != TypingClaimed {
-		return d, sess, why, nil
+	if c.Refusal != TypingClaimed {
+		return c, nil
 	}
 	if _, err = tx.ExecContext(ctx,
 		`UPDATE decisions SET delivery = 'delivered', delivered_via = 'send_keys', delivered_at = ? WHERE n = ?`,
 		formatTime(now), d.N); err != nil {
-		return model.Decision{}, model.Session{}, 0, fail("claim typing", id, err)
+		return TypingClaim{}, fail("claim typing", id, err)
 	}
-	if d, err = commitRead(ctx, tx, id); err != nil {
-		return model.Decision{}, model.Session{}, 0, fail("claim typing", id, err)
+	if c.Decision, err = commitRead(ctx, tx, id); err != nil {
+		return TypingClaim{}, fail("claim typing", id, err)
 	}
-	return d, sess, TypingClaimed, nil
+	return c, nil
+}
+
+// TypingClaim is what ClaimTyping did with an answer: the decision and its
+// session as stored, why it was not claimed (TypingClaimed when it was),
+// and for TypingUnsubmitted the id of the typed answer, not confirmed yet,
+// that blocks typing into the session (re-review N4).
+type TypingClaim struct {
+	Decision    model.Decision
+	Session     model.Session
+	Refusal     TypingRefusal
+	Unconfirmed string
 }
 
 // claimRefusal is why ClaimTyping may not claim d for typing into sess
-// inside tx, or TypingClaimed.
-func claimRefusal(ctx context.Context, tx *sql.Tx, d model.Decision, sess model.Session) (TypingRefusal, error) {
+// inside tx, or TypingClaimed, and the id of the unconfirmed typed answer
+// behind TypingUnsubmitted.
+func claimRefusal(ctx context.Context, tx *sql.Tx, d model.Decision, sess model.Session) (TypingRefusal, string, error) {
 	if d.Delivery != model.DeliveryQueued {
-		return TypingNotQueued, nil
+		return TypingNotQueued, "", nil
 	}
 	if why := typingRefusal(sess); why != TypingClaimed {
-		return why, nil
+		return why, "", nil
 	}
 	if shared, err := sharesPane(ctx, tx, sess); err != nil || shared {
-		return TypingSharedPane, err
+		return TypingSharedPane, "", err
 	}
-	if typed, err := unconfirmed(ctx, tx, sess); err != nil || typed {
-		return TypingUnsubmitted, err
+	if typed, err := unconfirmed(ctx, tx, sess); err != nil || typed != "" {
+		return TypingUnsubmitted, typed, err
 	}
-	return TypingClaimed, nil
+	return TypingClaimed, "", nil
 }
 
 // RequeueDelivery undoes a typing claim whose typing failed: a decision
@@ -205,13 +225,15 @@ const typedNames = `(instr(?, 'Decision ' || id || ' ') > 0 OR instr(?, 'Decisio
 
 // ConfirmTyped confirms, for curia hook UserPromptSubmit at now, the answers
 // typed into session sessionID no later than now that prompt names
-// (Ruling 86), in one statement, and returns how many. An empty sessionID
-// confirms nothing.
-func (s *Store) ConfirmTyped(ctx context.Context, sessionID, prompt string, now time.Time) (int64, error) {
+// (Ruling 86), in one statement inside the session's write transaction, so
+// the confirmation is written with the UserPromptSubmit's session update or
+// not at all (re-review N4). It returns how many it confirmed. An empty
+// sessionID confirms nothing.
+func (t *Tx) ConfirmTyped(ctx context.Context, sessionID, prompt string, now time.Time) (int64, error) {
 	if sessionID == "" {
 		return 0, nil
 	}
-	res, err := s.db.ExecContext(ctx, `
+	res, err := t.tx.ExecContext(ctx, `
 UPDATE decisions SET confirmed_at = ?
 WHERE session_id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL
   AND delivered_at <= ? AND `+typedNames,

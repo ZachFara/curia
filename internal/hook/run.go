@@ -106,6 +106,9 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 	if kind == model.Stop {
 		return runStop(ctx, ev, start, st, cfg)
 	}
+	if kind == model.UserPromptSubmit && strings.Contains(ev.Prompt, "Decision D-") {
+		return runConfirming(ctx, ev, start, st, cfg)
+	}
 	var out model.Session
 	var readErr error
 	err = st.UpdateSession(ctx, ev.SessionID, func(s model.Session, _ bool) model.Session {
@@ -115,11 +118,24 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 	if err != nil {
 		return Result{}, err
 	}
-	// A submitted prompt naming a typed answer confirms it (Ruling 86).
-	// Only a prompt that can name one costs a statement.
-	if kind == model.UserPromptSubmit && strings.Contains(ev.Prompt, "Decision D-") {
-		_, err = st.ConfirmTyped(ctx, ev.SessionID, ev.Prompt, ev.At)
-		readErr = errors.Join(readErr, err)
+	return Result{Session: out}, readErr
+}
+
+// runConfirming is Run's transaction for a UserPromptSubmit whose prompt
+// may name a typed answer (Ruling 86): the session update and the
+// confirmation are one write, so a busy database cannot let the update
+// through and lose the confirmation (re-review N4). Only such a prompt
+// costs the statement.
+func runConfirming(ctx context.Context, ev model.Event, start *startInfo, st *store.Store, cfg config.Config) (Result, error) {
+	var out model.Session
+	var readErr error
+	err := st.UpdateSessionTx(ctx, ev.SessionID, func(tx *store.Tx, s model.Session, _ bool) (model.Session, error) {
+		out, readErr = apply(s, ev, start, cfg, nil)
+		_, cerr := tx.ConfirmTyped(ctx, ev.SessionID, ev.Prompt, ev.At)
+		return out, cerr
+	})
+	if err != nil {
+		return Result{}, err
 	}
 	return Result{Session: out}, readErr
 }
