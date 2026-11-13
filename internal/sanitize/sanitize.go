@@ -13,6 +13,9 @@ import (
 const (
 	esc      = '\x1b'
 	bel      = '\a'
+	nel      = '\u0085' // NEXT LINE
+	lineSep  = '\u2028' // LINE SEPARATOR
+	paraSep  = '\u2029' // PARAGRAPH SEPARATOR
 	ellipsis = "…"
 
 	// keysPunct is the punctuation Keys keeps besides letters, digits and
@@ -31,14 +34,20 @@ func Line(s string, limit int) string {
 	return out
 }
 
-// Text is Line for several lines: "\r\n" and "\r" become "\n", each line is
-// cleaned as Line cleans one, and at most one blank line is kept in a row.
+// Text is Line for several lines: "\r\n", "\r", NEL, U+2028 and U+2029
+// become "\n", each line is cleaned as Line cleans one, and at most one
+// blank line is kept in a row.
 // A positive limit cuts the result to that many runes, the last one an
 // ellipsis; callers pass a positive limit for untrusted text, since a limit
 // that is not positive leaves the length unbounded.
 func Text(s string, limit int) string {
 	s = strings.ReplaceAll(scan(s), "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\r", "\n")
+	s = strings.Map(func(r rune) rune {
+		if isBreak(r) {
+			return '\n'
+		}
+		return r
+	}, s)
 	lines := strings.Split(s, "\n")
 	out := lines[:0]
 	blanks := 0
@@ -81,12 +90,18 @@ func squeeze(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// oneLine turns line breaks, tabs and Unicode space separators (category Zs)
-// into spaces, drops every rune that is not printable, then squeezes the spaces. The input has been through scan.
+// isBreak reports whether r ends a line: "\n", "\r", NEL, U+2028 or U+2029.
+func isBreak(r rune) bool {
+	return r == '\n' || r == '\r' || r == nel || r == lineSep || r == paraSep
+}
+
+// oneLine turns line breaks (isBreak), tabs and Unicode space separators
+// (category Zs) into spaces, drops every other rune that is not printable,
+// then squeezes the spaces. The input has been through scan.
 func oneLine(s string) string {
 	return squeeze(strings.Map(func(r rune) rune {
 		switch {
-		case r == '\n' || r == '\r' || r == '\t' || unicode.Is(unicode.Zs, r):
+		case isBreak(r) || r == '\t' || unicode.Is(unicode.Zs, r):
 			return ' '
 		case unicode.IsPrint(r): // includes the ASCII space
 			return r
@@ -142,23 +157,43 @@ func scan(s string) string {
 // escLen is the length in bytes of what follows an ESC that belongs to the
 // sequence. An ESC followed by another ESC is dropped alone, so the second
 // one introduces its own sequence; an ESC followed by a line break is
-// dropped alone too, so the break survives.
+// dropped alone too, so the break survives. An ESC with intermediate bytes
+// (0x20 to 0x2F, as in the charset designation "ESC ( B") takes them and
+// its final byte.
 func escLen(rest string) int {
 	r, n := utf8.DecodeRuneInString(rest)
-	switch r {
-	case utf8.RuneError:
+	switch {
+	case r == utf8.RuneError:
 		return n // end of input (0) or one invalid byte (1)
-	case esc, '\n', '\r':
+	case r == esc || r == '\n' || r == '\r':
 		return 0
-	case '[':
+	case r == '[':
 		return n + csiLen(rest[n:])
-	case ']':
+	case r == ']':
 		return n + stringLen(rest[n:], true)
-	case 'P', 'X', '^', '_':
+	case r == 'P' || r == 'X' || r == '^' || r == '_':
 		return n + stringLen(rest[n:], false)
+	case r >= 0x20 && r <= 0x2f:
+		return n + nfLen(rest[n:])
 	default:
 		return n
 	}
+}
+
+// nfLen is the length of the rest of an escape sequence with intermediate
+// bytes, after its first: more intermediates, then one final byte 0x30 to
+// 0x7E. An ESC or a line break ends it early, unconsumed.
+func nfLen(rest string) int {
+	for i := 0; i < len(rest); i++ {
+		switch c := rest[i]; {
+		case c >= 0x20 && c <= 0x2f:
+		case c >= 0x30 && c <= 0x7e:
+			return i + 1
+		default:
+			return i
+		}
+	}
+	return len(rest)
 }
 
 // csiLen is the length of a CSI sequence after its introducer: up to and
