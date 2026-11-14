@@ -25,37 +25,54 @@ const gitWaitDelay = 100 * time.Millisecond
 // A symbolic ref is far shorter.
 const maxHeadBytes = 4096
 
-// gitInfo returns the repository top level and current branch for cwd, or
-// empty strings when cwd is empty or not in a repository. It runs one git
-// process, bounded by subprocessTimeout, for the top level and the git dir,
-// then reads the branch from <git dir>/HEAD: "ref: refs/heads/<branch>", and
-// anything else (a detached HEAD) is no branch. This is right in a linked
-// worktree, whose git dir has its own HEAD, and before the first commit. Any
-// failure other than "not a git repository" (git missing, a timeout, an
-// unreadable HEAD) is logged on logger as one warning.
-func gitInfo(ctx context.Context, cwd string, logger *slog.Logger) (repo, branch string) {
+// gitInfo returns, for cwd, the main repository's top level, the current
+// branch and, in a linked worktree, that worktree's top level (else empty),
+// or empty strings when cwd is empty or not in a repository. It runs one git
+// process, bounded by subprocessTimeout, for the top level, the git dir and
+// the common dir (plan section 4.5), then reads the branch from
+// <git dir>/HEAD: "ref: refs/heads/<branch>", and anything else (a detached
+// HEAD) is no branch. This is right in a linked worktree, whose git dir has
+// its own HEAD, and before the first commit. Output other than three
+// absolute paths, and any failure other than "not a git repository" (git
+// missing, a timeout, an unreadable HEAD), is logged on logger as one
+// warning.
+func gitInfo(ctx context.Context, cwd string, logger *slog.Logger) (repo, branch, worktree string) {
 	if cwd == "" { // git -C "" would use this process's directory
-		return "", ""
+		return "", "", ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 	defer cancel()
-	res := runGit(ctx, cwd, "rev-parse", "--show-toplevel", "--absolute-git-dir")
+	res := runGit(ctx, cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir")
 	if res.err != nil {
 		if !res.notARepository() {
 			res.log(logger, cwd)
 		}
-		return "", ""
+		return "", "", ""
 	}
-	repo, gitDir, ok := strings.Cut(res.out, "\n")
-	if !ok || strings.Contains(gitDir, "\n") {
+	lines := strings.Split(res.out, "\n")
+	if len(lines) != 3 || slices.ContainsFunc(lines, func(l string) bool { return !filepath.IsAbs(l) }) {
 		logger.Warn("git failed", "cwd", cwd, "args", strings.Join(res.args, " "), "err", "unexpected output", "stdout", res.out)
-		return "", ""
+		return "", "", ""
 	}
+	top, gitDir, common := lines[0], lines[1], lines[2]
 	branch, err := headBranch(gitDir)
 	if err != nil {
 		logger.Warn("git HEAD unreadable", "cwd", cwd, "err", err.Error())
 	}
-	return repo, branch
+	repo, worktree = mainRepo(top, common)
+	return repo, branch, worktree
+}
+
+// mainRepo returns the main repository and the linked worktree (or "") for
+// a top level and common dir from git: a common dir named .git whose parent
+// is not the top level belongs to a linked worktree of that parent.
+// Anything else (a main worktree, a submodule's common dir) is its own top
+// level.
+func mainRepo(top, common string) (repo, worktree string) {
+	if parent := filepath.Dir(common); filepath.Base(common) == ".git" && parent != top {
+		return parent, top
+	}
+	return top, ""
 }
 
 // headBranch returns the branch the HEAD file in gitDir names, or "" when

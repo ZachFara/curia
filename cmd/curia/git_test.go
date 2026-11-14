@@ -14,12 +14,12 @@ import (
 )
 
 // fakeGitArgs is the argv gitInfo passes after `-C <cwd>`.
-const fakeGitArgs = "rev-parse --show-toplevel --absolute-git-dir"
+const fakeGitArgs = "rev-parse --path-format=absolute --show-toplevel --absolute-git-dir --git-common-dir"
 
 // useFakeGit puts a "git" on PATH that is a symlink to /bin/sh and returns
 // the cwd to pass to gitInfo: a shell script file. gitInfo runs
 // `git -C <cwd> <args>`, which /bin/sh reads as -C (noclobber) and then runs
-// the script with <args> as $1, $2. (A real executable would need a file
+// the script with <args> as $1, $2, ... (A real executable would need a file
 // mode gosec rejects in tests.) This depends on gitInfo's argv: should it
 // change, sh rejects the options, or the script exits 97 naming the
 // arguments, and the test sees that failure in the log rather than passing.
@@ -107,11 +107,11 @@ func TestGitInfo(t *testing.T) {
 	t.Setenv("GIT_WORK_TREE", other)
 	logger, buf := testLogger()
 
-	if repo, branch := gitInfo(context.Background(), dir, logger); repo != "" || branch != "" {
-		t.Errorf("outside a repo: %q, %q", repo, branch)
+	if repo, branch, wt := gitInfo(context.Background(), dir, logger); repo != "" || branch != "" || wt != "" {
+		t.Errorf("outside a repo: %q, %q, %q", repo, branch, wt)
 	}
-	if repo, branch := gitInfo(context.Background(), "", logger); repo != "" || branch != "" {
-		t.Errorf("empty cwd: %q, %q", repo, branch)
+	if repo, branch, wt := gitInfo(context.Background(), "", logger); repo != "" || branch != "" || wt != "" {
+		t.Errorf("empty cwd: %q, %q, %q", repo, branch, wt)
 	}
 	if lines := logLines(buf); lines != nil {
 		t.Errorf("logged for a directory outside a repo: %q", lines)
@@ -122,10 +122,10 @@ func TestGitInfo(t *testing.T) {
 	if err := os.Mkdir(sub, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	repo, branch := gitInfo(context.Background(), sub, logger)
+	repo, branch, wt := gitInfo(context.Background(), sub, logger)
 	wantRepo, _ := filepath.EvalSymlinks(dir)
-	if repo != wantRepo || branch != "feat/x" {
-		t.Errorf("gitInfo = %q, %q, want %q, feat/x", repo, branch, wantRepo)
+	if repo != wantRepo || branch != "feat/x" || wt != "" {
+		t.Errorf("gitInfo = %q, %q, %q, want %q, feat/x and no worktree", repo, branch, wt, wantRepo)
 	}
 	if lines := logLines(buf); lines != nil {
 		t.Errorf("logged for a good repo: %q", lines)
@@ -135,8 +135,8 @@ func TestGitInfo(t *testing.T) {
 func TestGitInfoLogsMissingGit(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	logger, buf := testLogger()
-	if repo, branch := gitInfo(context.Background(), t.TempDir(), logger); repo != "" || branch != "" {
-		t.Errorf("without git: %q, %q", repo, branch)
+	if repo, branch, wt := gitInfo(context.Background(), t.TempDir(), logger); repo != "" || branch != "" || wt != "" {
+		t.Errorf("without git: %q, %q, %q", repo, branch, wt)
 	}
 	if lines := logLines(buf); len(lines) != 1 || !strings.Contains(lines[0], "git failed") {
 		t.Errorf("log = %q, want one git failure", lines)
@@ -149,30 +149,32 @@ func TestGitInfoLogsTimeout(t *testing.T) {
 	cwd, _ := useFakeGit(t, "/bin/sleep 5\nexit 0\n")
 	logger, buf := testLogger()
 	start := time.Now()
-	repo, branch := gitInfo(context.Background(), cwd, logger)
+	repo, branch, wt := gitInfo(context.Background(), cwd, logger)
 	// The grandchild keeps stdout open for 5s; gitWaitDelay stops the wait
 	// soon after the timeout, well before the grandchild exits.
 	elapsed := time.Since(start)
 	if elapsed < subprocessTimeout || elapsed > subprocessTimeout+time.Second {
 		t.Errorf("gitInfo took %v, want about %v", elapsed, subprocessTimeout)
 	}
-	if repo != "" || branch != "" {
-		t.Errorf("after a timeout: %q, %q", repo, branch)
+	if repo != "" || branch != "" || wt != "" {
+		t.Errorf("after a timeout: %q, %q, %q", repo, branch, wt)
 	}
 	if lines := logLines(buf); len(lines) != 1 || !strings.Contains(lines[0], "timed out") {
 		t.Errorf("log = %q, want one timeout line", lines)
 	}
 }
 
-// Ruling 30: one git process per SessionStart; the branch comes from the HEAD
-// file in the git dir it reports.
-func TestGitInfoRunsOneGitProcess(t *testing.T) {
+// Ruling 30 and plan section 4.5: one git process per SessionStart gives the
+// top level, the git dir and the common dir; the branch comes from the HEAD
+// file in the git dir it reports. Here the common dir names a linked
+// worktree of /fake/repo.
+func TestGitInfoIsOneProcess(t *testing.T) {
 	gitDir := fakeGitDir(t, "ref: refs/heads/feat/one\n")
-	cwd, calls := useFakeGit(t, "printf '/fake/repo\\n%s\\n' '"+gitDir+"'\n")
+	cwd, calls := useFakeGit(t, "printf '/fake/wt\\n%s\\n/fake/repo/.git\\n' '"+gitDir+"'\n")
 	logger, buf := testLogger()
-	repo, branch := gitInfo(context.Background(), cwd, logger)
-	if repo != "/fake/repo" || branch != "feat/one" {
-		t.Errorf("gitInfo = %q, %q, want /fake/repo, feat/one", repo, branch)
+	repo, branch, wt := gitInfo(context.Background(), cwd, logger)
+	if repo != "/fake/repo" || branch != "feat/one" || wt != "/fake/wt" {
+		t.Errorf("gitInfo = %q, %q, %q, want /fake/repo, feat/one, /fake/wt", repo, branch, wt)
 	}
 	if b, _ := os.ReadFile(filepath.Clean(calls)); string(b) != "run\n" {
 		t.Errorf("git ran %d times, want once", strings.Count(string(b), "run"))
@@ -189,10 +191,11 @@ func TestGitInfoLinkedWorktree(t *testing.T) {
 	wt := filepath.Join(t.TempDir(), "wt")
 	gitRun(t, dir, "worktree", "add", "-q", "-b", "feat/wt", wt)
 	logger, buf := testLogger()
-	repo, branch := gitInfo(context.Background(), wt, logger)
-	wantRepo, _ := filepath.EvalSymlinks(wt)
-	if repo != wantRepo || branch != "feat/wt" {
-		t.Errorf("gitInfo = %q, %q, want %q, feat/wt", repo, branch, wantRepo)
+	repo, branch, worktree := gitInfo(context.Background(), wt, logger)
+	wantRepo, _ := filepath.EvalSymlinks(dir)
+	wantWorktree, _ := filepath.EvalSymlinks(wt)
+	if repo != wantRepo || branch != "feat/wt" || worktree != wantWorktree {
+		t.Errorf("gitInfo = %q, %q, %q, want %q, feat/wt, %q", repo, branch, worktree, wantRepo, wantWorktree)
 	}
 	if lines := logLines(buf); lines != nil {
 		t.Errorf("log = %q, want none", lines)
@@ -205,10 +208,10 @@ func TestGitInfoDetachedHead(t *testing.T) {
 	gitRun(t, dir, "commit", "-q", "--allow-empty", "-m", "first")
 	gitRun(t, dir, "checkout", "-q", "--detach")
 	logger, buf := testLogger()
-	repo, branch := gitInfo(context.Background(), dir, logger)
+	repo, branch, wt := gitInfo(context.Background(), dir, logger)
 	wantRepo, _ := filepath.EvalSymlinks(dir)
-	if repo != wantRepo || branch != "" {
-		t.Errorf("gitInfo = %q, %q, want %q and no branch", repo, branch, wantRepo)
+	if repo != wantRepo || branch != "" || wt != "" {
+		t.Errorf("gitInfo = %q, %q, %q, want %q and no branch or worktree", repo, branch, wt, wantRepo)
 	}
 	if lines := logLines(buf); lines != nil {
 		t.Errorf("log = %q, want none", lines)
@@ -222,17 +225,17 @@ func TestGitInfoHeadFIFODoesNotBlock(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(gitDir, "HEAD"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cwd, _ := useFakeGit(t, "printf '/fake/repo\\n%s\\n' '"+gitDir+"'\n")
+	cwd, _ := useFakeGit(t, "printf '/fake/repo\\n%s\\n/fake/repo/.git\\n' '"+gitDir+"'\n")
 	logger, buf := testLogger()
 	start := time.Now()
-	done := make(chan [2]string, 1)
+	done := make(chan [3]string, 1)
 	go func() {
-		repo, branch := gitInfo(context.Background(), cwd, logger)
-		done <- [2]string{repo, branch}
+		repo, branch, wt := gitInfo(context.Background(), cwd, logger)
+		done <- [3]string{repo, branch, wt}
 	}()
 	select {
 	case got := <-done:
-		if got != [2]string{"/fake/repo", ""} {
+		if got != [3]string{"/fake/repo", "", ""} {
 			t.Errorf("gitInfo = %q, want /fake/repo and no branch", got)
 		}
 	case <-time.After(subprocessTimeout + time.Second):
@@ -253,14 +256,98 @@ func TestGitInfoBadHeadFile(t *testing.T) {
 		"missing":   {t.TempDir(), "HEAD"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			cwd, _ := useFakeGit(t, "printf '/fake/repo\\n%s\\n' '"+tc.gitDir+"'\n")
+			cwd, _ := useFakeGit(t, "printf '/fake/repo\\n%s\\n/fake/repo/.git\\n' '"+tc.gitDir+"'\n")
 			logger, buf := testLogger()
-			repo, branch := gitInfo(context.Background(), cwd, logger)
-			if repo != "/fake/repo" || branch != "" {
-				t.Errorf("gitInfo = %q, %q, want /fake/repo and no branch", repo, branch)
+			repo, branch, wt := gitInfo(context.Background(), cwd, logger)
+			if repo != "/fake/repo" || branch != "" || wt != "" {
+				t.Errorf("gitInfo = %q, %q, %q, want /fake/repo and no branch or worktree", repo, branch, wt)
 			}
 			if lines := logLines(buf); len(lines) != 1 || !strings.Contains(lines[0], tc.wantLog) {
 				t.Errorf("log = %q, want one line about %s", lines, tc.wantLog)
+			}
+		})
+	}
+}
+
+func TestGitInfoMainWorktree(t *testing.T) {
+	dir := hermeticGit(t)
+	gitInit(t, dir, "main")
+	gitRun(t, dir, "commit", "-q", "--allow-empty", "-m", "first")
+	// A linked worktree elsewhere does not change what the main one reports.
+	gitRun(t, dir, "worktree", "add", "-q", "-b", "feat/wt", filepath.Join(t.TempDir(), "wt"))
+	logger, buf := testLogger()
+	repo, branch, wt := gitInfo(context.Background(), dir, logger)
+	wantRepo, _ := filepath.EvalSymlinks(dir)
+	if repo != wantRepo || branch != "main" || wt != "" {
+		t.Errorf("gitInfo = %q, %q, %q, want %q, main and no worktree", repo, branch, wt, wantRepo)
+	}
+	if lines := logLines(buf); lines != nil {
+		t.Errorf("log = %q, want none", lines)
+	}
+}
+
+func TestGitInfoSubdirectoryOfWorktree(t *testing.T) {
+	dir := hermeticGit(t)
+	gitInit(t, dir, "main")
+	gitRun(t, dir, "commit", "-q", "--allow-empty", "-m", "first")
+	wt := filepath.Join(t.TempDir(), "wt")
+	gitRun(t, dir, "worktree", "add", "-q", "-b", "curia/T-7-x", wt)
+	sub := filepath.Join(wt, "a", "b")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logger, buf := testLogger()
+	repo, branch, worktree := gitInfo(context.Background(), sub, logger)
+	wantRepo, _ := filepath.EvalSymlinks(dir)
+	wantWorktree, _ := filepath.EvalSymlinks(wt)
+	if repo != wantRepo || branch != "curia/T-7-x" || worktree != wantWorktree {
+		t.Errorf("gitInfo = %q, %q, %q, want %q, curia/T-7-x, %q", repo, branch, worktree, wantRepo, wantWorktree)
+	}
+	if lines := logLines(buf); lines != nil {
+		t.Errorf("log = %q, want none", lines)
+	}
+}
+
+// Only a common dir named .git outside the top level marks a linked
+// worktree; any other (a submodule's, under .git/modules) leaves the top
+// level as the repository.
+func TestGitInfoRepoFromCommonDir(t *testing.T) {
+	gitDir := fakeGitDir(t, "ref: refs/heads/main\n")
+	for common, want := range map[string][2]string{
+		"/fake/top/.git":             {"/fake/top", ""},
+		"/fake/main/.git":            {"/fake/main", "/fake/top"},
+		"/fake/super/.git/modules/x": {"/fake/top", ""},
+	} {
+		cwd, _ := useFakeGit(t, "printf '/fake/top\\n%s\\n%s\\n' '"+gitDir+"' '"+common+"'\n")
+		logger, buf := testLogger()
+		repo, branch, wt := gitInfo(context.Background(), cwd, logger)
+		if repo != want[0] || branch != "main" || wt != want[1] {
+			t.Errorf("common dir %s: gitInfo = %q, %q, %q, want %q, main, %q", common, repo, branch, wt, want[0], want[1])
+		}
+		if lines := logLines(buf); lines != nil {
+			t.Errorf("common dir %s: log = %q, want none", common, lines)
+		}
+	}
+}
+
+// Output that is not three absolute paths is logged once and yields
+// nothing.
+func TestGitInfoUnexpectedOutput(t *testing.T) {
+	gitDir := fakeGitDir(t, "ref: refs/heads/main\n")
+	for name, out := range map[string]string{
+		"two lines":     "/fake/top\n" + gitDir + "\n",
+		"four lines":    "/fake/top\n" + gitDir + "\n/fake/top/.git\n/extra\n",
+		"empty line":    "/fake/top\n\n/fake/top/.git\n",
+		"relative path": "fake/top\n" + gitDir + "\n/fake/top/.git\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cwd, _ := useFakeGit(t, "printf '%s' '"+out+"'\n")
+			logger, buf := testLogger()
+			if repo, branch, wt := gitInfo(context.Background(), cwd, logger); repo != "" || branch != "" || wt != "" {
+				t.Errorf("gitInfo = %q, %q, %q, want nothing", repo, branch, wt)
+			}
+			if lines := logLines(buf); len(lines) != 1 || !strings.Contains(lines[0], "unexpected output") {
+				t.Errorf("log = %q, want one line about unexpected output", lines)
 			}
 		})
 	}
