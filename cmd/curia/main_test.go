@@ -181,7 +181,7 @@ func TestVersionFlagPrintsVersion(t *testing.T) {
 		t.Fatalf("Execute(--version) returned error: %v", err)
 	}
 
-	want := "curia version " + version + "\n"
+	want := "curia version " + resolveVersion() + "\n"
 	if got := out.String(); got != want {
 		t.Fatalf("--version output = %q, want %q", got, want)
 	}

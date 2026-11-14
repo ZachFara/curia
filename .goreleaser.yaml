@@ -1,0 +1,88 @@
+# GoReleaser configuration (schema v2), run only by .github/workflows/release.yml
+# on a pushed v* tag. `make release-snapshot` builds everything locally without
+# publishing. The GoReleaser version is pinned in the Makefile and the workflow.
+version: 2
+
+project_name: curia
+
+builds:
+  - id: curia
+    main: ./cmd/curia
+    binary: curia
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version=v{{ .Version }}
+      - -X main.commit={{ .FullCommit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: curia
+    formats:
+      - tar.gz
+    name_template: "curia_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: git
+  groups:
+    - title: Features
+      regexp: '^feat(\([^)]*\))?!?:'
+      order: 0
+    - title: Fixes
+      regexp: '^fix(\([^)]*\))?!?:'
+      order: 1
+    - title: Other changes
+      order: 2
+  filters:
+    exclude:
+      - '^docs(\([^)]*\))?:'
+      - '^test(\([^)]*\))?:'
+      - '^chore(\([^)]*\))?:'
+      - '^ci(\([^)]*\))?:'
+
+brews:
+  - name: curia
+    repository:
+      owner: ZachFara
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/ZachFara/curia
+    description: Control plane for parallel Claude Code sessions in tmux
+    license: MIT
+    commit_author:
+      name: goreleaser
+      email: bot@goreleaser.com
+    dependencies:
+      - name: tmux
+    install: |
+      bin.install "curia"
+    caveats: |
+      Run `curia install` to register Curia's hooks, MCP server and skill with
+      Claude Code and to add its tmux snippet to ~/.tmux.conf. Run
+      `curia uninstall` before `brew uninstall curia` to remove them again.
+
+      The hooks record this binary's versioned path under Cellar. To upgrade,
+      run `curia uninstall`, then `brew upgrade curia`, then `curia install`.
+
+      Curia needs Claude Code, which this formula does not install:
+      https://claude.com/claude-code
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/curia --version")

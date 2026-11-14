@@ -25,7 +25,12 @@ func loadConfig() (config.Config, error) {
 	if err != nil {
 		return config.Config{}, fmt.Errorf("find config: %w", err)
 	}
-	return config.Load(filepath.Join(home, ".config", "curia", "config.toml"))
+	return config.Load(configFile(home))
+}
+
+// configFile is the path of Curia's configuration under home.
+func configFile(home string) string {
+	return filepath.Join(home, ".config", "curia", "config.toml")
 }
 
 // openStore opens the store at cfg.DBPath, creating it if needed.
