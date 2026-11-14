@@ -51,6 +51,21 @@ type Client interface {
 	CapturePane(ctx context.Context, pane string) (Capture, error)
 	// Bell rings the pane's bell.
 	Bell(ctx context.Context, pane string) error
+	// NewWindow opens the window and returns its pane. tmux gives a command
+	// of one argument to its default-shell, so the exec client refuses one
+	// that is not a plain word (letters, digits and ._/@:+-).
+	NewWindow(ctx context.Context, w WindowSpec) (Pane, error)
+	// CaptureTail returns the last lines of the pane's history and screen, no escape sequences.
+	CaptureTail(ctx context.Context, pane string, lines int) (string, error)
+}
+
+// WindowSpec is a window to open. Every field is built by Curia from validated values.
+type WindowSpec struct {
+	Session string   // tmux session name; created detached when absent
+	Name    string   // window name
+	Dir     string   // start directory, absolute
+	Env     []string // NAME=value, set for this pane only
+	Command []string // executed directly, without a shell
 }
 
 // Capture is what CapturePane read of a pane.

@@ -134,6 +134,14 @@ func (unreachableTmux) CapturePane(context.Context, string) (tmux.Capture, error
 
 func (unreachableTmux) Bell(context.Context, string) error { return errTmuxUnreachable }
 
+func (unreachableTmux) NewWindow(context.Context, tmux.WindowSpec) (tmux.Pane, error) {
+	return tmux.Pane{}, errTmuxUnreachable
+}
+
+func (unreachableTmux) CaptureTail(context.Context, string, int) (string, error) {
+	return "", errTmuxUnreachable
+}
+
 func TestGuardIsolatesEnvironment(t *testing.T) {
 	home := os.Getenv("HOME")
 	if home == "" || !strings.HasPrefix(home, guardDir+string(os.PathSeparator)) {

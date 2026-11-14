@@ -946,3 +946,473 @@ func killServer(socket string) {
 		_ = root.Close()
 	}
 }
+
+// goodWindow is a WindowSpec NewWindow accepts; each refusal case below
+// spoils one field of it.
+func goodWindow() WindowSpec {
+	return WindowSpec{
+		Session: "api", Name: "T-1", Dir: "/tmp/wt", Env: []string{"CURIA_TASK_ID=T-1"},
+		Command: []string{"/usr/local/bin/curia", "launch", "T-1"},
+	}
+}
+
+func TestNewWindowRefusesBadInput(t *testing.T) {
+	many := func(n int, s string) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("%s%d", s, i)
+		}
+		return out
+	}
+	cases := map[string]func(*WindowSpec){
+		"session empty":           func(w *WindowSpec) { w.Session = "" },
+		"session a.b":             func(w *WindowSpec) { w.Session = "a.b" },
+		"session a:b":             func(w *WindowSpec) { w.Session = "a:b" },
+		"session a b":             func(w *WindowSpec) { w.Session = "a b" },
+		"session 41 runes":        func(w *WindowSpec) { w.Session = strings.Repeat("a", 41) },
+		"session ends with ;":     func(w *WindowSpec) { w.Session = "api;" },
+		"name T 1":                func(w *WindowSpec) { w.Name = "T 1" },
+		"name empty":              func(w *WindowSpec) { w.Name = "" },
+		"name 41 runes":           func(w *WindowSpec) { w.Name = strings.Repeat("T", 41) },
+		"name #{pane_id}":         func(w *WindowSpec) { w.Name = "#{pane_id}" },
+		"dir rel":                 func(w *WindowSpec) { w.Dir = "rel" },
+		"dir empty":               func(w *WindowSpec) { w.Dir = "" },
+		"dir newline":             func(w *WindowSpec) { w.Dir = "/a\nb" },
+		"dir tab":                 func(w *WindowSpec) { w.Dir = "/a\tb" },
+		"dir ends with ;":         func(w *WindowSpec) { w.Dir = "/a;" },
+		"dir not cleaned":         func(w *WindowSpec) { w.Dir = "/a/../b" },
+		"dir trailing slash":      func(w *WindowSpec) { w.Dir = "/a/" },
+		"dir not UTF-8":           func(w *WindowSpec) { w.Dir = "/a\xffb" },
+		"env lower=1":             func(w *WindowSpec) { w.Env = []string{"lower=1"} },
+		"env A=$(id)":             func(w *WindowSpec) { w.Env = []string{"A=$(id)"} },
+		"env A=b c":               func(w *WindowSpec) { w.Env = []string{"A=b c"} },
+		"env A=b;":                func(w *WindowSpec) { w.Env = []string{"A=b;"} },
+		"env no =":                func(w *WindowSpec) { w.Env = []string{"A"} },
+		"env name 65":             func(w *WindowSpec) { w.Env = []string{strings.Repeat("A", 65) + "=1"} },
+		"env value 257":           func(w *WindowSpec) { w.Env = []string{"A=" + strings.Repeat("v", 257)} },
+		"env 9 entries":           func(w *WindowSpec) { w.Env = many(9, "A=") },
+		"command nil":             func(w *WindowSpec) { w.Command = nil },
+		"command empty arg":       func(w *WindowSpec) { w.Command = []string{""} },
+		"command ;":               func(w *WindowSpec) { w.Command = []string{";"} },
+		"command x;":              func(w *WindowSpec) { w.Command = []string{"x;"} },
+		"command a\\nb":           func(w *WindowSpec) { w.Command = []string{"a\nb"} },
+		"command 17 args":         func(w *WindowSpec) { w.Command = many(17, "a") },
+		"command later ;":         func(w *WindowSpec) { w.Command = []string{"/bin/echo", "x", ";"} },
+		"command later x;":        func(w *WindowSpec) { w.Command = []string{"/bin/echo", "x;"} },
+		"command later empty":     func(w *WindowSpec) { w.Command = []string{"/bin/echo", ""} },
+		"command arg 4097 bytes":  func(w *WindowSpec) { w.Command = []string{"/bin/echo", strings.Repeat("a", 4097)} },
+		"command arg not UTF-8":   func(w *WindowSpec) { w.Command = []string{"/bin/echo", "a\xff"} },
+		"command arg escape":      func(w *WindowSpec) { w.Command = []string{"/bin/echo", "a\x1bb"} },
+		"one arg with shell text": func(w *WindowSpec) { w.Command = []string{"echo $HOME"} },
+		"one arg with space":      func(w *WindowSpec) { w.Command = []string{"sleep 9"} },
+		"one arg like a flag":     func(w *WindowSpec) { w.Command = []string{"-x"} },
+		"one arg assignment":      func(w *WindowSpec) { w.Command = []string{"A=b"} },
+	}
+	for name, spoil := range cases {
+		w := goodWindow()
+		spoil(&w)
+		c, r := recordingClient()
+		if _, err := c.NewWindow(context.Background(), w); err == nil {
+			t.Errorf("%s: NewWindow(%+v): want an error", name, w)
+		}
+		if len(r.runs) != 0 {
+			t.Errorf("%s: NewWindow ran tmux: %q", name, r.runs)
+		}
+	}
+}
+
+// TestNewWindowAcceptsLimits: the largest values the rules allow are
+// accepted and reach tmux unchanged.
+func TestNewWindowAcceptsLimits(t *testing.T) {
+	w := goodWindow()
+	w.Session, w.Name = strings.Repeat("s", 40), strings.Repeat("n", 40)
+	w.Dir = "/a b/é/#{x}%H"
+	w.Env = nil
+	for i := range 8 {
+		// 64-character names, the longest allowed.
+		w.Env = append(w.Env, fmt.Sprintf("%s%c=%s", strings.Repeat("V", 63), 'A'+i, strings.Repeat("v", 256)))
+	}
+	w.Command = []string{"/bin/echo"}
+	for range 15 {
+		w.Command = append(w.Command, strings.Repeat("é", 2048))
+	}
+	c, r := recordingClient()
+	r.out = "%3\t" + w.Session + "\t@3\t1794437573\t" + w.Name + "\n"
+	if _, err := c.NewWindow(context.Background(), w); err != nil {
+		t.Fatalf("NewWindow at the limits: %v", err)
+	}
+	if len(r.runs) != 2 || !slices.Equal(r.runs[1][len(r.runs[1])-16:], w.Command) {
+		t.Fatalf("runs = %d, want 2 with the command intact", len(r.runs))
+	}
+	if !slices.Contains(r.runs[1], "/a b/é/##{x}%H") {
+		t.Errorf("new-window = %q, want the dir with # doubled (tmux expands -c as a format)", r.runs[1])
+	}
+	for _, one := range []string{"true", "/usr/bin/true", "a-b_c.d@e:f+g"} {
+		w.Command = []string{one}
+		c, r = recordingClient()
+		r.out = "%3\t" + w.Session + "\t@3\t1794437573\t" + w.Name + "\n"
+		if _, err := c.NewWindow(context.Background(), w); err != nil || len(r.runs) != 2 {
+			t.Errorf("NewWindow with command [%q] = %v after %d runs, want it accepted", one, err, len(r.runs))
+		}
+	}
+}
+
+// windowRunner answers each tmux invocation of NewWindow with errs[i] (nil
+// when past the end) and out, and records each invocation and its deadline.
+type windowRunner struct {
+	errs      []error
+	out       string
+	runs      [][]string
+	deadlines []time.Duration
+}
+
+func (r *windowRunner) run(ctx context.Context, args ...string) (string, error) {
+	i := len(r.runs)
+	r.runs = append(r.runs, slices.Clone(args))
+	d, ok := ctx.Deadline()
+	if !ok {
+		d = time.Now().Add(time.Hour)
+	}
+	r.deadlines = append(r.deadlines, time.Until(d))
+	if i < len(r.errs) && r.errs[i] != nil {
+		return "", r.errs[i]
+	}
+	return r.out, nil
+}
+
+// TestNewWindowInvocations: has-session decides between new-window and
+// new-session; a new-session that lost the race to another process is
+// retried once as new-window; nothing else is retried; the whole call has
+// 5 s.
+func TestNewWindowInvocations(t *testing.T) {
+	w := goodWindow()
+	w.Env = append(w.Env, "CURIA_DB=/d/x.db")
+	tail := []string{
+		"-n", "T-1", "-c", "/tmp/wt", "-e", "CURIA_TASK_ID=T-1", "-e", "CURIA_DB=/d/x.db",
+		"--", "/usr/local/bin/curia", "launch", "T-1",
+	}
+	has := []string{"has-session", "-t", "=api"}
+	newWindow := append([]string{"new-window", "-d", "-P", "-F", paneFormat, "-t", "=api:"}, tail...)
+	newSession := append([]string{"new-session", "-d", "-P", "-F", paneFormat, "-s", "api"}, tail...)
+	absent := errors.New("tmux has-session: exit status 1: can't find session: api")
+	dup := errors.New("tmux new-session: exit status 1: duplicate session: api")
+	other := errors.New("tmux new-session: exit status 1: create window failed")
+	for _, tc := range []struct {
+		name string
+		errs []error
+		want [][]string
+		ok   bool
+	}{
+		{name: "session present", want: [][]string{has, newWindow}, ok: true},
+		{name: "session absent", errs: []error{absent}, want: [][]string{has, newSession}, ok: true},
+		{name: "lost the race", errs: []error{absent, dup}, want: [][]string{has, newSession, newWindow}, ok: true},
+		{name: "lost the race, retry fails", errs: []error{absent, dup, other}, want: [][]string{has, newSession, newWindow}},
+		{name: "new-session fails otherwise", errs: []error{absent, other}, want: [][]string{has, newSession}},
+		{name: "new-window fails", errs: []error{nil, other}, want: [][]string{has, newWindow}},
+	} {
+		r := &windowRunner{errs: tc.errs, out: "%7\tapi\t@4\t1794437573\tT-1\n"}
+		p, err := (&execClient{runner: r.run}).NewWindow(context.Background(), w)
+		if !reflect.DeepEqual(r.runs, tc.want) {
+			t.Errorf("%s: runs = %q\nwant %q", tc.name, r.runs, tc.want)
+		}
+		if tc.ok && (err != nil || p != (Pane{ID: "%7", Session: "api", WindowID: "@4", ServerStart: time.Unix(1794437573, 0), WindowName: "T-1"})) {
+			t.Errorf("%s: NewWindow = %+v, %v", tc.name, p, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("%s: NewWindow = %+v, want an error", tc.name, p)
+		}
+		for _, d := range r.deadlines {
+			if d <= 4*time.Second || d > windowTimeout || windowTimeout != 5*time.Second {
+				t.Errorf("%s: deadline in %v, want the 5 s budget", tc.name, d)
+			}
+		}
+	}
+	// The printed line must be one pane.
+	for _, out := range []string{"", "\t\t\t\t\n", "%7\tapi\t@4\t1794437573\tT-1\n%8\tapi\t@5\t1794437573\tT-1\n"} {
+		r := &windowRunner{out: out}
+		if p, err := (&execClient{runner: r.run}).NewWindow(context.Background(), w); err == nil {
+			t.Errorf("printed %q: NewWindow = %+v, want an error", out, p)
+		}
+	}
+}
+
+// waitFile waits up to 5 s for path to exist and returns its contents.
+func waitFile(t *testing.T, path string) string {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if b, err := os.ReadFile(filepath.Clean(path)); err == nil {
+			return string(b)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s not written within 5s", path)
+		}
+	}
+}
+
+// TestNewWindowArgvIsDirect: the command's arguments reach the program
+// exactly as given, with no shell or tmux reading them. The program is
+// /bin/sh running a script file (an executable script would need a file
+// mode gosec refuses in tests); it writes its arguments, its working
+// directory and $CURIA_TASK_ID, then moves the file into place.
+func TestNewWindowArgvIsDirect(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	realTmux(ctx, t)
+	tmp := t.TempDir()
+	dir := filepath.Join(tmp, "work #{pane_id} %H")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script, out := filepath.Join(tmp, "argv.sh"), filepath.Join(tmp, "argv")
+	body := `out=$1; shift
+{ for a in "$@"; do printf '%s\n' "$a"; done; pwd -P; printf '%s\n' "$CURIA_TASK_ID"; } > "$out.tmp"
+mv "$out.tmp" "$out"
+`
+	if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"two words", "$(id) `id` #{pane_id}", "a;b"}
+	_, err := NewExec(realSocket).NewWindow(ctx, WindowSpec{
+		Session: "t", Name: "argv", Dir: dir, Env: []string{"CURIA_TASK_ID=T-7"},
+		Command: append([]string{"/bin/sh", script, out}, args...),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join(append(args, resolved, "T-7"), "\n") + "\n"
+	if got := waitFile(t, out); got != want {
+		t.Fatalf("the program saw %q\nwant %q", got, want)
+	}
+}
+
+// sleepCommand is a pane command that outlives the test.
+var sleepCommand = []string{"sleep", "600"}
+
+func TestNewWindowCreatesSessionThenReusesIt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	if out, err := tm("new-session", "-d", "-s", "api-server", "-n", "keep"); err != nil {
+		t.Fatalf("new-session: %v: %s", err, out)
+	}
+	c := NewExec(realSocket)
+	dir := t.TempDir()
+	open := func(name string) Pane {
+		t.Helper()
+		p, err := c.NewWindow(ctx, WindowSpec{Session: "api", Name: name, Dir: dir, Command: sleepCommand})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	first, second := open("T-1"), open("T-2")
+	if first.Session != "api" || first.WindowName != "T-1" || second.Session != "api" || second.WindowName != "T-2" {
+		t.Fatalf("panes = %+v, %+v", first, second)
+	}
+	if first.ID == second.ID || first.WindowID == second.WindowID {
+		t.Fatalf("both calls returned the same pane or window: %+v, %+v", first, second)
+	}
+	panes, err := c.ListPanes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bySession := map[string][]string{}
+	for _, p := range panes {
+		bySession[p.Session] = append(bySession[p.Session], p.WindowName)
+	}
+	if !slices.Contains(panes, first) || !slices.Contains(panes, second) {
+		t.Errorf("ListPanes = %+v, want both new panes as returned", panes)
+	}
+	if got := bySession["api"]; !slices.Equal(got, []string{"T-1", "T-2"}) {
+		t.Errorf("windows of api = %q, want [T-1 T-2]", got)
+	}
+	if got := bySession["api-server"]; !slices.Equal(got, []string{"keep"}) {
+		t.Errorf("windows of api-server = %q, want it untouched", got)
+	}
+}
+
+func TestNewWindowConcurrentFirstUse(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	c := NewExec(realSocket)
+	dir := t.TempDir()
+	errs := make(chan error, 5)
+	for i := range 5 {
+		go func() {
+			_, err := c.NewWindow(ctx, WindowSpec{Session: "swarm", Name: fmt.Sprintf("T-%d", i), Dir: dir, Command: sleepCommand})
+			errs <- err
+		}()
+	}
+	for range 5 {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+	out, err := tm("list-windows", "-a", "-F", "#{session_name} #{window_name}")
+	if err != nil {
+		t.Fatalf("list-windows: %v: %s", err, out)
+	}
+	var got []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if name, ok := strings.CutPrefix(line, "swarm "); ok {
+			got = append(got, name)
+		}
+	}
+	slices.Sort(got)
+	if want := []string{"T-0", "T-1", "T-2", "T-3", "T-4"}; !slices.Equal(got, want) {
+		t.Errorf("windows of swarm = %q, want %q (all of %q)", got, want, out)
+	}
+	sessions, _ := tm("list-sessions", "-F", "#{session_name}")
+	if n := strings.Count(sessions, "swarm"); n != 1 {
+		t.Errorf("sessions = %q, want swarm once", sessions)
+	}
+}
+
+func TestNewWindowPaneEndsWithCommand(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	realTmux(ctx, t)
+	c := NewExec(realSocket)
+	p, err := c.NewWindow(ctx, WindowSpec{Session: "t", Name: "brief", Dir: t.TempDir(), Command: []string{"true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		panes, err := c.ListPanes(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.ContainsFunc(panes, func(q Pane) bool { return q.ID == p.ID }) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pane %s still listed 2s after its command ended", p.ID)
+		}
+	}
+}
+
+func TestCaptureTailRefusesBadInput(t *testing.T) {
+	for _, tc := range []struct {
+		pane  string
+		lines int
+	}{
+		{"x", 5}, {"", 5}, {"%1;kill-server", 5}, {"t:0", 5}, {"%5", 0}, {"%5", -1}, {"%5", 2001},
+	} {
+		c, r := recordingClient()
+		if _, err := c.CaptureTail(context.Background(), tc.pane, tc.lines); err == nil {
+			t.Errorf("CaptureTail(%q, %d): want an error", tc.pane, tc.lines)
+		}
+		if len(r.runs) != 0 {
+			t.Errorf("CaptureTail(%q, %d) ran tmux: %q", tc.pane, tc.lines, r.runs)
+		}
+	}
+	c, r := recordingClient()
+	r.out = "a\nb\n"
+	if _, err := c.CaptureTail(context.Background(), "%5", 2000); err != nil {
+		t.Fatal(err)
+	}
+	if want := [][]string{{"capture-pane", "-p", "-J", "-t", "%5", "-S", "-2000"}}; !reflect.DeepEqual(r.runs, want) {
+		t.Errorf("runs = %q, want %q", r.runs, want)
+	}
+}
+
+// TestCaptureTailLastLines: the tail is the last lines lines that are not
+// blank rows at the bottom of the screen.
+func TestCaptureTailLastLines(t *testing.T) {
+	for _, tc := range []struct {
+		out   string
+		lines int
+		want  string
+	}{
+		{"1\n2\n3\n4\n\n\n", 2, "3\n4\n"},
+		{"1\n2\n", 5, "1\n2\n"},
+		{"1\n  \n2\n   \n\n", 2, "  \n2\n"},
+		{"\n\n\n", 3, ""},
+		{"", 3, ""},
+		{"only", 1, "only\n"},
+	} {
+		c, r := recordingClient()
+		r.out = tc.out
+		got, err := c.CaptureTail(context.Background(), "%5", tc.lines)
+		if err != nil || got != tc.want {
+			t.Errorf("CaptureTail of %q, %d = %q, %v; want %q", tc.out, tc.lines, got, err, tc.want)
+		}
+	}
+}
+
+func TestCaptureTailInRealTmux(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	id, err := tm("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "t:", "/bin/sh", "-c",
+		`i=1; while [ $i -le 200 ]; do echo $i; i=$((i+1)); done; exec sleep 600`)
+	if err != nil {
+		t.Fatalf("new-window: %v: %s", err, id)
+	}
+	pane := strings.TrimSpace(id)
+	c := NewExec(realSocket)
+	const want = "196\n197\n198\n199\n200\n"
+	var got string
+	for deadline := time.Now().Add(5 * time.Second); got != want; time.Sleep(20 * time.Millisecond) {
+		if got, err = c.CaptureTail(ctx, pane, 5); err != nil {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("CaptureTail(%s, 5) = %q, want %q", pane, got, want)
+		}
+	}
+	// History and screen together: 150 lines reach back past the screen.
+	all, err := c.CaptureTail(ctx, pane, 150)
+	if err != nil || !strings.HasPrefix(all, "51\n52\n") || !strings.HasSuffix(all, "\n200\n") || strings.Count(all, "\n") != 150 {
+		t.Errorf("CaptureTail(%s, 150) = %q, %v; want lines 51 to 200", pane, all, err)
+	}
+	for _, tc := range []struct {
+		pane  string
+		lines int
+	}{{pane, 0}, {pane, 2001}, {"x", 5}, {"%999", 5}} {
+		if _, err := c.CaptureTail(ctx, tc.pane, tc.lines); err == nil {
+			t.Errorf("CaptureTail(%q, %d): want an error", tc.pane, tc.lines)
+		}
+	}
+}
+
+func TestFakeRecordsNewWindowAndCaptureTail(t *testing.T) {
+	ctx := context.Background()
+	f := &Fake{Panes: []Pane{{ID: "%0", Session: "main", WindowName: "zsh"}}, Tail: "196\n200\n"}
+	var c Client = f
+	w := WindowSpec{Session: "api", Name: "T-1", Dir: "/w/t1", Env: []string{"A=1", "B=2"}, Command: []string{"curia", "launch", "T-1"}}
+	p, err := c.NewWindow(ctx, w)
+	if want := (Pane{ID: "%100", Session: "api", WindowName: "T-1"}); err != nil || p != want {
+		t.Fatalf("NewWindow = %+v, %v; want %+v", p, err, want)
+	}
+	w.Name, w.Env = "T-2", nil
+	if p, err = c.NewWindow(ctx, w); err != nil || p.ID != "%101" || p.WindowName != "T-2" {
+		t.Fatalf("second NewWindow = %+v, %v; want %%101", p, err)
+	}
+	f.NewWindowErr = errors.New("boom")
+	w.Name = "T-3"
+	if _, err = c.NewWindow(ctx, w); !errors.Is(err, f.NewWindowErr) {
+		t.Fatalf("NewWindow = %v, want NewWindowErr", err)
+	}
+	if got := []string{f.Panes[1].ID, f.Panes[2].ID}; len(f.Panes) != 3 || !slices.Equal(got, []string{"%100", "%101"}) {
+		t.Fatalf("Panes = %+v, want the two opened windows after %%0", f.Panes)
+	}
+	tail, err := c.CaptureTail(ctx, "%100", 5)
+	if err != nil || tail != "196\n200\n" {
+		t.Fatalf("CaptureTail = %q, %v; want Tail", tail, err)
+	}
+	want := []string{
+		"NewWindow api T-1 /w/t1 A=1,B=2 curia launch T-1",
+		"NewWindow api T-2 /w/t1  curia launch T-1",
+		"NewWindow api T-3 /w/t1  curia launch T-1",
+		"CaptureTail %100 5",
+	}
+	if !reflect.DeepEqual(f.Calls, want) {
+		t.Fatalf("Calls = %q\nwant %q", f.Calls, want)
+	}
+}
