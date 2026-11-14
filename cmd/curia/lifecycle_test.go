@@ -229,7 +229,7 @@ func TestPauseCommitsUntrackedThenRemoves(t *testing.T) {
 		"Removed worktree "+wt, "Paused T-1", "curia resume T-1", "1a2b3c4d")
 }
 
-func TestPauseRefusesIgnoredFiles(t *testing.T) {
+func TestPauseKeepsWorktreeWithIgnoredFiles(t *testing.T) {
 	f := lifecycleWithLead(t)
 	wt := f.worktree("T-1")
 	worktreeWrite(t, filepath.Join(wt, "README"), "changed\n")
@@ -237,37 +237,116 @@ func TestPauseRefusesIgnoredFiles(t *testing.T) {
 	worktreeWrite(t, filepath.Join(wt, ".env"), "TOKEN=1\n")
 
 	out, err := lifecycleRun(t, "pause", "T-1")
-	if err == nil {
-		t.Fatalf("pause with ignored files succeeded:\n%s", out)
+	if err != nil {
+		t.Fatalf("pause with ignored files: %v\n%s", err, out)
 	}
-	for _, want := range []string{"2 ignored", "node_modules/", ".env", "Nothing was done", "curia pause T-1 again", ".curia/setup.sh"} {
+	if got := lifecycleKills(f); !slices.Equal(got, []string{"KillPane %100"}) {
+		t.Errorf("kills = %q, want the task's pane", got)
+	}
+	if got, want := lifecycleCommits(f), []string{"curia: WIP T-1 (paused)"}; !slices.Equal(got, want) {
+		t.Errorf("commits on the branch = %q, want %q", got, want)
+	}
+	if files := worktreeGit(t, f.repo, "show", "--name-only", "--format=", lifecycleBranch); files != "README" {
+		t.Errorf("WIP commit holds %q, want README only", files)
+	}
+	if got := lifecycleRead(t, filepath.Join(wt, "node_modules", "left-pad", "index.js")); got != "x\n" {
+		t.Errorf("ignored file = %q, want it kept", got)
+	}
+	if got := lifecycleRead(t, filepath.Join(wt, ".env")); got != "TOKEN=1\n" {
+		t.Errorf(".env = %q, want it kept", got)
+	}
+	if got := worktreeGit(t, wt, "symbolic-ref", "HEAD"); got != "refs/heads/"+lifecycleBranch {
+		t.Errorf("worktree HEAD = %q, want the task's branch", got)
+	}
+	tk := f.get("T-1")
+	if !tk.PausedAt.Equal(f.now) || tk.ResumeSession != lifecycleLead || tk.Pane != "" || !tk.LaunchedAt.IsZero() || tk.Worktree != wt {
+		t.Errorf("task = %+v, want paused now, resume %s, no pane, no launch claim, worktree kept", tk, lifecycleLead)
+	}
+	lifecycleWantOrder(t, out, "Closed pane api-server:T-1 (%100)", "Committed WIP", "Kept worktree "+wt, "2 ignored entries",
+		".env", "node_modules/", "Paused T-1", "resume reuses it")
+	if strings.Contains(out, "Removed worktree") {
+		t.Errorf("pause says it removed the worktree:\n%s", out)
+	}
+	if tl := taskMust(t, "task", "ls"); !strings.Contains(tl, "(paused, worktree)") {
+		t.Errorf("task ls does not say the pause kept the worktree:\n%s", tl)
+	}
+}
+
+func TestResumeReusesKeptWorktree(t *testing.T) {
+	f := lifecycleWithLead(t)
+	wt := f.worktree("T-1")
+	script := "#!/bin/sh\necho ran > \"$CURIA_WORKTREE/SETUP_RAN\"\n"
+	worktreeWrite(t, filepath.Join(wt, ".curia", "setup.sh"), script)
+	gitRun(t, wt, "add", ".curia/setup.sh")
+	gitRun(t, wt, "update-index", "--chmod=+x", ".curia/setup.sh")
+	gitRun(t, wt, "commit", "-q", "-m", "setup")
+	if err := os.Remove(filepath.Join(wt, ".curia", "setup.sh")); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, wt, "checkout", "--", ".curia/setup.sh") // executable through the checkout
+	f.approve(script)
+	worktreeWrite(t, filepath.Join(wt, "README"), "work in progress\n")
+	worktreeWrite(t, filepath.Join(wt, ".env"), "TOKEN=1\n")
+	if out, err := lifecycleRun(t, "pause", "T-1"); err != nil {
+		t.Fatalf("pause: %v\n%s", err, out)
+	}
+	f.fake.Panes = nil
+	out, err := lifecycleRun(t, "resume", "T-1")
+	if err != nil {
+		t.Fatalf("resume: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Worktree: reusing") {
+		t.Errorf("resume did not reuse the kept worktree:\n%s", out)
+	}
+	if got := lifecycleRead(t, filepath.Join(wt, ".env")); got != "TOKEN=1\n" {
+		t.Errorf(".env = %q, want it kept", got)
+	}
+	if got := worktreeGit(t, wt, "log", "-1", "--format=%s"); got != "curia: WIP T-1 (paused)" {
+		t.Errorf("worktree tip = %q, want the WIP commit", got)
+	}
+	if !worktreeExists(filepath.Join(wt, "SETUP_RAN")) {
+		t.Errorf("the approved setup script did not run on resume:\n%s", out)
+	}
+	w := f.windows()
+	want := "NewWindow api-server T-1 " + wt + " CURIA_TASK_ID=T-1 " + spawnTestBin + " launch T-1 --resume " + lifecycleLead
+	if len(w) != 2 || w[1] != want {
+		t.Errorf("windows = %q, want the second %q", w, want)
+	}
+	if tk := f.get("T-1"); !tk.PausedAt.IsZero() || tk.Pane != "%101" {
+		t.Errorf("task = %+v, want not paused, pane %%101", tk)
+	}
+}
+
+func TestCleanNamesIgnoredFilesAndNeedsForce(t *testing.T) {
+	f := lifecycleWithLead(t)
+	worktreeWrite(t, filepath.Join(f.worktree("T-1"), ".env"), "TOKEN=1\n")
+	if out, err := lifecycleRun(t, "pause", "T-1"); err != nil {
+		t.Fatalf("pause: %v\n%s", err, out)
+	}
+	gitRun(t, f.repo, "merge", "-q", "--no-ff", "--no-edit", lifecycleBranch)
+	lifecycleEnded(f)
+	_, err := lifecycleRun(t, "clean", "T-1")
+	if err == nil {
+		t.Fatal("clean of a worktree with ignored files succeeded without --force")
+	}
+	for _, want := range []string{"1 ignored entry", ".env", "Nothing was removed", "--force"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q: %v", want, err)
 		}
 	}
-	if got := lifecycleKills(f); len(got) != 0 {
-		t.Errorf("kills = %q, want none", got)
+	if got := lifecycleRead(t, filepath.Join(f.worktree("T-1"), ".env")); got != "TOKEN=1\n" {
+		t.Errorf(".env = %q, want it kept", got)
 	}
-	if c := lifecycleCommits(f); len(c) != 0 {
-		t.Errorf("commits = %q, want none", c)
+	if ok, _ := refExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); !ok {
+		t.Error("branch deleted")
 	}
-	lifecycleWantKept(f)
-	if got := lifecycleRead(t, filepath.Join(wt, "node_modules", "left-pad", "index.js")); got != "x\n" {
-		t.Errorf("ignored file = %q", got)
+	out, err := lifecycleRun(t, "clean", "T-1", "--force")
+	if err != nil {
+		t.Fatalf("clean --force: %v\n%s", err, out)
 	}
-
-	// The user moves them away; the pause goes through.
-	if err = os.RemoveAll(filepath.Join(wt, "node_modules")); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Remove(filepath.Join(wt, ".env")); err != nil {
-		t.Fatal(err)
-	}
-	if out, err = lifecycleRun(t, "pause", "T-1"); err != nil {
-		t.Fatalf("pause after the ignored files went: %v\n%s", err, out)
-	}
-	if worktreeExists(wt) || f.get("T-1").PausedAt.IsZero() {
-		t.Errorf("worktree on disk %v, paused_at %v: want removed and paused", worktreeExists(wt), f.get("T-1").PausedAt)
+	lifecycleWantOrder(t, out, "Removed worktree", "1 ignored entry", ".env", "Deleted branch", "Cleaned T-1")
+	if worktreeExists(f.worktree("T-1")) {
+		t.Error("worktree still on disk")
 	}
 }
 
@@ -435,34 +514,46 @@ func TestPauseCommitFailureKeepsWorktree(t *testing.T) {
 }
 
 func TestPauseNeverForcesRemoval(t *testing.T) {
-	for _, tc := range []struct{ name, file, want string }{
-		{"untracked", "late.txt", "never forces"},
-		{"ignored", ".env", "1 ignored"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := lifecycleWithLead(t)
-			// A post-commit hook writes a file after the WIP commit.
-			lifecycleHooks(f, "post-commit", "#!/bin/sh\necho late > "+tc.file+"\n")
-			wt := f.worktree("T-1")
-			worktreeWrite(t, filepath.Join(wt, "README"), "changed\n")
+	f := lifecycleWithLead(t)
+	// A post-commit hook writes a file after the WIP commit.
+	lifecycleHooks(f, "post-commit", "#!/bin/sh\necho late > late.txt\n")
+	wt := f.worktree("T-1")
+	worktreeWrite(t, filepath.Join(wt, "README"), "changed\n")
 
-			out, err := lifecycleRun(t, "pause", "T-1")
-			if err == nil {
-				t.Fatalf("pause succeeded:\n%s", out)
-			}
-			for _, want := range []string{tc.want, "WIP commit", "curia pause T-1 again"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error lacks %q: %v", want, err)
-				}
-			}
-			lifecycleWantKept(f)
-			if got := lifecycleRead(t, filepath.Join(wt, tc.file)); got != "late\n" {
-				t.Errorf("%s = %q, want kept", tc.file, got)
-			}
-			if got, want := lifecycleCommits(f), []string{"curia: WIP T-1 (paused)"}; !slices.Equal(got, want) {
-				t.Errorf("commits = %q, want %q", got, want)
-			}
-		})
+	out, err := lifecycleRun(t, "pause", "T-1")
+	if err == nil {
+		t.Fatalf("pause succeeded:\n%s", out)
+	}
+	for _, want := range []string{"never forces", "WIP commit", "curia pause T-1 again"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+	lifecycleWantKept(f)
+	if got := lifecycleRead(t, filepath.Join(wt, "late.txt")); got != "late\n" {
+		t.Errorf("late.txt = %q, want kept", got)
+	}
+	if got, want := lifecycleCommits(f), []string{"curia: WIP T-1 (paused)"}; !slices.Equal(got, want) {
+		t.Errorf("commits = %q, want %q", got, want)
+	}
+}
+
+func TestPauseKeepsWorktreeWhenIgnoredFileAppearsAfterCommit(t *testing.T) {
+	f := lifecycleWithLead(t)
+	// A post-commit hook writes an ignored file after the WIP commit: the
+	// check after the commit sees it and keeps the worktree.
+	lifecycleHooks(f, "post-commit", "#!/bin/sh\necho late > .env\n")
+	wt := f.worktree("T-1")
+	worktreeWrite(t, filepath.Join(wt, "README"), "changed\n")
+	out, err := lifecycleRun(t, "pause", "T-1")
+	if err != nil {
+		t.Fatalf("pause: %v\n%s", err, out)
+	}
+	if got := lifecycleRead(t, filepath.Join(wt, ".env")); got != "late\n" {
+		t.Errorf(".env = %q, want kept", got)
+	}
+	if !strings.Contains(out, "Kept worktree") || f.get("T-1").PausedAt.IsZero() {
+		t.Errorf("want the worktree kept and the task paused:\n%s", out)
 	}
 }
 
@@ -735,7 +826,11 @@ func TestCleanRemovesMergedBranchAndWorktree(t *testing.T) {
 	worktreeWrite(t, filepath.Join(f.worktree("T-1"), "node_modules", "x.js"), "x\n")
 	lifecycleEnded(f)
 
-	out, err := lifecycleRun(t, "clean", "T-1")
+	// The ignored node_modules/ is named and kept without --force (Ruling 111).
+	if _, err := lifecycleRun(t, "clean", "T-1"); err == nil || !strings.Contains(err.Error(), "node_modules/") {
+		t.Fatalf("clean without --force = %v, want a refusal naming node_modules/", err)
+	}
+	out, err := lifecycleRun(t, "clean", "T-1", "--force")
 	if err != nil {
 		t.Fatalf("clean: %v\n%s", err, out)
 	}

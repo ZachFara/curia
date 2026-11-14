@@ -462,8 +462,9 @@ func TestTaskLsTableNotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = raw.Close() }()
-	if _, err := raw.Exec(`UPDATE tasks SET status = 'ready', paused_at = ?, worktree = '/w/one' WHERE id = 'T-1'`,
-		"2026-11-13T11:00:00.000000000Z"); err != nil {
+	kept := t.TempDir() // a worktree the pause kept on disk
+	if _, err := raw.Exec(`UPDATE tasks SET status = 'ready', paused_at = ?, worktree = ? WHERE id = 'T-1'`,
+		"2026-11-13T11:00:00.000000000Z", kept); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := raw.Exec(`UPDATE tasks SET status = 'ready', worktree = '/w/two' WHERE id = 'T-2'`); err != nil {
@@ -481,6 +482,15 @@ func TestTaskLsTableNotes(t *testing.T) {
 	}
 	if !strings.Contains(lines[2], "running") || strings.Contains(lines[2], "worktree") || !strings.Contains(lines[2], "%7 +1") {
 		t.Errorf("running task: %q, want running, no worktree note, agent %%7 +1", lines[2])
+	}
+	// A pause that removed the worktree: the path is still recorded, but the
+	// note says only paused.
+	if _, err := raw.Exec(`UPDATE tasks SET worktree = ? WHERE id = 'T-1'`, filepath.Join(kept, "removed")); err != nil {
+		t.Fatal(err)
+	}
+	lines = strings.Split(strings.TrimSuffix(taskMust(t, "task", "ls"), "\n"), "\n")
+	if !strings.Contains(lines[1], "ready (paused)") || strings.Contains(lines[1], "worktree") {
+		t.Errorf("paused task whose worktree was removed: %q, want ready (paused)", lines[1])
 	}
 }
 

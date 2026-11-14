@@ -408,19 +408,26 @@ func taskPrintJSON(w io.Writer, cards []task.Card) error {
 func taskCell(s string) string { return ui.Cell(sanitize.Line(s, task.MaxTitle)) }
 
 // taskStatusText is c's status with what the status cannot say: paused
-// when the task is paused, worktree when it has one and no live session.
+// when the task is paused, worktree when its worktree is on disk and it has
+// no live session (so a paused task says whether the pause kept it).
 func taskStatusText(c task.Card) string {
 	var notes []string
 	if !c.Task.PausedAt.IsZero() {
 		notes = append(notes, "paused")
 	}
-	if c.Task.Worktree != "" && len(c.Sessions) == 0 {
+	if c.Task.Worktree != "" && len(c.Sessions) == 0 && taskOnDisk(c.Task.Worktree) {
 		notes = append(notes, "worktree")
 	}
 	if len(notes) == 0 {
 		return string(c.Status)
 	}
 	return string(c.Status) + " (" + strings.Join(notes, ", ") + ")"
+}
+
+// taskOnDisk reports whether something is at path.
+func taskOnDisk(path string) bool {
+	_, err := os.Lstat(filepath.Clean(path))
+	return err == nil
 }
 
 // taskAgentText is the pane of c's lead (or solo) live session, with the

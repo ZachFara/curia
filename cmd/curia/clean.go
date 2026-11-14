@@ -32,13 +32,16 @@ func init() {
 			"with changes is left for you) and deletes its branch with git branch -d.\n" +
 			"The branch must be merged into the task's base branch; a squash or rebase\n" +
 			"merge looks unmerged to git, and then --force deletes it with -D after\n" +
-			"naming every commit that is in neither the base nor any remote. The task\n" +
+			"naming every commit that is in neither the base nor any remote. A worktree\n" +
+			"holding ignored files (dependencies, .env) is removed with them only under\n" +
+			"--force, after they are named. The task\n" +
 			"keeps its status. Refuses while an agent of the task runs, and inside an\n" +
 			"agent session.",
 		Args: cobra.ExactArgs(1),
 		RunE: runClean,
 	}
-	cmd.Flags().BoolVar(&cleanForce, "force", false, "delete the branch even when git does not see it merged (names the commits lost)")
+	cmd.Flags().BoolVar(&cleanForce, "force", false,
+		"delete the branch even when git does not see it merged, and the worktree's ignored files (names what is lost)")
 	rootCmd.AddCommand(cmd)
 }
 
@@ -64,6 +67,11 @@ func cleanTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.
 	exists, err := refExists(ctx, t.Repo, "refs/heads/"+t.Branch)
 	if err != nil {
 		return err
+	}
+	if onDisk {
+		if err = cleanCheckIgnored(ctx, t, path, force); err != nil {
+			return err
+		}
 	}
 	if exists {
 		if err = cleanCheckMerged(ctx, t, force, out); err != nil {
@@ -122,6 +130,20 @@ func cleanCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 			id, spawnWhere(panes, t.Pane))
 	}
 	return t, path, onDisk, nil
+}
+
+// cleanCheckIgnored refuses, unless force, to remove a worktree that holds
+// ignored files, which git worktree remove deletes without a word; it names
+// them. Under force cleanRemoveWorktree names them again as it removes them.
+func cleanCheckIgnored(ctx context.Context, t model.Task, path string, force bool) error {
+	n, names, err := lifecycleIgnored(ctx, path)
+	if err != nil || n == 0 || force {
+		return err
+	}
+	return fmt.Errorf("%s not cleaned: its worktree %s holds %s (%s), which removing it deletes. Nothing was removed. "+
+		"Move what you want to keep, then run curia clean %s again, or run curia clean %s --force to delete them with it "+
+		"(--force also deletes the branch when git does not see it merged, naming the commits that would be lost)",
+		t.ID, sanitize.Line(path, 300), lifecycleCount(n, "ignored entry", "ignored entries"), strings.Join(names, ", "), t.ID, t.ID)
 }
 
 // cleanCheckMerged refuses an unmerged branch unless force, naming the
