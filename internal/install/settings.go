@@ -65,17 +65,18 @@ func Hooks(settingsPath, bin string, now time.Time) error {
 	return saveSettings(settingsPath, raw, settings, now)
 }
 
-// toolRules are the permission rules that let the four curia MCP tools run
+// toolRules are the permission rules that let the five curia MCP tools run
 // without a prompt.
 var toolRules = []string{
 	"mcp__curia__search_decisions", "mcp__curia__request_decision",
 	"mcp__curia__check_decision", "mcp__curia__withdraw_decision",
+	"mcp__curia__check_messages",
 }
 
-// AllowTools adds each of the four curia MCP tool rules that is not already
+// AllowTools adds each of the five curia MCP tool rules that is not already
 // in permissions.allow of the settings file at settingsPath, creating the
 // file, permissions and allow as needed, in one write with the usual backup.
-// When all four are there it writes nothing. A permissions or allow value of
+// When all five are there it writes nothing. A permissions or allow value of
 // an unexpected type is an error and nothing is written.
 func AllowTools(settingsPath string, now time.Time) error {
 	settingsPath = filepath.Clean(settingsPath)
@@ -102,7 +103,7 @@ func AllowTools(settingsPath string, now time.Time) error {
 	return saveSettings(settingsPath, raw, settings, now)
 }
 
-// ToolsAllowed reports whether all four curia MCP tool rules are already in
+// ToolsAllowed reports whether all five curia MCP tool rules are already in
 // permissions.allow of the settings file at settingsPath. A file that is
 // missing, unreadable or of an unexpected shape reports false.
 func ToolsAllowed(settingsPath string) bool {
@@ -144,7 +145,7 @@ func allowList(settings map[string]any) (map[string]any, []any, error) {
 	return perms, allow, nil
 }
 
-// Unhooks removes the hook commands Curia added, and the four curia MCP tool
+// Unhooks removes the hook commands Curia added, and the five curia MCP tool
 // rules whoever added them, from the settings file at settingsPath, in one
 // write. Hook entries that became empty are dropped; the allow list is kept
 // even when empty, and everything else is kept as it is. A missing file, or
@@ -203,7 +204,7 @@ func removeOurHooks(settings map[string]any, bin string) (bool, error) {
 	return changed, nil
 }
 
-// removeToolRules drops the four tool rules from permissions.allow and
+// removeToolRules drops the five tool rules from permissions.allow and
 // reports whether it removed any.
 func removeToolRules(settings map[string]any) (bool, error) {
 	perms, allow, err := allowList(settings)
