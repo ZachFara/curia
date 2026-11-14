@@ -236,3 +236,48 @@ func TestTmuxKeys(t *testing.T) {
 		t.Errorf("loaded keys = %q %q %q %q, want F5, empty, N, C-m", got.KeyDashboard, got.KeyDecisions, got.KeyNext, got.KeyMessage)
 	}
 }
+
+// editor defaults to empty (no editor); a set value is split on single
+// spaces into an argument vector, with no shell and no quoting.
+func TestEditorOption(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	if c := config.Default(); c.Editor != "" || c.EditorArgs() != nil {
+		t.Errorf("default editor = %q, args %q, want none", c.Editor, c.EditorArgs())
+	}
+	for value, want := range map[string][]string{
+		"/usr/bin/vim -f":  {"/usr/bin/vim", "-f"},
+		"code --wait":      {"code", "--wait"},
+		"nano":             {"nano"},
+		"/opt/é/ed -p ➜ x": {"/opt/é/ed", "-p", "➜", "x"},
+	} {
+		got, err := config.Load(writeConfig(t, "editor = \""+value+"\"\n"))
+		if err != nil {
+			t.Errorf("editor %q: %v", value, err)
+			continue
+		}
+		if got.Editor != value || !reflect.DeepEqual(got.EditorArgs(), want) {
+			t.Errorf("editor %q: %q, args %q, want args %q", value, got.Editor, got.EditorArgs(), want)
+		}
+	}
+}
+
+func TestBadEditorRejected(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	for name, value := range map[string]string{
+		"leading space":  ` vim`,
+		"trailing space": `vim `,
+		"double space":   `vim  -f`,
+		"only spaces":    `   `,
+		"tab":            `vim\t-f`,
+		"escape":         `vim\u001b[31m`,
+		"newline":        `vim\n-f`,
+		"bidi override":  `vim\u202e`,
+		"relative path":  `./bin/vim`,
+		"too long":       "vim " + strings.Repeat("x", 1024),
+	} {
+		_, err := config.Load(writeConfig(t, "editor = \""+value+"\"\n"))
+		if err == nil || !strings.Contains(err.Error(), "editor") {
+			t.Errorf("%s: err = %v, want one naming editor", name, err)
+		}
+	}
+}
