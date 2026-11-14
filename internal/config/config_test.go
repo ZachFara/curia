@@ -153,3 +153,20 @@ func TestNonPositiveAssumeExpiryRejected(t *testing.T) {
 		}
 	}
 }
+
+// The snippet's keys default to a, A and N; a file can change each one, and
+// an empty value (binds no key) is kept, not replaced by the default.
+func TestTmuxKeys(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	c := config.Default()
+	if c.KeyDashboard != "a" || c.KeyDecisions != "A" || c.KeyNext != "N" {
+		t.Errorf("default keys = %q %q %q, want a A N", c.KeyDashboard, c.KeyDecisions, c.KeyNext)
+	}
+	got, err := config.Load(writeConfig(t, "key_dashboard = \"F5\"\nkey_decisions = \"\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.KeyDashboard != "F5" || got.KeyDecisions != "" || got.KeyNext != "N" {
+		t.Errorf("loaded keys = %q %q %q, want F5, empty, N", got.KeyDashboard, got.KeyDecisions, got.KeyNext)
+	}
+}

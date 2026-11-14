@@ -2,15 +2,20 @@ package install
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
 const testBin = "/opt/curia/bin/curia"
+
+// defaultKeys are the keys config.Default gives the snippet.
+var defaultKeys = TmuxKeys{Dashboard: "a", Decisions: "A", Next: "N"}
 
 var expectedEvents = []string{
 	"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
@@ -394,7 +399,7 @@ func TestTmuxFenceAddedOnceAndRemoved(t *testing.T) {
 	writeFile(t, conf, original)
 
 	for range 2 {
-		if err := WriteTmux(snippet, conf, testBin); err != nil {
+		if _, err := WriteTmux(snippet, conf, testBin, defaultKeys); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -411,13 +416,17 @@ func TestTmuxFenceAddedOnceAndRemoved(t *testing.T) {
 		t.Errorf("snippet does not start with focus-events on:\n%s", snip)
 	}
 	for _, want := range []string{
-		"set -g status-interval 2\n",
-		`if -F '#{m:*@curia_badge*,#{status-right}}' '' "set -ag status-right ' #{@curia_badge}#(` + testBin + ` status)'"` + "\n",
-		"bind a display-popup -E -w 90% -h 80% '" + testBin + " ui'\n",
-		"bind A display-popup -E -w 90% -h 80% '" + testBin + " decide'\n",
-		"bind N run-shell '" + testBin + " next'\n",
+		"if -F '#{||:#{==:#{status-interval},0},#{e|>:#{status-interval},2}}' 'set -g status-interval 2'\n",
+		`if -F '#{m:*@curia_badge*,#{status-right}}' '' "set -ag status-right '#[default] #{@curia_badge}#(` + testBin + ` status)'"` + "\n",
+		`if-shell '[ -n "$TMUX" ] && tmux show -g status >/dev/null 2>&1 && ! tmux list-keys -T prefix a 2>/dev/null | grep -qv curia' ` +
+			`"bind a display-popup -E -w 90% -h 80% '` + testBin + ` ui'"` + "\n",
+		`if-shell '[ -n "$TMUX" ] && tmux show -g status >/dev/null 2>&1 && ! tmux list-keys -T prefix A 2>/dev/null | grep -qv curia' ` +
+			`"bind A display-popup -E -w 90% -h 80% '` + testBin + ` decide'"` + "\n",
+		`if-shell '[ -n "$TMUX" ] && tmux show -g status >/dev/null 2>&1 && ! tmux list-keys -T prefix N 2>/dev/null | grep -qv curia' ` +
+			`"bind N run-shell '` + testBin + ` next'"` + "\n",
 		`set-hook -g pane-focus-in "run-shell -b '` + testBin + ` seen #{pane_id}'"` + "\n",
-		"set -g window-status-current-format '#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'\n",
+		"set -g @curia_marker_format '#{?#{==:#{@curia_marker},red},#[fg=red] ●,}'\n",
+		`if -F '#{m:*@curia_marker*,#{window-status-current-format}}' '' "set -ag window-status-current-format '#{E:@curia_marker_format}'"` + "\n",
 	} {
 		if !strings.Contains(snip, want) {
 			t.Errorf("snippet missing %q", want)
@@ -446,7 +455,7 @@ func TestRewriteKeepsFileMode(t *testing.T) {
 		}
 	}
 	snippet := filepath.Join(dir, "curia", "curia.tmux")
-	if err := WriteTmux(snippet, conf, testBin); err != nil {
+	if _, err := WriteTmux(snippet, conf, testBin, defaultKeys); err != nil {
 		t.Fatal(err)
 	}
 	if err := Hooks(settings, testBin, testNow); err != nil {
@@ -472,7 +481,7 @@ func TestTmuxConfCreatedAndEmptiedWhenMissing(t *testing.T) {
 	if err := RemoveTmux(conf); err != nil {
 		t.Errorf("RemoveTmux on missing conf: %v", err)
 	}
-	if err := WriteTmux(filepath.Join(dir, "curia.tmux"), conf, testBin); err != nil {
+	if _, err := WriteTmux(filepath.Join(dir, "curia.tmux"), conf, testBin, defaultKeys); err != nil {
 		t.Fatal(err)
 	}
 	if err := RemoveTmux(conf); err != nil {
@@ -589,7 +598,7 @@ func TestSymlinkedTmuxConfSurvives(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteTmux(filepath.Join(dir, "curia.tmux"), link, testBin); err != nil {
+	if _, err := WriteTmux(filepath.Join(dir, "curia.tmux"), link, testBin, defaultKeys); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
@@ -613,7 +622,7 @@ func TestFenceAtEOFWithoutNewlineNotDuplicated(t *testing.T) {
 	dir := t.TempDir()
 	conf := filepath.Join(dir, ".tmux.conf")
 	writeFile(t, conf, "set -g mouse on\n"+fenceBegin)
-	if err := WriteTmux(filepath.Join(dir, "curia.tmux"), conf, testBin); err != nil {
+	if _, err := WriteTmux(filepath.Join(dir, "curia.tmux"), conf, testBin, defaultKeys); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(readFile(t, conf), fenceBegin); n != 1 {
@@ -629,10 +638,94 @@ func TestWriteTmuxLeavesNoSnippetWhenConfUnreadable(t *testing.T) {
 	if err := os.Mkdir(conf, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteTmux(snippet, conf, testBin); err == nil {
+	if _, err := WriteTmux(snippet, conf, testBin, defaultKeys); err == nil {
 		t.Fatal("want error")
 	}
 	if _, err := os.Stat(snippet); !os.IsNotExist(err) {
 		t.Errorf("snippet written before conf validated: %v", err)
+	}
+}
+
+// boundKeys reads which prefix keys a configuration gives to something that
+// is not Curia's.
+func TestBoundKeys(t *testing.T) {
+	conf := strings.Join([]string{
+		"bind a display-popup -E recon # a comment",
+		"bind-key -r B resize-pane -U",
+		`bind -N "my note" F5 run-shell 'x'`,
+		"bind -Tprefix C-y next-window",
+		"bind -T prefix -- D detach",
+		"bind -n N new-window",
+		"bind -T copy-mode-vi E send -X begin-selection",
+		"bind A display-popup -E '/usr/local/bin/curia decide'",
+		"# bind G commented out",
+		"  bind 'H' kill-pane",
+		"set -g prefix C-s",
+		fenceBegin,
+		"bind I not-really-here",
+		fenceEnd,
+	}, "\n")
+	got := boundKeys(conf)
+	want := map[string]bool{"a": true, "B": true, "F5": true, "C-y": true, "D": true, "H": true}
+	if !maps.Equal(got, want) {
+		t.Errorf("boundKeys = %v, want %v", got, want)
+	}
+}
+
+// WriteTmux reports, per key, whether ~/.tmux.conf binds it already, and
+// whether the snippet it replaced was the one that overwrote the formats.
+func TestWriteTmuxReportsKeysAndOldSnippet(t *testing.T) {
+	dir := t.TempDir()
+	snippet, conf := filepath.Join(dir, "curia.tmux"), filepath.Join(dir, ".tmux.conf")
+	writeFile(t, conf, "run '~/.tmux/plugins/tpm/tpm'\nbind a display-popup -E recon\n")
+	writeFile(t, snippet, "set -g focus-events on\nset -g status-interval 2\n"+
+		"set -g window-status-format '#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'\n")
+
+	res, err := WriteTmux(snippet, conf, testBin, TmuxKeys{Dashboard: "a", Decisions: "A", Next: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OldSnippet {
+		t.Error("OldSnippet = false after replacing the snippet that set window-status-format")
+	}
+	want := []KeyState{
+		{
+			Name: "dashboard", Option: "key_dashboard", Key: "a", Taken: true,
+			Command: "display-popup -E -w 90% -h 80% '" + testBin + " ui'",
+		},
+		{
+			Name: "decisions", Option: "key_decisions", Key: "A",
+			Command: "display-popup -E -w 90% -h 80% '" + testBin + " decide'",
+		},
+		{Name: "next", Option: "key_next", Command: "run-shell '" + testBin + " next'"},
+	}
+	if !slices.Equal(res.Keys, want) {
+		t.Errorf("Keys =\n%+v\nwant\n%+v", res.Keys, want)
+	}
+	if snip := readFile(t, snippet); strings.Contains(snip, "list-keys -T prefix N") || strings.Contains(snip, " next'") {
+		t.Errorf("snippet binds next with key_next empty:\n%s", snip)
+	}
+
+	res, err = WriteTmux(snippet, conf, testBin, defaultKeys)
+	if err != nil || res.OldSnippet {
+		t.Errorf("second WriteTmux: OldSnippet = %v, %v; want false", res.OldSnippet, err)
+	}
+}
+
+// A key that is not a plain tmux key name is refused before anything is
+// written: it would reach tmux's parser, a format and a shell.
+func TestWriteTmuxRefusesBadKey(t *testing.T) {
+	for _, key := range []string{"a b", "'", "#", "$x", "-a", "a;b", "C-a\n"} {
+		dir := t.TempDir()
+		snippet, conf := filepath.Join(dir, "curia.tmux"), filepath.Join(dir, ".tmux.conf")
+		_, err := WriteTmux(snippet, conf, testBin, TmuxKeys{Dashboard: "a", Decisions: "A", Next: key})
+		if err == nil || !strings.Contains(err.Error(), "key_next") {
+			t.Errorf("key %q: err = %v, want one naming key_next", key, err)
+		}
+		for _, p := range []string{snippet, conf} {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Errorf("key %q: %s written", key, p)
+			}
+		}
 	}
 }
