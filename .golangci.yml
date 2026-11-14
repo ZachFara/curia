@@ -89,9 +89,10 @@ linters:
       # may import the standard library, the third-party modules it needs, and
       # only the internal packages ABOVE it in the table. Every rule is strict
       # (fail closed): an import not on the allow list is rejected.
-      # Order of the table (docs/decisions/0010): model, config, sanitize,
-      # decision, precedent, store, state, transcript, hook, tmux, fleet,
-      # attention, notify, deliver, mcp, ui, install, cmd/curia.
+      # Order of the table (docs/decisions/0015): model, config, sanitize,
+      # decision, precedent, task, message, route, team, store, state,
+      # transcript, hook, tmux, fleet, attention, notify, deliver, mcp, ui,
+      # install, cmd/curia.
       rules:
         model:
           list-mode: strict
@@ -159,6 +160,76 @@ linters:
             - pkg: github.com/ZachFara/curia
               desc: "internal/precedent may import only internal packages above it: model to decision (docs/decisions/0010)"
 
+        task:
+          list-mode: strict
+          files:
+            - "**/internal/task/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/task may import only internal packages above it: model to precedent (docs/decisions/0015)"
+
+        message:
+          list-mode: strict
+          files:
+            - "**/internal/message/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/message may import only internal packages above it: model to task (docs/decisions/0015)"
+
+        route:
+          list-mode: strict
+          files:
+            - "**/internal/route/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/route may import only internal packages above it: model to message (docs/decisions/0015)"
+
+        team:
+          list-mode: strict
+          files:
+            - "**/internal/team/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/team may import only internal packages above it: model to route (docs/decisions/0015)"
+
         store:
           list-mode: strict
           files:
@@ -171,6 +242,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
           deny:
             - pkg: github.com/ZachFara/curia
@@ -187,6 +262,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
           deny:
@@ -204,6 +283,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -222,6 +305,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -241,6 +328,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -261,6 +352,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -282,6 +377,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -304,6 +403,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -327,6 +430,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -351,6 +458,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -378,6 +489,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -404,6 +519,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -435,6 +554,10 @@ linters:
             - github.com/ZachFara/curia/internal/sanitize$
             - github.com/ZachFara/curia/internal/decision$
             - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -472,6 +595,10 @@ linters:
             - "!**/internal/sanitize/**"
             - "!**/internal/decision/**"
             - "!**/internal/precedent/**"
+            - "!**/internal/task/**"
+            - "!**/internal/message/**"
+            - "!**/internal/route/**"
+            - "!**/internal/team/**"
             - "!**/internal/store/**"
             - "!**/internal/state/**"
             - "!**/internal/transcript/**"
