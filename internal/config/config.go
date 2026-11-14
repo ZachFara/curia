@@ -25,6 +25,9 @@ type Config struct {
 	AssumeExpiry      time.Duration  `toml:"assume_expiry"`
 	NotifyBell        bool           `toml:"notify_bell"`
 	NotifyMacOS       bool           `toml:"notify_macos"`
+
+	// Plan 3 additions.
+	Routing Routing `toml:"routing"`
 }
 
 // Default returns the configuration used when no file overrides it.
@@ -39,6 +42,9 @@ func Default() Config {
 		ContextCritPct:    85,
 		StaleHideAfter:    10 * time.Minute,
 		AssumeExpiry:      24 * time.Hour,
+
+		// Plan 3 additions.
+		Routing: defaultRouting(),
 	}
 }
 
@@ -59,6 +65,9 @@ func Load(path string) (Config, error) {
 	}
 	if c.AssumeExpiry <= 0 {
 		return Config{}, fmt.Errorf("config %s: assume_expiry must be positive, got %v", path, c.AssumeExpiry)
+	}
+	if err := c.Routing.validate(); err != nil {
+		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
 	c.DBPath = expandHome(c.DBPath)
 	c.LogPath = expandHome(c.LogPath)
