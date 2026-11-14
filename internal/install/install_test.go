@@ -15,7 +15,7 @@ import (
 const testBin = "/opt/curia/bin/curia"
 
 // defaultKeys are the keys config.Default gives the snippet.
-var defaultKeys = TmuxKeys{Dashboard: "a", Decisions: "A", Next: "N"}
+var defaultKeys = TmuxKeys{Dashboard: "a", Decisions: "A", Next: "N", Message: "m"}
 
 var expectedEvents = []string{
 	"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
@@ -681,7 +681,7 @@ func TestWriteTmuxReportsKeysAndOldSnippet(t *testing.T) {
 	writeFile(t, snippet, "set -g focus-events on\nset -g status-interval 2\n"+
 		"set -g window-status-format '#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'\n")
 
-	res, err := WriteTmux(snippet, conf, testBin, TmuxKeys{Dashboard: "a", Decisions: "A", Next: ""})
+	res, err := WriteTmux(snippet, conf, testBin, TmuxKeys{Dashboard: "a", Decisions: "A", Next: "", Message: ""})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,6 +698,7 @@ func TestWriteTmuxReportsKeysAndOldSnippet(t *testing.T) {
 			Command: "display-popup -E -w 90% -h 80% '" + testBin + " decide'",
 		},
 		{Name: "next", Option: "key_next", Command: "run-shell '" + testBin + " next'"},
+		{Name: "message", Option: "key_message", Command: "display-popup -E -w 80% -h 12 '" + testBin + " say'"},
 	}
 	if !slices.Equal(res.Keys, want) {
 		t.Errorf("Keys =\n%+v\nwant\n%+v", res.Keys, want)

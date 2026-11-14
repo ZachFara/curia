@@ -29,10 +29,12 @@ type Config struct {
 	// Plan 3 additions.
 	Routing Routing `toml:"routing"`
 	// The tmux prefix-table keys curia install's snippet binds for the
-	// dashboard popup, the decide popup and curia next; "" binds none.
+	// dashboard popup, the decide popup, curia next and the message popup; ""
+	// binds none.
 	KeyDashboard string `toml:"key_dashboard"`
 	KeyDecisions string `toml:"key_decisions"`
 	KeyNext      string `toml:"key_next"`
+	KeyMessage   string `toml:"key_message"`
 }
 
 // Default returns the configuration used when no file overrides it.
@@ -53,6 +55,7 @@ func Default() Config {
 		KeyDashboard: "a",
 		KeyDecisions: "A",
 		KeyNext:      "N",
+		KeyMessage:   "m",
 	}
 }
 
