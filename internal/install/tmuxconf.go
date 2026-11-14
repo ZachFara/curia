@@ -30,14 +30,23 @@ const markerFormat = "#{?#{==:#{@curia_marker},red},#[fg=red] ●,}"
 const oldSnippetLine = "\nset -g window-status-format "
 
 // TmuxKeys are the tmux prefix-table keys the snippet binds for the dashboard
-// popup, the decide popup and curia next; "" binds none.
+// popup, the decide popup, curia next and the message popup; "" binds none.
 type TmuxKeys struct {
-	Dashboard, Decisions, Next string
+	Dashboard, Decisions, Next, Message string
 }
+
+// MessageDefaultKey is the one key that tmux itself binds by default among
+// Curia's, to marking a pane; the message key may replace that binding and
+// nothing else a user bound.
+const MessageDefaultKey = "m"
+
+// MessageDefaultCommand is tmux's own command for MessageDefaultKey, which
+// uninstall binds again.
+const MessageDefaultCommand = "select-pane -m"
 
 // KeyState is what the snippet does with one of its keys.
 type KeyState struct {
-	Name   string // what the key opens: dashboard, decisions or next
+	Name   string // what the key opens: dashboard, decisions, next or message
 	Option string // its option in Curia's config.toml
 	Key    string // the key, "" when the option is empty
 	// Taken is set when the tmux configuration binds Key in the prefix table
@@ -46,6 +55,9 @@ type KeyState struct {
 	// Command is the tmux command the key runs, for a bind line of the
 	// user's own.
 	Command string
+	// Default is tmux's own binding of Key, which the snippet may replace;
+	// "" when tmux binds Key to nothing by default.
+	Default string
 }
 
 // TmuxResult is what WriteTmux found.
@@ -71,21 +83,36 @@ func ValidKey(key string) bool {
 func keyStates(bin string, keys TmuxKeys) []KeyState {
 	b := shellQuote(bin)
 	popup := "display-popup -E -w 90% -h 80% "
+	msg := KeyState{
+		Name: "message", Option: "key_message", Key: keys.Message,
+		Command: "display-popup -E -w 80% -h 12 " + tmuxQuote(b+" say"),
+	}
+	if keys.Message == MessageDefaultKey {
+		msg.Default = MessageDefaultCommand
+	}
 	return []KeyState{
 		{Name: "dashboard", Option: "key_dashboard", Key: keys.Dashboard, Command: popup + tmuxQuote(b+" ui")},
 		{Name: "decisions", Option: "key_decisions", Key: keys.Decisions, Command: popup + tmuxQuote(b+" decide")},
 		{Name: "next", Option: "key_next", Key: keys.Next, Command: "run-shell " + tmuxQuote(b+" next")},
+		msg,
 	}
 }
 
 // bindLine binds key to command only if the key is free in the prefix table
-// or already runs Curia (its binding mentions curia), so a re-source or an
-// upgrade rebinds Curia's own keys and never the user's. The shell asks the
+// or already runs Curia (its binding mentions curia), or, when def is set,
+// is still tmux's own binding def, so a re-source or an upgrade rebinds
+// Curia's own keys and never the user's. The shell asks the
 // server that runs it: tmux sets TMUX in every job to its own socket, and
 // with TMUX empty, or that server not answering, nothing is bound.
-func bindLine(key, command string) string {
+func bindLine(key, command, def string) string {
+	grep := "grep -qv curia"
+	if def != "" {
+		// list-keys prints "bind-key -T prefix m select-pane -m": the
+		// default is that command after the key and nothing else.
+		grep = `grep -qvE "curia| -T prefix +` + key + ` +` + def + `$"`
+	}
 	check := `[ -n "$TMUX" ] && tmux show -g status >/dev/null 2>&1 && ` +
-		"! tmux list-keys -T prefix " + key + " 2>/dev/null | grep -qv curia"
+		"! tmux list-keys -T prefix " + key + " 2>/dev/null | " + grep
 	return "if-shell " + tmuxQuote(check) + " " + tmuxQuote("bind "+key+" "+command)
 }
 
@@ -122,7 +149,7 @@ func snippet(bin string, keys []KeyState) string {
 	}
 	for _, k := range keys {
 		if k.Key != "" {
-			lines = append(lines, bindLine(k.Key, k.Command))
+			lines = append(lines, bindLine(k.Key, k.Command, k.Default))
 		}
 	}
 	lines = append(lines, "set-hook -g pane-focus-in "+tmuxQuote("run-shell -b "+tmuxQuote(b+" seen #{pane_id}")))

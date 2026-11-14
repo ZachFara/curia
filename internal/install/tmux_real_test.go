@@ -165,13 +165,16 @@ func TestSnippetQuotedBinaryInRealTmux(t *testing.T) {
 	}
 	waitForLine(t, calls, "status ")
 
-	for _, key := range []string{"a", "N", "A"} {
+	for _, key := range []string{"a", "N", "A", "m"} {
 		if out, err := tm("list-keys", "-T", "prefix", key); err != nil || !strings.Contains(out, "curia") {
 			t.Errorf("binding %s = %q, %v", key, out, err)
 		}
 	}
 	if out, err := tm("list-keys", "-T", "prefix", "A"); err != nil || !strings.Contains(out, "decide") {
 		t.Errorf("binding A = %q, %v; want the decide popup", out, err)
+	}
+	if out, err := tm("list-keys", "-T", "prefix", "m"); err != nil || !strings.Contains(out, "curia' say") {
+		t.Errorf("binding m = %q, %v; want the say popup for the quoted binary", out, err)
 	}
 }
 
@@ -222,7 +225,7 @@ func tmuxState(t *testing.T, tm func(...string) (string, error)) map[string]stri
 		}
 		state[opt] = strings.TrimSuffix(out, "\n")
 	}
-	for _, key := range []string{"a", "A", "N"} {
+	for _, key := range []string{"a", "A", "N", "m"} {
 		out, _ := tm("list-keys", "-T", "prefix", key) // an unbound key exits 1
 		state["key "+key] = strings.TrimSpace(out)
 	}
@@ -402,14 +405,14 @@ func TestSnippetConfiguredKeys(t *testing.T) {
 	dir := t.TempDir()
 	tm := realTmux(ctx, t, dir)
 	snippet := filepath.Join(dir, "curia.tmux")
-	keys := TmuxKeys{Dashboard: "F5", Decisions: "", Next: "C-y"}
+	keys := TmuxKeys{Dashboard: "F5", Decisions: "", Next: "C-y", Message: "C-m"}
 	if _, err := WriteTmux(snippet, filepath.Join(dir, ".tmux.conf"), testBin, keys); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := tm("source-file", snippet); err != nil || out != "" {
 		t.Fatalf("source-file: %v: %q", err, out)
 	}
-	for key, want := range map[string]string{"F5": testBin + " ui", "C-y": testBin + " next"} {
+	for key, want := range map[string]string{"F5": testBin + " ui", "C-y": testBin + " next", "C-m": testBin + " say"} {
 		if out, err := tm("list-keys", "-T", "prefix", key); err != nil || !strings.Contains(out, want) {
 			t.Errorf("key %s = %q, %v; want %q", key, out, err, want)
 		}
@@ -421,7 +424,7 @@ func TestSnippetConfiguredKeys(t *testing.T) {
 	if strings.Contains(all, " decide") {
 		t.Errorf("decide is bound with key_decisions empty:\n%s", all)
 	}
-	for _, key := range []string{"a", "A", "N"} {
+	for _, key := range []string{"a", "A", "N", "m"} {
 		if out, _ := tm("list-keys", "-T", "prefix", key); strings.Contains(out, "curia") {
 			t.Errorf("key %s = %q, want no Curia binding", key, out)
 		}
@@ -442,5 +445,45 @@ func TestSnippetRebindsCuriasOwnKeys(t *testing.T) {
 	sourceSnippet(t, tm, dir, testBin, 1)
 	if out, err := tm("list-keys", "-T", "prefix", "a"); err != nil || !strings.Contains(out, testBin+" ui") {
 		t.Errorf("key a = %q, %v; want %s ui", out, err, testBin)
+	}
+}
+
+// TestSnippetMessageKeyAgainstTmuxDefault: tmux binds m to marking a pane by
+// default. The snippet takes m from that default and from Curia, and leaves
+// any other binding of m alone.
+func TestSnippetMessageKeyAgainstTmuxDefault(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	tm := realTmux(ctx, t, dir)
+	binding := func() string {
+		out, _ := tm("list-keys", "-T", "prefix", "m")
+		return strings.TrimSpace(out)
+	}
+	if got := binding(); !strings.HasSuffix(got, " select-pane -m") {
+		t.Skipf("this tmux does not bind m to select-pane -m by default: %q", got)
+	}
+
+	// The default binding becomes Curia's, and stays so on a re-source.
+	sourceSnippet(t, tm, dir, testBin, 1)
+	first := binding()
+	if !strings.Contains(first, testBin+" say") || strings.Contains(first, "select-pane") {
+		t.Fatalf("m over the default = %q, want Curia's say popup", first)
+	}
+	sourceSnippet(t, tm, dir, testBin, 2)
+	if again := binding(); again != first {
+		t.Errorf("m after re-sourcing = %q, want %q", again, first)
+	}
+
+	// A binding of the user's own is left alone, however close it looks.
+	for _, own := range []string{"display-message mine", "select-pane -M", "select-pane -m -t 1"} {
+		if out, err := tm("bind", "m", own); err != nil {
+			t.Fatalf("bind m %s: %v: %s", own, err, out)
+		}
+		before := binding()
+		sourceSnippet(t, tm, dir, testBin, 2)
+		if after := binding(); after != before || strings.Contains(after, "curia") {
+			t.Errorf("user's bind m %q became %q, want it untouched", own, after)
+		}
 	}
 }
