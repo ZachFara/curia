@@ -223,7 +223,11 @@ func TestUninstallSaysHowToUndoTmux(t *testing.T) {
 	if err != nil {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
-	for _, want := range []string{"Restart tmux", "tmux set-hook -gu pane-focus-in; tmux unbind a; tmux unbind N; tmux unbind A"} {
+	for _, want := range []string{
+		"Restart tmux",
+		"tmux set-hook -gu pane-focus-in; tmux set -gu @curia_marker_format\n",
+		`for k in a A N; do tmux list-keys -T prefix "$k" 2>/dev/null | grep -q curia && tmux unbind "$k"; done` + "\n",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("uninstall output missing %q:\n%s", want, out)
 		}
@@ -626,4 +630,111 @@ func TestInstallWithoutClaudeConfigDir(t *testing.T) {
 		t.Fatalf("claudeDir = %s", h.claudeDir)
 	}
 	installCheckClaudeDir(t, h)
+}
+
+// installThemedHome is a temp HOME whose ~/.tmux.conf loads a theme and
+// binds prefix a to another tool, with the snippet from before the fix in
+// place, and the config.toml body given (none when empty).
+func installThemedHome(t *testing.T, configBody string) installHome {
+	t.Helper()
+	h := installSetup(t, "")
+	writeTestFile(t, filepath.Join(h.home, ".tmux.conf"),
+		"set -g prefix C-s\nbind a display-popup -E -w 80% -h 80% recon\nrun '~/.tmux/plugins/tpm/tpm'\n")
+	writeTestFile(t, filepath.Join(h.home, ".config", "curia", "curia.tmux"),
+		"set -g focus-events on\nset -g window-status-format '#{?#{==:#{@curia_marker},red},#[fg=red]● #[default],}#I:#W'\n")
+	if configBody != "" {
+		writeTestFile(t, filepath.Join(h.home, ".config", "curia", "config.toml"), configBody)
+	}
+	return h
+}
+
+// writeTestFile writes content to path, creating its directory.
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Install says, per key, whether the snippet binds it or leaves a key the
+// user's configuration binds already (with the line to bind another), that
+// the curia block must stay last, and, after the old snippet, that a running
+// tmux keeps the plain formats it set.
+func TestInstallSaysWhatTheTmuxSnippetDoes(t *testing.T) {
+	installRecord(t)
+	h := installThemedHome(t, "")
+	out, err := installRun(t, "install")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	conf, cfg := filepath.Join(h.home, ".tmux.conf"), filepath.Join(h.home, ".config", "curia", "config.toml")
+	want := "tmux snippet: written to " + filepath.Join(h.home, ".config", "curia", "curia.tmux") + " and sourced from " + conf + "\n" +
+		"  prefix a (dashboard): already bound in " + conf + ", left alone; to use another key, set key_dashboard in " + cfg +
+		" and run curia install again, or add after the curia block: bind <key> display-popup -E -w 90% -h 80% '" + h.bin + " ui'\n" +
+		"  prefix A (decisions): bound by the snippet\n" +
+		"  prefix N (next): bound by the snippet\n" +
+		"  The snippet binds a key only if it is free (or already Curia's) when tmux loads it, and adds a marker to your " +
+		"window formats: keep the curia block last in " + conf + ", after any theme or plugin line.\n" +
+		"  The previous snippet replaced your window formats with plain ones; a running tmux keeps them until it restarts " +
+		"or your theme sets them again.\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("install output:\n%s\nwant it to contain:\n%s", out, want)
+	}
+
+	out, err = installRun(t, "install")
+	if err != nil {
+		t.Fatalf("second install: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "previous snippet") {
+		t.Errorf("second install still reports the old snippet:\n%s", out)
+	}
+}
+
+// The keys come from config.toml: an empty one is reported with the line to
+// bind it by hand, and uninstall's unbind loop names the configured keys.
+func TestInstallUsesConfiguredTmuxKeys(t *testing.T) {
+	installRecord(t)
+	h := installThemedHome(t, "key_decisions = \"\"\nkey_next = \"C-y\"\n")
+	out, err := installRun(t, "install")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	cfg := filepath.Join(h.home, ".config", "curia", "config.toml")
+	for _, want := range []string{
+		"  decisions: no key (key_decisions is empty in " + cfg + "); to bind one, add: bind <key> display-popup -E -w 90% -h 80% '" + h.bin + " decide'\n",
+		"  prefix C-y (next): bound by the snippet\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("install output missing %q:\n%s", want, out)
+		}
+	}
+	snip, err := os.ReadFile(filepath.Join(h.home, ".config", "curia", "curia.tmux"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(snip), "list-keys -T prefix C-y ") || strings.Contains(string(snip), " decide'") {
+		t.Errorf("snippet does not follow the configured keys:\n%s", snip)
+	}
+
+	out, err = installRun(t, "uninstall")
+	if err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	if want := "for k in a C-y; do"; !strings.Contains(out, want) {
+		t.Errorf("uninstall output missing %q:\n%s", want, out)
+	}
+}
+
+// A configured key tmux could not take safely stops install with the
+// option's name.
+func TestInstallRefusesBadTmuxKey(t *testing.T) {
+	installRecord(t)
+	installThemedHome(t, "key_next = \"a;b\"\n")
+	out, err := installRun(t, "install")
+	if err == nil || !strings.Contains(err.Error(), "key_next") {
+		t.Fatalf("install: err = %v, want one naming key_next\n%s", err, out)
+	}
 }
