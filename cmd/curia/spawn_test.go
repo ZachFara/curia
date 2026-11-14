@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -120,10 +122,10 @@ func (f *spawnFixture) windows() []string {
 
 func (f *spawnFixture) worktree(id string) string { return task.WorktreePath(f.repo, id) }
 
-// setupScript commits .curia/setup.sh with content to the repository,
+// commitSetup commits .curia/setup.sh with content to the repository,
 // executable when exe is set (through the index, so no test writes a file
-// with an execute bit: the worktree checkout does).
-func (f *spawnFixture) setupScript(content string, exe bool) {
+// with an execute bit: the worktree checkout does). It is not approved.
+func (f *spawnFixture) commitSetup(content string, exe bool) {
 	f.t.Helper()
 	worktreeWrite(f.t, filepath.Join(f.repo, ".curia", "setup.sh"), content)
 	gitRun(f.t, f.repo, "add", "-A")
@@ -131,6 +133,23 @@ func (f *spawnFixture) setupScript(content string, exe bool) {
 		gitRun(f.t, f.repo, "update-index", "--chmod=+x", ".curia/setup.sh")
 	}
 	gitRun(f.t, f.repo, "commit", "-q", "-m", "setup")
+}
+
+// setupScript commits .curia/setup.sh (see commitSetup) and approves its
+// content for the repository.
+func (f *spawnFixture) setupScript(content string, exe bool) {
+	f.t.Helper()
+	f.commitSetup(content, exe)
+	f.approve(content)
+}
+
+// approve records content as the approved setup script of the repository.
+func (f *spawnFixture) approve(content string) {
+	f.t.Helper()
+	sum := sha256.Sum256([]byte(content))
+	if err := f.st.ApproveSetup(context.Background(), f.repo, hex.EncodeToString(sum[:])); err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 // setupLog is the setup log of task T-1.
@@ -588,6 +607,9 @@ func TestSpawnSetupFailureLeavesWorktree(t *testing.T) {
 	// Fixing the script in the worktree (the file keeps its mode) lets a
 	// second spawn through.
 	worktreeWrite(t, filepath.Join(wt, ".curia", "setup.sh"), "#!/bin/sh\necho fixed\n")
+	if out, err := runRoot(t, "setup", "approve", "T-1"); err != nil {
+		t.Fatalf("setup approve: %v\n%s", err, out)
+	}
 	_, out, err := f.spawn("T-1", spawnOptions{})
 	if err != nil {
 		t.Fatalf("second spawn: %v\n%s", err, out)

@@ -7,12 +7,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -54,11 +52,8 @@ var (
 )
 
 const (
-	spawnWait      = 20 * time.Second       // curia spawn's wait for the first hook
-	spawnPoll      = 250 * time.Millisecond // its poll interval
-	spawnLogCap    = 1 << 20                // the setup log's size limit
-	spawnTailLines = 20                     // setup log lines shown on failure
-	spawnLineMax   = 200                    // runes of a shown setup log line
+	spawnWait = 20 * time.Second       // curia spawn's wait for the first hook
+	spawnPoll = 250 * time.Millisecond // its poll interval
 )
 
 // spawnSessionID is the form of a Claude Code session id (--resume).
@@ -77,7 +72,8 @@ func init() {
 		Short: "Start a task's agent in its own git worktree and tmux window",
 		Long: "Creates (or reuses) the task's worktree under .curia-worktrees/ next to its\n" +
 			"repository, on branch curia/<id>-<slug> from the task's base branch, runs the\n" +
-			"worktree's .curia/setup.sh if it is executable (output in the setup log), opens\n" +
+			"worktree's .curia/setup.sh if you approved its exact content (curia setup\n" +
+			"approve; output in the setup log), opens\n" +
 			"a tmux window named after the task in the repository's session and starts\n" +
 			"claude there with the task's brief. Waits up to 20 s for the agent to report.",
 		Args: cobra.ExactArgs(1),
@@ -260,7 +256,7 @@ func spawnStart(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 		return spawnResult{Task: t}, err
 	}
 	stays := " (the worktree " + sanitize.Line(t.Worktree, 300) + " stays; a retry reuses it)"
-	if err = spawnSetup(ctx, cfg, t, o.Out); err != nil {
+	if err = setupStep(ctx, st, cfg, t, o.Out); err != nil {
 		return spawnResult{Task: t}, fmt.Errorf("%w%s", err, stays)
 	}
 	pane, err := spawnWindow(ctx, tm, t, o)
@@ -339,146 +335,6 @@ func spawnAddWorktree(ctx context.Context, t model.Task, path, branch string) er
 		return err
 	}
 	return worktreeAdd(ctx, t.Repo, path, branch, t.BaseBranch)
-}
-
-// spawnSetupScript finds the worktree's .curia/setup.sh and returns the
-// path to run, or "" after saying why nothing runs: it is absent, resolves
-// outside the worktree, or is not an executable regular file.
-func spawnSetupScript(worktree string, out io.Writer) string {
-	const name = ".curia/setup.sh"
-	link := filepath.Join(worktree, ".curia", "setup.sh")
-	skip := func(why string) string {
-		_, _ = fmt.Fprintf(out, "Setup: %s %s; skipped\n", name, why)
-		return ""
-	}
-	if _, err := os.Lstat(link); errors.Is(err, fs.ErrNotExist) {
-		_, _ = fmt.Fprintf(out, "Setup: no %s\n", name)
-		return ""
-	}
-	resolved, err := filepath.EvalSymlinks(link)
-	if err != nil {
-		return skip("cannot be resolved")
-	}
-	root, err := filepath.EvalSymlinks(worktree)
-	if err != nil || !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
-		return skip("resolves outside the worktree")
-	}
-	fi, err := os.Stat(resolved)
-	switch {
-	case err != nil || !fi.Mode().IsRegular():
-		return skip("is not a regular file")
-	case fi.Mode().Perm()&0o111 == 0:
-		return skip("is not executable")
-	}
-	return resolved
-}
-
-// spawnSetupLogPath is the setup log of task id: setup/<id>.log next to the
-// log file.
-func spawnSetupLogPath(cfg config.Config, id string) string {
-	return filepath.Join(filepath.Dir(cfg.LogPath), "setup", id+".log")
-}
-
-// spawnSetup is step 3: it runs the worktree's .curia/setup.sh, if it is
-// to run, with no shell, the worktree as its directory, stdin from
-// /dev/null, the task's variables, spawnSetupLimit and its output in the
-// setup log (truncated first, capped at 1 MiB). A failure says the log's
-// path and shows its last lines, cleaned.
-func spawnSetup(ctx context.Context, cfg config.Config, t model.Task, out io.Writer) error {
-	script := spawnSetupScript(t.Worktree, out)
-	if script == "" {
-		return nil
-	}
-	logPath := spawnSetupLogPath(cfg, t.ID)
-	runErr, err := spawnRunSetup(ctx, t, script, logPath)
-	if err != nil {
-		return fmt.Errorf("setup: %w", err)
-	}
-	if runErr == nil {
-		_, _ = fmt.Fprintf(out, "Setup: ran .curia/setup.sh (log: %s)\n", logPath)
-		return nil
-	}
-	_, _ = fmt.Fprintf(out, "Setup: .curia/setup.sh failed: %s. Last lines of %s:\n", runErr, logPath)
-	for _, l := range spawnTail(logPath) {
-		_, _ = fmt.Fprintf(out, "  %s\n", l)
-	}
-	return fmt.Errorf("setup script failed: %w; its log is %s", runErr, logPath)
-}
-
-// spawnRunSetup runs script for t with its output in the log at logPath.
-// It returns the script's failure as runErr, and a failure to run it at
-// all (the log cannot be opened) as err.
-func spawnRunSetup(ctx context.Context, t model.Task, script, logPath string) (runErr, err error) {
-	if err = os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(filepath.Clean(logPath), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	ctx, cancel := context.WithTimeout(ctx, spawnSetupLimit)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, script)
-	cmd.Dir = t.Worktree
-	cmd.Env = append(spawnSetupEnv(), "CURIA_TASK_ID="+t.ID, "CURIA_REPO="+t.Repo, "CURIA_WORKTREE="+t.Worktree)
-	w := &spawnCapWriter{w: f, left: spawnLogCap}
-	cmd.Stdout, cmd.Stderr = w, w
-	// Its own process group, so the limit kills what the script started too.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = time.Second
-	runErr = cmd.Run()
-	switch {
-	case errors.Is(runErr, exec.ErrWaitDelay):
-		runErr = nil // it succeeded; something it left running holds its output
-	case runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded):
-		runErr = fmt.Errorf("timed out after %s", spawnSetupLimit)
-	}
-	return runErr, nil
-}
-
-// spawnSetupEnv is this process's environment without git's repository
-// variables, which would point the script's git at another repository.
-func spawnSetupEnv() []string {
-	return slices.DeleteFunc(os.Environ(), func(kv string) bool {
-		name, _, _ := strings.Cut(kv, "=")
-		return slices.Contains(gitRepoVars, name)
-	})
-}
-
-// spawnCapWriter writes to w until left bytes are written and then drops
-// the rest, reporting every write as complete so the script never sees an
-// error.
-type spawnCapWriter struct {
-	w    io.Writer
-	left int
-}
-
-func (c *spawnCapWriter) Write(p []byte) (int, error) {
-	if c.left > 0 {
-		n := min(len(p), c.left)
-		if _, err := c.w.Write(p[:n]); err != nil {
-			return 0, err
-		}
-		c.left -= n
-	}
-	return len(p), nil
-}
-
-// spawnTail returns the last spawnTailLines lines of the log at path, each
-// cleaned to one line of at most spawnLineMax runes.
-func spawnTail(path string) []string {
-	b, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		return []string{"(the log cannot be read: " + sanitize.Line(err.Error(), spawnLineMax) + ")"}
-	}
-	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
-	lines = lines[max(0, len(lines)-spawnTailLines):]
-	for i, l := range lines {
-		lines[i] = sanitize.Line(l, spawnLineMax)
-	}
-	return lines
 }
 
 // spawnCommand is the window's command: curia launch with the task id and
