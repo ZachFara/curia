@@ -1,0 +1,6 @@
+{"topic":"curia-probe-one","title":"D-1 api-server: decision needed","message":"Decision D-1 needs you\nA: option A\nB: option B\nC: option C\nRecommended: A","priority":4,"tags":["curia","decision"],
+ "actions":[
+ {"action":"http","label":"A: option A","url":"http://127.0.0.1:56841/v1/answer","method":"POST","headers":{"Authorization":"Bearer TOKEN","Content-Type":"application/json"},"body":"{\"decision\":\"D-1\",\"key\":\"A\"}","clear":true},
+ {"action":"http","label":"B: option B","url":"http://127.0.0.1:56841/v1/answer","method":"POST","headers":{"Authorization":"Bearer TOKEN","Content-Type":"application/json"},"body":"{\"decision\":\"D-1\",\"key\":\"B\"}","clear":true},
+ {"action":"http","label":"C: option C","url":"http://127.0.0.1:56841/v1/answer","method":"POST","headers":{"Authorization":"Bearer TOKEN","Content-Type":"application/json"},"body":"{\"decision\":\"D-1\",\"key\":\"C\"}","clear":true}
+ ]}

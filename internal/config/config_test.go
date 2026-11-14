@@ -406,6 +406,31 @@ func TestBadNtfyConfigRejected(t *testing.T) {
 	wantAccepted(t, "[ntfy]\nquiet = \"00:00-23:59\"\n")
 }
 
+// TestNtfyTopicRule is ntfy 2.38.0's rule as probe N1 observed it: 1 to 64
+// letters, digits, "-" and "_"; anything else is 400 (code 40009).
+func TestNtfyTopicRule(t *testing.T) {
+	for _, topic := range []string{"a", "-", "_", "curia-k3j9x2m4", "A_b-9", strings.Repeat("z", 64)} {
+		wantAccepted(t, "[ntfy.devices]\nphone = \""+topic+"\"\n")
+	}
+	for _, topic := range []string{"", " ", "a b", "a/b", "a.b", "a+b", "é", "ａ", "a\\nb", strings.Repeat("z", 65)} {
+		wantErrNaming(t, "[ntfy.devices]\nphone = \""+topic+"\"\n", "ntfy.devices.phone")
+	}
+}
+
+// TestNtfyURLHasNoPath: Curia publishes JSON to the server's base URL, and
+// ntfy stores a JSON body POSTed to /<topic> as plain text, so the URL may
+// not carry a path (probe N1).
+func TestNtfyURLHasNoPath(t *testing.T) {
+	for _, u := range []string{"https://ntfy.sh", "https://ntfy.sh/", "http://127.0.0.1:8080/"} {
+		wantAccepted(t, "[ntfy]\nurl = \""+u+"\"\n")
+	}
+	for _, u := range []string{"https://ntfy.sh/curia-k3j9x2m4", "https://ntfy.sh/a/", "https://ntfy.sh//", "http://127.0.0.1:8080/x"} {
+		wantErrNaming(t, "[ntfy]\nurl = \""+u+"\"\n", "ntfy.url")
+	}
+	// serve.public_url is not the ntfy server and keeps its own rule.
+	wantAccepted(t, "[serve]\npublic_url = \"https://box.tail1234.ts.net/curia\"\n")
+}
+
 func TestPlainHTTPOnlyInsideTailnet(t *testing.T) {
 	for _, u := range []string{
 		"http://127.0.0.1:8080", "http://localhost:8080", "http://100.101.102.103",

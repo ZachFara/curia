@@ -1,0 +1,3 @@
+HTTP 400
+{"code":40007,"http":400,"error":"invalid priority parameter","link":"https://ntfy.sh/docs/publish/#message-priority"}
+

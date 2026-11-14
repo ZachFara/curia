@@ -1,0 +1,10 @@
+HTTP/1.1 429 Too Many Requests
+Access-Control-Allow-Origin: *
+Content-Type: application/json
+Ratelimit: "requests";r=0;t=3600
+Ratelimit-Policy: "requests";q=5;w=18000
+Retry-After: 3600
+Date: Sat, 14 Nov 2026 23:29:31 GMT
+Content-Length: 120
+
+{"code":42901,"http":429,"error":"limit reached: too many requests","link":"https://ntfy.sh/docs/publish/#limitations"}

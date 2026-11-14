@@ -1,0 +1,8 @@
+# wrong-token
+HTTP/1.1 401 Unauthorized
+Access-Control-Allow-Origin: *
+Content-Type: application/json
+Date: Sat, 14 Nov 2026 23:29:28 GMT
+Content-Length: 103
+
+{"code":40101,"http":401,"error":"unauthorized","link":"https://ntfy.sh/docs/publish/#authentication"}

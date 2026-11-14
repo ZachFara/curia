@@ -1,0 +1,12 @@
+# valid-token
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: *
+Content-Type: application/json
+Ratelimit: "requests";r=55;t=3
+Ratelimit: "messages";r=17279;t=71543
+Ratelimit-Policy: "requests";q=60;w=300
+Ratelimit-Policy: "messages";q=17280;w=86400
+Date: Sat, 14 Nov 2026 23:29:28 GMT
+Content-Length: 1044
+
+{"id":"rq299F1WFedE","time":1794698968,"expires":1794742168,"event":"message","topic":"curia-probe-auth","title":"D-1 api-server: decision needed","message":"Decision D-1 needs you\nA: option A\nB: option B\nC: option C\nRecommended: A","priority":4,"tags":["curia","decision"],"actions":[{"id":"2VBwSW23km","action":"http","label":"A: option A","clear":true,"url":"http://127.0.0.1:56841/v1/answer","method":"POST","headers":{"Authorization":"Bearer TOKEN","Content-Type":"application/json"},"body":"{\"decision\":\"D-1\",\"key\":\"A\"}"},{"id":"p4UIcSy7l9","action":"http","label":"B: option B","clear":true,"url":"http://127.0.0.1:56841/v1/answer","method":"POST","headers":{"Authorization":"Bearer TOKEN","Content-Type":"application/json"},"body":"{\"decision\":\"D-1\",\"key\":\"B\"}"},{"id":"PH4a8ApvP1","action":"http","label":"C: option C","clear":true,"url":"http://127.0.0.1:56841/v1/answer","method":"POST","headers":{"Authorization":"Bearer TOKEN","Content-Type":"application/json"},"body":"{\"decision\":\"D-1\",\"key\":\"C\"}"}]}
