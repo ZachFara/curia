@@ -41,6 +41,10 @@ type Session struct {
 	// TaskID is the task whose agent this is; Worktree its worktree. TeamID,
 	// TeamRole and TeamMember place the session in an agent team.
 	TaskID, Worktree, TeamID, TeamRole, TeamMember string
+	// Socket is the tmux server's socket path (stored). ReviewPending is
+	// never stored; fleet.WithReviews sets it.
+	Socket        string
+	ReviewPending bool
 }
 
 // Team roles.
