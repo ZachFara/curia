@@ -163,11 +163,11 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	open(t, path)
-	if n := countMigrations(t, path); n != 3 {
-		t.Errorf("schema_migrations has %d rows, want 3", n)
+	if n := countMigrations(t, path); n != 4 {
+		t.Errorf("schema_migrations has %d rows, want 4", n)
 	}
 	names := migrationNames(t, rawDB(t, path))
-	if want := []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("migration names = %v, want %v", names, want)
 	}
 }
@@ -494,8 +494,8 @@ func TestConcurrentOpenOfFreshFile(t *testing.T) {
 	for round := range 10 {
 		path := filepath.Join(t.TempDir(), fmt.Sprintf("round%d.db", round))
 		openAndUpsertConcurrently(t, path, openers)
-		if n := countMigrations(t, path); n != 3 {
-			t.Errorf("round %d: schema_migrations has %d rows, want 3", round, n)
+		if n := countMigrations(t, path); n != 4 {
+			t.Errorf("round %d: schema_migrations has %d rows, want 4", round, n)
 		}
 		got, err := open(t, path).ListSessions(context.Background(), store.ListFilter{})
 		if err != nil {
