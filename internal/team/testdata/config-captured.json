@@ -1,0 +1,53 @@
+{
+  "name": "session-bf9b79ad",
+  "createdAt": 1794618562459,
+  "leadAgentId": "team-lead@session-bf9b79ad",
+  "leadSessionId": "bf9b79ad-5a7a-472e-94a5-8c58b9033764",
+  "leadProcess": {
+    "pid": 45281,
+    "pidSpace": "host.local",
+    "claimedAt": 1794618562459
+  },
+  "members": [
+    {
+      "agentId": "team-lead@session-bf9b79ad",
+      "name": "team-lead",
+      "agentType": "team-lead",
+      "joinedAt": 1794618562459,
+      "tmuxPaneId": "leader",
+      "cwd": "/home/dev/src/.curia-worktrees/api-T-5",
+      "subscriptions": [],
+      "backendType": "in-process"
+    },
+    {
+      "agentId": "alpha@session-bf9b79ad",
+      "name": "alpha",
+      "color": "blue",
+      "joinedAt": 1794618581006,
+      "tmuxPaneId": "%17",
+      "subscriptions": [],
+      "agentType": "general-purpose",
+      "model": "haiku",
+      "prompt": "You are alpha, a teammate on the agent team \"probe\". Your only task: reply to the lead with exactly the word \"ready\". Do not read or modify any files and do not run any commands. After replying, wait for further instructions.",
+      "planModeRequired": false,
+      "cwd": "/home/dev/src/.curia-worktrees/api-T-5",
+      "backendType": "tmux",
+      "isActive": false
+    },
+    {
+      "agentId": "beta@session-bf9b79ad",
+      "name": "beta",
+      "color": "green",
+      "joinedAt": 1794618581012,
+      "tmuxPaneId": "%18",
+      "subscriptions": [],
+      "agentType": "general-purpose",
+      "model": "haiku",
+      "prompt": "You are beta, a teammate on the agent team \"probe\". Your only task: reply to the lead with exactly the word \"ready\". Do not read or modify any files and do not run any commands. After replying, wait for further instructions.",
+      "planModeRequired": false,
+      "cwd": "/home/dev/src/.curia-worktrees/api-T-5",
+      "backendType": "tmux",
+      "isActive": false
+    }
+  ]
+}
