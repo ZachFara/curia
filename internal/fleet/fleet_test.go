@@ -266,6 +266,23 @@ func TestBadge(t *testing.T) {
 	}
 }
 
+func TestBadgeAutoOffSuffix(t *testing.T) {
+	for _, tc := range []struct {
+		in   fleet.Counts
+		want string
+	}{
+		{fleet.Counts{Decisions: 1, AutoOff: true}, "D1 auto-off"},
+		{fleet.Counts{Decisions: 2, Undelivered: 1, Waiting: 3, Reviews: 4, AutoOff: true}, "D2 Q1 W3 R4 auto-off"},
+		{fleet.Counts{AutoOff: true}, "auto-off"},
+		{fleet.Counts{Decisions: 1}, "D1"},
+		{fleet.Counts{}, ""},
+	} {
+		if got := fleet.Badge(tc.in); got != tc.want {
+			t.Errorf("Badge(%+v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestNextSkipsSessionsWithoutPane(t *testing.T) {
 	in := []model.Session{
 		sess("nopane", model.StateNeedsDecision, "", t0.Add(-time.Hour)),

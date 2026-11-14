@@ -169,25 +169,10 @@ func TestReturnedColumnsAreDecisionColumns(t *testing.T) {
 	}
 }
 
-// stopCheck runs StopCheck for session id at now in its own transaction on
-// session s1.
-func stopCheck(t *testing.T, s *store.Store, id string, now time.Time) (int, bool) {
-	t.Helper()
-	var n int
-	var q bool
-	err := s.UpdateSessionTx(context.Background(), "s1", func(tx *store.Tx, sess model.Session, _ bool) (model.Session, error) {
-		var err error
-		n, q, err = tx.StopCheck(context.Background(), id, now)
-		sess.ID, sess.Agent = "s1", "claude"
-		return sess, err
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return n, q
-}
-
-func TestTxStopCheck(t *testing.T) {
+// StopState's decision parts: the open blocking tickets counted as
+// OpenBlocking counts them, and whether an answer is queued (this was
+// StopCheck's test before StopState replaced it).
+func TestTxStopStateDecisions(t *testing.T) {
 	path := dbPath(t)
 	s := open(t, path)
 	now := t0.Add(time.Hour)
@@ -203,37 +188,33 @@ func TestTxStopCheck(t *testing.T) {
 	}
 	queued(t, s, "Blocking answered?", "s1")
 
-	type facts struct {
-		open   int
-		queued bool
-	}
-	got := map[string]facts{}
+	got := map[string]store.StopState{}
 	for _, id := range []string{"s1", "s2", "s3", "s4", ""} {
-		n, q := stopCheck(t, s, id, now)
-		got[id] = facts{n, q}
+		got[id] = stopState(t, s, id, now)
 	}
-	want := map[string]facts{
-		"s1": {2, true},  // the expired, assume and answered tickets are not open
-		"s2": {1, false}, // open, nothing answered
-		"s3": {0, false}, // answered and already delivered
-		"s4": {0, false},
-		"":   {0, false},
+	want := map[string]store.StopState{
+		"s1": {OpenBlocking: 2, Answers: true}, // the expired, assume and answered tickets are not open
+		"s2": {OpenBlocking: 1},                // open, nothing answered
+		"s3": {},                               // answered and already delivered
+		"s4": {},
+		"":   {},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("StopCheck = %+v, want %+v", got, want)
+		t.Errorf("StopState = %+v, want %+v", got, want)
 	}
 }
 
-// StopCheck agrees with OpenBlocking, and a claim in the same transaction
-// leaves the count as it was and clears queued.
-func TestTxStopCheckAroundAClaim(t *testing.T) {
+// StopState agrees with OpenBlocking, and claims in the same transaction
+// leave the count as it was and clear what they claimed.
+func TestTxStopStateAroundClaims(t *testing.T) {
 	s := open(t, dbPath(t))
 	ctx := context.Background()
 	liveSession(t, s, "s1", "%3", model.StateWorking)
 	create(t, s, ticket(t, "Still open?", model.ModeBlocking, "s1", t0))
 	d := queued(t, s, "Answered?", "s1")
+	m := queuedMessage(t, s, "an instruction", "s1")
 	err := s.UpdateSessionTx(ctx, "s1", func(tx *store.Tx, sess model.Session, _ bool) (model.Session, error) {
-		before, q, err := tx.StopCheck(ctx, "s1", tClaim)
+		before, err := tx.StopState(ctx, "s1", tClaim)
 		if err != nil {
 			return sess, err
 		}
@@ -241,16 +222,20 @@ func TestTxStopCheckAroundAClaim(t *testing.T) {
 		if err != nil {
 			return sess, err
 		}
-		if before != 1 || !q || n != before {
-			t.Errorf("before the claim: StopCheck = %d, %v; OpenBlocking = %d; want 1, true, 1", before, q, n)
+		if want := (store.StopState{OpenBlocking: 1, Answers: true, Messages: true}); before != want || n != before.OpenBlocking {
+			t.Errorf("before the claims: StopState = %+v; OpenBlocking = %d; want %+v, 1", before, n, want)
 		}
 		claimed, err := tx.ClaimDeliveries(ctx, "s1", tClaim)
 		if err != nil || len(claimed) != 1 || claimed[0].ID != d.ID {
 			t.Errorf("ClaimDeliveries = %v, %v; want %s", decisionIDs(claimed), err, d.ID)
 		}
-		after, q, err := tx.StopCheck(ctx, "s1", tClaim)
-		if after != before || q || err != nil {
-			t.Errorf("after the claim: StopCheck = %d, %v, %v; want %d, false, nil", after, q, err, before)
+		ms, err := tx.ClaimMessages(ctx, "s1", tClaim, 4000)
+		if err != nil || len(ms) != 1 || ms[0].ID != m.ID {
+			t.Errorf("ClaimMessages = %v, %v; want %s", messageIDs(ms), err, m.ID)
+		}
+		after, err := tx.StopState(ctx, "s1", tClaim)
+		if want := (store.StopState{OpenBlocking: before.OpenBlocking}); after != want || err != nil {
+			t.Errorf("after the claims: StopState = %+v, %v; want %+v, nil", after, err, want)
 		}
 		return sess, nil
 	})

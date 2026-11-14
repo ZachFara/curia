@@ -1,0 +1,83 @@
+[
+  {
+    "id": "T-1",
+    "title": "Fix the auth refresh",
+    "body": "Rotate the token\n\tbefore expiry.",
+    "repo": "<root>",
+    "base_branch": "main",
+    "status": "backlog",
+    "stored_status": "backlog",
+    "source": "local",
+    "source_ref": "",
+    "tags": [
+      "auth"
+    ],
+    "branch": "",
+    "worktree": "",
+    "team": false,
+    "agent_model": "",
+    "pane": "",
+    "resume_session": "",
+    "sessions": [],
+    "created_at": "<time>",
+    "updated_at": "<time>",
+    "launched_at": null,
+    "paused_at": null,
+    "cleaned_at": null
+  },
+  {
+    "id": "T-2",
+    "title": "Add rate limits",
+    "body": "",
+    "repo": "<root>",
+    "base_branch": "main",
+    "status": "running",
+    "stored_status": "ready",
+    "source": "local",
+    "source_ref": "",
+    "tags": [],
+    "branch": "",
+    "worktree": "",
+    "team": false,
+    "agent_model": "",
+    "pane": "",
+    "resume_session": "",
+    "sessions": [
+      "s-work"
+    ],
+    "created_at": "<time>",
+    "updated_at": "<time>",
+    "launched_at": null,
+    "paused_at": null,
+    "cleaned_at": null
+  },
+  {
+    "id": "T-3",
+    "title": "Pick a cache",
+    "body": "",
+    "repo": "<root>",
+    "base_branch": "main",
+    "status": "needs_decision",
+    "stored_status": "ready",
+    "source": "local",
+    "source_ref": "",
+    "tags": [
+      "cache",
+      "infra"
+    ],
+    "branch": "",
+    "worktree": "",
+    "team": false,
+    "agent_model": "",
+    "pane": "",
+    "resume_session": "",
+    "sessions": [
+      "s-ask"
+    ],
+    "created_at": "<time>",
+    "updated_at": "<time>",
+    "launched_at": null,
+    "paused_at": null,
+    "cleaned_at": null
+  }
+]
