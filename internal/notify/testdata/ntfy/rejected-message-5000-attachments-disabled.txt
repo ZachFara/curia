@@ -1,0 +1,2 @@
+HTTP 400
+{"code":40014,"http":400,"error":"invalid request: attachments not allowed","link":"https://ntfy.sh/docs/config/#attachments"}

@@ -304,6 +304,11 @@ func (n Ntfy) validate() error {
 	if err := validateURL("ntfy.url", n.URL); err != nil {
 		return err
 	}
+	// Curia publishes JSON to the base URL; ntfy stores a JSON body POSTed
+	// to /<topic> as plain text (probe N1), so no path is allowed.
+	if u, err := url.Parse(n.URL); err == nil && u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("ntfy.url must be the server's base URL with no path (the topic goes in [ntfy.devices]), got %q", n.URL)
+	}
 	if n.Quiet != "" {
 		if _, _, ok := ParseQuiet(n.Quiet); !ok {
 			return fmt.Errorf("ntfy.quiet must be HH:MM-HH:MM with two different times, got %q", n.Quiet)

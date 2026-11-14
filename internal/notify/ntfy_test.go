@@ -1,11 +1,13 @@
 package notify
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -336,19 +338,24 @@ func ntfyFixture(t *testing.T, name string) []byte {
 	return b
 }
 
-// TestPublishMatchesCapturedRequest compares the request with the request
-// shape the plan specifies. The fixture is built by hand from ntfy's
-// documentation (hence "built-"), because probe N1, which would record a
-// request a real ntfy server accepted, is held for the owner's approval.
-// When it runs, its recording replaces this fixture.
+// TestPublishMatchesCapturedRequest checks the request against probe N1's
+// recording (publish-accepted.json): a JSON POST that ntfy 2.38.0 accepted.
+// The input is the probe's ticket; the token is replaced by TOKEN. The probe
+// also sent "tags", which section 4.7 does not, so that one field is left
+// out of the comparison; every other field must be equal.
 func TestPublishMatchesCapturedRequest(t *testing.T) {
-	s := newNtfyServer(t, http.StatusOK, ntfyFixture(t, "built-publish-reply.json"))
-	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken)
+	s := newNtfyServer(t, http.StatusOK, ntfyFixture(t, "publish-reply.json"))
+	d := model.Decision{
+		ID: "D-1", Repo: "/src/api-server", Question: "Decision D-1 needs you",
+		Options:        []model.Option{{Key: "A", Label: "option A"}, {Key: "B", Label: "option B"}, {Key: "C", Label: "option C"}},
+		Recommendation: "A", Reversibility: model.ReversCheap, Mode: model.ModeBlocking,
+	}
+	n := DecisionPush(d, "curia-probe-one", "http://127.0.0.1:56841/v1/answer", ntfyToken)
 	if err := (Publisher{URL: s.URL}).Publish(context.Background(), n); err != nil {
 		t.Fatal(err)
 	}
 	if s.method != http.MethodPost || s.path != "/" {
-		t.Errorf("request = %s %s", s.method, s.path)
+		t.Errorf("request = %s %s, want POST / (a JSON body at /<topic> is stored as plain text)", s.method, s.path)
 	}
 	if ct := s.headers.Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q", ct)
@@ -356,27 +363,33 @@ func TestPublishMatchesCapturedRequest(t *testing.T) {
 	if ua := s.headers.Get("User-Agent"); ua != "curia" {
 		t.Errorf("User-Agent = %q", ua)
 	}
-	if !bytes.Contains(s.body, []byte("LISTEN & NOTIFY")) {
-		t.Errorf("HTML escaping is on: %s", s.body)
-	}
-	var got, want any
+	var got, want map[string]any
 	if err := json.Unmarshal(bytes.ReplaceAll(s.body, []byte(ntfyToken), []byte("TOKEN")), &got); err != nil {
 		t.Fatalf("body %s: %v", s.body, err)
 	}
-	if err := json.Unmarshal(ntfyFixture(t, "built-publish-request.json"), &want); err != nil {
+	if err := json.Unmarshal(ntfyFixture(t, "publish-accepted.json"), &want); err != nil {
 		t.Fatal(err)
 	}
+	if _, ok := want["tags"]; !ok {
+		t.Fatal("the recording has no tags: drop this exception")
+	}
+	delete(want, "tags")
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("request body\n got %s\nwant %s", s.body, ntfyFixture(t, "built-publish-request.json"))
+		t.Errorf("request body\n got %s\nwant %s", s.body, ntfyFixture(t, "publish-accepted.json"))
 	}
 }
 
 func TestPublishWireDetails(t *testing.T) {
 	s := newNtfyServer(t, http.StatusOK, nil)
-	n := ReviewPush(model.Review{ID: "R-3", TaskID: "T-42", Summary: "x", Tests: model.TestsPassed}, model.Task{Title: "t"}, ntfyTopic)
+	n := ReviewPush(model.Review{ID: "R-3", TaskID: "T-42", Summary: "x", Tests: model.TestsPassed}, model.Task{Title: "Kafka & <ZooKeeper>"}, ntfyTopic)
 	n.Priority = 0
-	if err := (Publisher{URL: s.URL + "/base"}).Publish(context.Background(), n); err != nil {
-		t.Fatal(err)
+	for _, base := range []string{s.URL, s.URL + "/"} {
+		if err := (Publisher{URL: base}).Publish(context.Background(), n); err != nil {
+			t.Fatal(err)
+		}
+		if s.path != "/" {
+			t.Errorf("%s: posted to %q, want /", base, s.path)
+		}
 	}
 	var got map[string]any
 	if err := json.Unmarshal(s.body, &got); err != nil {
@@ -385,11 +398,13 @@ func TestPublishWireDetails(t *testing.T) {
 	if got["priority"] != float64(3) {
 		t.Errorf("zero priority sent as %v", got["priority"])
 	}
-	if _, ok := got["actions"]; ok {
-		t.Errorf("a push without buttons sent actions: %s", s.body)
+	for _, k := range []string{"actions", "clear", "tags"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("sent a top-level %q: %s", k, s.body)
+		}
 	}
-	if s.path != "/base" {
-		t.Errorf("posted to %q, want the configured URL", s.path)
+	if !bytes.Contains(s.body, []byte("Kafka & <ZooKeeper>")) {
+		t.Errorf("HTML escaping is on: %s", s.body)
 	}
 }
 
@@ -413,39 +428,62 @@ func TestPublishSetsBearerOnlyWhenGiven(t *testing.T) {
 	}
 }
 
-// ntfyFailure is one way a publish fails, for the status and leak tests.
-type ntfyFailure struct {
-	name     string
-	rejected bool
-	publish  func(t *testing.T, p Publisher, n Notification) error
+// ntfyClasses are the four kinds of failure a caller tells apart.
+var ntfyClasses = []error{ErrNotAllowed, ErrRateLimited, ErrRejected, ErrUnavailable}
+
+// ntfyAssertClass checks that err matches class and no other class, except
+// that ErrNotAllowed also matches ErrRejected (neither is retried).
+func ntfyAssertClass(t *testing.T, what string, err, class error) {
+	t.Helper()
+	if err == nil {
+		t.Errorf("%s: no error, want %v", what, class)
+		return
+	}
+	for _, c := range ntfyClasses {
+		want := errors.Is(c, class) || errors.Is(class, ErrNotAllowed) && errors.Is(c, ErrRejected)
+		if errors.Is(err, c) != want {
+			t.Errorf("%s: errors.Is(%v) = %v, want %v (err %v)", what, c, !want, want, err)
+		}
+	}
 }
 
-func ntfyStatusFailure(status int, rejected bool) ntfyFailure {
-	return ntfyFailure{http.StatusText(status), rejected, func(t *testing.T, p Publisher, n Notification) error {
+// ntfyFailure is one way a publish fails, for the status and leak tests.
+type ntfyFailure struct {
+	name    string
+	class   error
+	publish func(t *testing.T, p Publisher, n Notification) error
+}
+
+func ntfyStatusFailure(status int, class error) ntfyFailure {
+	return ntfyFailure{http.StatusText(status), class, func(t *testing.T, p Publisher, n Notification) error {
 		// The reply echoes the secrets: it must be discarded, never quoted.
 		s := newNtfyServer(t, status, []byte(`{"error":"`+ntfyAccess+" "+ntfyToken+" "+n.Message+`"}`))
-		p.URL = s.URL + "/secret-path"
+		p.URL = s.URL
 		return p.Publish(context.Background(), n)
 	}}
 }
 
 func ntfyFailures() []ntfyFailure {
 	f := []ntfyFailure{}
-	for _, c := range []int{400, 401, 403, 413} {
-		f = append(f, ntfyStatusFailure(c, true))
+	for _, c := range []int{400, 404, 413} {
+		f = append(f, ntfyStatusFailure(c, ErrRejected))
 	}
-	for _, c := range []int{302, 429, 500, 503} {
-		f = append(f, ntfyStatusFailure(c, false))
+	for _, c := range []int{401, 403} {
+		f = append(f, ntfyStatusFailure(c, ErrNotAllowed))
 	}
-	f = append(f, ntfyFailure{"closed server", false, func(_ *testing.T, p Publisher, n Notification) error {
+	f = append(f, ntfyStatusFailure(429, ErrRateLimited))
+	for _, c := range []int{302, 500, 503} {
+		f = append(f, ntfyStatusFailure(c, ErrUnavailable))
+	}
+	f = append(f, ntfyFailure{"closed server", ErrUnavailable, func(_ *testing.T, p Publisher, n Notification) error {
 		s := httptest.NewServer(http.NotFoundHandler())
 		s.Close()
-		p.URL = s.URL + "/secret-path"
+		p.URL = s.URL
 		return p.Publish(context.Background(), n)
-	}}, ntfyFailure{"redirect", false, func(t *testing.T, p Publisher, n Notification) error {
+	}}, ntfyFailure{"redirect", ErrUnavailable, func(t *testing.T, p Publisher, n Notification) error {
 		_, err := ntfyRedirect(t, p, n)
 		return err
-	}}, ntfyFailure{"timeout", false, func(t *testing.T, p Publisher, n Notification) error {
+	}}, ntfyFailure{"timeout", ErrUnavailable, func(t *testing.T, p Publisher, n Notification) error {
 		_, err := ntfyHang(t, p, n)
 		return err
 	}})
@@ -465,14 +503,182 @@ func TestPublishStatusTable(t *testing.T) {
 		}
 	}
 	for _, f := range ntfyFailures() {
-		err := f.publish(t, Publisher{AccessToken: ntfyAccess}, n)
-		if err == nil {
-			t.Errorf("%s: no error", f.name)
+		ntfyAssertClass(t, f.name, f.publish(t, Publisher{AccessToken: ntfyAccess}, n), f.class)
+	}
+}
+
+// ntfyReplay serves a response recorded by probe N1: either a full HTTP
+// response (after optional "#" comment lines) or "HTTP <code>" then the body.
+func ntfyReplay(t *testing.T, name string) *httptest.Server {
+	t.Helper()
+	raw := string(ntfyFixture(t, name))
+	for strings.HasPrefix(raw, "#") {
+		_, raw, _ = strings.Cut(raw, "\n")
+	}
+	code, header, body := 0, http.Header{}, ""
+	if strings.HasPrefix(raw, "HTTP/1.1 ") {
+		resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(raw)), nil)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		code, header, body = resp.StatusCode, resp.Header, string(b)
+	} else {
+		first, rest, _ := strings.Cut(raw, "\n")
+		if _, err := fmt.Sscanf(first, "HTTP %d", &code); err != nil {
+			t.Fatalf("%s: first line %q", name, first)
+		}
+		header.Set("Content-Type", "application/json")
+		body = rest
+	}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		for k, v := range header {
+			if k != "Content-Length" && k != "Date" {
+				w.Header()[k] = v
+			}
+		}
+		w.WriteHeader(code)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func TestPublishFixtureReplies(t *testing.T) {
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken)
+	for _, name := range []string{"publish-reply.full.txt", "auth-valid-token.txt"} {
+		if err := (Publisher{URL: ntfyReplay(t, name).URL, AccessToken: ntfyAccess}).Publish(context.Background(), n); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	cases := []struct {
+		name  string
+		class error
+	}{
+		{"auth-no-token.txt", ErrNotAllowed},
+		{"auth-wrong-token.txt", ErrNotAllowed},
+		{"rejected-rate-limited.full.txt", ErrRateLimited},
+		{"rejected-four-actions.txt", ErrRejected},
+		{"rejected-topic-invalid-slash.txt", ErrRejected},
+		{"rejected-priority-9.txt", ErrRejected},
+		{"rejected-message-8000-body-too-large.txt", ErrRejected},
+		{"rejected-message-5000-attachments-disabled.txt", ErrRejected},
+		{"rejected-message-5000.txt", ErrUnavailable},
+	}
+	for _, c := range cases {
+		err := (Publisher{URL: ntfyReplay(t, c.name).URL, AccessToken: ntfyAccess}).Publish(context.Background(), n)
+		ntfyAssertClass(t, c.name, err, c.class)
+		var se *StatusError
+		if !errors.As(err, &se) {
+			t.Errorf("%s: %v is not a *StatusError", c.name, err)
 			continue
 		}
-		if errors.Is(err, ErrRejected) != f.rejected {
-			t.Errorf("%s: errors.Is(ErrRejected) = %v, want %v (%v)", f.name, !f.rejected, f.rejected, err)
+		wantRetry := time.Duration(0)
+		if errors.Is(c.class, ErrRateLimited) {
+			wantRetry = time.Hour // the recording's Retry-After: 3600
 		}
+		if se.RetryAfter != wantRetry {
+			t.Errorf("%s: RetryAfter = %v, want %v", c.name, se.RetryAfter, wantRetry)
+		}
+	}
+}
+
+func TestPublishRetryAfterIsBounded(t *testing.T) {
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, "", "")
+	cases := []struct {
+		header string
+		want   time.Duration
+	}{
+		{"", 0},
+		{"0", 0},
+		{"30", 30 * time.Second},
+		{" 45 ", 45 * time.Second},
+		{"3600", time.Hour},
+		{"86400", MaxRetryAfter},
+		{"99999999999999999999", MaxRetryAfter},
+		{"-5", 0},
+		{"junk", 0},
+		{"1.5", 0},
+		{"Wed, 21 Oct 2026 07:28:00 GMT", 0},
+	}
+	for _, c := range cases {
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if c.header != "" {
+				w.Header().Set("Retry-After", c.header)
+			}
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		err := (Publisher{URL: s.URL}).Publish(context.Background(), n)
+		s.Close()
+		var se *StatusError
+		if !errors.As(err, &se) || !errors.Is(err, ErrRateLimited) || se.RetryAfter != c.want {
+			t.Errorf("Retry-After %q: err %v, RetryAfter %v, want %v", c.header, err, se, c.want)
+		}
+	}
+	if MaxRetryAfter > time.Hour {
+		t.Errorf("MaxRetryAfter = %v, want at most an hour", MaxRetryAfter)
+	}
+}
+
+// ntfyLimitsServer enforces the limits probe N1 observed on ntfy 2.38.0: a
+// body of about 8 KiB or more is 413, a message of 4096 bytes or more is 400,
+// more than three actions is 400, a topic outside [-_A-Za-z0-9]{1,64} is 400.
+func ntfyLimitsServer(t *testing.T) (*httptest.Server, *[]byte) {
+	t.Helper()
+	topic := regexp.MustCompile(`^[-_A-Za-z0-9]{1,64}$`)
+	var last []byte
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		last = body
+		var m struct {
+			Topic   string `json:"topic"`
+			Message string `json:"message"`
+			Actions []any  `json:"actions"`
+		}
+		switch {
+		case len(body) >= 8192:
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+		case json.Unmarshal(body, &m) != nil, len(m.Message) >= 4096, len(m.Actions) > 3, !topic.MatchString(m.Topic):
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(s.Close)
+	return s, &last
+}
+
+func TestPushFitsNtfyByteLimits(t *testing.T) {
+	s, last := ntfyLimitsServer(t)
+	for _, fill := range []string{"😀", "€", `"`, `\`, "é\"", "😀\"", "😀\\", "a"} {
+		long := strings.Repeat(fill, 5000)
+		d := model.Decision{
+			ID: "D-117", Repo: "/src/" + long, Question: long, Recommendation: "B",
+			Options: []model.Option{
+				{Key: "A", Label: long}, {Key: "B", Label: long}, {Key: "C", Label: long}, {Key: "D", Label: long},
+			},
+			Mode: model.ModeBlocking, Reversibility: model.ReversCheap,
+		}
+		dn := DecisionPush(d, ntfyTopic, "https://"+strings.Repeat("h", 180)+".ts.net/v1/answer", ntfyToken)
+		rn := ReviewPush(model.Review{ID: "R-3", TaskID: "T-42", Summary: long, Tests: model.TestsPassed}, model.Task{Title: long}, ntfyTopic)
+		for _, n := range []Notification{dn, rn} {
+			if !utf8.ValidString(n.Message) || len(n.Message) >= 4096 {
+				t.Errorf("fill %q: message of %d bytes (valid UTF-8 %v)", fill, len(n.Message), utf8.ValidString(n.Message))
+			}
+			if err := (Publisher{URL: s.URL}).Publish(context.Background(), n); err != nil {
+				t.Errorf("fill %q: the limits server refused a %d-byte body: %v", fill, len(*last), err)
+			}
+			if len(*last) > maxBody {
+				t.Errorf("fill %q: body of %d bytes, bound %d", fill, len(*last), maxBody)
+			}
+		}
+		if !strings.HasSuffix(dn.Message, "…") || !strings.HasSuffix(rn.Message, "…") {
+			t.Errorf("fill %q: a cut message does not end in an ellipsis", fill)
+		}
+	}
+	// A message that fits is not cut.
+	if n := DecisionPush(ntfyTicket(3), ntfyTopic, "", ""); strings.Contains(n.Message, "…") {
+		t.Errorf("short message cut: %q", n.Message)
 	}
 }
 
@@ -485,7 +691,7 @@ func ntfyRedirect(t *testing.T, p Publisher, n Notification) (int32, error) {
 		http.Redirect(w, r, second.URL+"/elsewhere", http.StatusTemporaryRedirect)
 	}))
 	t.Cleanup(first.Close)
-	p.URL = first.URL + "/secret-path"
+	p.URL = first.URL
 	err := p.Publish(context.Background(), n)
 	return second.hits.Load(), err
 }
@@ -518,7 +724,7 @@ func ntfyHang(t *testing.T, p Publisher, n Notification) (time.Duration, error) 
 		}
 	}))
 	t.Cleanup(func() { close(release); s.Close() })
-	p.URL = s.URL + "/secret-path"
+	p.URL = s.URL
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -593,7 +799,7 @@ func TestPublishReadsAtMost4KiB(t *testing.T) {
 
 func TestPublishErrorLeaksNothing(t *testing.T) {
 	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken)
-	secrets := []string{ntfyToken, ntfyAccess, ntfyTopic, n.Message, "Which queue", "secret-path", "Redis"}
+	secrets := []string{ntfyToken, ntfyAccess, ntfyTopic, n.Message, "Which queue", "Redis", "127.0.0.1", "http:"}
 	for _, f := range ntfyFailures() {
 		err := f.publish(t, Publisher{AccessToken: ntfyAccess}, n)
 		if err == nil {
@@ -616,7 +822,7 @@ func TestPublishRefusesBadNotification(t *testing.T) {
 	}{
 		{"newline in title", func(n *Notification, _ *Publisher) { n.Title = "a\nX-Injected: 1" }},
 		{"CR in title", func(n *Notification, _ *Publisher) { n.Title = "a\rb" }},
-		{"U+2028 in title", func(n *Notification, _ *Publisher) { n.Title = "a b" }},
+		{"U+2028 in title", func(n *Notification, _ *Publisher) { n.Title = "a\u2028b" }},
 		{"long title", func(n *Notification, _ *Publisher) { n.Title = strings.Repeat("t", MaxPushTitle+1) }},
 		{"ESC in message", func(n *Notification, _ *Publisher) { n.Message = "a\x1b[2Jb" }},
 		{"long message", func(n *Notification, _ *Publisher) { n.Message = strings.Repeat("m", MaxPushText+1) }},
@@ -636,15 +842,29 @@ func TestPublishRefusesBadNotification(t *testing.T) {
 		{"server url with user info", func(_ *Notification, p *Publisher) {
 			p.URL = strings.Replace(p.URL, "http://", "http://u:"+ntfyAccess+"@", 1)
 		}},
+		{"server url with a topic path", func(_ *Notification, p *Publisher) { p.URL += "/" + ntfyTopic }},
+		{"server url with a deeper path", func(_ *Notification, p *Publisher) { p.URL += "/a/" }},
+		{"server url with a query", func(_ *Notification, p *Publisher) { p.URL += "/?topic=x" }},
+		{"message over the byte bound", func(n *Notification, _ *Publisher) { n.Message = strings.Repeat("😀", 1000) }},
+		{"message of quotes over the byte bound", func(n *Notification, _ *Publisher) { n.Message = strings.Repeat(`"`, 1900) }},
+		{"long action url", func(n *Notification, _ *Publisher) { n.Actions[0].URL = "https://h/" + strings.Repeat("u", 600) }},
+		{"body over the bound", func(n *Notification, _ *Publisher) {
+			for i := range n.Actions {
+				n.Actions[i].Body = strings.Repeat(`"`, maxActionBody)
+				n.Actions[i].URL = "https://h/" + strings.Repeat("u", maxActionURL-10)
+			}
+			n.Message = strings.Repeat("😀", 890)
+		}},
 	}
 	for _, c := range cases {
 		s := newNtfyServer(t, http.StatusOK, nil)
 		n, p := good(), Publisher{URL: s.URL, AccessToken: ntfyAccess}
 		c.change(&n, &p)
 		err := p.Publish(context.Background(), n)
-		if !errors.Is(err, ErrInvalid) || !errors.Is(err, ErrRejected) {
-			t.Errorf("%s: err %v, want ErrInvalid and ErrRejected", c.name, err)
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: err %v, want ErrInvalid", c.name, err)
 		}
+		ntfyAssertClass(t, c.name, err, ErrRejected)
 		if s.hits.Load() != 0 {
 			t.Errorf("%s: the server saw the request", c.name)
 		}

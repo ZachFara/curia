@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -32,6 +33,18 @@ const (
 	MaxPushTitle = 80   // runes of a title
 	MaxPushLabel = 30   // runes of a button label
 	PublishLimit = 5 * time.Second
+	// MaxRetryAfter bounds the wait a 429's Retry-After may ask for.
+	MaxRetryAfter = time.Hour
+)
+
+// Byte bounds, from probe N1 on ntfy 2.38.0: a message of 4096 bytes or
+// more is refused (or turned into an attachment), and a JSON body between
+// 8,097 and 8,897 bytes starts getting 413.
+const (
+	maxMessageBytes = 3584 // the message as JSON-encoded, so also its raw bytes
+	maxBody         = 7168 // the whole JSON body
+	maxActionBody   = 256  // bytes of an action's body
+	maxActionURL    = 512  // bytes of an action's URL
 )
 
 const (
@@ -42,6 +55,7 @@ const (
 	maxReply        = 4 << 10
 	tokenBytes      = 32
 	userAgent       = "curia"
+	ellipsis        = "…"
 )
 
 var (
@@ -106,7 +120,7 @@ func DecisionPush(d model.Decision, topic, answerURL, token string) Notification
 	n := Notification{
 		Topic:    topic,
 		Title:    sanitize.Line(d.ID+repoPart(d.Repo)+": decision needed", MaxPushTitle),
-		Message:  sanitize.Text(strings.Join(lines, "\n"), MaxPushText),
+		Message:  fitMessage(sanitize.Text(strings.Join(lines, "\n"), MaxPushText)),
 		Priority: priorityTicket,
 	}
 	if answerURL != "" && token != "" && !irreversible {
@@ -161,7 +175,7 @@ func ReviewPush(r model.Review, t model.Task, topic string) Notification {
 	return Notification{
 		Topic:    topic,
 		Title:    sanitize.Line(r.ID+" "+r.TaskID+": ready for review", MaxPushTitle),
-		Message:  sanitize.Text(strings.Join(lines, "\n"), MaxPushText),
+		Message:  fitMessage(sanitize.Text(strings.Join(lines, "\n"), MaxPushText)),
 		Priority: priorityDefault,
 	}
 }
@@ -182,14 +196,60 @@ func HashToken(plain string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ErrRejected is wrapped when ntfy answered 4xx other than 429: sending the same message again cannot help.
-var ErrRejected = errors.New("notify: ntfy rejected the message")
+// The classes of a failed Publish. Every error Publish returns matches
+// exactly one of ErrNotAllowed, ErrRateLimited, ErrRejected and
+// ErrUnavailable with errors.Is, except that ErrNotAllowed errors match
+// ErrRejected too, since neither is worth sending again.
+var (
+	// ErrRejected is wrapped when ntfy answered 4xx other than 429: sending the same message again cannot help.
+	ErrRejected = errors.New("notify: ntfy rejected the message")
+	// ErrNotAllowed is wrapped for 401 and 403: the access token is missing,
+	// wrong or lacks write access to the topic. Do not retry; tell the user.
+	ErrNotAllowed = errors.New("notify: ntfy refused the access token (check CURIA_NTFY_TOKEN and the topic's access)")
+	// ErrRateLimited is wrapped for 429; the *StatusError carries Retry-After.
+	ErrRateLimited = errors.New("notify: ntfy rate limit reached")
+	// ErrUnavailable is wrapped for a transport failure, a timeout, a 3xx
+	// (redirects are not followed) and a 5xx: worth retrying later.
+	ErrUnavailable = errors.New("notify: ntfy unreachable or failing")
+)
 
 // ErrInvalid is wrapped when Publish refused to send a notification or to
 // use a Publisher field (a control rune in a title, a label, a token or the
 // access token, a length over its limit, a topic or URL of the wrong shape).
-// Such an error wraps ErrRejected too: sending it again cannot help.
+// Such an error matches ErrRejected too: sending it again cannot help.
 var ErrInvalid = errors.New("notify: notification not sent")
+
+// StatusError is a reply from ntfy that is not 2xx. Its text holds only the
+// status code and its class.
+type StatusError struct {
+	Code int
+	// RetryAfter is a 429's Retry-After in whole seconds, at most
+	// MaxRetryAfter; 0 when absent, not a number of seconds, or not a 429.
+	RetryAfter time.Duration
+}
+
+func (e *StatusError) class() error {
+	switch {
+	case e.Code == http.StatusUnauthorized || e.Code == http.StatusForbidden:
+		return ErrNotAllowed
+	case e.Code == http.StatusTooManyRequests:
+		return ErrRateLimited
+	case e.Code >= 400 && e.Code < 500:
+		return ErrRejected
+	default:
+		return ErrUnavailable
+	}
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%v (status %d)", e.class(), e.Code)
+}
+
+// Is matches the error's class, and ErrRejected for ErrNotAllowed.
+func (e *StatusError) Is(target error) bool {
+	c := e.class()
+	return target == c || c == ErrNotAllowed && target == ErrRejected
+}
 
 // invalidError names what was wrong, never its value.
 type invalidError struct{ what string }
@@ -206,7 +266,9 @@ type sendError struct {
 	err  error
 }
 
-func (e sendError) Error() string { return "notify: ntfy request failed: " + e.kind }
+func (e sendError) Error() string { return ErrUnavailable.Error() + ": " + e.kind }
+
+func (e sendError) Is(target error) bool { return target == ErrUnavailable }
 
 func (e sendError) Unwrap() error { return e.err }
 
@@ -233,18 +295,23 @@ func directTransport() *http.Transport {
 func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // Publish sends n in one attempt bounded by PublishLimit (or ctx's earlier
-// deadline). It returns nil for 2xx, an error wrapping ErrRejected for a 4xx
-// other than 429 or a notification it refuses to send (ErrInvalid), and a
-// plain error otherwise; no error text holds the URL, a token or the body.
-// The reply is read up to 4 KiB and discarded. It never retries.
+// deadline), as a JSON POST to the server's base URL "/" with the topic in
+// the body. It returns nil for 2xx; otherwise an error of one class (see
+// ErrRejected), a *StatusError when ntfy answered. No error text holds the
+// URL, a token or the body. The reply is read up to 4 KiB and discarded. It
+// never retries.
 func (p Publisher) Publish(ctx context.Context, n Notification) error {
+	target, err := baseURL(p.URL)
+	if err != nil {
+		return err
+	}
 	body, err := encode(p, n)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, PublishLimit)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.URL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return invalidError{"the server URL does not parse"}
 	}
@@ -259,7 +326,42 @@ func (p Publisher) Publish(ctx context.Context, n Notification) error {
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxReply))
 	_ = resp.Body.Close()
-	return statusError(resp.StatusCode)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	se := &StatusError{Code: resp.StatusCode}
+	if se.Code == http.StatusTooManyRequests {
+		se.RetryAfter = retryAfter(resp.Header.Get("Retry-After"))
+	}
+	return se
+}
+
+// baseURL is "<scheme>://<host>/" for a server URL with no path (or "/"), no
+// query, no fragment and no user info. A JSON body POSTed to /<topic> is
+// stored by ntfy as plain text, so the request URL never carries a path.
+func baseURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+		return "", invalidError{"the server URL must be http or https with a host and no user info"}
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		return "", invalidError{"the server URL must be the base URL, with no path, query or fragment"}
+	}
+	return u.Scheme + "://" + u.Host + "/", nil
+}
+
+// retryAfter reads a Retry-After of whole seconds, bounded by MaxRetryAfter.
+// An HTTP date (ntfy sends seconds) or anything else is 0.
+func retryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.Trim(v, "0123456789") != "" {
+		return 0
+	}
+	if len(v) > 6 { // more than 999999 s is past the bound anyway
+		return MaxRetryAfter
+	}
+	n, _ := strconv.Atoi(v)
+	return min(time.Duration(n)*time.Second, MaxRetryAfter)
 }
 
 // client is the caller's client with redirects turned off, or defaultClient.
@@ -270,19 +372,6 @@ func (p Publisher) client() *http.Client {
 	c := *p.Client
 	c.CheckRedirect = noRedirect
 	return &c
-}
-
-func statusError(code int) error {
-	switch {
-	case code >= 200 && code < 300:
-		return nil
-	case code >= 300 && code < 400:
-		return fmt.Errorf("notify: ntfy answered status %d, a redirect, which is not followed", code)
-	case code >= 400 && code < 500 && code != http.StatusTooManyRequests:
-		return fmt.Errorf("%w (status %d)", ErrRejected, code)
-	default:
-		return fmt.Errorf("notify: ntfy answered status %d", code)
-	}
 }
 
 // transportKind names a transport failure without quoting it.
@@ -317,8 +406,10 @@ func unwrapURL(err error) error {
 	return err
 }
 
-// The request body as ntfy documents JSON publishing. This is the one place
-// the wire shape lives; probe N1 (held) will confirm it against a real server.
+// The request body: ntfy's JSON publishing, as probe N1 recorded ntfy 2.38.0
+// accepting it (testdata/ntfy/publish-accepted.json). This is the one place
+// the wire shape lives. "clear" belongs inside an action; ntfy ignores a
+// top-level one, so none is sent.
 type wireAction struct {
 	Action  string            `json:"action"`
 	Label   string            `json:"label"`
@@ -362,13 +453,14 @@ func encode(p Publisher, n Notification) ([]byte, error) {
 	if err := enc.Encode(w); err != nil {
 		return nil, invalidError{"the body does not encode"}
 	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+	body := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+	if len(body) > maxBody {
+		return nil, invalidError{"the body is too large"}
+	}
+	return body, nil
 }
 
 func checkPublisher(p Publisher) error {
-	if !httpURL(p.URL) {
-		return invalidError{"the server URL must be http or https with a host and no user info"}
-	}
 	if len(p.AccessToken) > maxAccessToken || !oneLine(p.AccessToken) {
 		return invalidError{"the access token is too long or holds a control character"}
 	}
@@ -381,7 +473,7 @@ func checkNotification(n Notification) error {
 		return invalidError{"the topic must match " + pushTopic.String()}
 	case !oneLine(n.Title) || utf8.RuneCountInString(n.Title) > MaxPushTitle:
 		return invalidError{"the title is too long or holds a control character"}
-	case !textLines(n.Message) || utf8.RuneCountInString(n.Message) > MaxPushText:
+	case !textLines(n.Message) || utf8.RuneCountInString(n.Message) > MaxPushText || jsonLen(n.Message) > maxMessageBytes:
 		return invalidError{"the message is too long or holds a control character"}
 	case n.Priority < 0 || n.Priority > 5:
 		return invalidError{"the priority must be 1 to 5"}
@@ -402,9 +494,9 @@ func checkAction(a Action) error {
 		return invalidError{"an action label is too long or holds a control character"}
 	case !pushToken.MatchString(a.Token):
 		return invalidError{"an action token is not 43 characters of base64url"}
-	case !httpURL(a.URL):
-		return invalidError{"an action URL must be http or https with a host and no user info"}
-	case !oneLine(a.Body) || len(a.Body) > MaxPushText:
+	case !httpURL(a.URL) || len(a.URL) > maxActionURL:
+		return invalidError{"an action URL must be http or https with a host and no user info, at most 512 bytes"}
+	case !oneLine(a.Body) || len(a.Body) > maxActionBody:
 		return invalidError{"an action body is too long or holds a control character"}
 	}
 	return nil
@@ -421,7 +513,7 @@ func httpURL(raw string) bool {
 // paragraph separator.
 func oneLine(s string) bool {
 	return utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool {
-		return unicode.IsControl(r) || r == ' ' || r == ' '
+		return unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
 	})
 }
 
@@ -433,4 +525,42 @@ func textLines(s string) bool {
 		}
 	}
 	return true
+}
+
+// fitMessage cuts a cleaned message on a rune boundary so that, JSON-encoded,
+// it is at most maxMessageBytes, the last rune an ellipsis. A message that
+// fits is returned as it is.
+func fitMessage(s string) string {
+	if jsonLen(s) <= maxMessageBytes {
+		return s
+	}
+	budget, n := maxMessageBytes-len(ellipsis), 0
+	for i, r := range s {
+		n += runeJSONLen(r)
+		if n > budget {
+			return s[:i] + ellipsis
+		}
+	}
+	return s // unreachable: s did not fit
+}
+
+// jsonLen is the length of s inside a JSON string as encoding/json writes it
+// with HTML escaping off.
+func jsonLen(s string) int {
+	n := 0
+	for _, r := range s {
+		n += runeJSONLen(r)
+	}
+	return n
+}
+
+func runeJSONLen(r rune) int {
+	switch {
+	case r == '"' || r == '\\' || r == '\n' || r == '\r' || r == '\t' || r == '\b' || r == '\f':
+		return 2
+	case r < 0x20 || r == ' ' || r == ' ' || r == utf8.RuneError:
+		return 6
+	default:
+		return utf8.RuneLen(r)
+	}
 }

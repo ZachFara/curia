@@ -1,0 +1,3 @@
+HTTP 400
+{"code":40018,"http":400,"error":"invalid request: actions invalid; only 3 actions allowed","link":"https://ntfy.sh/docs/publish/#action-buttons"}
+

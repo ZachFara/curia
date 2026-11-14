@@ -1,0 +1,55 @@
+{
+    "id": "5rvtrsStO1yk",
+    "time": 1794698885,
+    "expires": 1794742085,
+    "event": "message",
+    "topic": "curia-probe-one",
+    "title": "D-1 api-server: decision needed",
+    "message": "Decision D-1 needs you\nA: option A\nB: option B\nC: option C\nRecommended: A",
+    "priority": 4,
+    "tags": [
+        "curia",
+        "decision"
+    ],
+    "actions": [
+        {
+            "id": "4tXG4vg2Xv",
+            "action": "http",
+            "label": "A: option A",
+            "clear": true,
+            "url": "http://127.0.0.1:56841/v1/answer",
+            "method": "POST",
+            "headers": {
+                "Authorization": "Bearer TOKEN",
+                "Content-Type": "application/json"
+            },
+            "body": "{\"decision\":\"D-1\",\"key\":\"A\"}"
+        },
+        {
+            "id": "XM89CRNu1R",
+            "action": "http",
+            "label": "B: option B",
+            "clear": true,
+            "url": "http://127.0.0.1:56841/v1/answer",
+            "method": "POST",
+            "headers": {
+                "Authorization": "Bearer TOKEN",
+                "Content-Type": "application/json"
+            },
+            "body": "{\"decision\":\"D-1\",\"key\":\"B\"}"
+        },
+        {
+            "id": "qZWRQ1mgzn",
+            "action": "http",
+            "label": "C: option C",
+            "clear": true,
+            "url": "http://127.0.0.1:56841/v1/answer",
+            "method": "POST",
+            "headers": {
+                "Authorization": "Bearer TOKEN",
+                "Content-Type": "application/json"
+            },
+            "body": "{\"decision\":\"D-1\",\"key\":\"C\"}"
+        }
+    ]
+}
