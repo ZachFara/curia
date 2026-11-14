@@ -1,6 +1,140 @@
 # PROGRESS
 
-This file mirrors the plans for humans; it does not replace them. Task order, interfaces and tests come from the current plan, `docs/superpowers/plans/2026-11-11-curia-plan-2-decisions.md`. Plan 1 (`docs/superpowers/plans/2026-11-11-curia-plan-1-foundation.md`) is complete; its record is kept below.
+This file mirrors the plans for humans; it does not replace them. Task order, interfaces and tests come from the current plan, `docs/superpowers/plans/2026-11-13-curia-plan-3-tasks-and-routing.md`. Plan 2 (`docs/superpowers/plans/2026-11-11-curia-plan-2-decisions.md`) is complete; its record is kept below. Plan 1 (`docs/superpowers/plans/2026-11-11-curia-plan-1-foundation.md`) is complete; its record is kept below.
+
+# Plan 3 (Tasks, Spawning, Teams and Message Routing): setup in progress
+
+## Plan 3 status
+
+- **Plan:** `docs/superpowers/plans/2026-11-13-curia-plan-3-tasks-and-routing.md` (31 tasks, 7 waves). Integration branch: `plan-3` (cut from `main` after the plan's PR #40). Every task PR goes into `plan-3`.
+- **Setup (plan section 6):** PR `chore/plan3-setup` into `plan-3` carries the shared-file changes: depguard rules and layout allow-list for `task`, `message`, `route` and `team` (decision 0015), CI on `plan-3`, AGENTS.md, decision records 0015 to 0020, and this section. Section 6.7 (the test guard in `cmd/curia/main_test.go`) and 6.8 (fixtures from the probes) are listed below as not done by this PR.
+- **Live probes P1 to P8 (plan section 15) are still running.** Their results become Rulings from 97 and AGENTS.md entries, and may amend tasks before dispatch. Wave 1 does not start until they have reported and the setup PR is merged.
+- **Addressed by this plan:** Plan 2 Open Question 8 (repo identity across worktrees: Task 14, decision 0020); Plan 2 final-review M12 (plan decision 9: `spawn` does not set `CURIA_SESSION_ID`); Plan 2 re-review m2 (a `<task-notification>` prompt confirms nothing: Task 18); Plan 1 live-check defect 13 (narrow dashboard drops columns: Task 30).
+- **Task 21 (message key `prefix m`) must follow Ruling 95:** tmux binds `m` to mark-pane by default, so Curia never rebinds a key the user has already bound; the key is configurable and a taken key is reported.
+- **Reviews:** only at the final PR (owner's decision of 2026-11-13, above). Task PRs merge on the implementer's report plus green CI.
+
+## Plan 3 waves
+
+Every task's done criteria also include: `make check` passes in the task's worktree; the PR into `plan-3` uses the PR template; CI (`check`) is green; no shared file is touched (plan section 2), except that Task 3 edits `cmd/curia/main_test.go` as plan section 6.7 says. The tests named per task are those of the plan's task text; the plan is the authority.
+
+Model column: the plan's suggested models (section 7), **suggested, confirmed at dispatch**. Dependencies (plan section 7): 6 needs 1, 2; 7 needs 1; 8 needs 1; 9 needs 1; 11 needs 6, 7; 12 needs 7, 8; 13 needs 4, 8; 14 needs 8; 15 needs 8; 16 needs 5, 6, 8, 14; 17 needs 7, 12; 18 needs 7, 12, 14; 19 needs 3, 6, 8, 14; 20 needs 6; 21 needs 10; 22 needs 4, 13; 23 needs 11; 24 needs 3, 19; 25 needs 3, 12, 17; 26 needs 12, 13, 22; 27 needs 8, 11, 12, 13, 17, 22, 23; 28 needs 11, 12; 29 needs 12; 30 needs 8, 9, 19, 20, 22; 31 needs everything.
+
+### Before wave 1
+
+| Step | Owner | Done criteria | Status |
+| --- | --- | --- | --- |
+| Live probes P1 to P8 | orchestrator | each run as plan section 15 prescribes (private tmux server, temp `HOME` and `CURIA_DB`, `claude --settings <temp file> --setting-sources project`); results recorded as Rulings from 97 and in AGENTS.md; the tasks each probe names amended before dispatch; fixtures of 6.8 committed | running |
+| Setup PR (plan section 6) | orchestrator | `chore/plan3-setup` merged into `plan-3`; `make check` and CI green | open |
+
+### Wave 1
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 1 | Types and config | Sonnet (suggested, confirmed at dispatch) | plan task 1 complete; `TestRoutingDefaults`, `TestLoadRoutingOverrides`, `TestBadRoutingRejected` pass under `-race` | not started |
+| 2 | Sanitiser: `Block` | Sonnet (suggested, confirmed at dispatch) | plan task 2 complete; `TestBlockKeepsLayout`, `TestBlockStripsEscapes`, `TestBlockLimitIsBytes`, `TestBlockIdempotent`, `TestBlockInHostileCorpus` pass under `-race` | not started |
+| 3 | tmux: windows and scrollback | Opus (suggested, confirmed at dispatch) | plan task 3 complete; `TestNewWindowRefusesBadInput`, `TestNewWindowArgvIsDirect`, `TestNewWindowCreatesSessionThenReusesIt`, `TestNewWindowConcurrentFirstUse`, `TestNewWindowPaneEndsWithCommand`, `TestCaptureTailInRealTmux`, `TestFakeRecordsNewWindowAndCaptureTail` pass under `-race` | not started |
+| 4 | Team config | Sonnet (suggested, confirmed at dispatch) | plan task 4 complete; `TestParseCapturedConfig`, `TestParseHostile`, `TestAssignBySessionIDThenPane`, `TestAssignLeadByLeadSessionID`, `TestAssignNoMatchIsSolo`, `TestAssignSkipsEndedAndStale`, `TestAssignFirstTeamWins` pass under `-race` | not started |
+| 5 | Backlog.md parser | Sonnet (suggested, confirmed at dispatch) | plan task 5 complete; `TestParseCapturedFiles`, `TestParseInlineAndBlockLabels`, `TestParseQuotedTitle`, `TestParseTitleFallsBackToFileName`, `TestParseNotATask`, `TestParseHostile` pass under `-race` | not started |
+
+### Wave 2
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 6 | Task rules | Sonnet (suggested, confirmed at dispatch) | plan task 6 complete; `TestValidID`, `TestValidateReportsEveryProblem`, `TestNormalizeKeepsBodyLayout`, `TestSlug`, `TestBranchAndPaths`, `TestSessionName`, `TestDeriveTable`, `TestCardsOrderAndLeadFirst`, `TestBriefWording`, `TestBriefKeepsBody` pass under `-race` | not started |
+| 7 | Message rules | Opus (suggested, confirmed at dispatch) | plan task 7 complete; `TestNormalize`, `TestParseAddress`, `TestTypedLineWording`, `TestTypedLineIsInert`, `TestAgentWordingNeverSaysUser`, `TestTypedLineCutsLongText`, `TestStopBlock`, `TestFit`, `TestNames` pass under `-race` | not started |
+| 8 | Store: tasks | Opus (suggested, confirmed at dispatch) | plan task 8 complete; `TestMigrationAddsTasksAndMessages`, `TestMigrationOnPlan2Database`, `TestSessionTaskAndWorktreeRoundTrip`, `TestOldUpsertKeepsNewColumns`, `TestUpsertNeverWritesTeamColumns`, `TestCreateAllocatesSequentialIDs`, `TestTaskRoundTrip`, `TestCreateRejectsDerivedStatus`, `TestConcurrentCreatesAllocateDistinctIDs`, `TestImportUpsertsBySourceRef`, `TestUpdateTaskLosesNoUpdates`, `TestUpdateTaskRollsBackOnError`, `TestClaimLaunchOneWins`, `TestTaskSessionsLiveOnly`, `TestOpenBlockingByTask`, `TestListTasksFilters` pass under `-race` | not started |
+| 9 | Fleet units | Sonnet (suggested, confirmed at dispatch) | plan task 9 complete; `TestUnitsSoloOnly`, `TestUnitsGroupsTeam`, `TestUnitsRankByWorst`, `TestUnitsTeamWithoutLeadIsSolo`, `TestUnitsTwoTeams`, `TestUnitsDoesNotMutateInput` pass under `-race` | not started |
+| 10 | Install: fifth tool rule | Sonnet (suggested, confirmed at dispatch) | plan task 10 complete; `TestAllowToolsAddsFifthToAPlan2Install`, `TestUnhooksRemovesTheFiveToolRules`, `TestInstallAllowsFiveToolsByDefault`, `TestUninstallSaysHowToUnbindBothKeys` pass under `-race` | not started |
+
+### Wave 3
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 11 | Route rules | Sonnet (suggested, confirmed at dispatch) | plan task 11 complete; `TestCandidatesKeysAndLabels`, `TestCandidatesTeammateBecomesLead`, `TestPromptHoldsNoLastUpdate`, `TestPromptEscapesMessage`, `TestResolveOrder`, `TestResolveSeveralAndNone`, `TestSettleTable`, `TestParseSuggestionAcceptsCaptured`, `TestParseSuggestionRejects`, `TestParseSuggestionFindsObjectInFence`, `TestGateNeedsFiftyLabels`, `TestAutoTable`, `TestAutoCloseCallAndMissingConfidence`, `TestSamplingEveryTenth`, `TestTripped` pass under `-race` | not started |
+| 12 | Store: messages | Opus (suggested, confirmed at dispatch) | plan task 12 complete; `TestMessageRoundTrip`, `TestCreateAllocatesMessageIDs`, `TestMessageTransitionsTable`, `TestUndoRacesRelease`, `TestSweepCancelsOrphanedHeld`, `TestClaimMessageTypingRefusals`, `TestOneUnconfirmedLineAcrossKinds`, `TestRequeueMessageOnlyUndoesTyping`, `TestCheckMessagesClaimsAndConfirms`, `TestMessageClaimedExactlyOnce`, `TestStopStateOneStatement`, `TestTxClaimMessagesFitsBudget`, `TestTxClaimMessagesRollsBackOnError`, `TestConfirmTypedMessages`, `TestRouteLabelsNewestFirst`, `TestRoutingStateSetOnceAndReset`, `TestBadgeExtras` pass under `-race` | not started |
+| 13 | Store: rules and teams | Opus (suggested, confirmed at dispatch) | plan task 13 complete; `TestCreateRuleIsDecidedPrecedent`, `TestRuleScopeTable`, `TestIdenticalRuleCollapses`, `TestRuleCanBeRescopedAndSuperseded`, `TestRuleNeverQueuesDelivery`, `TestFTSStaysInSyncWithRules`, `TestSetTeamsSetsAndClears`, `TestSetTeamsWritesOnlyChanges`, `TestTeammateInheritsLeadTask`, `TestSetTeamsSurvivesConcurrentHook` pass under `-race` | not started |
+| 14 | Hook: task link and main repository | Opus (suggested, confirmed at dispatch) | plan task 14 complete; `TestSessionStartLinksTask`, `TestTaskSurvivesClear`, `TestTaskFilledMidRun`, `TestNoTaskWithoutEnv`, `TestSessionInLinkedWorktreeStoresMainRepo`, `TestCompactionKeepsRepoAndTask`, `TestGitInfoMainWorktree`, `TestGitInfoLinkedWorktree`, `TestGitInfoSubdirectoryOfWorktree`, `TestGitInfoIsOneProcess`, `TestHookReadsTaskFromEnvironment`, `TestHookLatencyUnchanged` pass under `-race` | not started |
+| 15 | `ls --json` keys | Sonnet (suggested, confirmed at dispatch) | plan task 15 complete; its tests pass under `-race` | not started |
+
+### Wave 4
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 16 | `curia task` | Opus (suggested, confirmed at dispatch) | plan task 16 complete; `TestTaskAddStoresMainRepoAndBase`, `TestTaskAddRefusesLinkedWorktreeAndNonRepo`, `TestTaskAddDetachedHeadNeedsBase`, `TestTaskAddBodyFromFileAndStdin`, `TestTaskAddReportsEveryProblem`, `TestTaskLsJSONGolden`, `TestTaskLsDerivesFromSessions`, `TestTaskLsStatusFilterAndAll`, `TestTaskLsTableIsSanitised`, `TestTaskEditFlags`, `TestTaskEditThroughEditor`, `TestTaskReady`, `TestTaskImportBacklogMD`, `TestTaskImportBounds` pass under `-race` | not started |
+| 17 | Deliver a message | Opus (suggested, confirmed at dispatch) | plan task 17 complete; `TestIdleSessionGetsTypedMessage`, `TestMessageNeverTypedIntoWaitingOrWorking`, `TestMessagePaneRefusals`, `TestMessageStateChangeAfterCaptureIsNotTyped`, `TestMessageSendKeysFailureRequeues`, `TestMessagePartialSendKeepsClaim`, `TestMessageBlockedByUnconfirmedAnswer`, `TestAnswerBlockedByUnconfirmedMessage`, `TestMessageToRuleKindIsNotTyped`, `TestMessageTmuxUnreachableLeavesQueued`, `TestTypedMessageReachesRealPane`, `TestHostileMessageIsInertInARealShell` pass under `-race` | not started |
+| 18 | Hook: messages | Opus (suggested, confirmed at dispatch) | plan task 18 complete; `TestStopClaimsQueuedMessageAndBlocks`, `TestStopWithAnswersAndMessages`, `TestStopReasonUnchangedWithoutMessages`, `TestStopLeavesMessagesThatDoNotFit`, `TestSecondStopDoesNotRedeliverMessages`, `TestTwoStopHooksOneDeliversMessage`, `TestStopDoesNotClaimHeldOrOthersMessages`, `TestStopNeverDeliversUnconfirmedTypedMessage`, `TestOtherEventsNeverClaimMessages`, `TestPromptConfirmsTypedMessage`, `TestTaskNotificationConfirmsNothing`, `TestFailedMessageClaimStillDeliversAnswers`, `TestStopOutputSurvivesHostileMessage`, `TestStopLatencyWithMessages`, `TestStdoutOnlyOnBlockedStopWithMessages`, `TestHookExitsZeroAndSilentWhenMessageQueryFails` pass under `-race` | not started |
+| 19 | Spawn, launch and worktrees | Opus (suggested, confirmed at dispatch) | plan task 19 complete; `TestWorktreeAddNewAndExistingBranch`, `TestWorktreeIsOurs`, `TestWorktreeRemoveRefusesDirtyWithoutForce`, `TestWorktreeCommitAllTakesUntracked`, `TestBranchMergedAndDelete`, `TestGitErrorsAreCleaned`, `TestWorktreeFunctionsIgnoreGitEnv`, `TestSpawnCreatesWorktreeWindowAndRecords`, `TestSpawnNeverPassesTaskTextToTmux`, `TestSpawnModelAndTeamFlags`, `TestSpawnRefusals`, `TestSpawnRefusesWhenRunning`, `TestSpawnSecondClaimRefused`, `TestSpawnReusesWorktreeOnRetry`, `TestSetupScriptRules`, `TestSpawnSetupFailureLeavesWorktree`, `TestSpawnWaitsForLink`, `TestSpawnWaitZeroReturnsAtOnce`, `TestSpawnInRealTmuxAndGit`, `TestLaunchPassesBriefByExec`, `TestLaunchModelTeamResume`, `TestLaunchNeverAddsPermissionFlags`, `TestLaunchFailureWaitsAndExitsOne`, `TestLaunchRejectsBadArguments` pass under `-race` | not started |
+| 20 | Board view | Opus (suggested, confirmed at dispatch) | plan task 20 complete; `TestBoardColumnsWide`, `TestBoardListNarrow`, `TestBoardMoveAcrossAndWithinColumns`, `TestBoardSelectionFollowsTask`, `TestBoardReadyToggle`, `TestBoardSpawnNeedsConfirmation`, `TestBoardSpawnConfirmHonoursDwell`, `TestBoardSpawnOnlyFromBacklogOrReady`, `TestBoardEnterJumpsToLeadPane`, `TestBoardPasteIsNotACommand`, `TestBoardEmbeddedCloseSendsMessage`, `TestBoardTextCannotDrawEscapes`, `TestBoardSourceErrorKeepsLastCards`, `TestBoardEmpty` pass under `-race` | not started |
+
+### Wave 5
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 21 | Install: message key and skill | Sonnet (suggested, confirmed at dispatch) | plan task 21 complete; `TestSnippetBindsSayKey`, `TestSkillMentionsMessagesAndTeams`, `TestWriteSkillUpgradesPlan2File` pass under `-race` | not started |
+| 22 | Team refresh | Opus (suggested, confirmed at dispatch) | plan task 22 complete; `TestRefreshTeamsAssignsFromCapturedConfig`, `TestRefreshTeamsClearsFinishedTeam`, `TestRefreshTeamsFailsSoft`, `TestRefreshTeamsCapsDirectories`, `TestRefreshTeamsWritesNothingWhenUnchanged`, `TestReconcileRefreshesTeams`, `TestStatusNeverReadsTeams` pass under `-race` | not started |
+| 23 | Say view | Opus (suggested, confirmed at dispatch) | plan task 23 complete; `TestSayStartsWithInputWhenNoText`, `TestSayInputCap`, `TestSayShowsProposal`, `TestSayEnterSendsUnchanged`, `TestSayTabCyclesRunnerUpFirst`, `TestSayKChangesKind`, `TestSayEscCancels`, `TestSayHeldEnterDoesNotSend`, `TestSayEnterBeforeDwellIgnored`, `TestSayPasteIsNotACommand`, `TestSayAutoHoldsThenReleases`, `TestSayAutoUndo`, `TestSayAutoIgnoresOtherKeys`, `TestSayProposeErrorShown`, `TestSaySendErrorShown`, `TestSayManualPickList`, `TestSayTextCannotDrawEscapes`, `TestSayNarrowWidth`, `TestSayResultAfterQuit` pass under `-race` | not started |
+| 24 | Pause, resume, clean | Opus (suggested, confirmed at dispatch) | plan task 24 complete; `TestLifecycleCommandsRefuseInsideAgent`, `TestPauseCommitsUntrackedThenRemoves`, `TestPauseCleanWorktreeMakesNoCommit`, `TestPauseRefusesWorkingAgentWithoutForce`, `TestPauseKillsOnlyTaskPanes`, `TestPauseCommitFailureKeepsWorktree`, `TestPauseNeverForcesRemoval`, `TestPausePicksLeadAsResumeSession`, `TestPauseRefusesWhenNotSpawnedOrAlreadyPaused`, `TestResumeRecreatesWorktreeAndResumes`, `TestResumeWithoutSessionStartsFresh`, `TestResumeKeepsModelAndTeam`, `TestResumeRefusesWhenNotPaused`, `TestCleanRemovesMergedBranchAndWorktree`, `TestCleanRefusesUnmerged`, `TestCleanRefusesWithLiveAgent`, `TestCleanAfterPause`, `TestSpawnAfterCleanStartsOver` pass under `-race` | not started |
+| 25 | `curia send`, `curia read` | Opus (suggested, confirmed at dispatch) | plan task 25 complete; `TestReadPrintsTailOfAgentPane`, `TestReadRefusesNonAgentPane`, `TestReadOutputIsSanitised`, `TestReadLinesBounds`, `TestSendQueuesAndDelivers`, `TestSendToWorkingSessionQueues`, `TestSendRefusesNonAgentPane`, `TestSendRefusesSharedPane`, `TestSendFromAgentIsLabelled`, `TestSendToSelfRefused`, `TestSendTextFromStdinAndBounds` pass under `-race` | not started |
+
+### Wave 6
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 26 | MCP: messages, tasks, lead only | Opus (suggested, confirmed at dispatch) | plan task 26 complete; `TestToolSurfaceIsExactlyFive`, `TestCheckMessagesReturnsAndClaims`, `TestCheckMessagesConfirmsTypedLine`, `TestCheckMessagesUnknownCallerGetsNone`, `TestCheckMessagesLabelsAgentSender`, `TestCheckMessagesIgnoresArguments`, `TestTeammateTicketRefused`, `TestTeammateMaySearchCheckAndWithdraw`, `TestLeadAndSoloMayRequest`, `TestTicketCarriesCallerTask`, `TestTaskScopePrecedentCrossesSessions`, `TestRuleShownAsRuleInPrecedent`, `TestCallerCarriesTaskAndTeamRole`, `TestTeammateTicketRefusedBeforeAnyView`, `TestCallerTeamRefreshFailureIsNotAnError`, `TestMCPOverPipesListsFiveTools` pass under `-race` | not started |
+| 27 | `curia say` | Opus (suggested, confirmed at dispatch) | plan task 27 complete; `TestSayRefusesInsideAgent`, `TestSayAddressedInstructionIsSentWithoutModel`, `TestSayTaskIdAddress`, `TestSayTeamGoesToLead`, `TestSayRuleBecomesPrecedent`, `TestSayGlobalRuleNeedsNoRepo`, `TestSayTaskIsFiled`, `TestSayAmbiguousAddressWithoutTerminalFails`, `TestSayUnaddressedWithoutTerminalFails`, `TestSayConfirmedInView`, `TestSayOverriddenInView`, `TestSayAutoSendHoldsAndUndoes`, `TestSayAutoNeverForRule`, `TestSayAutoSampledAsks`, `TestSayAutoTargetEndedSinceList`, `TestAutoTripsAndStaysOff`, `TestSaySweepsOrphanedHeld`, `TestSayTextBounds`, `TestSayOutputIsSanitised`, `TestRouterChildEnvironment`, `TestRouterArgsHoldSafeMode`, `TestRouterRunsStubClaude`, `TestRouterTimeoutFallsBackToManual`, `TestRouterGarbageFallsBackToManual`, `TestRouterMissingClaudeFallsBackToManual`, `TestProposalOrderPutsRunnerUpSecond`, `TestAliasResolves` pass under `-race` | not started |
+| 28 | `curia messages`, `curia routing` | Sonnet (suggested, confirmed at dispatch) | plan task 28 complete; `TestMessagesLsDefaultIsOpen`, `TestMessagesLsJSON`, `TestMessagesLsMarksUncollectable`, `TestMessagesLsTableIsSanitised`, `TestMessagesLsSweepsHeld`, `TestMessagesCancel`, `TestRoutingStatsNumbers`, `TestRoutingStatsShowsTripped`, `TestRoutingReset` pass under `-race` | not started |
+| 29 | Badge | Sonnet (suggested, confirmed at dispatch) | plan task 29 complete; `TestBadgeAutoOffSuffix`, `TestStatusCountsUndeliveredMessages`, `TestStatusIgnoresMessagesNobodyCanCollect`, `TestBadgeSaysAutoOff`, `TestStatusStillSilentOnMessageQueryError` pass under `-race` | not started |
+| 30 | Dashboard: tasks, teams, board | Opus (suggested, confirmed at dispatch) | plan task 30 complete; `TestTaskColumnShowsIdAndTitle`, `TestColumnsDropAsWidthShrinks`, `TestTeamShowsAsOneCollapsedRow`, `TestSpaceExpandsAndCollapsesTeam`, `TestTeamRanksByWorstMember`, `TestEnterOnGroupJumpsToWorstMember`, `TestKillRefusedOnGroupRow`, `TestFilterExpandsMatchingTeam`, `TestSoloRowsUnchanged`, `TestTKeyOpensBoardAndClosesBack`, `TestNKeyOpensBoardWithNotice`, `TestTKeyWithoutBoard`, `TestTasksErrorKeepsLastTasks`, `TestSidebarHasNoTaskColumnAndCollapsedTeams`, `TestTeamTextCannotDrawEscapes`, `TestStoreSourceTasks`, `TestBoardSourceSpawnDoesNotWait`, `TestBoardSourceSetStatusOnlyBacklogOrReady`, `TestDashboardOffersBoardInPopupOnly` pass under `-race` | not started |
+
+### Wave 7
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Done criteria | Status |
+| --- | --- | --- | --- | --- |
+| 31 | Acceptance | Opus (suggested, confirmed at dispatch) | plan task 31 complete; `TestTasksEndToEnd`, `TestStopHookLatencyWithMessages` pass under `-race` | not started |
+
+## Plan 3 smoke and live checks
+
+Run by the orchestrator on `plan-3` after each wave, as plan section 7 lists them (after wave 2: `make check` and the Plan 2 binary against the wave-2 database and the reverse; after 3: a hook in a linked worktree stores main repo, worktree and task, and `ls --json` shows the new keys; after 4: live check A with real Claude Code; after 5: pause and resume on the live-check task, `read` and `send`; after 6: live check B with the real router, `prefix + m`, a real team, the badge; after 7: Task 31 and `deadcode ./...` without `-test`).
+
+| After wave | Result |
+| --- | --- |
+| none yet | |
+
+## Plan 3 Rulings
+
+Format: Ruling: what — why — cost if wrong. Rulings 94 to 96 were made 2026-11-13 after the owner's real tmux setup was damaged by `curia install`; they are implemented by the separate fix PR `fix/install-respects-tmux`, not by Plan 3's tasks. **Plan 3's probe rulings start at 97.**
+
+94. Ruling: the tmux snippet never replaces `window-status-format`; it adds its marker to the format in effect — replacing the owner's format destroyed their window list — a window list that shows Curia's marker through the user's own format.
+95. Ruling: Curia never rebinds a key the user has already bound; it binds only free keys or its own, reports the taken ones, and the keys are configurable — a binding that silently replaced the owner's own is damage `curia install` must not do — a user with every key taken gets no popup binding until they choose one. (Task 21's `prefix m` follows this: tmux binds `m` to mark-pane by default.)
+96. Ruling: tmux options are changed only as far as needed — the snippet had set options the owner had already chosen — fewer settings from Curia, and a Curia feature that needs an option the user set differently reports it.
+
+## Plan 3 Open Questions
+
+Plan section 16. Each has the plan's default and blocks nothing; **the project proceeds on every default** until the owner answers.
+
+1. **Worktrees: Curia's own, or Claude Code's native `-w --tmux`?** The spec says native first; plan decision 1 explains why this plan does not. Default: Curia's own. Probe P1 will show what the native path would give up (path, branch name, base, tmux placement). Proceeding on the default.
+2. **Should `curia pause` skip a repository's git hooks for its WIP commit?** Default: no; `--no-verify` is there when a hook is slow or failing. Proceeding on the default.
+3. **Is 5 seconds the right limit for the router** once probe P6 has measured it? Default: the spec's 5 seconds, after which the owner picks by hand. Proceeding on the default.
+4. **`prefix + m` replaces tmux's "mark pane".** Default: the spec's key. Proceeding on the default, as amended by Ruling 95: Curia does not rebind a key the user has bound, so Task 21 binds `m` only when it is free and reports it when it is taken.
+5. **Allow `check_messages` without a prompt**, as the four tools are since Ruling 78? Default: yes, added by `curia install` and removed by `curia uninstall`. Proceeding on the default.
+6. **Linear import in Plan 5, not here** (plan decision 7). Default: Plan 5. Proceeding on the default.
+7. **Are pause, resume and clean the owner's alone,** or may an operator agent run them (plan decision 17)? Default: the owner's alone. Proceeding on the default.
+8. **May the router see each session's last update** (plan decision 27)? Default: no. Proceeding on the default.
+9. **`curia spawn` in a repository whose worktrees the owner would rather keep elsewhere.** Default: the spec's `<repo>/../.curia-worktrees/`, unless probe P2 forces it inside the repository. Proceeding on the default.
+
+## Plan 3 Ledger
+
+- 2026-11-13: setup PR `chore/plan3-setup` into `plan-3` opened (this change). Not done by it: plan section 6.7 (`guardUnset` additions in `cmd/curia/main_test.go`) and 6.8 (fixtures from the probes), both for the orchestrator.
+
+## Plan 3 fixtures expected from the probes (plan section 6.8)
+
+Committed by the orchestrator from the probes, never generated by a task; paths and names in them are replaced by neutral ones and nothing else is edited:
+
+- `internal/team/testdata/config-captured.json` (P5)
+- `internal/route/testdata/envelope-*.json` (P6: three real envelopes)
+- `internal/task/testdata/backlogmd/captured-*.md` (P8)
+- any new screen from P2 into `internal/deliver/testdata/prompt/`
+
 
 # Plan 2 (Decisions): all tasks merged, PR into main next
 
@@ -12,6 +146,13 @@ This file mirrors the plans for humans; it does not replace them. Task order, in
 - **Next:** the PR `plan-2` into `main`; then Plan 3 (see "Plan 2 Next steps").
 - Integration branch: `plan-2`. Every task PR goes into `plan-2`. The setup PRs and the three pre-wave-1 live checks (2026-11-11, Claude Code 2.1.322, tmux 3.8; plan decisions 36 to 41, Rulings 42 to 47) are done.
 - The owner was present on 2026-11-12 and decided several points; see the next section.
+
+## Owner's decisions and standing rules (2026-11-13)
+
+These apply from now on and override the 2026-11-12 review rules below where they differ.
+
+- **Reviews happen only at the final PR.** No plan pre-flight review, no per-task review, no re-reviews. Task PRs merge on the implementer's report plus green CI. This replaces the 2026-11-12 rules of one reviewer pass per task and a re-review on Critical.
+- **Installation should become very easy:** prebuilt releases and Homebrew. This is handled by a separate packaging PR, not by Plan 3's tasks.
 
 ## Owner's decisions and standing rules (2026-11-12)
 
@@ -191,7 +332,7 @@ Seeded from plan section 14. Each has a default, so execution is not blocked. Un
 5. **Confirmed by the live probe (plan decision 39):** a block with exit 0 continues the same turn. **Plan 1's hook rule against F7.** Default: the amended stdout rule (decision 0012).
 6. **Badge meaning.** Spec F4 says `D2` is "decisions"; Plan 1 counted sessions in `needs_decision`. Default: open blocking tickets.
 7. **F17 "soonest first" for cold caches.** Default: a cold cache sorts with unknown ones, by age.
-8. **Repo identity across worktrees.** `sessions.repo` is the worktree's top-level path. Default: leave it; Plan 3 must store the main repository before it spawns worktrees.
+8. **Repo identity across worktrees.** `sessions.repo` is the worktree's top-level path. Default: leave it; Plan 3 must store the main repository before it spawns worktrees. **Addressed by Plan 3 Task 14 (decision 0020).**
 9. **Settled 2026-11-12 (owner's decision, Ruling 78, Task 18):** the tools are allowed by default and `--no-allow-mcp-tools` opts out; uninstall removes the four exact strings. As first asked: **Auto-allowing the tools.** The orchestrator had ruled off by default (Ruling 40, owner away; plan decisions 26 and 35). The server-wide `mcp__curia` is still never added.
 10. **Settled:** the Stop payload carries `last_assistant_message`, and Plan 1's live-check fix reads it. **Stop reads the transcript for the last assistant text**, but Claude Code's docs say the payload's `last_assistant_message` should be used at Stop. Not a Plan 2 change; default: leave it and do a small fix PR.
 11. **`curia install` path problems inherited from Plan 1** (Plan 1 Open Questions 8, 14, 16): the MCP registration and the `A` binding record the same resolved binary path as the hooks. Default: same behaviour as the hooks.
@@ -258,7 +399,7 @@ The Plan 2 ledger's "minor (deferred)" lines as of 2026-11-12, after the final f
 **From the final review**
 
 - **M7:** `curia decide` on another tmux server than the agent's. The session row stores a pane id, not the server, so with two servers the row is marked stale wrongly or, when the pane id exists on both, the line is typed into an unrelated pane (inert there, by the sanitiser's alphabet). Inherited from Plan 1's reconcile; record the socket path from `$TMUX` at SessionStart and compare.
-- **M12:** Two live sessions in one pane resolve to "the most recently updated" in `mcpPaneSession`, so a ticket can be recorded against the other one and handed to it at its Stop. Typing is already refused there (Ruling 73). Known cost of Ruling 43; pass `CURIA_SESSION_ID` from `curia spawn` later.
+- **M12 (addressed by Plan 3, plan decision 9):** Two live sessions in one pane resolve to "the most recently updated" in `mcpPaneSession`, so a ticket can be recorded against the other one and handed to it at its Stop. Typing is already refused there (Ruling 73). Known cost of Ruling 43; pass `CURIA_SESSION_ID` from `curia spawn` later.
 
 **From the live checks and the re-review** (not fixed; recorded)
 
@@ -266,7 +407,7 @@ The Plan 2 ledger's "minor (deferred)" lines as of 2026-11-12, after the final f
 - **Live check 2, defect 12:** Claude Code labels Stop-hook delivery "Stop hook error: Curia: decisions answered while you were working." and shows "Stop hook error occurred" in the footer. Inherent to the `{"decision":"block"}` route; worth a line in the docs or the skill. A retraction is delivered under the same header (live check 3).
 - **Live check 2, defect 13:** a session's `last_update` stays `interrupted` into its next working turn until a tool event replaces it (`UserPromptSubmit` keeps the old `LastUpdate`).
 - **Live check 2, defect 14:** the typed line's closing "Continue." confuses an agent when no work remains (it asks what to continue). Change the closing sentence in `decision.TypedMessage`.
-- **Re-review m2:** a `<task-notification>` UserPromptSubmit, which carries a subagent's output, confirms a lost typed answer if that output contains "Decision D-n ". Skip `ConfirmTyped` for prompts that start with `<task-notification>`.
+- **Re-review m2 (addressed by Plan 3 Task 18):** a `<task-notification>` UserPromptSubmit, which carries a subagent's output, confirms a lost typed answer if that output contains "Decision D-n ". Skip `ConfirmTyped` for prompts that start with `<task-notification>`.
 - **Re-review m4:** a running turn is recognised only by "esc to interrupt" in the footer; if a narrow pane drops that hint cleanly, a running turn would read as empty. Check with vim mode's footer and the default-mode footer.
 - **Re-review m5:** dialog hints in `prompt.go` are matched case-sensitively. That fails safe, because the input box must also be at the bottom; no action needed.
 - **Re-review m6:** an older long-lived `curia mcp` (started before the upgrade) still returns a superseded answer with "Follow the answer" until its session restarts; say so in the upgrade text.
@@ -449,7 +590,7 @@ Format: Ruling: what — why — cost if wrong.
 - Live check, not fixed (defect 7): a waiting session's last_update becomes the generic "Claude needs your permission", overwriting the tool and target.
 - Live check, not fixed (defect 10): internal tool names leak into last_update (`SubagentHandback` after a subagent), and subagent tool events overwrite the main session's last_update.
 - Live check, not fixed (defect 12): a stale row's AGE resets to 0s when it is marked stale, so it looks freshly active.
-- Live check, not fixed (defect 13): at about 50 columns every dashboard column truncates and rows cannot be told apart; a narrow layout should drop columns.
+- Live check, not fixed (defect 13; addressed by Plan 3 Task 30): at about 50 columns every dashboard column truncates and rows cannot be told apart; a narrow layout should drop columns.
 - Live check, not fixed (defect 14): SessionStart p50 27.8 ms, p95 93.6 ms at load average 11.9, over the 20 ms budget; re-measure on an idle machine before acting.
 - Live check, not fixed (defect 15, design limit): a Claude process killed with SIGKILL in a pane that stays open stays `working` forever; a liveness check of the pane's foreground process would catch it.
 - Live-check fixes review: SessionStart with source=compact mid-turn shows idle-seen until the next tool event (Parse should read source; keep state on compact; Open Question 21); MarkSeen on focus uses time.Now() and can cover a concurrent event (use sess.UpdatedAt); PaneFocused means a client is attached, not that the terminal has focus; the focus path adds a second tmux call on red-turning events, unmeasured; the MarkSeen-failure branch is untested; docs/DESIGN.md still says SessionStart -> working (Open Question 20).
