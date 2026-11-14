@@ -44,7 +44,7 @@ func installRunClaude(ctx context.Context, args ...string) ([]byte, error) {
 
 // installToolsHint is what install prints when --no-allow-mcp-tools skipped
 // the rules.
-const installToolsHint = "MCP tools not allowed without a prompt; to allow the four curia tools, run curia install without --no-allow-mcp-tools"
+const installToolsHint = "MCP tools not allowed without a prompt; to allow the five curia tools, run curia install without --no-allow-mcp-tools"
 
 // installPaths are the user-owned files the install commands edit, and the
 // Claude config JSON they only read.
@@ -170,26 +170,26 @@ func installTmux(out io.Writer, p installPaths, bin string) error {
 	return nil
 }
 
-// installTools adds the four tool rules unless --no-allow-mcp-tools was given
-// (Ruling 78); with the flag it says how to allow them, unless all four are
+// installTools adds the five tool rules unless --no-allow-mcp-tools was given
+// (Ruling 78); with the flag it says how to allow them, unless all five are
 // there already (Ruling 57).
 func installTools(out io.Writer, settings string) error {
 	if installNoAllowMCPTools {
 		if install.ToolsAllowed(settings) {
-			installSay(out, "MCP tools: the four curia tools are already allowed without a prompt in %s", settings)
+			installSay(out, "MCP tools: the five curia tools are already allowed without a prompt in %s", settings)
 		} else {
 			installSay(out, "%s", installToolsHint)
 		}
 		return nil
 	}
 	if install.ToolsAllowed(settings) {
-		installSay(out, "MCP tools: the four curia tools are already allowed without a prompt in %s", settings)
+		installSay(out, "MCP tools: the five curia tools are already allowed without a prompt in %s", settings)
 		return nil
 	}
 	if err := install.AllowTools(settings, time.Now()); err != nil {
 		return err
 	}
-	installSay(out, "MCP tools: the four curia tools are allowed without a prompt in %s; "+
+	installSay(out, "MCP tools: the five curia tools are allowed without a prompt in %s; "+
 		"to skip this step, run curia install --no-allow-mcp-tools", settings)
 	return nil
 }
@@ -329,7 +329,7 @@ func init() {
 		RunE:  runInstall,
 	}
 	installCmd.Flags().BoolVar(&installNoAllowMCPTools, "no-allow-mcp-tools", false,
-		"do not add the four curia MCP tools to Claude's permissions.allow (they are allowed by default)")
+		"do not add the five curia MCP tools to Claude's permissions.allow (they are allowed by default)")
 	rootCmd.AddCommand(
 		installCmd,
 		&cobra.Command{

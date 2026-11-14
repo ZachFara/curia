@@ -150,11 +150,12 @@ func installAllow(t *testing.T, path string) []string {
 var installToolRules = []string{
 	"mcp__curia__search_decisions", "mcp__curia__request_decision",
 	"mcp__curia__check_decision", "mcp__curia__withdraw_decision",
+	"mcp__curia__check_messages",
 }
 
-const installWantToolsHint = "MCP tools not allowed without a prompt; to allow the four curia tools, run curia install without --no-allow-mcp-tools"
+const installWantToolsHint = "MCP tools not allowed without a prompt; to allow the five curia tools, run curia install without --no-allow-mcp-tools"
 
-const installWantAllowedLine = "MCP tools: the four curia tools are allowed without a prompt in %s; to skip this step, run curia install --no-allow-mcp-tools"
+const installWantAllowedLine = "MCP tools: the five curia tools are allowed without a prompt in %s; to skip this step, run curia install --no-allow-mcp-tools"
 
 func installAddCall(bin string) string {
 	return "mcp add --scope user curia -- " + bin + " mcp"
@@ -338,7 +339,7 @@ func TestUninstallReversesPlan2Items(t *testing.T) {
 	if out, err := installRun(t, "install"); err != nil {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
-	if got := installAllow(t, h.settings); len(got) != 5 {
+	if got := installAllow(t, h.settings); len(got) != 6 {
 		t.Fatalf("allow after install = %q", got)
 	}
 	// What claude mcp add writes, which the recorder does not.
@@ -380,7 +381,7 @@ func TestInstallAllowsToolsByDefault(t *testing.T) {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
 	if got := installAllow(t, h.settings); !slices.Equal(got, installToolRules) {
-		t.Errorf("allow = %q, want exactly the four rules", got)
+		t.Errorf("allow = %q, want exactly the five rules", got)
 	}
 	if want := fmt.Sprintf(installWantAllowedLine, h.settings) + "\n"; strings.Count(out, want) != 1 {
 		t.Errorf("install output lacks the line %q:\n%s", want, out)
@@ -449,7 +450,7 @@ func TestInstallKeepsUsersOwnRules(t *testing.T) {
 		return m.Permissions.Allow
 	}
 	got := read()
-	if len(got) != 8 || got[0] != "mcp__curia" || got[1] != float64(42) || got[4] != "Bash(ls:*)" {
+	if len(got) != 9 || got[0] != "mcp__curia" || got[1] != float64(42) || got[4] != "Bash(ls:*)" {
 		t.Errorf("allow after install = %v", got)
 	}
 	if out, err := installRun(t, "uninstall"); err != nil {
