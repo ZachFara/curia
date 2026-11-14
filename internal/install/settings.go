@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -52,10 +53,11 @@ func Hooks(settingsPath, bin string, now time.Time) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", settingsPath, err)
 		}
-		if containsOurs(entries, bin) {
+		updated, did := withCurrent(entries, bin, ev)
+		if !did {
 			continue
 		}
-		hooks[ev] = append(entries, ourEntry(bin, ev))
+		hooks[ev] = updated
 		changed = true
 	}
 	if !changed {
@@ -63,6 +65,30 @@ func Hooks(settingsPath, bin string, now time.Time) error {
 	}
 	settings["hooks"] = hooks
 	return saveSettings(settingsPath, raw, settings, now)
+}
+
+// withCurrent returns entries with exactly Curia's current hook for event ev
+// and none that name another path for this binary, and reports whether that
+// changed anything.
+func withCurrent(entries []any, bin, ev string) ([]any, bool) {
+	current, stale := false, false
+	for _, h := range ourHooks(entries, bin) {
+		if isCurrent(h, bin) {
+			current = true
+		} else {
+			stale = true
+		}
+	}
+	if current && !stale {
+		return entries, false
+	}
+	if stale {
+		entries, _ = withoutMatching(entries, func(h any) bool { return isOurs(h, bin) && !isCurrent(h, bin) })
+	}
+	if !current {
+		entries = append(entries, ourEntry(bin, ev))
+	}
+	return entries, true
 }
 
 // toolRules are the permission rules that let the four curia MCP tools run
@@ -300,9 +326,9 @@ func ourEntry(bin, event string) map[string]any {
 	return entry
 }
 
-// isOurs reports whether a hook command was added by Curia for this binary,
-// in the form ourEntry writes it.
-func isOurs(hook any, bin string) bool {
+// isCurrent reports whether a hook command starts the way ourEntry writes it
+// for bin.
+func isCurrent(hook any, bin string) bool {
 	h, ok := hook.(map[string]any)
 	if !ok {
 		return false
@@ -311,22 +337,116 @@ func isOurs(hook any, bin string) bool {
 	return strings.HasPrefix(cmd, hookPrefix(bin))
 }
 
-func containsOurs(entries []any, bin string) bool {
-	for _, e := range entries {
-		entry, _ := e.(map[string]any)
-		inner, _ := entry["hooks"].([]any)
-		for _, h := range inner {
-			if isOurs(h, bin) {
-				return true
-			}
+// isOurs reports whether a hook command was added by Curia for this binary,
+// in the form ourEntry writes it. The command's program is bin, or (Ruling
+// 104, extending Ruling 13's "only the current binary path") a path that
+// ourBinary accepts, so an upgrade repairs and uninstall removes entries
+// written before the binary moved. The command must then be exactly
+// "<program> hook <event>" for one of Curia's events.
+func isOurs(hook any, bin string) bool {
+	if isCurrent(hook, bin) {
+		return true
+	}
+	h, ok := hook.(map[string]any)
+	if !ok {
+		return false
+	}
+	cmd, _ := h["command"].(string)
+	word, rest, ok := splitCommandWord(cmd)
+	event, found := strings.CutPrefix(rest, " hook ")
+	return ok && found && slices.Contains(hookEvents, event) && ourBinary(word, bin)
+}
+
+// splitCommandWord splits the first shell word off cmd, as shellQuote writes
+// it: bare, or single-quoted as shellQuote does. ok is false when
+// cmd does not start with such a word.
+func splitCommandWord(cmd string) (word, rest string, ok bool) {
+	if !strings.HasPrefix(cmd, "'") {
+		i := strings.IndexByte(cmd, ' ')
+		if i <= 0 {
+			return "", "", false
+		}
+		return cmd[:i], cmd[i:], true
+	}
+	var b strings.Builder
+	i := 1
+	for i < len(cmd) {
+		switch {
+		case strings.HasPrefix(cmd[i:], `'\''`):
+			b.WriteByte('\'')
+			i += 4
+		case cmd[i] == '\'':
+			return b.String(), cmd[i+1:], true
+		default:
+			b.WriteByte(cmd[i])
+			i++
+		}
+	}
+	return "", "", false
+}
+
+// ourBinary reports whether program, found in an entry an earlier install
+// wrote, was Curia's binary: an absolute path that now resolves to the same
+// file as bin, or one that no longer exists and is the versioned path of a
+// package manager's install (versionedCuria), which an upgrade has since
+// replaced. Any other path is not ours, whatever it contains, so an entry
+// for /usr/local/bin/curia that does not exist stays the user's.
+func ourBinary(program, bin string) bool {
+	if !filepath.IsAbs(program) {
+		return false
+	}
+	a, err := os.Stat(filepath.Clean(program))
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist) && versionedCuria(program)
+	}
+	b, err := os.Stat(filepath.Clean(bin))
+	return err == nil && os.SameFile(a, b)
+}
+
+// versionedVersion matches a directory name that is a version: Homebrew's
+// "0.1.0" or "1", or a version manager's "v0.1.0".
+var versionedVersion = regexp.MustCompile(`^v?[0-9]`)
+
+// versionedCuria reports whether path is named curia and lies under a
+// directory named curia that is followed directly by a version directory,
+// as in .../Cellar/curia/0.1.0/bin/curia.
+func versionedCuria(path string) bool {
+	if filepath.Base(path) != "curia" {
+		return false
+	}
+	parts := strings.Split(filepath.Dir(path), string(filepath.Separator))
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "curia" && versionedVersion.MatchString(parts[i+1]) {
+			return true
 		}
 	}
 	return false
 }
 
+// ourHooks returns the hook commands in entries that are Curia's for bin.
+func ourHooks(entries []any, bin string) []any {
+	var found []any
+	for _, e := range entries {
+		entry, _ := e.(map[string]any)
+		inner, _ := entry["hooks"].([]any)
+		for _, h := range inner {
+			if isOurs(h, bin) {
+				found = append(found, h)
+			}
+		}
+	}
+	return found
+}
+
 // withoutOurs drops Curia's commands from entries, and any entry that held
 // nothing else, and reports whether it removed anything.
 func withoutOurs(entries []any, bin string) (kept []any, removed bool) {
+	return withoutMatching(entries, func(h any) bool { return isOurs(h, bin) })
+}
+
+// withoutMatching drops the hook commands for which drop is true, and any
+// entry that held nothing else, and reports whether it removed anything.
+func withoutMatching(entries []any, drop func(any) bool) (kept []any, removed bool) {
 	for _, e := range entries {
 		entry, ok := e.(map[string]any)
 		inner, isList := entry["hooks"].([]any)
@@ -336,7 +456,7 @@ func withoutOurs(entries []any, bin string) (kept []any, removed bool) {
 		}
 		var rest []any
 		for _, h := range inner {
-			if isOurs(h, bin) {
+			if drop(h) {
 				removed = true
 			} else {
 				rest = append(rest, h)

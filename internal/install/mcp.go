@@ -33,6 +33,9 @@ const (
 	MCPAbsent
 	// MCPRemoved means `claude mcp remove` removed our entry.
 	MCPRemoved
+	// MCPUpdated means the curia entry was Curia's but ran another path for
+	// this binary (an older install); it was removed and registered again.
+	MCPUpdated
 	// MCPNoClaude means the change was needed but claude is not on PATH.
 	MCPNoClaude
 )
@@ -60,6 +63,9 @@ func ClaudeConfigPath(home, configDir string) string {
 	return filepath.Join(home, ".claude.json")
 }
 
+// mcpRemoveArgs are the claude arguments that remove the curia server.
+var mcpRemoveArgs = []string{"mcp", "remove", "--scope", "user", mcpName}
+
 // mcpAddArgs are the claude arguments that register bin as the curia server.
 func mcpAddArgs(bin string) []string {
 	return []string{"mcp", "add", "--scope", "user", mcpName, "--", bin, "mcp"}
@@ -76,21 +82,30 @@ func MCPAddCommand(bin string) string {
 // only reads that file and never runs `claude mcp get` or `claude mcp list`,
 // which start the server.
 func AddMCP(ctx context.Context, run Runner, configPath, bin string) (MCPState, error) {
-	found, err := mcpEntry(configPath, bin)
-	if err != nil || found != MCPAbsent {
+	found, command, err := mcpEntry(configPath, bin)
+	if err != nil {
 		return found, err
 	}
-	return runClaude(ctx, run, MCPAdded, mcpAddArgs(bin))
+	switch {
+	case found == MCPAbsent:
+		return runClaude(ctx, run, MCPAdded, mcpAddArgs(bin))
+	case found == MCPAlreadyOurs && command != bin:
+		if state, err := runClaude(ctx, run, MCPRemoved, mcpRemoveArgs); err != nil || state != MCPRemoved {
+			return state, err
+		}
+		return runClaude(ctx, run, MCPUpdated, mcpAddArgs(bin))
+	}
+	return found, nil
 }
 
 // RemoveMCP removes the user-scope curia MCP server through run, only when
 // the config file at configPath shows it runs bin.
 func RemoveMCP(ctx context.Context, run Runner, configPath, bin string) (MCPState, error) {
-	found, err := mcpEntry(configPath, bin)
+	found, _, err := mcpEntry(configPath, bin)
 	if err != nil || found != MCPAlreadyOurs {
 		return found, err
 	}
-	return runClaude(ctx, run, MCPRemoved, []string{"mcp", "remove", "--scope", "user", mcpName})
+	return runClaude(ctx, run, MCPRemoved, mcpRemoveArgs)
 }
 
 // runClaude runs claude with args and returns done on success.
@@ -106,36 +121,36 @@ func runClaude(ctx context.Context, run Runner, done MCPState, args []string) (M
 }
 
 // mcpEntry reads the config file and says whether its curia entry is absent
-// (MCPAbsent), runs bin with args ["mcp"] (MCPAlreadyOurs), or is anything
-// else, including a file that is not a JSON object (MCPForeign).
-func mcpEntry(configPath, bin string) (MCPState, error) {
+// (MCPAbsent), is Curia's (MCPAlreadyOurs, with the command it runs), or is
+// anything else, including a file that is not a JSON object (MCPForeign).
+func mcpEntry(configPath, bin string) (MCPState, string, error) {
 	raw, err := os.ReadFile(filepath.Clean(configPath))
 	if errors.Is(err, fs.ErrNotExist) {
-		return MCPAbsent, nil
+		return MCPAbsent, "", nil
 	}
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	top, ok := jsonObject(raw)
 	if !ok {
-		return MCPForeign, nil
+		return MCPForeign, "", nil
 	}
 	serversRaw, ok := top["mcpServers"]
 	if !ok {
-		return MCPAbsent, nil
+		return MCPAbsent, "", nil
 	}
 	servers, ok := jsonObject(serversRaw)
 	if !ok {
-		return MCPForeign, nil
+		return MCPForeign, "", nil
 	}
 	entryRaw, ok := servers[mcpName]
 	if !ok {
-		return MCPAbsent, nil
+		return MCPAbsent, "", nil
 	}
-	if isOurMCPEntry(entryRaw, bin) {
-		return MCPAlreadyOurs, nil
+	if command, ours := ourMCPEntry(entryRaw, bin); ours {
+		return MCPAlreadyOurs, command, nil
 	}
-	return MCPForeign, nil
+	return MCPForeign, "", nil
 }
 
 // jsonObject decodes raw as a JSON object, reporting false for anything
@@ -148,17 +163,21 @@ func jsonObject(raw []byte) (map[string]json.RawMessage, bool) {
 	return m, true
 }
 
-// isOurMCPEntry reports whether entry's command is exactly bin and its args
-// exactly ["mcp"]. Keys are matched exactly, unlike json's struct decoding.
-func isOurMCPEntry(entry json.RawMessage, bin string) bool {
+// ourMCPEntry reports whether entry is Curia's for bin, and the command it
+// runs: args exactly ["mcp"] and a command that is bin or, as for hooks,
+// one ourBinary accepts (Ruling 104). Keys are matched exactly, unlike
+// json's struct decoding.
+func ourMCPEntry(entry json.RawMessage, bin string) (command string, ours bool) {
 	fields, ok := jsonObject(entry)
 	if !ok {
-		return false
+		return "", false
 	}
-	var command string
 	var args []string
 	if json.Unmarshal(fields["command"], &command) != nil || json.Unmarshal(fields["args"], &args) != nil {
-		return false
+		return "", false
 	}
-	return command == bin && slices.Equal(args, []string{"mcp"})
+	if !slices.Equal(args, []string{"mcp"}) {
+		return "", false
+	}
+	return command, command == bin || ourBinary(command, bin)
 }
