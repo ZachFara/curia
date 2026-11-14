@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -31,6 +34,9 @@ import (
 // 108). The script is read once, hashed, compared with the approval and
 // then run from a private copy of the bytes that were hashed, so the file
 // in the worktree cannot be swapped between the check and the run.
+// Approval shows the whole script, so a script holding anything the display
+// would hide or alter is never run nor approvable, and the user confirms by
+// typing the start of its hash on the controlling terminal.
 
 const (
 	setupName       = ".curia/setup.sh"
@@ -38,8 +44,9 @@ const (
 	setupMaxShebang = 256      // bytes of the #! line
 	setupLogCap     = 1 << 20  // the setup log's size limit
 	setupTailLines  = 20       // setup log lines shown on failure
-	setupHeadLines  = 40       // script lines curia setup approve shows
-	setupLineMax    = 200      // runes of a shown line
+	setupMaxLines   = 300      // lines of a setup script; more are not run
+	setupLineMax    = 200      // runes of a script line (and of a shown log line)
+	setupConfirmLen = 8        // hex characters of the hash the user types
 )
 
 // setupEnvNames are the variables of this process a setup script gets,
@@ -63,8 +70,8 @@ type setupScript struct {
 // setupRead reads the worktree's .curia/setup.sh once. It is errSetupAbsent
 // when there is none, and an error saying why it is not to be run when it
 // resolves outside the worktree, is not an executable regular file, is
-// larger than setupMaxBytes or has no #! line naming an absolute
-// interpreter.
+// larger than setupMaxBytes, cannot be shown whole and exactly
+// (setupShowable) or has no #! line naming an absolute interpreter.
 func setupRead(worktree string) (setupScript, error) {
 	link := filepath.Join(worktree, ".curia", "setup.sh")
 	if _, err := os.Lstat(link); errors.Is(err, fs.ErrNotExist) {
@@ -80,6 +87,9 @@ func setupRead(worktree string) (setupScript, error) {
 	}
 	body, err := setupReadFile(resolved)
 	if err != nil {
+		return setupScript{}, err
+	}
+	if err = setupShowable(body); err != nil {
 		return setupScript{}, err
 	}
 	interp, err := setupInterpreter(body)
@@ -117,6 +127,40 @@ func setupReadFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("is larger than %d KiB", setupMaxBytes>>10)
 	}
 	return body, nil
+}
+
+// setupLines splits body into its lines; a final newline ends the last one.
+func setupLines(body []byte) []string {
+	return strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+}
+
+// setupShowable refuses a script curia setup approve could not show whole
+// and exactly as it is: invalid UTF-8, more than setupMaxLines lines, a line
+// longer than setupLineMax runes, or a line holding anything but tabs and
+// printable runes (control characters such as ESC, NUL and CR, bidi
+// overrides and other invisible format characters) or anything else the
+// sanitizer would change (trailing spaces or tabs).
+func setupShowable(body []byte) error {
+	if !utf8.Valid(body) {
+		return errors.New("is not valid UTF-8")
+	}
+	lines := setupLines(body)
+	if len(lines) > setupMaxLines {
+		return fmt.Errorf("has more than %d lines", setupMaxLines)
+	}
+	for i, l := range lines {
+		if utf8.RuneCountInString(l) > setupLineMax {
+			return fmt.Errorf("has a line longer than %d characters (line %d)", setupLineMax, i+1)
+		}
+		if j := strings.IndexFunc(l, func(r rune) bool { return r != '\t' && !unicode.IsPrint(r) }); j >= 0 {
+			r, _ := utf8.DecodeRuneInString(l[j:])
+			return fmt.Errorf("holds a character the display would hide or alter (U+%04X on line %d)", r, i+1)
+		}
+		if sanitize.Block(l, 0) != l {
+			return fmt.Errorf("has trailing spaces or tabs, which the display would not show (line %d)", i+1)
+		}
+	}
+	return nil
 }
 
 // setupInterpreter reads the #! line of body as the kernel does: an
@@ -280,10 +324,13 @@ func init() {
 	parent.AddCommand(&cobra.Command{
 		Use:   "approve <task id>",
 		Short: "Show the task's .curia/setup.sh and approve its exact content for the repository",
-		Long: "Shows the setup script in the task's worktree (path, size, SHA-256 and its first\n" +
-			"40 lines) and approves that exact content for the task's repository: curia spawn\n" +
-			"runs .curia/setup.sh only when its SHA-256 matches the approval, and any change\n" +
-			"needs a new approval. Only the user may approve: it refuses inside an agent session.",
+		Long: "Shows the whole setup script in the task's worktree (path, size, SHA-256 and\n" +
+			"every line, numbered) and asks you to type the first 8 characters of its SHA-256\n" +
+			"on your terminal; then that exact content is approved for the task's repository.\n" +
+			"curia spawn runs .curia/setup.sh only when its SHA-256 matches the approval, and\n" +
+			"any change needs a new approval. A script holding anything the display would hide\n" +
+			"(control or invisible characters, lines over 200 characters, more than 300 lines)\n" +
+			"cannot be approved. It refuses inside an agent session.",
 		Args: cobra.ExactArgs(1),
 		RunE: runSetupApprove,
 	})
@@ -315,6 +362,9 @@ func runSetupApprove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	setupShow(cmd.OutOrStdout(), t, s)
+	if err = setupConfirmed(s); err != nil {
+		return err
+	}
 	if err = st.ApproveSetup(ctx, t.Repo, s.Sum); err != nil {
 		return err
 	}
@@ -343,17 +393,52 @@ func setupApprovable(ctx context.Context, st *store.Store, id string) (model.Tas
 	return t, s, nil
 }
 
-// setupShow prints what is being approved: the script's path, size, hash
-// and first setupHeadLines lines, cleaned with their indentation kept.
+// setupShow prints what is being approved: the repository, the script's
+// path, size and hash, and every line, numbered. setupShowable has made sure
+// each line shows exactly as it is.
 func setupShow(out io.Writer, t model.Task, s setupScript) {
-	_, _ = fmt.Fprintf(out, "Repository: %s\nScript: %s\nSize: %d bytes\nSHA-256: %s\nFirst lines:\n",
-		sanitize.Line(t.Repo, 300), sanitize.Line(s.Path, 300), len(s.Body), s.Sum)
-	lines := strings.Split(strings.TrimRight(string(s.Body), "\n"), "\n")
-	for _, l := range lines[:min(len(lines), setupHeadLines)] {
-		// Block keeps the indentation a reader needs; the bound is in bytes.
-		_, _ = fmt.Fprintf(out, "  %s\n", sanitize.Block(l, 4*setupLineMax))
+	lines := setupLines(s.Body)
+	_, _ = fmt.Fprintf(out, "Repository: %s\nScript: %s\nSize: %d lines, %d bytes\nSHA-256: %s\n",
+		sanitize.Line(t.Repo, 300), sanitize.Line(s.Path, 300), len(lines), len(s.Body), s.Sum)
+	for i, l := range lines {
+		_, _ = fmt.Fprintf(out, "%4d  %s\n", i+1, l)
 	}
-	if n := len(lines) - setupHeadLines; n > 0 {
-		_, _ = fmt.Fprintf(out, "  (%d more lines not shown)\n", n)
+	_, _ = fmt.Fprintf(out, "(end of script: %d lines)\n", len(lines))
+}
+
+// setupConfirm asks on the controlling terminal for the confirmation and
+// returns the answer; tests replace it.
+var setupConfirm = func(prompt string) (string, error) { return setupAskTerminal("/dev/tty", prompt) }
+
+// setupAskTerminal writes prompt to the terminal at path and reads one line
+// from it, never from stdin, so piped input cannot answer. No terminal, or
+// an end of input before a newline, is an error.
+func setupAskTerminal(path, prompt string) (string, error) {
+	tty, err := os.OpenFile(filepath.Clean(path), os.O_RDWR, 0)
+	if err != nil {
+		return "", fmt.Errorf("no terminal to confirm on: %w", err)
 	}
+	defer func() { _ = tty.Close() }()
+	if _, err = io.WriteString(tty, prompt); err != nil {
+		return "", err
+	}
+	line, err := bufio.NewReader(io.LimitReader(tty, 256)).ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("no answer: %w", err)
+	}
+	return strings.TrimSpace(line), nil
+}
+
+// setupConfirmed asks the user to type the first setupConfirmLen hex
+// characters of s's SHA-256; anything else approves nothing.
+func setupConfirmed(s setupScript) error {
+	want := s.Sum[:setupConfirmLen]
+	answer, err := setupConfirm(fmt.Sprintf("To approve it, type the first %d characters of its SHA-256: ", setupConfirmLen))
+	if err != nil {
+		return fmt.Errorf("not approved: %w", err)
+	}
+	if !strings.EqualFold(answer, want) {
+		return fmt.Errorf("not approved: the answer is not the first %d characters of the SHA-256", setupConfirmLen)
+	}
+	return nil
 }

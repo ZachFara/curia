@@ -607,6 +607,7 @@ func TestSpawnSetupFailureLeavesWorktree(t *testing.T) {
 	// Fixing the script in the worktree (the file keeps its mode) lets a
 	// second spawn through.
 	worktreeWrite(t, filepath.Join(wt, ".curia", "setup.sh"), "#!/bin/sh\necho fixed\n")
+	setupAnswer(t, setupSum("#!/bin/sh\necho fixed\n")[:8], nil)
 	if out, err := runRoot(t, "setup", "approve", "T-1"); err != nil {
 		t.Fatalf("setup approve: %v\n%s", err, out)
 	}
