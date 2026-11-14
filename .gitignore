@@ -8,3 +8,5 @@
 /.bin/
 # Built binary (`make build`).
 /curia
+# GoReleaser output (`make release-snapshot`).
+/dist/
