@@ -231,14 +231,16 @@ func (s *Store) UpdateSession(ctx context.Context, id string, fn func(s model.Se
 }
 
 // upsert is the single INSERT ... ON CONFLICT statement behind UpsertSession
-// and UpdateSession.
+// and UpdateSession. It names the columns it writes, so the team columns
+// (written only by SetTeams) and Plan 2's cache columns survive it. An
+// empty task id or worktree is stored as NULL, like the pane.
 func upsert(ctx context.Context, e dbtx, sess model.Session) error {
 	_, err := e.ExecContext(ctx, `
 INSERT INTO sessions (
   id, agent, tmux_pane, tmux_session, tmux_window, cwd, repo, branch, state, model,
   context_used, context_max, subagents_active, last_update, seen_at, transcript_path,
-  started_at, updated_at, transcript_offset
-) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  started_at, updated_at, transcript_offset, task_id, worktree
+) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))
 ON CONFLICT(id) DO UPDATE SET
   agent = excluded.agent, tmux_pane = excluded.tmux_pane,
   tmux_session = excluded.tmux_session, tmux_window = excluded.tmux_window,
@@ -248,11 +250,12 @@ ON CONFLICT(id) DO UPDATE SET
   subagents_active = excluded.subagents_active, last_update = excluded.last_update,
   seen_at = excluded.seen_at, transcript_path = excluded.transcript_path,
   started_at = excluded.started_at, updated_at = excluded.updated_at,
-  transcript_offset = excluded.transcript_offset`,
+  transcript_offset = excluded.transcript_offset,
+  task_id = excluded.task_id, worktree = excluded.worktree`,
 		sess.ID, sess.Agent, sess.Pane, sess.TmuxSession, sess.TmuxWindow, sess.Cwd, sess.Repo, sess.Branch,
 		sess.State, sess.Model, sess.ContextUsed, sess.ContextMax, sess.SubagentsActive, sess.LastUpdate,
 		formatTime(sess.SeenAt), sess.TranscriptPath, formatTime(sess.StartedAt), formatTime(sess.UpdatedAt),
-		sess.TranscriptOffset)
+		sess.TranscriptOffset, sess.TaskID, sess.Worktree)
 	return err
 }
 
@@ -264,7 +267,8 @@ SELECT COALESCE(id, ''), COALESCE(agent, ''), COALESCE(tmux_pane, ''), COALESCE(
   COALESCE(tmux_window, ''), COALESCE(cwd, ''), COALESCE(repo, ''), COALESCE(branch, ''),
   COALESCE(state, ''), COALESCE(model, ''), COALESCE(context_used, 0), COALESCE(context_max, 0),
   COALESCE(subagents_active, 0), COALESCE(last_update, ''), seen_at, COALESCE(transcript_path, ''),
-  started_at, updated_at, transcript_offset
+  started_at, updated_at, transcript_offset, COALESCE(task_id, ''), COALESCE(worktree, ''),
+  COALESCE(team_id, ''), COALESCE(team_role, ''), COALESCE(team_member, '')
 FROM sessions`
 
 // GetSession returns the session with the given id, and false if there is none.
@@ -324,7 +328,7 @@ func scanSession(sc scanner) (model.Session, error) {
 	err := sc.Scan(&sess.ID, &sess.Agent, &sess.Pane, &sess.TmuxSession, &sess.TmuxWindow, &sess.Cwd,
 		&sess.Repo, &sess.Branch, &sess.State, &sess.Model, &sess.ContextUsed, &sess.ContextMax,
 		&sess.SubagentsActive, &sess.LastUpdate, &seen, &sess.TranscriptPath, &started, &updated,
-		&sess.TranscriptOffset)
+		&sess.TranscriptOffset, &sess.TaskID, &sess.Worktree, &sess.TeamID, &sess.TeamRole, &sess.TeamMember)
 	if err != nil {
 		return model.Session{}, err
 	}
