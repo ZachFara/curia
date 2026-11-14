@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/ZachFara/curia/internal/attention"
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/fleet"
+	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
 )
@@ -70,14 +72,61 @@ func reconcile(ctx context.Context, st *store.Store, client tmux.Client, logPath
 		return nil
 	}
 	windows, err := fleet.Reconcile(ctx, st, panes, now)
+	applyMarkers(ctx, client, st, logPath, "reconcile attention marker", windows)
+	return err
+}
+
+// applyMarkers re-applies the attention marker of each window, logging a
+// failure under msg unless the window is gone.
+func applyMarkers(ctx context.Context, client tmux.Client, st *store.Store, logPath, msg string, windows []string) {
 	for _, w := range windows {
 		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 		if aerr := attention.Apply(actx, client, st, w); aerr != nil && !errors.Is(aerr, tmux.ErrNoWindow) {
-			logWarn(logPath, "reconcile attention marker", "window", w, "err", aerr.Error())
+			logWarn(logPath, msg, "window", w, "err", aerr.Error())
 		}
 		cancel()
 	}
-	return err
+}
+
+// listSettled lists the sessions f selects after settling those a denied
+// prompt or an interrupt left working or waiting (fleet.Settle, Ruling 77),
+// listing again when it settled any so they show idle. It returns the
+// distinct windows of the settled sessions, whose markers may be out of
+// date. A settle failure does not fail the list: the session stays as it
+// was, and the failure is logged to logPath, or dropped when logPath is ""
+// (status, which must stay silent).
+func listSettled(ctx context.Context, st *store.Store, f store.ListFilter, logPath string, now time.Time) ([]model.Session, []string, error) {
+	sessions, err := st.ListSessions(ctx, f)
+	if err != nil {
+		return nil, nil, err
+	}
+	settled, serr := fleet.Settle(ctx, st, sessions, now)
+	if serr != nil && logPath != "" {
+		logWarn(logPath, "settle interrupted sessions", "err", serr.Error())
+	}
+	if len(settled) == 0 {
+		return sessions, nil, nil
+	}
+	var windows []string
+	for _, s := range sessions {
+		if s.TmuxWindow != "" && slices.Contains(settled, s.ID) && !slices.Contains(windows, s.TmuxWindow) {
+			windows = append(windows, s.TmuxWindow)
+		}
+	}
+	sessions, err = st.ListSessions(ctx, f)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sessions, windows, nil
+}
+
+// listSettledMarked is listSettled for the views that may call tmux (ls,
+// next, the dashboard): it also re-applies the markers of the settled
+// sessions' windows, as reconcile does for the windows it marks stale.
+func listSettledMarked(ctx context.Context, st *store.Store, client tmux.Client, f store.ListFilter, logPath string, now time.Time) ([]model.Session, error) {
+	sessions, windows, err := listSettled(ctx, st, f, logPath, now)
+	applyMarkers(ctx, client, st, logPath, "settle attention marker", windows)
+	return sessions, err
 }
 
 // logWarn appends one warning to the log file at logPath, if it opens.

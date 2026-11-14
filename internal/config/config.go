@@ -22,6 +22,9 @@ type Config struct {
 	ContextWarnPct    int            `toml:"context_warn_pct"`
 	ContextCritPct    int            `toml:"context_crit_pct"`
 	StaleHideAfter    time.Duration  `toml:"stale_hide_after"`
+	AssumeExpiry      time.Duration  `toml:"assume_expiry"`
+	NotifyBell        bool           `toml:"notify_bell"`
+	NotifyMacOS       bool           `toml:"notify_macos"`
 }
 
 // Default returns the configuration used when no file overrides it.
@@ -35,6 +38,7 @@ func Default() Config {
 		ContextWarnPct:    60,
 		ContextCritPct:    85,
 		StaleHideAfter:    10 * time.Minute,
+		AssumeExpiry:      24 * time.Hour,
 	}
 }
 
@@ -52,6 +56,9 @@ func Load(path string) (Config, error) {
 		if err := toml.Unmarshal(data, &c); err != nil {
 			return Config{}, fmt.Errorf("parse config %s: %w", path, err)
 		}
+	}
+	if c.AssumeExpiry <= 0 {
+		return Config{}, fmt.Errorf("config %s: assume_expiry must be positive, got %v", path, c.AssumeExpiry)
 	}
 	c.DBPath = expandHome(c.DBPath)
 	c.LogPath = expandHome(c.LogPath)

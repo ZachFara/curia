@@ -37,7 +37,35 @@ type Client interface {
 	DisplayMessage(ctx context.Context, text string) error
 	// KillPane closes the pane.
 	KillPane(ctx context.Context, pane string) error
+	// SendKeys types text literally into the pane, then Enter. It is the
+	// only method that types into a pane, and it refuses a pane that is not
+	// a pane id and text that is empty, one character, over 800 characters,
+	// not UTF-8, or holds a control character. An error wrapping
+	// ErrPartialSend means the text may be in the prompt, unsubmitted or even
+	// submitted; the caller must not retry by typing again. Any other error
+	// means nothing was typed, as far as tmux reported.
+	SendKeys(ctx context.Context, pane, text string) error
+	// CapturePane returns the visible text of the pane, one line per row
+	// and no escape sequences, and whether its window has synchronize-panes
+	// on. It refuses a pane that is not a pane id.
+	CapturePane(ctx context.Context, pane string) (Capture, error)
+	// Bell rings the pane's bell.
+	Bell(ctx context.Context, pane string) error
+}
+
+// Capture is what CapturePane read of a pane.
+type Capture struct {
+	Screen string // the visible text, one line per row
+	// Synchronized is set when the pane's window has synchronize-panes on:
+	// keys sent to the pane then reach every pane of the window.
+	Synchronized bool
 }
 
 // ErrNoWindow is wrapped by an error for a window that does not exist.
 var ErrNoWindow = errors.New("tmux: no such window")
+
+// ErrPartialSend is wrapped by a SendKeys error when the text may have
+// reached the pane: the Enter step failed for any reason, or the text step
+// failed while the context was done. The line may be in the prompt
+// unsubmitted, or may even have been submitted; do not type it again.
+var ErrPartialSend = errors.New("tmux: text may have been typed")

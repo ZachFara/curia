@@ -1,6 +1,7 @@
 // Package fleet is the view over every session at once: it marks sessions
-// whose pane is gone as stale, ranks sessions by how much they need the user,
-// and builds the status-bar badge.
+// whose pane is gone as stale, settles sessions a denial or an interrupt left
+// working or waiting, ranks sessions by how much they need the user, and
+// builds the status-bar badge.
 package fleet
 
 import (
@@ -145,34 +146,36 @@ func unseen(s model.Session) bool {
 	return s.SeenAt.IsZero() || s.SeenAt.Before(s.UpdatedAt)
 }
 
-// Counts is how many sessions are in each state the badge shows.
+// Counts is what the badge shows: open blocking tickets, waiting sessions
+// and reviews.
 type Counts struct {
-	Decisions, Waiting, Reviews int
+	Decisions, Undelivered, Waiting, Reviews int
 }
 
-// Count counts sessions waiting on a decision and waiting for input,
-// whether or not they have been seen. Reviews stays 0 until Plan 4.
-func Count(s []model.Session) Counts {
-	var c Counts
+// Count counts the sessions waiting for input, whether or not they have
+// been seen, and takes Decisions from openBlocking, the number of open
+// blocking tickets across all sessions (Plan 2 section 4.10), not from
+// needs_decision sessions, and Undelivered from undelivered, the answers
+// the agents have not got yet (Ruling 89). Reviews stays 0 until Plan 4.
+func Count(s []model.Session, openBlocking, undelivered int) Counts {
+	c := Counts{Decisions: openBlocking, Undelivered: undelivered}
 	for _, x := range s {
-		switch x.State {
-		case model.StateNeedsDecision:
-			c.Decisions++
-		case model.StateWaiting:
+		if x.State == model.StateWaiting {
 			c.Waiting++
 		}
 	}
 	return c
 }
 
-// Badge renders c as "D<n> W<n> R<n>", leaving out zero parts; it is the
-// empty string when every count is zero.
+// Badge renders c as "D<n> Q<n> W<n> R<n>", leaving out zero parts; it is
+// the empty string when every count is zero. Q counts the answers not yet
+// delivered to their agent (Ruling 89).
 func Badge(c Counts) string {
 	var parts []string
 	for _, p := range []struct {
 		letter string
 		n      int
-	}{{"D", c.Decisions}, {"W", c.Waiting}, {"R", c.Reviews}} {
+	}{{"D", c.Decisions}, {"Q", c.Undelivered}, {"W", c.Waiting}, {"R", c.Reviews}} {
 		if p.n != 0 {
 			parts = append(parts, fmt.Sprintf("%s%d", p.letter, p.n))
 		}

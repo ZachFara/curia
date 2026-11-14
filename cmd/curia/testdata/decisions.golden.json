@@ -1,0 +1,345 @@
+[
+  {
+    "id": "D-1",
+    "session_id": "s1",
+    "task_id": "",
+    "repo": "/src/curia",
+    "question": "Which store for events?",
+    "context": "",
+    "options": [
+      {
+        "key": "A",
+        "label": "Postgres",
+        "tradeoffs": "Durable."
+      },
+      {
+        "key": "B",
+        "label": "Redis",
+        "tradeoffs": "Fast."
+      }
+    ],
+    "recommendation": "A",
+    "rationale": "Replays need history.",
+    "reversibility": "costly",
+    "mode": "blocking",
+    "assumption": "",
+    "scope": "repo",
+    "tags": [
+      "storage"
+    ],
+    "status": "open",
+    "answer_key": "",
+    "answer": "",
+    "answer_reasoning": "",
+    "answered_via": "",
+    "precedent_of": "",
+    "differs_from": "",
+    "differs_why": "",
+    "withdraw_reason": "",
+    "superseded_by": "",
+    "args_hash": "hash-Which store for events?",
+    "delivery": "none",
+    "delivered_via": "",
+    "created_at": "2026-11-11T08:00:00.123456789Z",
+    "expires_at": null,
+    "answered_at": null,
+    "closed_at": null,
+    "superseded_at": null,
+    "delivered_at": null,
+    "confirmed_at": null
+  },
+  {
+    "id": "D-2",
+    "session_id": "s1",
+    "task_id": "",
+    "repo": "/src/curia",
+    "question": "Run a && b?",
+    "context": "",
+    "options": [
+      {
+        "key": "A",
+        "label": "Postgres",
+        "tradeoffs": "Durable."
+      },
+      {
+        "key": "B",
+        "label": "Redis",
+        "tradeoffs": "Fast."
+      }
+    ],
+    "recommendation": "A",
+    "rationale": "Replays need history.",
+    "reversibility": "costly",
+    "mode": "assume",
+    "assumption": "Postgres",
+    "scope": "repo",
+    "tags": [
+      "storage"
+    ],
+    "status": "open",
+    "answer_key": "",
+    "answer": "",
+    "answer_reasoning": "",
+    "answered_via": "",
+    "precedent_of": "",
+    "differs_from": "",
+    "differs_why": "",
+    "withdraw_reason": "",
+    "superseded_by": "",
+    "args_hash": "hash-Run a && b?",
+    "delivery": "none",
+    "delivered_via": "",
+    "created_at": "2026-11-11T09:00:00Z",
+    "expires_at": "2026-11-12T09:00:00Z",
+    "answered_at": null,
+    "closed_at": null,
+    "superseded_at": null,
+    "delivered_at": null,
+    "confirmed_at": null
+  },
+  {
+    "id": "D-3",
+    "session_id": "s1",
+    "task_id": "",
+    "repo": "/src/curia",
+    "question": "Which index?",
+    "context": "",
+    "options": [
+      {
+        "key": "A",
+        "label": "Postgres",
+        "tradeoffs": "Durable."
+      },
+      {
+        "key": "B",
+        "label": "Redis",
+        "tradeoffs": "Fast."
+      }
+    ],
+    "recommendation": "A",
+    "rationale": "Replays need history.",
+    "reversibility": "costly",
+    "mode": "blocking",
+    "assumption": "",
+    "scope": "repo",
+    "tags": [
+      "storage"
+    ],
+    "status": "answered",
+    "answer_key": "A",
+    "answer": "A: Postgres",
+    "answer_reasoning": "fits replays",
+    "answered_via": "cli",
+    "precedent_of": "",
+    "differs_from": "",
+    "differs_why": "",
+    "withdraw_reason": "",
+    "superseded_by": "",
+    "args_hash": "hash-Which index?",
+    "delivery": "delivered",
+    "delivered_via": "stop_hook",
+    "created_at": "2026-11-11T07:00:00Z",
+    "expires_at": null,
+    "answered_at": "2026-11-11T07:30:00Z",
+    "closed_at": null,
+    "superseded_at": null,
+    "delivered_at": "2026-11-11T07:45:00Z",
+    "confirmed_at": null
+  },
+  {
+    "id": "D-4",
+    "session_id": "s1",
+    "task_id": "",
+    "repo": "/src/curia",
+    "question": "Which cache?",
+    "context": "",
+    "options": [
+      {
+        "key": "A",
+        "label": "Postgres",
+        "tradeoffs": "Durable."
+      },
+      {
+        "key": "B",
+        "label": "Redis",
+        "tradeoffs": "Fast."
+      }
+    ],
+    "recommendation": "A",
+    "rationale": "Replays need history.",
+    "reversibility": "costly",
+    "mode": "assume",
+    "assumption": "Postgres",
+    "scope": "repo",
+    "tags": [
+      "storage"
+    ],
+    "status": "overridden",
+    "answer_key": "B",
+    "answer": "B: Redis",
+    "answer_reasoning": "",
+    "answered_via": "popup",
+    "precedent_of": "",
+    "differs_from": "",
+    "differs_why": "",
+    "withdraw_reason": "",
+    "superseded_by": "",
+    "args_hash": "hash-Which cache?",
+    "delivery": "queued",
+    "delivered_via": "",
+    "created_at": "2026-11-11T06:00:00Z",
+    "expires_at": "2026-11-12T06:00:00Z",
+    "answered_at": "2026-11-11T06:30:00Z",
+    "closed_at": null,
+    "superseded_at": null,
+    "delivered_at": null,
+    "confirmed_at": null
+  },
+  {
+    "id": "D-5",
+    "session_id": "s1",
+    "task_id": "",
+    "repo": "/src/curia",
+    "question": "Which format?",
+    "context": "",
+    "options": [
+      {
+        "key": "A",
+        "label": "Postgres",
+        "tradeoffs": "Durable."
+      },
+      {
+        "key": "B",
+        "label": "Redis",
+        "tradeoffs": "Fast."
+      }
+    ],
+    "recommendation": "A",
+    "rationale": "Replays need history.",
+    "reversibility": "costly",
+    "mode": "blocking",
+    "assumption": "",
+    "scope": "repo",
+    "tags": [
+      "storage"
+    ],
+    "status": "withdrawn",
+    "answer_key": "",
+    "answer": "",
+    "answer_reasoning": "",
+    "answered_via": "",
+    "precedent_of": "D-3",
+    "differs_from": "",
+    "differs_why": "",
+    "withdraw_reason": "covered by D-3",
+    "superseded_by": "",
+    "args_hash": "hash-Which format?",
+    "delivery": "none",
+    "delivered_via": "",
+    "created_at": "2026-11-11T05:00:00Z",
+    "expires_at": null,
+    "answered_at": null,
+    "closed_at": "2026-11-11T05:10:00Z",
+    "superseded_at": null,
+    "delivered_at": null,
+    "confirmed_at": null
+  },
+  {
+    "id": "D-6",
+    "session_id": "s1",
+    "task_id": "",
+    "repo": "/src/curia",
+    "question": "Which timeout?",
+    "context": "",
+    "options": [
+      {
+        "key": "A",
+        "label": "Postgres",
+        "tradeoffs": "Durable."
+      },
+      {
+        "key": "B",
+        "label": "Redis",
+        "tradeoffs": "Fast."
+      }
+    ],
+    "recommendation": "A",
+    "rationale": "Replays need history.",
+    "reversibility": "costly",
+    "mode": "assume",
+    "assumption": "Postgres",
+    "scope": "repo",
+    "tags": [
+      "storage"
+    ],
+    "status": "expired",
+    "answer_key": "",
+    "answer": "",
+    "answer_reasoning": "",
+    "answered_via": "",
+    "precedent_of": "",
+    "differs_from": "",
+    "differs_why": "",
+    "withdraw_reason": "",
+    "superseded_by": "",
+    "args_hash": "hash-Which timeout?",
+    "delivery": "none",
+    "delivered_via": "",
+    "created_at": "2026-11-11T04:00:00Z",
+    "expires_at": "2026-11-11T04:30:00Z",
+    "answered_at": null,
+    "closed_at": "2026-11-11T04:30:00Z",
+    "superseded_at": null,
+    "delivered_at": null,
+    "confirmed_at": null
+  },
+  {
+    "id": "D-7",
+    "session_id": "s1",
+    "task_id": "",
+    "repo": "/src/curia",
+    "question": "Which queue?",
+    "context": "",
+    "options": [
+      {
+        "key": "A",
+        "label": "Postgres",
+        "tradeoffs": "Durable."
+      },
+      {
+        "key": "B",
+        "label": "Redis",
+        "tradeoffs": "Fast."
+      }
+    ],
+    "recommendation": "A",
+    "rationale": "Replays need history.",
+    "reversibility": "costly",
+    "mode": "assume",
+    "assumption": "Postgres",
+    "scope": "repo",
+    "tags": [
+      "storage"
+    ],
+    "status": "confirmed",
+    "answer_key": "A",
+    "answer": "A: Postgres",
+    "answer_reasoning": "",
+    "answered_via": "ssh",
+    "precedent_of": "",
+    "differs_from": "",
+    "differs_why": "",
+    "withdraw_reason": "",
+    "superseded_by": "D-3",
+    "args_hash": "hash-Which queue?",
+    "delivery": "delivered",
+    "delivered_via": "check",
+    "created_at": "2026-11-11T03:00:00Z",
+    "expires_at": "2026-11-12T03:00:00Z",
+    "answered_at": "2026-11-11T03:20:00Z",
+    "closed_at": null,
+    "superseded_at": "2026-11-11T11:00:00Z",
+    "delivered_at": "2026-11-11T03:25:00Z",
+    "confirmed_at": null
+  }
+]

@@ -6,8 +6,16 @@ import "github.com/ZachFara/curia/internal/model"
 
 const maxLastUpdateRunes = 80
 
+// sourceCompact is the SessionStart source Claude Code sends after a
+// compaction.
+const sourceCompact = "compact"
+
 // Apply returns s after applying ev. openDecision reports whether the
-// transcript ends in an open decision, which turns a Stop into needs_decision.
+// session has an open blocking decision ticket, which turns a Stop into
+// needs_decision unless ev.StopBlocked (the hook is blocking the Stop to
+// deliver answers), which makes it working.
+// A SessionStart starts the session afresh, except a compaction's for a
+// stored session that is not ended (Continues), which keeps it as it was.
 // It is pure: no I/O and no clock. An ended session ignores SubagentStop and
 // SessionEnd and is returned unchanged (see Ignores); any other event is
 // applied as usual and brings it back.
@@ -45,7 +53,8 @@ func Apply(s model.Session, ev model.Event, openDecision bool) model.Session {
 	case model.Stop:
 		stop(&s, ev, openDecision)
 	case model.SubagentStop:
-		if s.SubagentsActive > 0 {
+		// A helper agent's stop matches no counted Agent or Task call.
+		if !ev.HelperAgent && s.SubagentsActive > 0 {
 			s.SubagentsActive--
 		}
 	case model.SessionEnd:
@@ -83,8 +92,13 @@ func countSubagent(s *model.Session, ev model.Event) {
 // sessionStart starts s from ev. A new or /cleared session sits at an empty
 // prompt the user just opened, so it is idle and seen (Ruling 37); its first
 // prompt makes it working. A model ev names stands until a transcript read
-// replaces it.
+// replaces it. A compaction's SessionStart that Continues the session is
+// not a start: see compacted.
 func sessionStart(s *model.Session, ev model.Event) {
+	if Continues(*s, ev) {
+		compacted(s, ev)
+		return
+	}
 	start(s, ev)
 	s.State = model.StateIdle
 	s.SeenAt = ev.At
@@ -94,13 +108,26 @@ func sessionStart(s *model.Session, ev model.Event) {
 	}
 }
 
+// stop ends a turn. A Stop the hook blocks to deliver answers does not
+// end it: Claude goes on with the answers, so the session is working.
+// Otherwise an open blocking ticket makes it needs_decision; with none it
+// is idle. A Stop that lists its background tasks sets the subagent count.
 func stop(s *model.Session, ev model.Event, openDecision bool) {
-	s.State = model.StateIdle
-	if openDecision {
+	switch {
+	case ev.StopBlocked:
+		s.State = model.StateWorking
+	case openDecision:
 		s.State = model.StateNeedsDecision
+	default:
+		s.State = model.StateIdle
 	}
 	if ev.Message != "" {
 		s.LastUpdate = truncate(ev.Message)
+	}
+	// The Stop's own list of background subagents is the count's truth: the
+	// turn is over, so only background ones can still run (Ruling 87).
+	if ev.BackgroundKnown {
+		s.SubagentsActive = ev.RunningSubagents
 	}
 }
 
@@ -133,4 +160,32 @@ func truncate(s string) string {
 		return s
 	}
 	return string(r[:maxLastUpdateRunes])
+}
+
+// Compaction reports whether ev is the SessionStart Claude Code fires after
+// compacting the conversation (source "compact"), which can come in the
+// middle of a turn (Ruling 74).
+func Compaction(ev model.Event) bool {
+	return ev.Kind == model.SessionStart && ev.Source == sourceCompact
+}
+
+// Continues reports whether ev is a compaction's SessionStart for s that
+// leaves s going on as it was: s has a row and is not ended (Rulings 74 and
+// 74a). An ended session is plainly alive again, so for it, as for one with
+// no row, a compaction is a start like any other.
+func Continues(s model.Session, ev model.Event) bool {
+	return s.ID != "" && s.State != model.StateEnded && Compaction(ev)
+}
+
+// compacted applies a compaction's SessionStart to a stored session: the
+// session goes on as it was, so its state, seen time, start and subagent
+// count stay. Only a changed transcript path (whose offset restarts) and a
+// named model are taken; Apply has set UpdatedAt.
+func compacted(s *model.Session, ev model.Event) {
+	if ev.TranscriptPath != "" && ev.TranscriptPath != s.TranscriptPath {
+		s.TranscriptPath, s.TranscriptOffset = ev.TranscriptPath, 0
+	}
+	if ev.Model != "" {
+		s.Model = ev.Model
+	}
 }

@@ -5,8 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/decision"
 	"github.com/ZachFara/curia/internal/hook"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -40,29 +43,11 @@ func hookHome(t *testing.T) string {
 }
 
 // runHookCmd runs `curia <args>` in-process with stdin and a fake exit func.
+// Its output is what was written to stdout, then what was written to stderr.
 func runHookCmd(t *testing.T, stdin io.Reader, args ...string) hookResult {
 	t.Helper()
-	res := hookResult{exitCode: -1}
-	prev := hookExit
-	hookExit = func(code int) { res.exitCode = code; res.exits++ }
-	var out bytes.Buffer
-	rootCmd.SetIn(stdin)
-	rootCmd.SetOut(&out)
-	rootCmd.SetErr(&out)
-	rootCmd.SetArgs(args)
-	t.Cleanup(func() {
-		hookExit = prev
-		rootCmd.SetIn(nil)
-		rootCmd.SetOut(nil)
-		rootCmd.SetErr(nil)
-		rootCmd.SetArgs(nil)
-	})
-	if err := rootCmd.Execute(); err != nil {
-		t.Errorf("Execute returned %v", err)
-	}
-	res.output = out.String()
-	res.log = readLog(t)
-	return res
+	s := hookRunStreams(t, stdin, args...)
+	return hookResult{exitCode: s.exitCode, exits: s.exits, output: s.stdout + s.stderr, log: s.log}
 }
 
 func readLog(t *testing.T) []string {
@@ -245,7 +230,7 @@ func TestHookBadInvocationsExitZero(t *testing.T) {
 func TestHookPanicExitsZero(t *testing.T) {
 	hookHome(t)
 	prev := hookRun
-	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (model.Session, error) {
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
 		panic("boom\nforged line")
 	}
 	t.Cleanup(func() { hookRun = prev })
@@ -479,8 +464,8 @@ func TestHookAppliesMarker(t *testing.T) {
 	hookHome(t)
 	fake := useFakeTmux(t)
 	prev := hookRun
-	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (model.Session, error) {
-		return model.Session{ID: "A", TmuxWindow: "@7", State: model.StateWaiting, UpdatedAt: time.Now()}, nil
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		return hook.Result{Session: model.Session{ID: "A", TmuxWindow: "@7", State: model.StateWaiting, UpdatedAt: time.Now()}}, nil
 	}
 	t.Cleanup(func() { hookRun = prev })
 
@@ -515,8 +500,8 @@ func TestHookAttentionFailureIsLoggedExitZero(t *testing.T) {
 	newTmuxClient = func() tmux.Client { return &failingTmux{} }
 	t.Cleanup(func() { newTmuxClient = prevC })
 	prev := hookRun
-	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (model.Session, error) {
-		return model.Session{ID: "A", TmuxWindow: "@7", State: model.StateWaiting, UpdatedAt: time.Now()}, nil
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		return hook.Result{Session: model.Session{ID: "A", TmuxWindow: "@7", State: model.StateWaiting, UpdatedAt: time.Now()}}, nil
 	}
 	t.Cleanup(func() { hookRun = prev })
 
@@ -562,8 +547,8 @@ func TestHookFailedBeforeReadIsLoggedAndApplies(t *testing.T) {
 	}
 	_ = raw.Close()
 	prev := hookRun
-	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (model.Session, error) {
-		return model.Session{ID: "A", TmuxWindow: "@7"}, nil
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		return hook.Result{Session: model.Session{ID: "A", TmuxWindow: "@7"}}, nil
 	}
 	t.Cleanup(func() { hookRun = prev })
 
@@ -576,5 +561,368 @@ func TestHookFailedBeforeReadIsLoggedAndApplies(t *testing.T) {
 	}
 	if len(fake.Calls) != 0 {
 		t.Errorf("calls = %q, want none (update failed before tmux)", fake.Calls)
+	}
+}
+
+// hookStreams is what one in-process run of `curia hook` wrote, with stdout
+// and stderr kept apart.
+type hookStreams struct {
+	exitCode, exits int
+	stdout, stderr  string
+	log             []string
+}
+
+// hookRunStreams runs `curia <args>` in-process like runHookCmd, capturing
+// stdout and stderr separately.
+func hookRunStreams(t *testing.T, stdin io.Reader, args ...string) hookStreams {
+	t.Helper()
+	res := hookStreams{exitCode: -1}
+	prev := hookExit
+	hookExit = func(code int) { res.exitCode = code; res.exits++ }
+	var out, errOut bytes.Buffer
+	rootCmd.SetIn(stdin)
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&errOut)
+	rootCmd.SetArgs(args)
+	t.Cleanup(func() {
+		hookExit = prev
+		rootCmd.SetIn(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+		rootCmd.SetArgs(nil)
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Errorf("Execute returned %v", err)
+	}
+	res.stdout, res.stderr = out.String(), errOut.String()
+	res.log = readLog(t)
+	return res
+}
+
+// hookWantExitZero checks the run exited 0 exactly once and wrote nothing
+// to stderr.
+func hookWantExitZero(t *testing.T, res hookStreams) {
+	t.Helper()
+	if res.exitCode != 0 || res.exits != 1 {
+		t.Errorf("exit code %d after %d exit calls, want one exit(0)", res.exitCode, res.exits)
+	}
+	if res.stderr != "" {
+		t.Errorf("hook wrote to stderr: %q", res.stderr)
+	}
+}
+
+// hookQueueAnswer raises a blocking ticket from session in the store at db
+// and answers it with option A, so its answer is queued; it returns the id.
+func hookQueueAnswer(t *testing.T, db, session string) string {
+	t.Helper()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	r := decision.Request{
+		Question: "Which store for events?",
+		Context:  "internal/events/store.go writes about 200 events a minute.",
+		Options: []model.Option{
+			{Key: "A", Label: "Postgres table", Tradeoffs: "Durable."},
+			{Key: "B", Label: "Redis stream", Tradeoffs: "No migration."},
+		},
+		Recommendation: "A",
+		Rationale:      "Replays need 30 days of history.",
+		Reversibility:  string(model.ReversCostly),
+		Mode:           string(model.ModeBlocking),
+		Scope:          string(model.ScopeRepo),
+	}
+	ctx := context.Background()
+	now := time.Now()
+	d, _, err := st.CreateDecision(ctx, decision.New(r, decision.Caller{SessionID: session}, now, time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.AnswerDecision(ctx, d.ID, model.Answer{Key: "A", Reasoning: "we already run it", Via: model.AnsweredCLI}, now); err != nil {
+		t.Fatal(err)
+	}
+	return d.ID
+}
+
+// hookDelivery returns decision id's delivery state and path.
+func hookDelivery(t *testing.T, db, id string) (model.Delivery, model.DeliveryVia) {
+	t.Helper()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	d, found, err := st.GetDecision(context.Background(), id)
+	if err != nil || !found {
+		t.Fatalf("GetDecision(%s) = found %v, err %v", id, found, err)
+	}
+	return d.Delivery, d.DeliveredVia
+}
+
+func TestStdoutOnlyOnBlockedStop(t *testing.T) {
+	db := hookHome(t)
+	body := `{"session_id":"A","cwd":"` + t.TempDir() + `"}`
+	hookWantExitZero(t, hookRunStreams(t, strings.NewReader(body), "hook", "SessionStart"))
+	id := hookQueueAnswer(t, db, "A")
+
+	res := hookRunStreams(t, strings.NewReader(body), "hook", "PostToolUse")
+	hookWantExitZero(t, res)
+	if res.stdout != "" {
+		t.Errorf("PostToolUse with a queued answer wrote %q, want nothing", res.stdout)
+	}
+	if got, _ := hookDelivery(t, db, id); got != model.DeliveryQueued {
+		t.Errorf("after PostToolUse %s is %s, want queued", id, got)
+	}
+
+	res = hookRunStreams(t, strings.NewReader(body), "hook", "Stop")
+	hookWantExitZero(t, res)
+	want := `{"decision":"block","reason":"Curia: decisions answered while you were working.\nDecision D-1 answered: option A [Postgres table]. Reasoning: we already run it. Continue."}` + "\n"
+	if res.stdout != want {
+		t.Errorf("Stop wrote\n %q\nwant\n %q", res.stdout, want)
+	}
+	// M8: the one log line names what the Stop delivered.
+	if len(res.log) != 1 || !strings.Contains(res.log[0], `level=INFO msg="hook Stop delivered answers" ids=D-1`) {
+		t.Errorf("log = %q, want one INFO line naming D-1", res.log)
+	}
+	if got, via := hookDelivery(t, db, id); got != model.DeliveryDelivered || via != model.ViaStopHook {
+		t.Errorf("after Stop %s is %s via %q, want delivered via stop_hook", id, got, via)
+	}
+
+	res = hookRunStreams(t, strings.NewReader(body), "hook", "Stop")
+	hookWantExitZero(t, res)
+	if res.stdout != "" {
+		t.Errorf("Stop with nothing queued wrote %q, want nothing", res.stdout)
+	}
+}
+
+func TestHookExitsZeroAndSilentWhenDecisionQueryFails(t *testing.T) {
+	hookHome(t)
+	prev := hookRun
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		return hook.Result{Session: model.Session{ID: "A", State: model.StateIdle}}, errors.New("count open blocking: boom")
+	}
+	t.Cleanup(func() { hookRun = prev })
+
+	res := hookRunStreams(t, strings.NewReader(`{"session_id":"A"}`), "hook", "Stop")
+	hookWantExitZero(t, res)
+	if res.stdout != "" {
+		t.Errorf("stdout = %q, want nothing", res.stdout)
+	}
+	if len(res.log) != 1 || !strings.Contains(res.log[0], "boom") {
+		t.Errorf("log = %q, want one line with the error", res.log)
+	}
+}
+
+// A claim that committed is delivered even when Run also reports an error
+// (a transcript it could not read): the answer is no longer queued.
+func TestHookEmitsBlockBesideAnError(t *testing.T) {
+	hookHome(t)
+	line := `{"decision":"block","reason":"x"}` + "\n"
+	prev := hookRun
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		return hook.Result{Session: model.Session{ID: "A", State: model.StateWorking}, Stdout: []byte(line)}, errors.New("transcript: boom")
+	}
+	t.Cleanup(func() { hookRun = prev })
+
+	res := hookRunStreams(t, strings.NewReader(`{"session_id":"A"}`), "hook", "Stop")
+	hookWantExitZero(t, res)
+	if res.stdout != line {
+		t.Errorf("stdout = %q, want %q", res.stdout, line)
+	}
+	if len(res.log) != 1 || !strings.Contains(res.log[0], "boom") {
+		t.Errorf("log = %q, want one line with the error", res.log)
+	}
+}
+
+func TestNothingPrintedAfterWatchdog(t *testing.T) {
+	hookHome(t)
+	prevDeadline, prev := hookDeadline, hookRun
+	hookDeadline = 10 * time.Millisecond
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		time.Sleep(50 * time.Millisecond)
+		return hook.Result{
+			Session: model.Session{ID: "A", State: model.StateWorking},
+			Stdout:  []byte(`{"decision":"block","reason":"x"}` + "\n"),
+		}, nil
+	}
+	t.Cleanup(func() { hookDeadline, hookRun = prevDeadline, prev })
+
+	res := hookRunStreams(t, strings.NewReader(`{"session_id":"A"}`), "hook", "Stop")
+	hookWantExitZero(t, res)
+	if res.stdout != "" {
+		t.Errorf("stdout = %q, want nothing after the watchdog", res.stdout)
+	}
+	if len(res.log) != 1 || !strings.Contains(res.log[0], "hook timed out") {
+		t.Errorf("log = %q, want one line saying the hook timed out", res.log)
+	}
+}
+
+// hookOrderTmux is a Fake that records, at each tmux call, what the hook
+// had written to stdout by then.
+type hookOrderTmux struct {
+	*tmux.Fake
+	stdout *bytes.Buffer
+	seen   []string
+}
+
+func (f *hookOrderTmux) PaneFocused(ctx context.Context, pane string) (bool, error) {
+	f.seen = append(f.seen, "PaneFocused:"+f.stdout.String())
+	return f.Fake.PaneFocused(ctx, pane)
+}
+
+func (f *hookOrderTmux) SetWindowOption(ctx context.Context, window, name, value string) error {
+	f.seen = append(f.seen, "SetWindowOption:"+f.stdout.String())
+	return f.Fake.SetWindowOption(ctx, window, name, value)
+}
+
+// The line is written before any tmux call, so a slow tmux cannot widen the
+// gap between claiming an answer and telling Claude.
+func TestHookEmitsBeforeTmux(t *testing.T) {
+	db := hookHome(t)
+	t.Setenv("TMUX_PANE", "%1")
+	fake := useFakeTmux(t)
+	fake.Panes = []tmux.Pane{{ID: "%1", Session: "s", WindowID: "@7"}}
+	var out bytes.Buffer
+	order := &hookOrderTmux{Fake: fake, stdout: &out}
+	newTmuxClient = func() tmux.Client { return order } // useFakeTmux restores it
+	seedSessions(t, db, model.Session{
+		ID: "A", Agent: "claude", Pane: "%1", TmuxSession: "s", TmuxWindow: "@7",
+		State: model.StateIdle, StartedAt: time.Now(), UpdatedAt: time.Now(), SeenAt: time.Now(),
+	})
+	line := `{"decision":"block","reason":"x"}` + "\n"
+	prev := hookRun
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		// A red window: the hook checks focus, then sets the marker.
+		s := model.Session{ID: "A", Pane: "%1", TmuxWindow: "@7", State: model.StateWaiting, UpdatedAt: time.Now()}
+		return hook.Result{Session: s, Stdout: []byte(line)}, nil
+	}
+	t.Cleanup(func() { hookRun = prev })
+
+	prevExit := hookExit
+	var codes []int
+	hookExit = func(code int) { codes = append(codes, code) }
+	var errOut bytes.Buffer
+	rootCmd.SetIn(strings.NewReader(`{"session_id":"A"}`))
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&errOut)
+	rootCmd.SetArgs([]string{"hook", "Stop"})
+	t.Cleanup(func() {
+		hookExit = prevExit
+		rootCmd.SetIn(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+		rootCmd.SetArgs(nil)
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(codes, []int{0}) || errOut.Len() != 0 {
+		t.Errorf("exit calls %v, stderr %q; want one exit(0) and no stderr", codes, errOut.String())
+	}
+	want := []string{"PaneFocused:" + line, "SetWindowOption:" + line}
+	if !slices.Equal(order.seen, want) {
+		t.Errorf("tmux calls saw stdout %q, want %q", order.seen, want)
+	}
+}
+
+// Ruling 74: a compaction's SessionStart leaves a red session red and ends
+// no other session in the pane, so no marker changes and tmux is not asked.
+func TestHookCompactMakesNoMarkerCall(t *testing.T) {
+	m := newMarkerHook(t)
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	seedSessions(t, m.db, model.Session{
+		ID: "B", Agent: "claude", Pane: "%1", TmuxWindow: "@8", State: model.StateWaiting,
+		StartedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	m.fake.Calls = nil
+	body := `{"session_id":"A","cwd":"` + t.TempDir() + `","source":"compact"}`
+	assertQuietExitZero(t, runHookCmd(t, strings.NewReader(body), "hook", "SessionStart"))
+	if len(m.fake.Calls) != 0 {
+		t.Errorf("tmux calls %q, want none", m.fake.Calls)
+	}
+	for _, id := range []string{"A", "B"} {
+		if s := getSession(t, m.db, id); s.State != model.StateWaiting {
+			t.Errorf("%s = %s, want still waiting", id, s.State)
+		}
+	}
+}
+
+// hookChildHome names the variable that makes TestHookClosedStdoutChild act
+// as the child process of TestHookClosedStdoutExitsZero; its value is the
+// child's HOME.
+const hookChildHome = "CURIA_TEST_HOOK_CHILD_HOME"
+
+// Claude Code may have closed its end of the hook's stdout. Go kills a
+// process whose write to fd 1 hits a closed pipe, unless SIGPIPE is
+// ignored, so this runs the hook in a child process whose stdout is a pipe
+// with no reader: it must log the failed write and exit 0.
+func TestHookClosedStdoutExitsZero(t *testing.T) {
+	home := t.TempDir()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable() // this test binary
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The context kills a hung child when the test ends.
+	child := exec.CommandContext(t.Context(), self, "-test.run=^TestHookClosedStdoutChild$", "-test.count=1", "-test.timeout=30s")
+	child.Env = append(os.Environ(), hookChildHome+"="+home)
+	child.Stdout = w
+	var stderr bytes.Buffer
+	child.Stderr = &stderr
+	err = child.Run()
+	_ = w.Close()
+	if err != nil {
+		t.Fatalf("child: %v, want exit 0 (stderr %q)", err, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("child wrote to stderr: %q", stderr.String())
+	}
+	b, err := os.ReadFile(filepath.Clean(filepath.Join(home, ".local", "state", "curia", "curia.log")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	if len(log) != 1 || !strings.Contains(log[0], "hook output") || !strings.Contains(log[0], "broken pipe") {
+		t.Errorf("log = %q, want one line with the failed write", log)
+	}
+}
+
+// TestHookClosedStdoutChild is the child of TestHookClosedStdoutExitsZero.
+// Run on its own it does nothing.
+func TestHookClosedStdoutChild(t *testing.T) {
+	home := os.Getenv(hookChildHome)
+	if home == "" {
+		return
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CURIA_DB", filepath.Join(home, "curia.db"))
+	prevRun, prevExit := hookRun, hookExit
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		return hook.Result{
+			Session: model.Session{ID: "A", State: model.StateWorking},
+			Stdout:  []byte(`{"decision":"block","reason":"x"}` + "\n"),
+		}, nil
+	}
+	code := -1
+	hookExit = func(c int) { code = c }
+	rootCmd.SetIn(strings.NewReader(`{"session_id":"A"}`))
+	rootCmd.SetArgs([]string{"hook", "Stop"})
+	t.Cleanup(func() {
+		hookRun, hookExit = prevRun, prevExit
+		rootCmd.SetIn(nil)
+		rootCmd.SetArgs(nil)
+	})
+	if err := rootCmd.Execute(); err != nil || code != 0 {
+		// stdout is the closed pipe: report on stderr.
+		fmt.Fprintf(os.Stderr, "Execute = %v, exit code %d; want nil and 0\n", err, code)
+		t.Fail()
 	}
 }

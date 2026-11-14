@@ -221,7 +221,7 @@ func TestRankIdleNeverSeenIsUnseen(t *testing.T) {
 }
 
 func TestCount(t *testing.T) {
-	seen := sess("e", model.StateNeedsDecision, "%5", t0)
+	seen := sess("e", model.StateWaiting, "%5", t0)
 	seen.SeenAt = t0.Add(time.Minute) // counted regardless of seen
 	in := []model.Session{
 		sess("a", model.StateNeedsDecision, "%1", t0),
@@ -231,7 +231,19 @@ func TestCount(t *testing.T) {
 		seen,
 		sess("f", model.StateStale, "%6", t0),
 	}
-	if got, want := fleet.Count(in), (fleet.Counts{Decisions: 2, Waiting: 1}); got != want {
+	if got, want := fleet.Count(in, 0, 0), (fleet.Counts{Waiting: 2}); got != want {
+		t.Errorf("Count = %+v, want %+v", got, want)
+	}
+}
+
+// Section 4.10: D counts open blocking tickets, not needs_decision sessions.
+func TestCountUsesOpenBlocking(t *testing.T) {
+	in := []model.Session{
+		sess("a", model.StateNeedsDecision, "%1", t0),
+		sess("b", model.StateWaiting, "%2", t0),
+		sess("c", model.StateWaiting, "%3", t0),
+	}
+	if got, want := fleet.Count(in, 3, 1), (fleet.Counts{Decisions: 3, Undelivered: 1, Waiting: 2}); got != want {
 		t.Errorf("Count = %+v, want %+v", got, want)
 	}
 }
@@ -242,6 +254,8 @@ func TestBadge(t *testing.T) {
 		want string
 	}{
 		{fleet.Counts{Decisions: 2, Waiting: 1, Reviews: 1}, "D2 W1 R1"},
+		{fleet.Counts{Decisions: 1, Undelivered: 2, Waiting: 1}, "D1 Q2 W1"}, // Ruling 89
+		{fleet.Counts{Undelivered: 1}, "Q1"},
 		{fleet.Counts{Waiting: 1}, "W1"},
 		{fleet.Counts{}, ""},
 		{fleet.Counts{Decisions: 3, Reviews: 12}, "D3 R12"},

@@ -44,10 +44,19 @@ type Session struct {
 // notification_type (for example "permission_prompt" or "idle_prompt").
 // LastAssistantMessage is a Stop's last_assistant_message: Claude's final
 // answer, which the transcript may not hold yet when Stop fires. Model is a
-// SessionStart's model, empty when the payload has none.
+// SessionStart's model, empty when the payload has none. Source is a
+// SessionStart's source ("startup", "resume", "clear" or "compact").
+// StopBlocked is set by the hook on a Stop it is about to block.
+// HelperAgent marks a SubagentStop of one of Claude Code's own helper agents
+// (agent_type present and empty), which no Agent or Task tool call started
+// (Ruling 87). On a Stop, RunningSubagents counts the subagents its
+// background_tasks lists as running, when BackgroundKnown says the payload
+// has that list. Prompt is a UserPromptSubmit's prompt.
 type Event struct {
 	Kind                                                                                  EventKind
 	SessionID, Pane, Cwd, TranscriptPath, ToolName, ToolTarget, Message, NotificationType string
-	LastAssistantMessage, Model                                                           string
+	LastAssistantMessage, Model, Source, Prompt                                           string
+	StopBlocked, HelperAgent, BackgroundKnown                                             bool
+	RunningSubagents                                                                      int
 	At                                                                                    time.Time
 }

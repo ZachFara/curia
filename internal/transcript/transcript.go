@@ -68,35 +68,55 @@ type usage struct {
 // all counted assistant lines read (Claude Code writes one line per content
 // block, so the final line may hold only a tool_use).
 func Read(path string, offset int64) (Update, int64, error) {
-	f, err := os.Open(filepath.Clean(path))
-	if errors.Is(err, fs.ErrNotExist) {
-		return Update{}, offset, nil
-	}
-	if err != nil {
-		return Update{}, offset, fmt.Errorf("open transcript: %w", err)
+	f, info, err := openTranscript(path)
+	if f == nil {
+		return Update{}, offset, err
 	}
 	defer func() { _ = f.Close() }()
-
-	info, err := f.Stat()
-	if err != nil {
-		return Update{}, offset, fmt.Errorf("stat transcript: %w", err)
-	}
-	if offset < 0 || offset > info.Size() {
+	size := info.Size()
+	if offset < 0 || offset > size {
 		offset = 0
 	}
-	r := bufio.NewReaderSize(f, 64<<10)
+	src := bounded(f, size)
+	r := bufio.NewReaderSize(src, 64<<10)
 	var buf []byte
-	start, ok, err := position(f, r, info.Size(), offset, &buf)
+	start, ok, err := position(src, r, size, offset, &buf)
 	if err != nil || !ok {
 		return Update{}, offset, err
 	}
 	return scan(r, &buf, start)
 }
 
+// openTranscript opens the transcript at path and returns it with what
+// Stat says of it. A missing file yields a nil file and no error; on any
+// error the file is nil too.
+func openTranscript(path string) (*os.File, fs.FileInfo, error) {
+	f, err := os.Open(filepath.Clean(path))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("open transcript: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("stat transcript: %w", err)
+	}
+	return f, info, nil
+}
+
+// bounded reads f only up to size, the size it had when it was opened, so
+// bytes appended later (or a device that never ends) cannot keep a read
+// going.
+func bounded(f *os.File, size int64) *io.SectionReader {
+	return io.NewSectionReader(f, 0, size)
+}
+
 // position seeks f to the first line to parse. Normally that is offset; if
 // more than tailWindow bytes are unread it is the first complete line inside
 // the last tailWindow bytes. ok is false if that window holds no complete line.
-func position(f *os.File, r *bufio.Reader, size, offset int64, buf *[]byte) (start int64, ok bool, err error) {
+func position(f io.Seeker, r *bufio.Reader, size, offset int64, buf *[]byte) (start int64, ok bool, err error) {
 	if size-offset <= tailWindow {
 		_, err = f.Seek(offset, io.SeekStart)
 		return offset, err == nil, wrap("seek transcript", err)

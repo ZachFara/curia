@@ -38,6 +38,9 @@ func TestDefaults(t *testing.T) {
 	if c.StaleHideAfter != 10*time.Minute {
 		t.Errorf("StaleHideAfter = %v", c.StaleHideAfter)
 	}
+	if c.AssumeExpiry != 24*time.Hour || c.NotifyBell || c.NotifyMacOS {
+		t.Errorf("decision defaults = %v/%v/%v", c.AssumeExpiry, c.NotifyBell, c.NotifyMacOS)
+	}
 }
 
 func TestLoadMissingFileReturnsDefaults(t *testing.T) {
@@ -117,5 +120,36 @@ func TestCuriaDBEnvOverride(t *testing.T) {
 	}
 	if got.DBPath != want {
 		t.Errorf("with file: DBPath = %q, want %q", got.DBPath, want)
+	}
+}
+
+func TestDecisionDefaults(t *testing.T) {
+	c := config.Default()
+	if c.AssumeExpiry != 24*time.Hour {
+		t.Errorf("AssumeExpiry = %v", c.AssumeExpiry)
+	}
+	if c.NotifyBell || c.NotifyMacOS {
+		t.Errorf("NotifyBell/NotifyMacOS = %v/%v", c.NotifyBell, c.NotifyMacOS)
+	}
+}
+
+func TestLoadDecisionOverrides(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	got, err := config.Load(writeConfig(t, "assume_expiry = \"36h\"\nnotify_bell = true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AssumeExpiry != 36*time.Hour || !got.NotifyBell || got.NotifyMacOS {
+		t.Errorf("got %v/%v/%v", got.AssumeExpiry, got.NotifyBell, got.NotifyMacOS)
+	}
+}
+
+func TestNonPositiveAssumeExpiryRejected(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	for _, v := range []string{"0s", "-1h"} {
+		_, err := config.Load(writeConfig(t, "assume_expiry = \""+v+"\"\n"))
+		if err == nil || !strings.Contains(err.Error(), "assume_expiry") {
+			t.Errorf("assume_expiry %s: err = %v", v, err)
+		}
 	}
 }

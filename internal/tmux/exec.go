@@ -3,12 +3,18 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // paneFormat is the tmux format string that parsePanes expects. start_time
@@ -18,16 +24,30 @@ const paneFormat = "#{pane_id}\t#{session_name}\t#{window_id}\t#{start_time}\t#{
 
 type execClient struct {
 	socket string
+	// runner runs one tmux command and returns its stdout. NewExec sets it
+	// to execTmux; tests set a recorder.
+	runner func(ctx context.Context, args ...string) (string, error)
+	// openTTY opens a pane's tty for Bell. NewExec sets it to openTTY;
+	// tests set a recorder.
+	openTTY func(name string) (*os.File, error)
 }
 
 // NewExec returns a Client that runs the tmux binary. An empty socket uses
 // the default server; otherwise every command gets -L socket.
 func NewExec(socket string) Client {
-	return &execClient{socket: socket}
+	c := &execClient{socket: socket}
+	c.runner = c.execTmux
+	c.openTTY = openTTY
+	return c
 }
 
-// run executes tmux with args as separate argv entries (never a shell).
+// run runs one tmux command through the client's runner.
 func (c *execClient) run(ctx context.Context, args ...string) (string, error) {
+	return c.runner(ctx, args...)
+}
+
+// execTmux executes tmux with args as separate argv entries (never a shell).
+func (c *execClient) execTmux(ctx context.Context, args ...string) (string, error) {
 	full := args
 	if c.socket != "" {
 		full = append([]string{"-L", c.socket}, args...)
@@ -106,6 +126,194 @@ func (c *execClient) DisplayMessage(ctx context.Context, text string) error {
 
 func (c *execClient) KillPane(ctx context.Context, pane string) error {
 	_, err := c.run(ctx, "kill-pane", "-t", pane)
+	return err
+}
+
+// paneIDPattern matches a pane id, the only target SendKeys and Bell accept:
+// a session, window or other target could resolve to a pane nobody chose.
+var paneIDPattern = regexp.MustCompile(`^%[0-9]+$`)
+
+// maxKeysRunes caps SendKeys text. Above about 1,000 characters Claude
+// Code's prompt treats input as a paste and send-keys -l splits it.
+const maxKeysRunes = 800
+
+// checkKeys refuses what SendKeys must never type, whoever calls it.
+func checkKeys(pane, text string) error {
+	if !paneIDPattern.MatchString(pane) {
+		return fmt.Errorf("tmux send-keys: refusing target %q: not a pane id", pane)
+	}
+	if !utf8.ValidString(text) {
+		return errors.New("tmux send-keys: refusing text that is not valid UTF-8")
+	}
+	// One character is refused because at a permission prompt a single
+	// digit selects an option at once.
+	switch n := utf8.RuneCountInString(text); {
+	case n < 2:
+		return fmt.Errorf("tmux send-keys: refusing text of %d characters", n)
+	case n > maxKeysRunes:
+		return fmt.Errorf("tmux send-keys: refusing text of %d characters (limit %d)", n, maxKeysRunes)
+	}
+	for _, r := range text {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return fmt.Errorf("tmux send-keys: refusing text with control character %U", r)
+		}
+	}
+	return nil
+}
+
+// keysStepTimeout bounds each of SendKeys's copy-mode and text steps, and
+// enterTimeout its Enter step, each on its own (Ruling 81).
+const (
+	keysStepTimeout = time.Second
+	enterTimeout    = 2 * time.Second
+)
+
+// SendKeys leaves any mode the pane is in, types text literally and presses
+// Enter, as three tmux invocations: text and Enter in one invocation make the
+// Enter a newline inside the prompt for long text.
+//
+// Each invocation has its own timeout. The copy-mode and text steps also end
+// with ctx. Once the text step has succeeded the text is in the prompt and
+// pressing Enter is the only good outcome, so the Enter step runs on a
+// context detached from ctx's cancellation, with its own timeout (Ruling 81).
+//
+// The error wraps ErrPartialSend when the text may have reached the pane:
+// when the Enter step fails for any reason, and when the text step fails
+// once its context is done (a killed tmux client may already have typed the
+// text). The line may then be in the prompt unsubmitted, or even submitted; a
+// caller seeing ErrPartialSend must not retry by typing again. Plain errors,
+// after which nothing was typed, come from a failed copy-mode step, from ctx
+// being done before the text step starts (it is then never run), and from a
+// text step that tmux itself failed while its context was live (such as no
+// such pane).
+func (c *execClient) SendKeys(ctx context.Context, pane, text string) error {
+	if err := checkKeys(pane, text); err != nil {
+		return err
+	}
+	// tmux reads a trailing ";" on an argument as a command separator and
+	// drops it; "\;" keeps it as a literal ";".
+	if strings.HasSuffix(text, ";") {
+		text = strings.TrimSuffix(text, ";") + `\;`
+	}
+	if err := c.runFor(ctx, keysStepTimeout, "copy-mode", "-q", "-t", pane); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tctx, cancel := context.WithTimeout(ctx, keysStepTimeout)
+	_, err := c.run(tctx, "send-keys", "-t", pane, "-l", "--", text)
+	done := tctx.Err() != nil
+	cancel()
+	if err != nil {
+		if done {
+			return fmt.Errorf("%w: %w", ErrPartialSend, err)
+		}
+		return err
+	}
+	if err := c.runFor(context.WithoutCancel(ctx), enterTimeout, "send-keys", "-t", pane, "Enter"); err != nil {
+		return fmt.Errorf("%w: %w", ErrPartialSend, err)
+	}
+	return nil
+}
+
+// runFor runs one tmux command on a context derived from ctx with its own
+// timeout, and returns only the error.
+func (c *execClient) runFor(ctx context.Context, timeout time.Duration, args ...string) error {
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	_, err := c.run(rctx, args...)
+	return err
+}
+
+// syncFormat is what CapturePane asks about a pane before capturing it. The
+// pane id tells a real pane from an unknown target, which tmux expands to
+// empty fields.
+const syncFormat = "#{pane_id}\t#{synchronize-panes}"
+
+func (c *execClient) CapturePane(ctx context.Context, pane string) (Capture, error) {
+	if !paneIDPattern.MatchString(pane) {
+		return Capture{}, fmt.Errorf("tmux capture-pane: refusing target %q: not a pane id", pane)
+	}
+	out, err := c.run(ctx, "display-message", "-p", "-t", pane, syncFormat)
+	if err != nil {
+		return Capture{}, err
+	}
+	f := strings.Split(strings.TrimSuffix(out, "\n"), "\t")
+	if len(f) != 2 || f[0] != pane {
+		return Capture{}, fmt.Errorf("tmux capture-pane: unexpected answer %q for %q", out, pane)
+	}
+	screen, err := c.run(ctx, "capture-pane", "-p", "-t", pane)
+	if err != nil {
+		return Capture{}, err
+	}
+	return Capture{Screen: screen, Synchronized: f[1] == "1"}, nil
+}
+
+// ttyPattern matches a pane's tty as tmux reports it: a pty, named
+// /dev/ttysN on macOS and /dev/pts/N on Linux. An unknown pane yields junk
+// with exit 0, so nothing else is ever opened (Ruling 55).
+var ttyPattern = regexp.MustCompile(`^/dev/(ttys[0-9]+|pts/[0-9]+)$`)
+
+// bellTimeout bounds the write of BEL when the context has no deadline, so a
+// flow-stopped pane cannot block the caller.
+const bellTimeout = time.Second
+
+// openTTY opens a tty write-only without making it the controlling terminal.
+func openTTY(name string) (*os.File, error) {
+	return os.OpenFile(filepath.Clean(name), os.O_WRONLY|syscall.O_NOCTTY, 0)
+}
+
+// Bell writes BEL to the pane's tty, which sets the window's bell flag. It
+// writes only to a character device at a pty path, and the write carries the
+// context's deadline, or bellTimeout when it has none.
+func (c *execClient) Bell(ctx context.Context, pane string) error {
+	if !paneIDPattern.MatchString(pane) {
+		return fmt.Errorf("tmux bell: refusing target %q: not a pane id", pane)
+	}
+	out, err := c.run(ctx, "display-message", "-p", "-t", pane, "#{pane_tty}")
+	if err != nil {
+		return err
+	}
+	tty := strings.TrimSuffix(out, "\n")
+	if !ttyPattern.MatchString(tty) {
+		return fmt.Errorf("tmux bell: unexpected tty %q for %q", out, pane)
+	}
+	f, err := c.openTTY(tty)
+	if err != nil {
+		return fmt.Errorf("tmux bell: %w", err)
+	}
+	err = ringBell(ctx, f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fmt.Errorf("tmux bell: %w", err)
+	}
+	return nil
+}
+
+// ringBell writes BEL to f once f is known to be a character device, with a
+// write deadline from ctx (or bellTimeout).
+func ringBell(ctx context.Context, f *os.File) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		return fmt.Errorf("%s is not a terminal (mode %s)", f.Name(), info.Mode())
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(bellTimeout)
+	}
+	if err = f.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	_, err = f.Write([]byte{0x07})
 	return err
 }
 

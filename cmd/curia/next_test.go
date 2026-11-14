@@ -120,3 +120,48 @@ func TestNextLogsErrorsAndExitsZero(t *testing.T) {
 		})
 	}
 }
+
+// A session that raised a blocking ticket is needs_decision, which ranks
+// before an older waiting session.
+func TestNextJumpsToSessionWithBlockingTicket(t *testing.T) {
+	db := decisionsHome(t, decisionsSpecs()[0]) // D-1: open, blocking, raised by s1
+	fake := useFakeTmux(t)
+	for _, id := range []string{"%1", "%2"} {
+		fake.Panes = append(fake.Panes, tmux.Pane{ID: id, Session: "work", WindowID: "@1"})
+	}
+	seedSessions(t, db,
+		model.Session{ID: "s0", Agent: "claude", State: model.StateWaiting, Pane: "%1", UpdatedAt: at(9, 0)},
+		model.Session{ID: "s1", Agent: "claude", State: model.StateNeedsDecision, Pane: "%2", UpdatedAt: at(11, 0)},
+	)
+	if d := decisionsGet(t, db, "D-1"); d.SessionID != "s1" || d.Mode != model.ModeBlocking || d.Status != model.StatusOpen {
+		t.Fatalf("D-1 = %+v, want an open blocking ticket of s1", d)
+	}
+	if out, err := runRoot(t, "next"); err != nil || out != "" {
+		t.Errorf("next = %q, %v, want no output", out, err)
+	}
+	if want := []string{"ListPanes", "SwitchTo %2"}; !reflect.DeepEqual(fake.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
+	}
+}
+
+// A session left waiting by a denial is settled first, so next does not jump
+// to it, and its window's marker is re-applied.
+func TestNextSkipsSettledSession(t *testing.T) {
+	db, fake := fleetHome(t, []string{"%1", "%2"},
+		settleDenied(t, "denied", model.StateWaiting, "%1"),
+		model.Session{ID: "done", Agent: "claude", State: model.StateIdle, Pane: "%2", TmuxWindow: "@2", UpdatedAt: at(11, 30)},
+	)
+	if out, err := runRoot(t, "next"); err != nil || out != "" {
+		t.Errorf("next = %q, %v, want no output", out, err)
+	}
+	want := []string{"ListPanes", "SetWindowOption @1 @curia_marker ", "SwitchTo %2"}
+	if !reflect.DeepEqual(fake.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
+	}
+	if s := getSession(t, db, "denied"); s.State != model.StateIdle || s.LastUpdate != "interrupted" {
+		t.Errorf("denied = %s %q, want idle \"interrupted\"", s.State, s.LastUpdate)
+	}
+	if log := readLog(t); log != nil {
+		t.Errorf("log = %q, want none", log)
+	}
+}

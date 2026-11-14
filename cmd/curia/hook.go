@@ -6,9 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,6 +19,7 @@ import (
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/hook"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/state"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
 )
@@ -43,7 +46,9 @@ func init() {
 		Use:   "hook <event>",
 		Short: "Record one Claude Code hook event (run by Claude Code's hooks)",
 		Long: "Reads the hook payload on stdin and $TMUX_PANE, and records the event.\n" +
-			"Always exits 0 and prints nothing; errors go to the log file.",
+			"Always exits 0 and prints nothing, except that a Stop which claims queued\n" +
+			"decision answers prints one JSON line blocking the stop with them;\n" +
+			"errors go to the log file.",
 		Args: cobra.ArbitraryArgs,
 		// Every argument reaches runHook, so a bad one is logged, not printed.
 		DisableFlagParsing: true,
@@ -52,10 +57,17 @@ func init() {
 }
 
 // runHook records the event and exits 0 on every path, panics included.
-// Nothing is written to stdout or stderr, which belong to Claude Code. A
-// watchdog exits after hookDeadline, logging it: stdin has no deadline of its
-// own, and the transcript is read inside the store's write transaction.
+// Nothing is written to stderr, and nothing to stdout except the one line
+// hook.Run gives for a Stop that claimed queued answers: both belong to
+// Claude Code. A watchdog exits after hookDeadline, logging it: stdin has
+// no deadline of its own, and the transcript is read inside the store's
+// write transaction.
 func runHook(cmd *cobra.Command, args []string) {
+	// Claude Code may have closed its end of stdout. A write to fd 1 that
+	// hits a closed pipe kills a Go program by SIGPIPE unless SIGPIPE is
+	// ignored; ignored, the write returns EPIPE, which is logged, and the
+	// hook still exits 0.
+	signal.Ignore(syscall.SIGPIPE)
 	event := strings.Join(args, " ")
 	end := &hookEnd{logger: slog.New(slog.DiscardHandler), closeLog: func() error { return nil }}
 	watchdog := time.AfterFunc(hookDeadline, func() {
@@ -80,7 +92,9 @@ func runHook(cmd *cobra.Command, args []string) {
 	logger := end.openLog(cfg.LogPath)
 	err := cfgErr
 	if err == nil {
-		err = recordEvent(cmd.Context(), args, cmd.InOrStdin(), cfg, logger)
+		err = recordEvent(cmd.Context(), args, cmd.InOrStdin(), cfg, logger, func(b []byte) error {
+			return end.emit(cmd.OutOrStdout(), b)
+		})
 	}
 	if err != nil {
 		logger.Error("hook failed", "event", event, "err", err.Error())
@@ -113,6 +127,23 @@ func (h *hookEnd) openLog(path string) *slog.Logger {
 	return h.logger
 }
 
+// emit writes b to out unless the run has already ended, under the same
+// lock as finish, so a watchdog that ends the run and a late result cannot
+// both act. The lock is held across the write, so a stdout that blocks
+// (Claude Code not reading) holds off the watchdog too: such a hook is
+// bounded by Claude Code's own hook timeout, not by hookDeadline.
+func (h *hookEnd) emit(out io.Writer, b []byte) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.ended {
+		return nil
+	}
+	if _, err := out.Write(b); err != nil {
+		return fmt.Errorf("write stop block: %w", err)
+	}
+	return nil
+}
+
 // finish runs last with the run's logger, closes the log and exits 0, the
 // first time it is called; later calls do nothing.
 func (h *hookEnd) finish(last func(*slog.Logger)) {
@@ -127,8 +158,13 @@ func (h *hookEnd) finish(last func(*slog.Logger)) {
 	hookExit(0)
 }
 
-// recordEvent reads the payload and runs the hook against the store.
-func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config.Config, logger *slog.Logger) error {
+// recordEvent reads the payload and runs the hook against the store. What
+// hook.Run gives for stdout goes to emit at once, before any tmux call, so
+// a slow tmux cannot widen the gap between claiming an answer and handing
+// it to Claude.
+func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config.Config, logger *slog.Logger,
+	emit func([]byte) error,
+) error {
 	if len(args) != 1 {
 		return fmt.Errorf("want one event name, got %d arguments", len(args))
 	}
@@ -144,7 +180,17 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	client := newTmuxClient()
 	kind := model.EventKind(args[0])
 	before := snapshotBefore(ctx, st, kind, payload, logger)
-	sess, err := hookRun(ctx, kind, payload, hookEnv(ctx, client, logger), st, cfg)
+	res, err := hookRun(ctx, kind, payload, hookEnv(ctx, client, logger), st, cfg)
+	if len(res.Stdout) > 0 {
+		if eerr := emit(res.Stdout); eerr != nil {
+			logger.Error("hook output", "event", string(kind), "err", eerr.Error())
+		} else if len(res.Claimed) > 0 {
+			// M8: a "delivered (stop_hook)" that never reached Claude Code
+			// can be told from one that did.
+			logger.Info("hook Stop delivered answers", "ids", strings.Join(res.Claimed, " "))
+		}
+	}
+	sess := res.Session
 	if err != nil && sess.ID == "" {
 		return err // nothing was written
 	}
@@ -196,8 +242,9 @@ type beforeEvent struct {
 }
 
 // snapshotBefore reads the event's session by id, and, in a pane, on
-// SessionStart or for a session with no row yet (the events where hook.Run
-// ends the pane's other sessions), the pane's other red sessions. It is used
+// SessionStart (other than a compaction's for a live session) or for a
+// session with no row yet (the events where hook.Run ends the pane's other
+// sessions), the pane's other red sessions. It is used
 // only to decide whether to call tmux. A read that fails is logged and
 // leaves known false.
 func snapshotBefore(ctx context.Context, st *store.Store, kind model.EventKind, payload []byte, logger *slog.Logger) beforeEvent {
@@ -212,7 +259,7 @@ func snapshotBefore(ctx context.Context, st *store.Store, kind model.EventKind, 
 		return beforeEvent{}
 	}
 	b := beforeEvent{prev: prev, known: true}
-	if (found && kind != model.SessionStart) || pane == "" {
+	if (found && (kind != model.SessionStart || state.Continues(prev, ev))) || pane == "" {
 		return b
 	}
 	live, err := st.ListSessions(ctx, store.ListFilter{})

@@ -38,6 +38,7 @@ func snippet(bin string) string {
 		"set -g window-status-format " + windowFormat,
 		"set -g window-status-current-format " + windowFormat,
 		"bind a display-popup -E -w 90% -h 80% " + tmuxQuote(b+" ui"),
+		"bind A display-popup -E -w 90% -h 80% " + tmuxQuote(b+" decide"),
 		"bind N run-shell " + tmuxQuote(b+" next"),
 		"set-hook -g pane-focus-in " + tmuxQuote("run-shell -b "+tmuxQuote(b+" seen #{pane_id}")),
 	}, "\n") + "\n"

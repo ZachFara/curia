@@ -33,10 +33,14 @@ BOUNDARY_LINTERS   := depguard
 # Every tracked or untracked-but-not-ignored Go file (skips .scratch/ etc.).
 GO_FILES = $$(git ls-files --cached --others --exclude-standard -- '*.go')
 
-.PHONY: check tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout test build clean
+.PHONY: check check-gates tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout test build clean
 
 ## check: run every gate, in order. This is what the hook and CI run.
-check: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout test
+check:
+	@scripts/with-test-lock.sh $(MAKE) --no-print-directory check-gates
+
+## check-gates: the gates themselves; `check` runs them under the worktree lock
+check-gates: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout test
 	@echo "==> make check: all gates passed"
 
 ## tools: install the pinned tool versions into .bin/
@@ -129,9 +133,13 @@ layout:
 	scripts/check-layout.sh
 
 ## test: all tests under the race detector
+# Packages run one at a time (-p 1): several packages hold latency gates
+# (the hook's 20 ms budget, the end-to-end 50 ms budget), and with packages
+# running in parallel those gates measured the other packages' load, on CI
+# most of all. The tests and their thresholds are unchanged.
 test:
-	@echo "==> go test -race ./..."
-	go test -race ./...
+	@echo "==> go test -race -p 1 ./..."
+	@scripts/with-test-lock.sh go test -race -p 1 ./...
 
 ## build: build the curia binary into ./curia
 build:

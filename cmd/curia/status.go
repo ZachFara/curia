@@ -14,7 +14,8 @@ func init() {
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "status",
 		Short: "Print the status-bar badge (run by tmux every few seconds)",
-		Long: "Prints D<n> W<n> R<n> (decisions, waiting, reviews) with zero parts left out\n" +
+		Long: "Prints D<n> Q<n> W<n> R<n> (open blocking decisions, answers not yet\n" +
+			"delivered to their agent, waiting sessions, reviews) with zero parts left out\n" +
 			"and no newline. Prints nothing when nothing needs you or on any error.",
 		Args: cobra.ArbitraryArgs,
 		// Bad flags or arguments are errors, which print nothing.
@@ -44,9 +45,18 @@ func statusBadge(ctx context.Context, args []string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = st.Close() }()
-	sessions, err := st.ListSessions(ctx, store.ListFilter{})
+	// No reconcile (no tmux call) and no expiry sweep: an assume ticket past
+	// its deadline is not open, so it is not counted either way. The only
+	// write is settling a session a denial or an interrupt left working or
+	// waiting, which costs nothing while no session is either.
+	now := clock()
+	sessions, _, err := listSettled(ctx, st, store.ListFilter{}, "", now)
 	if err != nil {
 		return "", err
 	}
-	return fleet.Badge(fleet.Count(sessions)), nil
+	openBlocking, undelivered, err := st.BadgeCounts(ctx, now)
+	if err != nil {
+		return "", err
+	}
+	return fleet.Badge(fleet.Count(sessions, openBlocking, undelivered)), nil
 }

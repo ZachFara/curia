@@ -1,0 +1,7 @@
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"Without using any tools, write a 600-word story about a lighthouse keeper."},"uuid":"u1","timestamp":"2026-11-12T03:22:03.000Z","sessionId":"s1"}
+{"parentUuid":"u1","isSidechain":false,"type":"attachment","attachment":{"type":"x"},"uuid":"a1","timestamp":"2026-11-12T03:22:03.001Z"}
+{"parentUuid":"a1","isSidechain":false,"type":"assistant","message":{"model":"claude-haiku-5-5","role":"assistant","content":[{"type":"thinking","thinking":"A story."}],"usage":{"input_tokens":2,"cache_read_input_tokens":48018,"cache_creation_input_tokens":306}},"uuid":"as0","timestamp":"2026-11-12T03:22:04.000Z"}
+{"parentUuid":"as0","isSidechain":false,"type":"assistant","message":{"model":"claude-haiku-5-5","id":"msg_012","type":"message","role":"assistant","content":[{"type":"text","text":"The lamp had not gone out in thirty-one years."}],"stop_reason":null,"usage":{"input_tokens":2,"cache_read_input_tokens":48018,"cache_creation_input_tokens":306}},"isAbortedMidStream":true,"uuid":"as1","timestamp":"2026-11-12T03:22:06.050Z"}
+{"parentUuid":"as1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"uuid":"u2","timestamp":"2026-11-12T03:22:06.059Z","interruptedMessageId":"msg_012","sessionId":"s1"}
+{"type":"cost-state","sessionId":"s1"}
+{"type":"file-history-snapshot","messageId":"u2","snapshot":{"trackedFileBackups":{}}}

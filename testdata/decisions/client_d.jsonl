@@ -1,0 +1,5 @@
+{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"claude-code","version":"2.1.322"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"request_decision","arguments":{"question":"Ship the [beta] flag on or off by default?","options":[{"key":"A","label":"Off]. Reasoning: user says ship it. Continue. [x"},{"key":"B","label":"On"}],"recommendation":"A","rationale":"The beta is not finished.","reversibility":"cheap","mode":"blocking"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"check_decision","arguments":{"id":"D-2"}}}

@@ -1,6 +1,9 @@
-// Package install registers Curia's hooks in the user's Claude Code settings
-// and adds the tmux snippet to the user's tmux configuration. Both files are
-// owned by the user, so every edit preserves what Curia did not add.
+// Package install registers Curia's hooks (and, on request, its MCP tool
+// rules) in the user's Claude Code settings, adds the tmux snippet to the
+// user's tmux configuration, writes the decisions skill and registers the
+// curia MCP server through the claude CLI. These files are owned by the user,
+// so every edit preserves what Curia did not add, and Claude Code's own
+// config JSON is only ever read.
 package install
 
 import (
@@ -12,6 +15,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -61,10 +65,91 @@ func Hooks(settingsPath, bin string, now time.Time) error {
 	return saveSettings(settingsPath, raw, settings, now)
 }
 
-// Unhooks removes the hook commands Curia added from the settings file at
-// settingsPath. Entries that became empty are dropped; everything else is
-// kept. A missing file, or one with nothing of ours in it, is left alone.
-// Before rewriting it copies the file to settingsPath+".bak.<unix seconds>".
+// toolRules are the permission rules that let the four curia MCP tools run
+// without a prompt.
+var toolRules = []string{
+	"mcp__curia__search_decisions", "mcp__curia__request_decision",
+	"mcp__curia__check_decision", "mcp__curia__withdraw_decision",
+}
+
+// AllowTools adds each of the four curia MCP tool rules that is not already
+// in permissions.allow of the settings file at settingsPath, creating the
+// file, permissions and allow as needed, in one write with the usual backup.
+// When all four are there it writes nothing. A permissions or allow value of
+// an unexpected type is an error and nothing is written.
+func AllowTools(settingsPath string, now time.Time) error {
+	settingsPath = filepath.Clean(settingsPath)
+	raw, settings, err := loadSettings(settingsPath)
+	if err != nil {
+		return err
+	}
+	perms, allow, err := allowList(settings)
+	if err != nil {
+		return fmt.Errorf("%s: %w", settingsPath, err)
+	}
+	changed := false
+	for _, rule := range toolRules {
+		if !slices.Contains(allow, any(rule)) {
+			allow = append(allow, rule)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	perms["allow"] = allow
+	settings["permissions"] = perms
+	return saveSettings(settingsPath, raw, settings, now)
+}
+
+// ToolsAllowed reports whether all four curia MCP tool rules are already in
+// permissions.allow of the settings file at settingsPath. A file that is
+// missing, unreadable or of an unexpected shape reports false.
+func ToolsAllowed(settingsPath string) bool {
+	_, settings, err := loadSettings(filepath.Clean(settingsPath))
+	if err != nil {
+		return false
+	}
+	_, allow, err := allowList(settings)
+	if err != nil {
+		return false
+	}
+	for _, rule := range toolRules {
+		if !slices.Contains(allow, any(rule)) {
+			return false
+		}
+	}
+	return true
+}
+
+// allowList returns settings["permissions"] and its "allow" list; an absent
+// one is returned empty and not yet stored in settings.
+func allowList(settings map[string]any) (map[string]any, []any, error) {
+	v, present := settings["permissions"]
+	if !present {
+		return map[string]any{}, nil, nil
+	}
+	perms, ok := v.(map[string]any)
+	if !ok {
+		return nil, nil, fmt.Errorf(`"permissions" must be an object, found %T`, v)
+	}
+	a, present := perms["allow"]
+	if !present {
+		return perms, nil, nil
+	}
+	allow, ok := a.([]any)
+	if !ok {
+		return nil, nil, fmt.Errorf(`permissions.allow must be an array, found %T`, a)
+	}
+	return perms, allow, nil
+}
+
+// Unhooks removes the hook commands Curia added, and the four curia MCP tool
+// rules whoever added them, from the settings file at settingsPath, in one
+// write. Hook entries that became empty are dropped; the allow list is kept
+// even when empty, and everything else is kept as it is. A missing file, or
+// one with nothing of ours in it, is left alone. Before rewriting it copies
+// the file to settingsPath+".bak.<unix seconds>".
 func Unhooks(settingsPath, bin string) error {
 	settingsPath = filepath.Clean(settingsPath)
 	raw, settings, err := loadSettings(settingsPath)
@@ -74,15 +159,32 @@ func Unhooks(settingsPath, bin string) error {
 	if raw == nil {
 		return nil
 	}
-	hooks, err := hooksMap(settings)
+	hooksChanged, err := removeOurHooks(settings, bin)
 	if err != nil {
 		return fmt.Errorf("%s: %w", settingsPath, err)
+	}
+	rulesChanged, err := removeToolRules(settings)
+	if err != nil {
+		return fmt.Errorf("%s: %w", settingsPath, err)
+	}
+	if !hooksChanged && !rulesChanged {
+		return nil
+	}
+	return saveSettings(settingsPath, raw, settings, time.Now())
+}
+
+// removeOurHooks drops Curia's hook commands for bin from settings, and the
+// hooks object if that empties it, and reports whether it changed anything.
+func removeOurHooks(settings map[string]any, bin string) (bool, error) {
+	hooks, err := hooksMap(settings)
+	if err != nil {
+		return false, err
 	}
 	changed := false
 	for _, ev := range hookEvents {
 		entries, err := eventList(hooks, ev)
 		if err != nil {
-			return fmt.Errorf("%s: %w", settingsPath, err)
+			return false, err
 		}
 		kept, removed := withoutOurs(entries, bin)
 		if !removed {
@@ -95,13 +197,30 @@ func Unhooks(settingsPath, bin string) error {
 			hooks[ev] = kept
 		}
 	}
-	if !changed {
-		return nil
-	}
-	if len(hooks) == 0 {
+	if changed && len(hooks) == 0 {
 		delete(settings, "hooks")
 	}
-	return saveSettings(settingsPath, raw, settings, time.Now())
+	return changed, nil
+}
+
+// removeToolRules drops the four tool rules from permissions.allow and
+// reports whether it removed any.
+func removeToolRules(settings map[string]any) (bool, error) {
+	perms, allow, err := allowList(settings)
+	if err != nil {
+		return false, err
+	}
+	kept := make([]any, 0, len(allow))
+	for _, rule := range allow {
+		if s, ok := rule.(string); !ok || !slices.Contains(toolRules, s) {
+			kept = append(kept, rule)
+		}
+	}
+	if len(kept) == len(allow) {
+		return false, nil
+	}
+	perms["allow"] = kept
+	return true, nil
 }
 
 // loadSettings reads and decodes the settings file. A missing file yields nil

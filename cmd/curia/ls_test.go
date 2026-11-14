@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -285,5 +286,34 @@ func TestLsReportsStoreError(t *testing.T) {
 	t.Setenv("CURIA_DB", t.TempDir()) // a directory is not a database
 	if _, err := runRoot(t, "ls"); err == nil {
 		t.Error("ls returned nil error when the store cannot open")
+	}
+}
+
+func TestLsShowsInterruptedSessionIdle(t *testing.T) {
+	_, fake := fleetHome(t, []string{"%1"}, settleDenied(t, "a", model.StateWorking, "%1"))
+	out, err := runRoot(t, "ls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[1], "idle") || !strings.HasSuffix(lines[1], "interrupted") {
+		t.Errorf("ls =\n%s\nwant one idle row with LAST UPDATE interrupted", out)
+	}
+	if want := []string{"ListPanes", "SetWindowOption @1 @curia_marker "}; !slices.Equal(fake.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
+	}
+}
+
+// A transcript ls cannot read is logged; the session is listed unchanged.
+func TestLsLogsSettleFailure(t *testing.T) {
+	fleetHome(t, []string{"%1"}, model.Session{
+		ID: "a", Agent: "claude", State: model.StateWorking, Pane: "%1", TranscriptPath: settleUnreadable(t), UpdatedAt: at(11, 0),
+	})
+	out, err := runRoot(t, "ls", "--json")
+	if err != nil || !strings.Contains(out, `"state": "working"`) {
+		t.Errorf("ls --json = %s, %v, want the session listed as working", out, err)
+	}
+	if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "settle") || !strings.Contains(log[0], "session a") {
+		t.Errorf("log = %q, want one line naming the session that failed to settle", log)
 	}
 }
