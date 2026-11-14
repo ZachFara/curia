@@ -71,23 +71,83 @@ func homePaths() (installPaths, error) {
 	}, nil
 }
 
-// executablePath is this binary's path with symlinks resolved.
-func executablePath() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	return filepath.EvalSymlinks(exe)
+// binaryPath is the path install records for this binary.
+type binaryPath struct {
+	// path is absolute, cleaned and names the running binary.
+	path string
+	// onPath is true when path is the curia found on PATH.
+	onPath bool
 }
 
-// installTarget returns the paths and this binary's path.
-func installTarget() (installPaths, string, error) {
+// sameFile reports whether a and b, symlinks followed, are one file.
+func sameFile(a, b string) bool {
+	fa, err := os.Stat(filepath.Clean(a))
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(filepath.Clean(b))
+	return err == nil && os.SameFile(fa, fb)
+}
+
+// chooseBinary picks the path install records, the one the user would type
+// (Ruling 104), so a symlink that a package manager keeps pointing at the
+// current version survives an upgrade. exe is os.Executable's result. In
+// order:
+//  1. the curia that lookPath finds (made absolute and cleaned, not
+//     resolved), when it is the same file as the running binary;
+//  2. exe as invoked (absolute, cleaned, not resolved), when it is that file;
+//  3. exe with symlinks resolved.
+//
+// A path from anywhere else is never recorded, and every result exists.
+func chooseBinary(exe string, lookPath func(string) (string, error)) (binaryPath, error) {
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return binaryPath{}, err
+	}
+	if found, err := lookPath("curia"); err == nil {
+		if abs, err := filepath.Abs(found); err == nil && sameFile(abs, resolved) {
+			return binaryPath{path: abs, onPath: true}, nil
+		}
+	}
+	if abs, err := filepath.Abs(exe); err == nil && sameFile(abs, resolved) {
+		return binaryPath{path: abs}, nil
+	}
+	return binaryPath{path: resolved}, nil
+}
+
+// currentBinary is chooseBinary for the running executable and PATH.
+func currentBinary() (binaryPath, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return binaryPath{}, err
+	}
+	return chooseBinary(exe, exec.LookPath)
+}
+
+// executablePath is the path install records for this binary.
+func executablePath() (string, error) {
+	b, err := currentBinary()
+	return b.path, err
+}
+
+// installTarget returns the paths and this binary's recorded path.
+func installTarget() (installPaths, binaryPath, error) {
 	p, err := homePaths()
 	if err != nil {
-		return installPaths{}, "", err
+		return installPaths{}, binaryPath{}, err
 	}
-	bin, err := executablePath()
+	bin, err := currentBinary()
 	return p, bin, err
+}
+
+// installSayBinary says which path install recorded and, for one that a
+// move or an upgrade would break, how to avoid that.
+func installSayBinary(w io.Writer, b binaryPath) {
+	installSay(w, "Binary: recorded %s", b.path)
+	if !b.onPath || strings.Contains(b.path, "/Cellar/") {
+		installSay(w, "  Hooks, the MCP server and the tmux bindings will break if that file moves or is replaced; "+
+			"to avoid that, put curia on PATH (a stable symlink such as /opt/homebrew/bin/curia) and run curia install again.")
+	}
 }
 
 // installSay prints one line of what install or uninstall did.
@@ -98,11 +158,13 @@ func installSay(w io.Writer, format string, args ...any) {
 // runInstall does each step in order and says what it did; a step that
 // fails stops it, after the lines for the steps already done.
 func runInstall(cmd *cobra.Command, _ []string) error {
-	p, bin, err := installTarget()
+	p, target, err := installTarget()
 	if err != nil {
 		return err
 	}
+	bin := target.path
 	out := cmd.OutOrStdout()
+	installSayBinary(out, target)
 	if err = install.Hooks(p.settings, bin, time.Now()); err != nil {
 		return err
 	}
@@ -224,6 +286,8 @@ func installMCP(ctx context.Context, out io.Writer, config, bin string) error {
 		installSay(out, "MCP server: registered with Claude Code as curia")
 	case install.MCPAlreadyOurs:
 		installSay(out, "MCP server: already registered with Claude Code as curia")
+	case install.MCPUpdated:
+		installSay(out, "MCP server: curia entry pointed at another path for this binary; re-registered with %s", bin)
 	case install.MCPForeign:
 		installSay(out, "MCP server: %s has a curia entry that is not this binary's, or is not valid JSON; left alone. "+
 			"To replace it, run: claude mcp remove --scope user curia, then curia install again", config)
@@ -234,10 +298,11 @@ func installMCP(ctx context.Context, out io.Writer, config, bin string) error {
 }
 
 func runUninstall(cmd *cobra.Command, _ []string) error {
-	p, bin, err := installTarget()
+	p, target, err := installTarget()
 	if err != nil {
 		return err
 	}
+	bin := target.path
 	if err = install.Unhooks(p.settings, bin); err != nil {
 		return err
 	}
