@@ -67,18 +67,23 @@ var clock = time.Now
 // in, so a red window does not stay red; a marker that fails is logged, not
 // returned, unless the window is gone, which is the usual reason its session
 // went stale. When tmux cannot list its panes (no server, or not installed) it
-// logs that to the log file at logPath and skips reconciling.
+// logs that to the log file at logPath and skips reconciling. Either way it
+// ends by refreshing team membership (refreshTeams), which reads files, not
+// tmux; what that cannot read is logged, and only a store error is returned.
 func reconcile(ctx context.Context, st *store.Store, client tmux.Client, logPath string, now time.Time) error {
 	tctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 	defer cancel()
 	panes, err := client.ListPanes(tctx)
 	if err != nil {
 		logWarn(logPath, "tmux unreachable, not reconciling", "err", err.Error())
-		return nil
+		return refreshTeams(ctx, st, logPath)
 	}
 	windows, err := fleet.Reconcile(ctx, st, panes, now)
 	applyMarkers(ctx, client, st, logPath, "reconcile attention marker", windows)
-	return err
+	if err != nil {
+		return err
+	}
+	return refreshTeams(ctx, st, logPath)
 }
 
 // applyMarkers re-applies the attention marker of each window, logging a
