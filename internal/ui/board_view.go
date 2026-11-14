@@ -200,8 +200,8 @@ func cardRepo(c task.Card) string {
 	return "-"
 }
 
-// statusLine is the spawn prompt, the last notice, the last read's error
-// or the keys, cut to the width.
+// statusLine is the spawn prompt, the last notice, the action in flight,
+// the last read's error or the keys, cut to the width.
 func (m BoardModel) statusLine(w int) string {
 	style, text := helpStyle, boardHelp
 	switch {
@@ -212,6 +212,8 @@ func (m BoardModel) statusLine(w int) string {
 		if m.noticeErr {
 			style = errorStyle
 		}
+	case m.working != "":
+		style, text = lipgloss.NewStyle(), m.working
 	case m.err != nil:
 		style, text = errorStyle, "read failed: "+sanitize.Line(m.err.Error(), maxNote)
 	}
