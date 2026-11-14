@@ -25,18 +25,22 @@ type Env struct {
 	Pane string
 	// Now is the clock.
 	Now func() time.Time
-	// Git returns the repository top level and current branch for cwd, or
-	// empty strings when cwd is not in a repository.
-	Git func(cwd string) (repo, branch string)
+	// Git returns, for cwd, the main repository's top level, the current
+	// branch and, in a linked worktree, the worktree's top level (else
+	// empty), or empty strings when cwd is not in a repository.
+	Git func(cwd string) (repo, branch, worktree string)
 	// PaneInfo returns the name of the tmux session and the id of the window
 	// (for example "@7") that hold pane.
 	PaneInfo func(pane string) (tmuxSession, window string)
+	// TaskID is the task named by the environment (CURIA_TASK_ID), already
+	// validated, or empty.
+	TaskID string
 }
 
 // startInfo is what a SessionStart learns from git and tmux before the
 // session's write transaction begins.
 type startInfo struct {
-	repo, branch, tmuxSession, window string
+	repo, branch, worktree, tmuxSession, window string
 }
 
 // Result is what Run did: the session as stored, and what curia hook must
@@ -62,7 +66,8 @@ type Result struct {
 // (PostToolUse, Notification, Stop), applies the state machine and writes the
 // result. Git and tmux run before that transaction, so no subprocess runs
 // while the write lock is held, and only once per session besides
-// SessionStart.
+// SessionStart. A session with no task takes env.TaskID on any event; one
+// that has a task keeps it.
 //
 // On Stop the same transaction also counts the session's open blocking
 // tickets and claims its queued answers (plan sections 4.3 and 4.9): claimed
@@ -82,6 +87,7 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 	if err != nil {
 		return Result{}, err
 	}
+	ev.TaskID = env.TaskID
 	if err = st.AppendEvent(ctx, ev, payload); err != nil {
 		return Result{}, err
 	}
@@ -211,7 +217,7 @@ func blockLine(claimed []model.Decision) ([]byte, error) {
 func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store) (*startInfo, error) {
 	start := &startInfo{}
 	if ev.Pane == "" {
-		start.repo, start.branch = env.Git(ev.Cwd)
+		start.repo, start.branch, start.worktree = env.Git(ev.Cwd)
 		return start, nil
 	}
 	if err := st.EndOthersInPane(ctx, ev.Pane, ev.SessionID, ev.At); err != nil {
@@ -223,7 +229,7 @@ func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store)
 		defer func() { panicked = recover() }()
 		start.tmuxSession, start.window = env.PaneInfo(ev.Pane)
 	})
-	start.repo, start.branch = env.Git(ev.Cwd)
+	start.repo, start.branch, start.worktree = env.Git(ev.Cwd)
 	wg.Wait()
 	if panicked != nil {
 		panic(panicked) // on the caller's goroutine, where it can be recovered
@@ -241,20 +247,7 @@ func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config,
 	if state.Ignores(s, ev) {
 		return s, nil // the transcript is not read either
 	}
-	switch {
-	case start == nil: // git and tmux were not asked
-	case ev.Kind == model.SessionStart && !state.Continues(s, ev):
-		s.Repo, s.Branch = start.repo, start.branch
-		s.TmuxSession, s.TmuxWindow = start.tmuxSession, start.window
-	default:
-		// First seen mid-run (a compaction's SessionStart included). A
-		// SessionStart may have written the row since Run looked, so fill
-		// only what is still empty.
-		fillEmpty(&s.Repo, start.repo)
-		fillEmpty(&s.Branch, start.branch)
-		fillEmpty(&s.TmuxSession, start.tmuxSession)
-		fillEmpty(&s.TmuxWindow, start.window)
-	}
+	enrich(&s, ev, start)
 	var err error
 	switch ev.Kind {
 	case model.PostToolUse, model.Notification, model.Stop:
@@ -270,6 +263,29 @@ func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config,
 		open = decisions(&ev)
 	}
 	return state.Apply(s, ev, open), err
+}
+
+// enrich sets what git, tmux and the environment said about the session.
+// start is nil when git and tmux were not asked. A session keeps the task it
+// has; an empty one takes ev's, on any event, so a missing CURIA_TASK_ID (a
+// teammate's process) never clears a task.
+func enrich(s *model.Session, ev model.Event, start *startInfo) {
+	fillEmpty(&s.TaskID, ev.TaskID)
+	switch {
+	case start == nil: // git and tmux were not asked
+	case ev.Kind == model.SessionStart && !state.Continues(*s, ev):
+		s.Repo, s.Branch, s.Worktree = start.repo, start.branch, start.worktree
+		s.TmuxSession, s.TmuxWindow = start.tmuxSession, start.window
+	default:
+		// First seen mid-run (a compaction's SessionStart included). A
+		// SessionStart may have written the row since Run looked, so fill
+		// only what is still empty.
+		fillEmpty(&s.Repo, start.repo)
+		fillEmpty(&s.Branch, start.branch)
+		fillEmpty(&s.Worktree, start.worktree)
+		fillEmpty(&s.TmuxSession, start.tmuxSession)
+		fillEmpty(&s.TmuxWindow, start.window)
+	}
 }
 
 // fillEmpty sets *field to v when *field is empty.

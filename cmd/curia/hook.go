@@ -21,6 +21,7 @@ import (
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/state"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/task"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -314,12 +315,14 @@ func readPayload(r io.Reader) ([]byte, error) {
 	return b, nil
 }
 
-// hookEnv is the real environment: $TMUX_PANE, the wall clock, git, tmux.
+// hookEnv is the real environment: $TMUX_PANE, the wall clock, git, tmux,
+// and $CURIA_TASK_ID when it is a valid task id (it is untrusted).
 func hookEnv(ctx context.Context, client tmux.Client, logger *slog.Logger) hook.Env {
 	return hook.Env{
-		Pane: os.Getenv("TMUX_PANE"),
-		Now:  time.Now,
-		Git:  func(cwd string) (string, string) { return gitInfo(ctx, cwd, logger) },
+		Pane:   os.Getenv("TMUX_PANE"),
+		Now:    time.Now,
+		TaskID: hookTaskID(os.Getenv("CURIA_TASK_ID")),
+		Git:    func(cwd string) (string, string, string) { return gitInfo(ctx, cwd, logger) },
 		PaneInfo: func(pane string) (string, string) {
 			pctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 			defer cancel()
@@ -331,4 +334,12 @@ func hookEnv(ctx context.Context, client tmux.Client, logger *slog.Logger) hook.
 			return p.Session, p.WindowID
 		},
 	}
+}
+
+// hookTaskID returns id when task.ValidID accepts it, else "".
+func hookTaskID(id string) string {
+	if !task.ValidID(id) {
+		return ""
+	}
+	return id
 }

@@ -246,11 +246,11 @@ func (f *fakeEnv) env(pane string) hook.Env {
 	return hook.Env{
 		Pane: pane,
 		Now:  func() time.Time { return t0 },
-		Git: func(cwd string) (string, string) {
+		Git: func(cwd string) (string, string, string) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			f.gitCalls = append(f.gitCalls, cwd)
-			return "/src/curia", "feat/hook"
+			return "/src/curia", "feat/hook", ""
 		},
 		PaneInfo: func(pane string) (string, string) {
 			f.mu.Lock()
@@ -392,11 +392,11 @@ func TestFirstSeenMidRunEndsPriorSessionInPane(t *testing.T) {
 func TestFirstSeenKeepsWhatAConcurrentSessionStartFilled(t *testing.T) {
 	st := openStore(t)
 	starter := (&fakeEnv{}).env("%2")
-	starter.Git = func(string) (string, string) { return "/other", "main" }
+	starter.Git = func(string) (string, string, string) { return "/other", "main", "" }
 	starter.PaneInfo = func(string) (string, string) { return "other", "@9" }
 	env := (&fakeEnv{}).env("%2")
 	git := env.Git
-	env.Git = func(cwd string) (string, string) {
+	env.Git = func(cwd string) (string, string, string) {
 		run(t, st, starter, model.SessionStart, payload("M", "", ""))
 		return git(cwd)
 	}
@@ -1193,7 +1193,7 @@ func gitBarrier(env hook.Env) hook.Env {
 	arrived := 0
 	both := make(chan struct{})
 	git := env.Git
-	env.Git = func(cwd string) (string, string) {
+	env.Git = func(cwd string) (string, string, string) {
 		mu.Lock()
 		if arrived++; arrived == 2 {
 			close(both)
@@ -1513,5 +1513,134 @@ func TestStopLatencyWithDecisions(t *testing.T) {
 	t.Logf("Stop with 500 decisions over %d runs: p50 %v, p95 %v, max %v", runs, p50, p95, worst)
 	if p95 >= 20*time.Millisecond {
 		t.Errorf("p95 = %v, want < 20ms (p50 %v, max %v, load average %s)", p95, p50, worst, loadAverage())
+	}
+}
+
+// Task link and main repository (plan section 4.5).
+
+// taskEnv is f's env in pane %3 with TaskID set to task.
+func taskEnv(f *fakeEnv, task string) hook.Env {
+	env := f.env("%3")
+	env.TaskID = task
+	return env
+}
+
+func TestSessionStartLinksTask(t *testing.T) {
+	st := openStore(t)
+	got := run(t, st, taskEnv(&fakeEnv{}, "T-7"), model.SessionStart, payload("A", "/p/a.jsonl", ""))
+	if got.TaskID != "T-7" || get(t, st, "A").TaskID != "T-7" {
+		t.Errorf("TaskID returned %q, stored %q, want T-7", got.TaskID, get(t, st, "A").TaskID)
+	}
+}
+
+// After /clear the same process starts a new session with the same
+// environment, so the new row is linked to the task too.
+func TestTaskSurvivesClear(t *testing.T) {
+	st := openStore(t)
+	env := taskEnv(&fakeEnv{}, "T-7")
+	run(t, st, env, model.SessionStart, payload("A", "/p/a.jsonl", ""))
+	run(t, st, env, model.UserPromptSubmit, payload("A", "/p/a.jsonl", ""))
+	run(t, st, env, model.SessionStart, payload("B", "/p/b.jsonl", `,"source":"clear"`))
+	if b := get(t, st, "B"); b.TaskID != "T-7" {
+		t.Errorf("B after /clear: TaskID %q, want T-7", b.TaskID)
+	}
+	if a := get(t, st, "A"); a.State != model.StateEnded || a.TaskID != "T-7" {
+		t.Errorf("A = %s with task %q, want ended and still T-7", a.State, a.TaskID)
+	}
+}
+
+func TestTaskFilledMidRun(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{}
+	// A row with no task gets one on its next event.
+	run(t, st, taskEnv(f, ""), model.SessionStart, payload("A", "", ""))
+	if got := run(t, st, taskEnv(f, "T-7"), model.PostToolUse, payload("A", "", `,"tool_name":"Edit"`)); got.TaskID != "T-7" {
+		t.Errorf("A after an event with T-7: TaskID %q, want T-7", got.TaskID)
+	}
+	// A session first seen mid-run takes it on its first event.
+	if got := run(t, st, taskEnv(f, "T-7"), model.Notification, payload("M", "", `,"message":"needs you"`)); got.TaskID != "T-7" {
+		t.Errorf("M first seen mid-run: TaskID %q, want T-7", got.TaskID)
+	}
+	// A session that has a task keeps it, on any event and on a new start.
+	run(t, st, taskEnv(f, "T-1"), model.SessionStart, payload("K", "", ""))
+	for _, kind := range []model.EventKind{model.UserPromptSubmit, model.PostToolUse, model.Stop, model.SessionStart} {
+		if got := run(t, st, taskEnv(f, "T-7"), kind, payload("K", "", `,"source":"resume"`)); got.TaskID != "T-1" {
+			t.Errorf("K after %s with T-7: TaskID %q, want T-1 kept", kind, got.TaskID)
+		}
+	}
+}
+
+func TestNoTaskWithoutEnv(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{}
+	for _, kind := range []model.EventKind{model.SessionStart, model.UserPromptSubmit, model.PostToolUse, model.Stop} {
+		if got := run(t, st, taskEnv(f, ""), kind, payload("A", "", "")); got.TaskID != "" {
+			t.Errorf("after %s without CURIA_TASK_ID: TaskID %q, want none", kind, got.TaskID)
+		}
+	}
+	// A teammate's process may lack the variable: its absence never clears
+	// a task already stored.
+	run(t, st, taskEnv(f, "T-7"), model.SessionStart, payload("B", "", ""))
+	for _, kind := range []model.EventKind{model.UserPromptSubmit, model.PostToolUse, model.Stop, model.SessionStart} {
+		if got := run(t, st, taskEnv(f, ""), kind, payload("B", "", `,"source":"resume"`)); got.TaskID != "T-7" {
+			t.Errorf("B after %s without CURIA_TASK_ID: TaskID %q, want T-7 kept", kind, got.TaskID)
+		}
+	}
+}
+
+func TestSessionInLinkedWorktreeStoresMainRepo(t *testing.T) {
+	st := openStore(t)
+	env := taskEnv(&fakeEnv{}, "T-7")
+	env.Git = func(string) (string, string, string) {
+		return "/src/api", "curia/T-7-x", "/src/.curia-worktrees/api-T-7"
+	}
+	got := run(t, st, env, model.SessionStart, payload("A", "", ""))
+	stored := get(t, st, "A")
+	if got != stored {
+		t.Errorf("Run returned %+v, store has %+v", got, stored)
+	}
+	if stored.Repo != "/src/api" || stored.Branch != "curia/T-7-x" || stored.Worktree != "/src/.curia-worktrees/api-T-7" {
+		t.Errorf("repo %q branch %q worktree %q, want the main repo, the branch and the worktree",
+			stored.Repo, stored.Branch, stored.Worktree)
+	}
+	// A session that starts again (resume) in the main worktree takes all
+	// three from git again: the worktree is cleared.
+	env.Git = func(string) (string, string, string) { return "/src/api", "main", "" }
+	if got = run(t, st, env, model.SessionStart, payload("A", "", `,"source":"resume"`)); got.Repo != "/src/api" ||
+		got.Branch != "main" || got.Worktree != "" {
+		t.Errorf("after resume in the main worktree: repo %q branch %q worktree %q, want /src/api main and none",
+			got.Repo, got.Branch, got.Worktree)
+	}
+	// First seen mid-run, the worktree is filled like the repo.
+	env.Git = func(string) (string, string, string) { return "/src/api", "curia/T-7-x", "/src/wt" }
+	if got = run(t, st, env, model.PostToolUse, payload("M", "", `,"tool_name":"Edit"`)); got.Worktree != "/src/wt" {
+		t.Errorf("first seen mid-run: worktree %q, want /src/wt", got.Worktree)
+	}
+}
+
+// A compaction's SessionStart for a live session asks git nothing and
+// changes neither the repository nor the task.
+func TestCompactionKeepsRepoAndTask(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{}
+	env := taskEnv(f, "T-7")
+	git := env.Git
+	env.Git = func(cwd string) (string, string, string) {
+		_, _, _ = git(cwd) // record the call
+		return "/src/api", "curia/T-7-x", "/src/wt"
+	}
+	run(t, st, env, model.SessionStart, payload("A", "/p/t.jsonl", ""))
+	run(t, st, env, model.UserPromptSubmit, payload("A", "/p/t.jsonl", ""))
+	later := taskEnv(f, "T-9")
+	got := run(t, st, later, model.SessionStart, payload("A", "/p/t.jsonl", `,"source":"compact"`))
+	if got.Repo != "/src/api" || got.Branch != "curia/T-7-x" || got.Worktree != "/src/wt" || got.TaskID != "T-7" {
+		t.Errorf("after compact: repo %q branch %q worktree %q task %q, want /src/api curia/T-7-x /src/wt T-7",
+			got.Repo, got.Branch, got.Worktree, got.TaskID)
+	}
+	if got.State != model.StateWorking {
+		t.Errorf("after compact: %s, want working", got.State)
+	}
+	if len(f.gitCalls) != 1 {
+		t.Errorf("Git called %d times, want once (the first SessionStart)", len(f.gitCalls))
 	}
 }

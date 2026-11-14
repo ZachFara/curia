@@ -926,3 +926,126 @@ func TestHookClosedStdoutChild(t *testing.T) {
 		t.Fail()
 	}
 }
+
+// hookLinkedWorktree makes a repository with one commit under a hermetic
+// git and a linked worktree of it on branch, and returns the main
+// repository's and the worktree's top levels as git prints them (symlinks
+// resolved).
+func hookLinkedWorktree(t *testing.T, branch string) (repo, worktree string) {
+	t.Helper()
+	dir := hermeticGit(t)
+	gitInit(t, dir, "main")
+	gitRun(t, dir, "commit", "-q", "--allow-empty", "-m", "first")
+	wt := filepath.Join(t.TempDir(), "wt")
+	gitRun(t, dir, "worktree", "add", "-q", "-b", branch, wt)
+	repo, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worktree, err = filepath.EvalSymlinks(wt); err != nil {
+		t.Fatal(err)
+	}
+	return repo, worktree
+}
+
+// hookLatency runs body n times (body(i) gives the i-th payload) through
+// hook.Run with the real hookEnv, and returns the sorted durations.
+func hookLatency(t *testing.T, st *store.Store, env hook.Env, kind model.EventKind, n int, body func(i int) []byte) []time.Duration {
+	t.Helper()
+	durations := make([]time.Duration, 0, n)
+	for i := range n {
+		b := body(i)
+		start := time.Now()
+		if _, err := hook.Run(context.Background(), kind, b, env, st, config.Default()); err != nil {
+			t.Fatal(err)
+		}
+		durations = append(durations, time.Since(start))
+	}
+	slices.Sort(durations)
+	return durations
+}
+
+// TestHookLatencyUnchanged is TestHookLatency's method and threshold (200
+// in-process PostToolUse runs, p95 under 20 ms) through the real hookEnv,
+// with CURIA_TASK_ID set and a linked worktree as cwd. It also reports 200
+// SessionStarts, each a new session and so one real git process, without
+// gating them: a fork from the race-instrumented test binary on a host that
+// other worktrees' checks load varies by tens of milliseconds at p95, before
+// this change as after it. The whole-process gate covers SessionStart.
+func TestHookLatencyUnchanged(t *testing.T) {
+	_, wt := hookLinkedWorktree(t, "curia/T-7-x")
+	t.Setenv("CURIA_TASK_ID", "T-7")
+	db := filepath.Join(t.TempDir(), "curia.db")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	logger, buf := testLogger()
+	env := hookEnv(context.Background(), unreachableTmux{}, logger)
+	tr := filepath.Join(t.TempDir(), "t.jsonl")
+	const line = `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}` + "\n"
+	if err = os.WriteFile(tr, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	const runs = 200
+	starts := hookLatency(t, st, env, model.SessionStart, runs, func(i int) []byte {
+		return fmt.Appendf(nil, `{"session_id":"S%d","transcript_path":%q,"cwd":%q,"source":"startup"}`, i, tr, wt)
+	})
+	tools := hookLatency(t, st, env, model.PostToolUse, runs, func(int) []byte {
+		f, ferr := os.OpenFile(filepath.Clean(tr), os.O_APPEND|os.O_WRONLY, 0)
+		if ferr != nil {
+			t.Fatal(ferr)
+		}
+		if _, ferr = f.WriteString(line); ferr != nil {
+			t.Fatal(ferr)
+		}
+		_ = f.Close()
+		return fmt.Appendf(nil, `{"session_id":"S0","transcript_path":%q,"cwd":%q,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}}`, tr, wt)
+	})
+	for _, m := range []struct {
+		kind model.EventKind
+		d    []time.Duration
+	}{{model.SessionStart, starts}, {model.PostToolUse, tools}} {
+		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, runs, m.d[runs/2], m.d[runs*95/100], m.d[runs-1])
+	}
+	if p95 := tools[runs*95/100]; p95 >= 20*time.Millisecond {
+		t.Errorf("PostToolUse p95 = %v, want < 20ms", p95)
+	}
+	if s := getSession(t, db, "S0"); s.TaskID != "T-7" || s.Worktree != wt {
+		t.Errorf("S0: task %q worktree %q, want T-7 and %q", s.TaskID, s.Worktree, wt)
+	}
+	if lines := logLines(buf); lines != nil {
+		t.Errorf("log = %q, want none", lines)
+	}
+}
+
+// CURIA_TASK_ID is untrusted: only a well-formed task id is stored.
+func TestHookReadsTaskFromEnvironment(t *testing.T) {
+	db := hookHome(t)
+	for i, tc := range []struct{ env, want string }{
+		{"T-9", "T-9"},
+		{"T-123456789", "T-123456789"},
+		{"T-09", ""},
+		{"D-1", ""},
+		{"T-9;x", ""},
+		{"T-9\n", ""},
+		{" T-9", ""},
+		{"t-9", ""},
+		{"T-0", ""},
+		{"T-1234567890", ""},
+		{"", ""},
+	} {
+		t.Setenv("CURIA_TASK_ID", tc.env)
+		id := fmt.Sprintf("S%d", i)
+		body := `{"session_id":"` + id + `","cwd":"` + t.TempDir() + `","source":"startup"}`
+		assertQuietExitZero(t, runHookCmd(t, strings.NewReader(body), "hook", "SessionStart"))
+		if got := getSession(t, db, id).TaskID; got != tc.want {
+			t.Errorf("CURIA_TASK_ID=%q: stored task %q, want %q", tc.env, got, tc.want)
+		}
+	}
+	if log := readLog(t); log != nil {
+		t.Errorf("log = %q, want none", log)
+	}
+}
