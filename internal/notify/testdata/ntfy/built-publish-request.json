@@ -1,0 +1,35 @@
+{
+  "topic": "phone-7Hq2",
+  "title": "D-117 api-server: decision needed",
+  "message": "Which queue should carry job events?\nA: Postgres LISTEN & NOTIFY\nB: Redis stream\nC: Kafka\nRecommended: B",
+  "priority": 4,
+  "actions": [
+    {
+      "action": "http",
+      "label": "B: Redis stream",
+      "url": "https://curia.example.ts.net/v1/answer",
+      "method": "POST",
+      "headers": {"Authorization": "Bearer TOKEN", "Content-Type": "application/json"},
+      "body": "{\"decision\":\"D-117\",\"key\":\"B\"}",
+      "clear": true
+    },
+    {
+      "action": "http",
+      "label": "A: Postgres LISTEN & NOTIFY",
+      "url": "https://curia.example.ts.net/v1/answer",
+      "method": "POST",
+      "headers": {"Authorization": "Bearer TOKEN", "Content-Type": "application/json"},
+      "body": "{\"decision\":\"D-117\",\"key\":\"A\"}",
+      "clear": true
+    },
+    {
+      "action": "http",
+      "label": "C: Kafka",
+      "url": "https://curia.example.ts.net/v1/answer",
+      "method": "POST",
+      "headers": {"Authorization": "Bearer TOKEN", "Content-Type": "application/json"},
+      "body": "{\"decision\":\"D-117\",\"key\":\"C\"}",
+      "clear": true
+    }
+  ]
+}
