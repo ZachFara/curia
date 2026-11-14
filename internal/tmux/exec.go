@@ -250,6 +250,143 @@ func (c *execClient) CapturePane(ctx context.Context, pane string) (Capture, err
 	return Capture{Screen: screen, Synchronized: f[1] == "1"}, nil
 }
 
+// windowTimeout bounds NewWindow, all its tmux invocations together.
+const windowTimeout = 5 * time.Second
+
+// NewWindow's limits. tmux reads an argument equal to ";" or ending in ";" as
+// a command separator, so nothing NewWindow passes on may end in one.
+var (
+	windowNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`)
+	windowEnvPattern  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}=[A-Za-z0-9._/:@-]{0,256}$`)
+	// plainWordPattern is what a one-argument command must be: tmux runs a
+	// single argument with its default-shell's -c, which then reads a plain
+	// word, holding nothing a shell expands or splits, as a bare command.
+	plainWordPattern = regexp.MustCompile(`^[A-Za-z0-9._/@:+][A-Za-z0-9._/@:+-]*$`)
+)
+
+const (
+	maxWindowEnv  = 8
+	maxWindowArgs = 16
+	maxArgBytes   = 4096
+)
+
+// checkWindow refuses a WindowSpec NewWindow must never pass to tmux.
+func checkWindow(w WindowSpec) error {
+	if !windowNamePattern.MatchString(w.Session) {
+		return fmt.Errorf("tmux new-window: refusing session name %q", w.Session)
+	}
+	if !windowNamePattern.MatchString(w.Name) {
+		return fmt.Errorf("tmux new-window: refusing window name %q", w.Name)
+	}
+	if !filepath.IsAbs(w.Dir) || filepath.Clean(w.Dir) != w.Dir || !commandText(w.Dir) {
+		return fmt.Errorf("tmux new-window: refusing directory %q", w.Dir)
+	}
+	if len(w.Env) > maxWindowEnv {
+		return fmt.Errorf("tmux new-window: refusing %d environment entries (limit %d)", len(w.Env), maxWindowEnv)
+	}
+	for _, e := range w.Env {
+		if !windowEnvPattern.MatchString(e) {
+			return fmt.Errorf("tmux new-window: refusing environment entry %q", e)
+		}
+	}
+	return checkWindowCommand(w.Command)
+}
+
+// checkWindowCommand refuses a command NewWindow must never pass to tmux.
+func checkWindowCommand(command []string) error {
+	if n := len(command); n < 1 || n > maxWindowArgs {
+		return fmt.Errorf("tmux new-window: refusing a command of %d arguments", n)
+	}
+	for _, a := range command {
+		if a == "" || len(a) > maxArgBytes || !commandText(a) {
+			return fmt.Errorf("tmux new-window: refusing command argument %q", a)
+		}
+	}
+	if len(command) == 1 && !plainWordPattern.MatchString(command[0]) {
+		return fmt.Errorf("tmux new-window: refusing one-argument command %q: tmux would give it to a shell", command[0])
+	}
+	return nil
+}
+
+// commandText reports whether s may go on tmux's command line as one
+// argument: valid UTF-8, no rune below 0x20, not ending in ";".
+func commandText(s string) bool {
+	if !utf8.ValidString(s) || strings.HasSuffix(s, ";") {
+		return false
+	}
+	return !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 })
+}
+
+// formatEscaper doubles "#", which tmux expands as a format in -c.
+var formatEscaper = strings.NewReplacer("#", "##")
+
+// NewWindow opens a detached window running w.Command in w.Dir. It asks
+// has-session whether w.Session exists (an exact match) and runs new-window
+// in it or new-session to create it; a new-session that finds the session
+// created meanwhile by another process is retried once as new-window.
+func (c *execClient) NewWindow(ctx context.Context, w WindowSpec) (Pane, error) {
+	if err := checkWindow(w); err != nil {
+		return Pane{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, windowTimeout)
+	defer cancel()
+	tail := []string{"-n", w.Name, "-c", formatEscaper.Replace(w.Dir)}
+	for _, e := range w.Env {
+		tail = append(tail, "-e", e)
+	}
+	tail = append(append(tail, "--"), w.Command...)
+	newWindow := append([]string{"new-window", "-d", "-P", "-F", paneFormat, "-t", "=" + w.Session + ":"}, tail...)
+	var out string
+	var err error
+	if _, herr := c.run(ctx, "has-session", "-t", "="+w.Session); herr == nil {
+		out, err = c.run(ctx, newWindow...)
+	} else {
+		out, err = c.run(ctx, append([]string{"new-session", "-d", "-P", "-F", paneFormat, "-s", w.Session}, tail...)...)
+		if err != nil && strings.Contains(err.Error(), "duplicate session") {
+			out, err = c.run(ctx, newWindow...)
+		}
+	}
+	if err != nil {
+		return Pane{}, err
+	}
+	panes, err := parsePanes(out)
+	if err != nil {
+		return Pane{}, err
+	}
+	if len(panes) != 1 {
+		return Pane{}, fmt.Errorf("tmux new-window: got %d panes for window %q", len(panes), w.Name)
+	}
+	return panes[0], nil
+}
+
+// maxTailLines caps CaptureTail; it is tmux's default history-limit.
+const maxTailLines = 2000
+
+// CaptureTail captures the pane from lines rows up its history to the bottom
+// of the screen, with wrapped lines joined, drops the blank rows at the
+// bottom of the screen and returns the last lines rows, each ending in a
+// newline.
+func (c *execClient) CaptureTail(ctx context.Context, pane string, lines int) (string, error) {
+	if !paneIDPattern.MatchString(pane) {
+		return "", fmt.Errorf("tmux capture-pane: refusing target %q: not a pane id", pane)
+	}
+	if lines < 1 || lines > maxTailLines {
+		return "", fmt.Errorf("tmux capture-pane: refusing %d lines (1 to %d)", lines, maxTailLines)
+	}
+	out, err := c.run(ctx, "capture-pane", "-p", "-J", "-t", pane, "-S", "-"+strconv.Itoa(lines))
+	if err != nil {
+		return "", err
+	}
+	rows := strings.Split(out, "\n")
+	for len(rows) > 0 && strings.TrimSpace(rows[len(rows)-1]) == "" {
+		rows = rows[:len(rows)-1]
+	}
+	if len(rows) == 0 {
+		return "", nil
+	}
+	return strings.Join(rows[max(0, len(rows)-lines):], "\n") + "\n", nil
+}
+
 // ttyPattern matches a pane's tty as tmux reports it: a pty, named
 // /dev/ttysN on macOS and /dev/pts/N on Linux. An unknown pane yields junk
 // with exit 0, so nothing else is ever opened (Ruling 55).
