@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ZachFara/curia/internal/model"
 )
@@ -23,7 +26,8 @@ const (
 	// TypingClaimed: the answer was claimed and is to be typed.
 	TypingClaimed TypingRefusal = iota
 	// TypingNotQueued: the decision is missing, has no answer to deliver,
-	// or another path delivered it first.
+	// or another path delivered it first; or the message is missing, is not
+	// a queued instruction, or has no target session.
 	TypingNotQueued
 	// TypingNoPane: the session has no row or no pane, or is stale.
 	TypingNoPane
@@ -38,9 +42,9 @@ const (
 	TypingSubagents
 	// TypingSharedPane: another live session is bound to the pane (Ruling 73).
 	TypingSharedPane
-	// TypingUnsubmitted: an answer typed into the session earlier is not
-	// confirmed yet, so its line may still sit unsubmitted in the prompt, or
-	// be lost (Rulings 81 and 86).
+	// TypingUnsubmitted: a line typed into the session earlier, an answer
+	// or a message, is not confirmed yet, so it may still sit unsubmitted in
+	// the prompt, or be lost (Rulings 81 and 86).
 	TypingUnsubmitted
 )
 
@@ -64,18 +68,24 @@ func typingRefusal(sess model.Session) TypingRefusal {
 	return TypingClaimed
 }
 
-// unconfirmed returns the id of the oldest answer typed into sess
-// (delivered by send_keys) that is not yet confirmed: no prompt naming it
-// has been submitted and the agent has not read it with check_decision
-// (Ruling 86), or "" when there is none. Its line may still sit in the
-// prompt, or be lost, and a second line would be glued to it (Ruling 81).
+// unconfirmed returns the id of the oldest line typed into sess (delivered
+// by send_keys), an answer (D-<n>) or a message (M-<n>), by delivered_at,
+// that is not yet confirmed: no prompt naming it has been submitted and the
+// agent has not read it with check_decision or check_messages (Ruling 86),
+// or "" when there is none. Its line may still sit in the prompt, or be
+// lost, and a second line of either kind would be glued to it (Ruling 81).
 func unconfirmed(ctx context.Context, tx *sql.Tx, sess model.Session) (string, error) {
 	var id string
 	err := tx.QueryRowContext(ctx, `
-SELECT id FROM decisions
-WHERE session_id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL
-ORDER BY n LIMIT 1`,
-		sess.ID).Scan(&id)
+SELECT id FROM (
+  SELECT id, delivered_at, 0 AS kind, n FROM decisions
+  WHERE session_id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL
+  UNION ALL
+  SELECT id, delivered_at, 1 AS kind, n FROM messages
+  WHERE target_session = ? AND `+msgTyped+`
+)
+ORDER BY delivered_at, kind, n LIMIT 1`,
+		sess.ID, sess.ID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -101,12 +111,12 @@ WHERE tmux_pane = ? AND id != ? AND COALESCE(state, '') NOT IN (?, ?)`,
 // now, in one write transaction: the decision must be queued; its session
 // row must exist, have a pane, be idle or needs_decision and have no
 // subagent running (Ruling 84); no other session row that is neither ended
-// nor stale may be bound to that pane (Ruling 73); and no answer typed into
-// the session earlier may be unconfirmed (Rulings 81 and 86). Then the
-// decision is marked delivered by send_keys, unconfirmed, and returned with
-// TypingClaimed and the session. Otherwise nothing changes, and the claim
+// nor stale may be bound to that pane (Ruling 73); and no line typed into
+// the session earlier, answer or message, may be unconfirmed (Rulings 81
+// and 86). Then the decision is marked delivered by send_keys, unconfirmed,
+// and returned with TypingClaimed and the session. Otherwise nothing changes, and the claim
 // says why, with both rows as stored (zero when absent) and, for
-// TypingUnsubmitted, the id of the unconfirmed answer that blocks it.
+// TypingUnsubmitted, the id of the unconfirmed line that blocks it.
 func (s *Store) ClaimTyping(ctx context.Context, id string, now time.Time) (TypingClaim, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -167,8 +177,8 @@ func (s *Store) StillTypable(ctx context.Context, sessionID, pane string) (Typin
 
 // TypingClaim is what ClaimTyping did with an answer: the decision and its
 // session as stored, why it was not claimed (TypingClaimed when it was),
-// and for TypingUnsubmitted the id of the typed answer, not confirmed yet,
-// that blocks typing into the session (re-review N4).
+// and for TypingUnsubmitted the id of the typed line (D-<n> or M-<n>), not
+// confirmed yet, that blocks typing into the session (re-review N4).
 type TypingClaim struct {
 	Decision    model.Decision
 	Session     model.Session
@@ -177,12 +187,20 @@ type TypingClaim struct {
 }
 
 // claimRefusal is why ClaimTyping may not claim d for typing into sess
-// inside tx, or TypingClaimed, and the id of the unconfirmed typed answer
+// inside tx, or TypingClaimed, and the id of the unconfirmed typed line
 // behind TypingUnsubmitted.
 func claimRefusal(ctx context.Context, tx *sql.Tx, d model.Decision, sess model.Session) (TypingRefusal, string, error) {
 	if d.Delivery != model.DeliveryQueued {
 		return TypingNotQueued, "", nil
 	}
+	return sessionRefusal(ctx, tx, sess)
+}
+
+// sessionRefusal is why nothing may be typed into sess now, inside tx, in
+// the typing path's order (typingRefusal, a shared pane, an unconfirmed
+// typed line), or TypingClaimed, and the id of the unconfirmed typed line
+// behind TypingUnsubmitted. Both ClaimTyping and ClaimMessageTyping use it.
+func sessionRefusal(ctx context.Context, tx *sql.Tx, sess model.Session) (TypingRefusal, string, error) {
 	if why := typingRefusal(sess); why != TypingClaimed {
 		return why, "", nil
 	}
@@ -246,6 +264,19 @@ WHERE id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND conf
 	return d, found, nil
 }
 
+// agentPrompts are the starts of prompts Claude Code builds itself, a
+// subagent's report or a background task's notification: such a prompt
+// confirms no typed line, whatever it quotes (Ruling 102). message.Names
+// refuses the same starts for messages.
+var agentPrompts = []string{"<task-notification", "<agent-message"}
+
+// agentBuilt reports whether prompt starts, after white space, with one of
+// agentPrompts.
+func agentBuilt(prompt string) bool {
+	start := strings.TrimLeftFunc(prompt, unicode.IsSpace)
+	return slices.ContainsFunc(agentPrompts, func(p string) bool { return strings.HasPrefix(start, p) })
+}
+
 // typedNames matches the decisions a submitted prompt names: "Decision D-n"
 // followed by a space (an answer's wording) or a colon (a retraction's),
 // so D-1 is not taken for D-12. Its parameters are the prompt, twice.
@@ -256,9 +287,10 @@ const typedNames = `(instr(?, 'Decision ' || id || ' ') > 0 OR instr(?, 'Decisio
 // (Ruling 86), in one statement inside the session's write transaction, so
 // the confirmation is written with the UserPromptSubmit's session update or
 // not at all (re-review N4). It returns how many it confirmed. An empty
-// sessionID confirms nothing.
+// sessionID, or a prompt Claude Code built itself (agentBuilt, Ruling 102),
+// confirms nothing.
 func (t *Tx) ConfirmTyped(ctx context.Context, sessionID, prompt string, now time.Time) (int64, error) {
-	if sessionID == "" {
+	if sessionID == "" || agentBuilt(prompt) {
 		return 0, nil
 	}
 	res, err := t.tx.ExecContext(ctx, `

@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ZachFara/curia/internal/decision"
+	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 )
@@ -837,5 +838,76 @@ func TestRequeueLeavesAnAnswerCheckConfirmed(t *testing.T) {
 	assertDelivered(t, s, d.ID, model.ViaSendKeys, tClaim)
 	if claimed := claimStop(t, s, "s1", tClaim.Add(time.Second)); len(claimed) != 0 {
 		t.Errorf("the Stop hook handed over again an answer check_decision returned: %v", decisionIDs(claimed))
+	}
+}
+
+// Ruling 86 across kinds: a session has at most one typed line, answer or
+// message, unconfirmed at a time, and the refusal names that line.
+func TestOneUnconfirmedLineAcrossKinds(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	liveSession(t, s, "s1", "%3", model.StateIdle)
+	d1 := queued(t, s, "Typed first?", "s1")
+	m1 := queuedMessage(t, s, "use pnpm", "s1")
+	if _, why := claimTyping(t, s, d1.ID, tClaim); why != store.TypingClaimed {
+		t.Fatalf("answer claim = %v", why)
+	}
+	// A typed, unconfirmed answer blocks typing a message.
+	c := claimMessageTyping(t, s, m1.ID, tClaim.Add(time.Second))
+	if c.Refusal != store.TypingUnsubmitted || c.Unconfirmed != "D-1" {
+		t.Fatalf("message claim = %v naming %q, want TypingUnsubmitted naming D-1", c.Refusal, c.Unconfirmed)
+	}
+	assertMessageStatus(t, s, m1.ID, model.MsgQueued, "")
+	confirmTyped(t, s, decision.TypedMessage(getDecision(t, s, d1.ID)), tClaim.Add(2*time.Second))
+	if c := claimMessageTyping(t, s, m1.ID, tClaim.Add(3*time.Second)); c.Refusal != store.TypingClaimed {
+		t.Fatalf("message claim after confirmation = %v", c.Refusal)
+	}
+	// A typed, unconfirmed message blocks typing an answer, and another message.
+	d2 := queued(t, s, "Typed second?", "s1")
+	tc, err := s.ClaimTyping(ctx, d2.ID, tClaim.Add(4*time.Second))
+	if err != nil || tc.Refusal != store.TypingUnsubmitted || tc.Unconfirmed != "M-1" {
+		t.Fatalf("answer claim = %v naming %q, %v; want TypingUnsubmitted naming M-1", tc.Refusal, tc.Unconfirmed, err)
+	}
+	assertQueued(t, s, d2.ID)
+	m2 := queuedMessage(t, s, "and run the linter", "s1")
+	if c := claimMessageTyping(t, s, m2.ID, tClaim.Add(4*time.Second)); c.Refusal != store.TypingUnsubmitted || c.Unconfirmed != "M-1" {
+		t.Errorf("second message claim = %v naming %q, want TypingUnsubmitted naming M-1", c.Refusal, c.Unconfirmed)
+	}
+	// Another session is not blocked.
+	liveSession(t, s, "s2", "%4", model.StateIdle)
+	if c := claimMessageTyping(t, s, queuedMessage(t, s, "for s2", "s2").ID, tClaim); c.Refusal != store.TypingClaimed {
+		t.Errorf("claim for s2 = %v, want claimed", c.Refusal)
+	}
+	confirmMessages(t, s, "s1", message.TypedLine(getMessage(t, s, m1.ID)), tClaim.Add(5*time.Second))
+	if _, why := claimTyping(t, s, d2.ID, tClaim.Add(6*time.Second)); why != store.TypingClaimed {
+		t.Errorf("answer claim after the message was confirmed = %v", why)
+	}
+}
+
+// Ruling 102: a prompt Claude Code builds itself, a subagent's report or a
+// background notification, confirms no typed answer, whatever it quotes.
+func TestConfirmTypedIgnoresAgentBuiltPrompts(t *testing.T) {
+	s := open(t, dbPath(t))
+	liveSession(t, s, "s1", "%3", model.StateIdle)
+	d := queued(t, s, "Typed?", "s1")
+	typed, _ := claimTyping(t, s, d.ID, tClaim)
+	line := decision.TypedMessage(typed)
+	at := tClaim.Add(time.Second)
+	for _, prompt := range []string{
+		"<task-notification>\n<summary>" + line + "</summary>",
+		"<agent-message from=\"worker\">" + line + "</agent-message>",
+		" \n\t<agent-message>" + line,
+		"<task-notification" + line,
+	} {
+		if n := confirmTyped(t, s, prompt, at); n != 0 {
+			t.Errorf("ConfirmTyped(%q) = %d; want 0", prompt, n)
+		}
+	}
+	if got := getDecision(t, s, d.ID); !got.ConfirmedAt.IsZero() {
+		t.Fatalf("confirmed at %v by an agent-built prompt", got.ConfirmedAt)
+	}
+	// The same text, quoted inside the user's own prompt, confirms it.
+	if n := confirmTyped(t, s, "see <agent-message> above. "+line, at); n != 1 {
+		t.Errorf("ConfirmTyped(user's prompt) = %d; want 1", n)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 )
 
@@ -100,24 +101,40 @@ func (t *Tx) ClaimDeliveries(ctx context.Context, sessionID string, now time.Tim
 	if sessionID == "" {
 		return nil, nil
 	}
-	if _, err := t.tx.ExecContext(ctx, `SAVEPOINT claim_deliveries`); err != nil {
+	var out []model.Decision
+	err := t.savepoint(ctx, "claim_deliveries", func() error {
+		var err error
+		out, err = claim(ctx, t.tx, sessionID, now)
+		return err
+	})
+	if err != nil {
 		return nil, fail("claim deliveries for", sessionID, err)
+	}
+	// SQLite promises no order for RETURNING rows; no test can see this
+	// sort (the plan returns id order today), so it is not dead code.
+	slices.SortFunc(out, func(a, b model.Decision) int { return cmp.Compare(a.N, b.N) })
+	return out, nil
+}
+
+// savepoint runs fn inside savepoint name of the transaction: released when
+// fn succeeds, rolled back and released when it fails, so on any error
+// nothing fn did is left in the transaction.
+func (t *Tx) savepoint(ctx context.Context, name string, fn func() error) error {
+	if _, err := t.tx.ExecContext(ctx, `SAVEPOINT `+name); err != nil {
+		return err
 	}
 	// The savepoint is closed even when ctx is done, so a claim is never
 	// left in the transaction after an error.
 	end := context.WithoutCancel(ctx)
-	out, err := claim(ctx, t.tx, sessionID, now)
+	err := fn()
 	if err == nil {
-		if _, err = t.tx.ExecContext(end, `RELEASE claim_deliveries`); err == nil {
-			// SQLite promises no order for RETURNING rows; no test can see this
-			// sort (the plan returns id order today), so it is not dead code.
-			slices.SortFunc(out, func(a, b model.Decision) int { return cmp.Compare(a.N, b.N) })
-			return out, nil
+		if _, err = t.tx.ExecContext(end, `RELEASE `+name); err == nil {
+			return nil
 		}
 	}
-	_, rbErr := t.tx.ExecContext(end, `ROLLBACK TO claim_deliveries`)
-	_, relErr := t.tx.ExecContext(end, `RELEASE claim_deliveries`)
-	return nil, fail("claim deliveries for", sessionID, errors.Join(err, rbErr, relErr))
+	_, rbErr := t.tx.ExecContext(end, `ROLLBACK TO `+name)
+	_, relErr := t.tx.ExecContext(end, `RELEASE `+name)
+	return errors.Join(err, rbErr, relErr)
 }
 
 // claim runs claimDeliveries and scans the rows it returns.
@@ -184,4 +201,129 @@ func (t *Tx) StopCheck(ctx context.Context, sessionID string, now time.Time) (op
 		return 0, false, fail("check stop for", sessionID, err)
 	}
 	return openBlocking, queued, nil
+}
+
+// stopState is StopState's one statement: stopCheck's two parts, and
+// whether an instruction is queued for the session (by the
+// messages_undelivered index). Parameters: the session id, now, the
+// session id, the session id.
+const stopState = stopCheck + `,
+  EXISTS (SELECT 1 FROM messages WHERE target_session = ? AND status = 'queued' AND kind = 'instruction')`
+
+// StopState is what curia hook Stop reads before it claims anything.
+type StopState struct {
+	OpenBlocking      int
+	Answers, Messages bool // something of that kind is queued for the session
+}
+
+// StopState is StopCheck with one more part, in one small statement: the
+// open blocking tickets of session sessionID at now, whether an answer of it
+// is queued (ClaimDeliveries has something to claim) and whether an
+// instruction for it is queued (ClaimMessages has something to claim). A
+// held, canceled or typed message is not queued. An empty sessionID has
+// nothing.
+func (t *Tx) StopState(ctx context.Context, sessionID string, now time.Time) (StopState, error) {
+	var st StopState
+	if sessionID == "" {
+		return st, nil
+	}
+	err := t.tx.QueryRowContext(ctx, stopState, sessionID, formatTime(now), sessionID, sessionID).
+		Scan(&st.OpenBlocking, &st.Answers, &st.Messages)
+	if err != nil {
+		return StopState{}, fail("read stop state for", sessionID, err)
+	}
+	return st, nil
+}
+
+// ClaimMessages claims, for curia hook Stop, the queued instructions of
+// session sessionID that the reason can hold: it reads the oldest
+// message.MaxPerStop of them, keeps the first message.Fit(..., budget)
+// (budget is the runes left in the reason), marks those delivered by
+// stop_hook and confirmed at now (the blocked stop hands them over), and
+// returns them in id order. The rest stay queued for the next Stop. It runs
+// inside a savepoint: on any error nothing is claimed. An empty sessionID
+// claims nothing.
+//
+// The claim commits with the hook's session update. If the hook dies after
+// the commit and before it writes its output, the claimed messages are lost
+// to the agent (at most once, as for answers).
+func (t *Tx) ClaimMessages(ctx context.Context, sessionID string, now time.Time, budget int) ([]model.Message, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	var out []model.Message
+	err := t.savepoint(ctx, "claim_messages", func() error {
+		var err error
+		out, err = claimMessages(ctx, t.tx, sessionID, now, budget)
+		return err
+	})
+	if err != nil {
+		return nil, fail("claim messages for", sessionID, err)
+	}
+	return out, nil
+}
+
+// claimMessages is ClaimMessages inside its savepoint.
+func claimMessages(ctx context.Context, tx *sql.Tx, sessionID string, now time.Time, budget int) ([]model.Message, error) {
+	ms, err := queryMessages(ctx, tx, selectMessages+`
+WHERE target_session = ? AND status = 'queued' AND kind = 'instruction' ORDER BY n LIMIT ?`,
+		sessionID, message.MaxPerStop)
+	if err != nil {
+		return nil, err
+	}
+	k := message.Fit(ms, budget)
+	if k == 0 {
+		return nil, nil
+	}
+	ns := make([]int64, k)
+	for i, m := range ms[:k] {
+		ns[i] = m.N
+	}
+	at := formatTime(now)
+	out, err := queryMessages(ctx, tx, `
+UPDATE messages SET status = 'delivered', delivered_via = 'stop_hook', delivered_at = ?, confirmed_at = ?
+WHERE n IN (SELECT value FROM json_each(?)) AND status = 'queued'
+RETURNING`+messageColumns, at, at, jsonNs(ns))
+	if err != nil {
+		return nil, err
+	}
+	// SQLite promises no order for RETURNING rows.
+	slices.SortFunc(out, func(a, b model.Message) int { return cmp.Compare(a.N, b.N) })
+	return out, nil
+}
+
+// ConfirmTypedMessages confirms, for curia hook UserPromptSubmit at now, the
+// messages typed into session sessionID no later than now and not yet
+// confirmed that prompt names (message.Names: "Message M-<n> ", never in a
+// prompt Claude Code built itself, Ruling 102), inside the session's write
+// transaction, and returns how many. An empty sessionID confirms nothing.
+func (t *Tx) ConfirmTypedMessages(ctx context.Context, sessionID, prompt string, now time.Time) (int64, error) {
+	if sessionID == "" {
+		return 0, nil
+	}
+	at := formatTime(now)
+	typed, err := queryMessages(ctx, t.tx, selectMessages+`
+WHERE target_session = ? AND `+msgTyped+` AND delivered_at <= ?`, sessionID, at)
+	if err != nil {
+		return 0, fail("confirm typed messages for", sessionID, err)
+	}
+	var named []int64
+	for _, m := range typed {
+		if message.Names(prompt, m.ID) {
+			named = append(named, m.N)
+		}
+	}
+	if len(named) == 0 {
+		return 0, nil
+	}
+	res, err := t.tx.ExecContext(ctx, `UPDATE messages SET confirmed_at = ? WHERE n IN (SELECT value FROM json_each(?))`,
+		at, jsonNs(named))
+	if err != nil {
+		return 0, fail("confirm typed messages for", sessionID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fail("confirm typed messages for", sessionID, err)
+	}
+	return n, nil
 }
