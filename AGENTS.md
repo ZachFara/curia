@@ -6,12 +6,14 @@ Read this first. It is the working agreement for every human and agent in this r
 
 `curia` is one Go binary that turns tmux into a control plane for parallel coding agents. Claude Code hooks call `curia hook <Event>`; the hook parses the payload, applies a pure state machine and upserts one row per session in a local SQLite store (WAL mode). Every view reads that store: `curia status` (status-bar badge), window markers, `curia next` (jump to the session that needs you), `curia ls`, and the `curia ui` popup / `curia sidebar`. Nothing scrapes panes. tmux is driven through a small `tmux.Client` interface so logic is testable without tmux.
 
+Plan 3 adds work for the agents and a way to talk down to them. Tasks are rows in a local `tasks` table (`curia task`, a Backlog.md import) whose stored status is only what the user sets (backlog, ready, dropped); running and needs_decision are derived from the sessions linked to the task by `CURIA_TASK_ID`, and the board (`t` in the dashboard) shows them. `curia spawn <id>` runs git and tmux itself (a worktree under `.curia-worktrees/`, a window, an optional `.curia/setup.sh`) and starts the agent through a hidden `curia launch`, which reads the brief from the store and `execve`s `claude`, so no task text passes through tmux's command parser; `curia pause`, `resume` and `clean` are user-only. Messages (`curia say`, `curia send`) are rows in a `messages` table delivered by the same three claims as decision answers (typed into an idle pane, handed over by the Stop hook, or fetched with the fifth MCP tool, `check_messages`); `curia say` routes an unaddressed message with one bounded `claude -p` call, or turns it into a standing rule (a decided `decisions` row with no options) or a task. The MCP server exposes five tools, none of which can decide, send, spawn or pause. Agent Teams are read from Claude Code's team config when a view or `curia mcp` refreshes and shown as one unit; only a team's lead may raise a ticket.
+
 Plan 2 adds decisions. `curia mcp` is a stdio MCP server, one process per Claude Code session, whose four tools let an agent search precedent and raise, check or withdraw a decision ticket in the store's `decisions` table; no MCP tool can answer one. `curia decide` (a popup, or flags for scripts) is the only place an answer is written, and it refuses to run inside an agent session; `curia decisions` (`ls`, `edit`) lists and curates tickets and is user-only too. The status badge reads `D<n> Q<n> W<n> R<n>` (open blocking tickets, answers a live session has not yet received, waiting sessions, reviews). An answer is delivered at most once, by one of three paths, each a claim in one write transaction: `curia decide` typing it into the agent's idle pane, `curia hook Stop` blocking the stop with the answer as its reason, or the agent's own `check_decision` (which also returns an answer already delivered).
 
 Sources of truth:
 
 - `docs/DESIGN.md`: the spec, WHAT to build.
-- `docs/superpowers/plans/`: the current implementation plan (Plan 2: `2026-11-11-curia-plan-2-decisions.md`), for task order, interfaces and tests. Plan 1 (`2026-11-11-curia-plan-1-foundation.md`) is complete.
+- `docs/superpowers/plans/`: the current implementation plan (Plan 3: `2026-11-13-curia-plan-3-tasks-and-routing.md`), for task order, interfaces and tests. Plan 2 (`2026-11-11-curia-plan-2-decisions.md`) and Plan 1 (`2026-11-11-curia-plan-1-foundation.md`) are complete.
 - `docs/decisions/`: numbered decision records, for HOW.
 - `PROGRESS.md`: status, waves, done criteria, open questions and rulings.
 
@@ -22,9 +24,9 @@ The layout check (`scripts/check-layout.sh`, decision 0006) rejects anything not
 | Path | Contents |
 | --- | --- |
 | `cmd/curia/` | Cobra commands, one file per command (see the convention below). |
-| `internal/<pkg>/` | One package per row of the plan's File structure table: `model`, `config`, `sanitize`, `decision`, `precedent`, `store`, `state`, `transcript`, `hook`, `tmux`, `fleet`, `attention`, `notify`, `deliver`, `mcp`, `ui`, `install`. Each may import only the packages above it in that table (depguard, decisions 0003 and 0010). |
+| `internal/<pkg>/` | One package per row of the plan's File structure table: `model`, `config`, `sanitize`, `decision`, `precedent`, `task`, `message`, `route`, `team`, `store`, `state`, `transcript`, `hook`, `tmux`, `fleet`, `attention`, `notify`, `deliver`, `mcp`, `ui`, `install`. Each may import only the packages above it in that table (depguard, decisions 0003, 0010 and 0015). |
 | `e2e/` | End-to-end tests that build and drive the binary; imports no internal package. |
-| `testdata/` | Shared fixtures (`testdata/replay/`, `testdata/decisions/`). Package-local fixtures live in `internal/<pkg>/testdata/` or `cmd/curia/testdata/`. |
+| `testdata/` | Shared fixtures (`testdata/replay/`, `testdata/decisions/`, `testdata/tasks/`). Package-local fixtures live in `internal/<pkg>/testdata/` or `cmd/curia/testdata/`. |
 | `docs/` | Spec, plans, decision records. |
 | `scripts/` | Check scripts used by `make check` and the git hooks. |
 | `.github/` | CI workflow and PR template. |
@@ -60,7 +62,7 @@ Commands:
 
 Rules for the toolchain:
 
-- Never run `go mod tidy` during Plan 1 or Plan 2. Every dependency is already in `go.mod` and `go.sum` (decision 0009) and Plan 2 adds no module (decision 0011). No task edits `go.mod` or `go.sum`.
+- Never run `go mod tidy` during Plans 1 to 3. Every dependency is already in `go.mod` and `go.sum` (decision 0009) and Plans 2 and 3 add no module (decision 0011; Plan 3 parses Backlog.md by hand and runs the router as a subprocess). No task edits `go.mod` or `go.sum`.
 - No test-helper modules (testify, teatest and so on): tests use the standard library plus the package's own dependencies. Use real dependencies in temp dirs: SQLite files under `t.TempDir()`, a real tmux server on its own socket (`tmux -L <name>`) where tmux is installed.
 - gosec is on (except G204): `filepath.Clean` paths before opening them, and write files with mode `0o600`.
 - Worktrees live under `.worktrees/` (gitignored). Each one has its own `.bin/`, so its first `make check` builds the tools (about a minute). depguard matches files by absolute path and its `e2e` rule matches any path segment named `e2e`, so no directory on the path to a worktree may be named `e2e`; use the branch slug, e.g. `.worktrees/plan1-t2-store`.
@@ -71,7 +73,7 @@ Rules for the toolchain:
 - **One file per command in `cmd/curia/`.** `main.go` holds only the package-level `rootCmd` and `main`. Every later command lives in its own file in `cmd/curia/` (for example `hook.go`, `ls.go`) and registers itself in that file's `init()` with `rootCmd.AddCommand(...)`, so parallel tasks never edit `main.go`. Tests for a command go in the matching `_test.go` file and drive it through `rootCmd.SetArgs` / `SetOut`.
 - **Shared files belong to the orchestrator alone** (from the owner's PARALLEL EXECUTION rules): "Shared files belong to you alone: PROGRESS.md, AGENTS.md, docs/decisions/, go.mod, go.sum, cmd/curia/main.go, the Makefile and CI config. An implementer that thinks one of these needs a change says so in its report; you make the change on plan-1 between waves." Here "you" is the orchestrator. The same applies to `.golangci.yml`, `lefthook.yml` and `scripts/`, which are part of the check configuration.
 - **`.scratch/` is the only place for throwaway work**: probe programs, experiments, notes, temporary scripts. It is gitignored and invisible to the layout check. Never put throwaway files in the tree. The orchestrator empties `.scratch/` at the end of every wave. Go code in `.scratch/` is not part of the module's `./...` (directories starting with `.` are skipped); to try something against this module's dependencies, copy `go.mod` and `go.sum` into a `.scratch/<name>/` directory and build there.
-- **Commits**: conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`, `build:`, `ci:`, `refactor:` ...), subject at most 72 characters; enforced by the commit-msg hook. Branches: `feat/`, `fix/`, `chore/`, `docs/`; Plan 1 task branches are `feat/plan1-tN-<slug>`. Plan 2 task branches are `feat/plan2-tN-<slug>`, in worktrees `.worktrees/plan2-tN-<slug>`.
+- **Commits**: conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`, `build:`, `ci:`, `refactor:` ...), subject at most 72 characters; enforced by the commit-msg hook. Branches: `feat/`, `fix/`, `chore/`, `docs/`; Plan 1 task branches are `feat/plan1-tN-<slug>`. Plan 2 task branches are `feat/plan2-tN-<slug>`, in worktrees `.worktrees/plan2-tN-<slug>`. Plan 3 task branches are `feat/plan3-tN-<slug>`, in worktrees `.worktrees/plan3-tN-<slug>`.
 - **PRs** use `.github/pull_request_template.md`: what changed, why, how it was tested.
 
 ## Things learned while building
@@ -84,6 +86,15 @@ Rules for the toolchain:
 - **Tests that start a real tmux server use a per-run socket** (`curia-test-<pid>`), because several worktrees run `make check` at the same time.
 - **Files the user owns may be symlinks into a dotfiles repo.** `internal/install` resolves symlinks before its atomic rename and never overwrites an existing backup.
 
+- **tmux reads a command argument that is `;` or ends in `;` as a separator and runs the next argument as a tmux command; several arguments after the flags of `new-window` or `new-session` are executed directly, without a shell; `-e NAME=value` sets a variable for that pane only** (tmux 3.8, at the desk). Untrusted text is never an argument to tmux.
+- **tmux 3.8 keeps `.` and `:` in a session name, which then cannot be targeted;** Curia builds session names from `[A-Za-z0-9_-]` and targets them as `=<name>:`.
+- **`git worktree remove` refuses a worktree with modified or untracked files, and silently deletes one that holds only ignored files; `git branch -d` refuses a branch a worktree has checked out** (git 2.56.0, at the desk).
+- **`git rev-parse --path-format=absolute --show-toplevel --absolute-git-dir --git-common-dir` gives the worktree, its git dir and the main repository's git dir in one process.**
+- **A session's `repo` is the main repository; its `worktree` column holds the linked worktree** (decision 0020). A session's task comes from `CURIA_TASK_ID`.
+- **The team columns of `sessions` are written only by `store.SetTeams`;** `upsert` leaves them out on purpose.
+- **A standing rule is a decided `decisions` row with no options;** nothing else marks it (decision 0018).
+- **Claude Code 2.1.323's `--help`** lists `-w/--worktree [name]`, `--tmux` (requires `--worktree`), `--session-id`, `--safe-mode`, `--no-session-persistence`, `--tools`, `--json-schema` and `-r/--resume`, and does not list `--teammate-mode`.
+- **SQLite 3.51.0 (the system `sqlite3`) runs the `0004_tasks.sql` DDL** as one multi-statement script in one transaction, and `decisions_fts` passes `integrity-check` afterwards.
 - **Command wiring lives in `cmd/curia/common.go`** (load config, open the store, open the log file) and git plumbing in `cmd/curia/git.go`. Reuse them; do not write a second copy in a new command.
 - **Any test or code that runs `git` must drop git's repository-local `GIT_*` variables** (`gitEnv` in `cmd/curia/git.go`). lefthook's pre-commit exports `GIT_DIR`, so an unguarded `git init` in a test acts on the real repository.
 - **GitHub Actions outages happen.** If a PR shows no checks for a long time, look at githubstatus.com before suspecting the code; never merge without the check.
@@ -173,6 +184,13 @@ Facts established by the live checks (Claude Code 2.1.323, tmux 3.8; evidence in
   - A fresh prompt shows a dim placeholder suggestion (`❯ Try "fix typecheck errors"`); `capture-pane -p` without `-e` cannot tell it from a draft.
   - The slash menu is drawn above the input box, and the box holds `❯ /`.
   - `capture-pane -p` shows the live screen, not tmux's copy-mode view; `#{pane_in_mode}` reports copy mode, and `SendKeys` leaves copy mode before typing.
+
+## Owner's amendments (2026-11-13)
+
+These replace the review rules of 2026-11-12 below. The full record is in `PROGRESS.md`.
+
+- Reviews happen only at the final PR: no plan pre-flight review, no per-task review, no re-reviews. Task PRs merge on the implementer's report plus green CI.
+- Installation should become very easy (prebuilt releases, Homebrew); a separate packaging PR handles it.
 
 ## Owner's amendments (2026-11-12)
 
