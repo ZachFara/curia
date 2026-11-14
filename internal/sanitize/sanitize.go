@@ -224,3 +224,42 @@ func stringLen(rest string, belEnds bool) int {
 	}
 	return len(rest)
 }
+
+// Block cleans text whose layout matters, such as a task brief or pane
+// text. Escape sequences go as Line removes them; "\r\n" and "\r" become
+// "\n"; "\n", "\t" and every space stay as they are (nothing collapses,
+// leading whitespace and blank lines stay); every other rune that is not
+// printable is dropped. Trailing spaces and tabs on each line and trailing
+// blank lines go. A positive limitBytes cuts the result to at most that many
+// bytes on a rune boundary, with no ellipsis; callers pass a positive limit
+// for untrusted text, since a limit that is not positive leaves the length
+// unbounded.
+func Block(s string, limitBytes int) string {
+	s = strings.ReplaceAll(scan(s), "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, s)
+	s = trimLines(s)
+	if limitBytes > 0 && len(s) > limitBytes {
+		end := limitBytes
+		for end > 0 && !utf8.RuneStart(s[end]) {
+			end--
+		}
+		s = trimLines(s[:end])
+	}
+	return s
+}
+
+// trimLines removes trailing spaces and tabs from every line, then trailing
+// blank lines.
+func trimLines(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, " \t")
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
