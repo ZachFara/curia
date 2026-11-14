@@ -1,17 +1,22 @@
 // Package ui is the dashboard: a Bubble Tea model that lists every session,
-// shown as a tmux popup (curia ui) or in a narrow always-on pane (curia
-// sidebar), and jumps to or kills the selected session's pane.
+// an agent team as one group row, shown as a tmux popup (curia ui) or in a
+// narrow always-on pane (curia sidebar), and jumps to or kills the selected
+// session's pane.
 package ui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/tmux"
 )
@@ -34,6 +39,9 @@ type Source interface {
 	// OpenDecisions counts the open tickets by session id and mode; only
 	// the popup reads it.
 	OpenDecisions(ctx context.Context) (map[string]model.OpenCount, error)
+	// Tasks returns the tasks by id, for the TASK column; only the popup
+	// reads it.
+	Tasks(ctx context.Context) (map[string]model.Task, error)
 }
 
 // Mode is how the dashboard is shown.
@@ -91,10 +99,13 @@ type Model struct {
 
 	sessions []model.Session            // the last good read, in Source order
 	counts   map[string]model.OpenCount // the last good OpenDecisions read; replaced, never mutated
+	tasks    map[string]model.Task      // the last good Tasks read; replaced, never mutated
 	names    map[string]string          // window id to window name; replaced, never mutated
-	rows     []model.Session            // sessions that pass the filter
+	expanded map[string]bool            // team ids shown expanded; replaced, never mutated
+	rows     []row                      // the units that pass the filter, as rows
 	cursor   int                        // index of the selected row
-	selected string                     // id of the selected session, kept across refreshes
+	selected rowKey                     // the selected row, kept across refreshes
+	selTeam  string                     // the selected row's team, to find its group row once collapsed
 	offset   int                        // index of the first row on screen
 
 	width, height int // 0 until the first WindowSizeMsg: no limit
@@ -109,17 +120,57 @@ type Model struct {
 
 	open     func(sessionID string) tea.Model // builds the decide view; nil: d cannot answer
 	noAnswer string                           // why d cannot answer; "": inside an agent session
-	child    tea.Model                        // the decide view while it is shown
+	board    func() tea.Model                 // builds the task board; nil: t and n say why
+	child    tea.Model                        // the decide view or the board while it is shown
 	childGen int                              // which child is (or was last) shown
+}
+
+// rowKind is what a row of the table stands for.
+type rowKind int
+
+const (
+	rowSolo  rowKind = iota // a session in no team, or a lead without teammates
+	rowGroup                // a collapsed team: its lead's cells, its worst member's state
+	rowLead                 // an expanded team's lead
+	rowMate                 // a teammate, under its expanded lead
+)
+
+// row is one row of the table.
+type row struct {
+	kind    rowKind
+	s       model.Session   // the session whose cells the row shows: the lead's for a group row
+	team    string          // the team id; "" for a solo row
+	worst   model.Session   // a group row's worst member
+	members []model.Session // a group row's lead and teammates
+}
+
+// rowKey names a row across refreshes: a group row and its expanded lead
+// row show the same session.
+type rowKey struct {
+	id    string
+	group bool
+}
+
+func (r row) key() rowKey { return rowKey{id: r.s.ID, group: r.kind == rowGroup} }
+
+// target is the session Enter jumps to: a group row's worst member, else
+// the row's own session.
+func (r row) target() model.Session {
+	if r.kind == rowGroup {
+		return r.worst
+	}
+	return r.s
 }
 
 // refreshMsg is the result of one refresh of chain.
 type refreshMsg struct {
 	sessions  []model.Session
 	counts    map[string]model.OpenCount
+	tasks     map[string]model.Task
 	names     map[string]string
 	err       error
 	countsErr error
+	tasksErr  error
 	chain     int
 }
 
@@ -138,6 +189,13 @@ type childMsg struct {
 // noticeNoAnswer is the d key's notice when the dashboard has no decide
 // factory: curia ui sets none inside an agent session (spec section 7).
 const noticeNoAnswer = "decisions cannot be answered inside an agent session (CLAUDECODE is set)"
+
+// Notices of the team and board keys.
+const (
+	noticeNoBoard   = "the task board opens in the popup (curia ui)"
+	noticePickTask  = "pick a task, then n"
+	noticeKillGroup = "expand the team to kill one pane"
+)
 
 // New returns the dashboard over src. tm resolves window names and performs
 // jumps and kills; cfg gives the context thresholds; now is the clock for
@@ -160,22 +218,31 @@ func (m Model) WithoutDecide(why string) Model {
 	return m
 }
 
+// WithBoard returns m with the t key enabled: t shows the model open builds
+// until it sends BoardClosedMsg, and n shows it with the notice "pick a
+// task, then n". Without it, both say the board is in the popup.
+func (m Model) WithBoard(open func() tea.Model) Model {
+	m.board = open
+	return m
+}
+
 // Init starts the first refresh.
 func (m Model) Init() tea.Cmd {
 	return m.refresh()
 }
 
 // refresh reads the Source and the window names off the event loop; the
-// popup also reads the open decision counts.
+// popup also reads the open decision counts and the tasks.
 func (m Model) refresh() tea.Cmd {
-	src, tm, chain, counts := m.src, m.tm, m.chain, m.mode == ModePopup
+	src, tm, chain, popup := m.src, m.tm, m.chain, m.mode == ModePopup
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 		defer cancel()
 		msg := refreshMsg{chain: chain}
 		msg.sessions, msg.err = src.Sessions(ctx)
-		if counts {
+		if popup {
 			msg.counts, msg.countsErr = src.OpenDecisions(ctx)
+			msg.tasks, msg.tasksErr = src.Tasks(ctx)
 		}
 		msg.names = windowNames(tm)
 		return msg
@@ -198,8 +265,8 @@ func windowNames(tm tmux.Client) map[string]string {
 	return names
 }
 
-// Update handles one message. While the decide view is shown, every
-// message goes to it (updateChild).
+// Update handles one message. While the decide view or the board is shown,
+// every message goes to it (updateChild).
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, ok := msg.(childMsg); ok || m.child != nil {
 		return m.updateChild(msg)
@@ -230,17 +297,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// applyRefresh keeps the last good sessions and the last good counts when
-// a read fails, and shows the first error.
+// applyRefresh keeps the last good sessions, counts and tasks when a read
+// fails, and shows the first error.
 func (m Model) applyRefresh(msg refreshMsg) Model {
-	m.names, m.err = msg.names, msg.err
+	m.names, m.err = msg.names, cmp.Or(msg.err, msg.countsErr, msg.tasksErr)
 	if msg.err == nil {
 		m.sessions = msg.sessions
 	}
 	if msg.countsErr == nil {
 		m.counts = msg.counts
-	} else if m.err == nil {
-		m.err = msg.countsErr
+	}
+	if msg.tasksErr == nil {
+		m.tasks = msg.tasks
 	}
 	return m.reselect()
 }
@@ -250,11 +318,11 @@ func (m Model) applyRefresh(msg refreshMsg) Model {
 // the session has no open ticket or the dashboard has no factory. The view
 // gets the window size, and its commands are wrapped as child gen.
 func (m Model) openDecide() (Model, tea.Cmd) {
-	s, ok := m.current()
+	r, ok := m.current()
 	if m.mode != ModePopup || !ok {
 		return m, nil
 	}
-	if c := m.counts[s.ID]; c.Blocking+c.Assume == 0 {
+	if c := m.counts[r.s.ID]; c.Blocking+c.Assume == 0 {
 		m.notice = "no open decisions"
 		return m, nil
 	}
@@ -265,8 +333,27 @@ func (m Model) openDecide() (Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	return m.showChild(m.open(r.s.ID))
+}
+
+// openBoard shows the task board, with notice on its status line when it
+// is not empty, or says why there is none.
+func (m Model) openBoard(notice string) (Model, tea.Cmd) {
+	if m.board == nil {
+		m.notice = noticeNoBoard
+		return m, nil
+	}
+	child := m.board()
+	if b, ok := child.(BoardModel); ok && notice != "" {
+		child = b.WithNotice(notice)
+	}
+	return m.showChild(child)
+}
+
+// showChild shows child, the decide view or the board, until it closes.
+// It gets the window size, and its commands are wrapped as child gen.
+func (m Model) showChild(child tea.Model) (Model, tea.Cmd) {
 	m.childGen++
-	child := m.open(s.ID)
 	cmds := []tea.Cmd{child.Init()}
 	if m.width > 0 || m.height > 0 {
 		var cmd tea.Cmd
@@ -277,11 +364,12 @@ func (m Model) openDecide() (Model, tea.Cmd) {
 	return m, wrapChild(m.childGen, tea.Batch(cmds...))
 }
 
-// updateChild handles a message while the decide view is shown, and a
-// child's wrapped message at any time. A wrapped message of a child that
-// is no longer shown is dropped, which also ends that child's tick chain.
-// DecideClosedMsg closes the view and starts a new refresh chain, so a
-// tick of the chain that ran before d (which the child got and ignored)
+// updateChild handles a message while the decide view or the board is
+// shown, and a child's wrapped message at any time. A wrapped message of a
+// child that is no longer shown is dropped, which also ends that child's
+// tick chain. DecideClosedMsg or BoardClosedMsg (also sent after the
+// board's jump) closes the child and starts a new refresh chain, so a tick
+// of the chain that ran before d or t (which the child got and ignored)
 // never doubles it. Any other message goes to the child, a window size
 // also to the dashboard, which keeps its layout for when the child closes.
 func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -292,7 +380,7 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 		msg = cm.msg
 	}
 	switch msg := msg.(type) {
-	case DecideClosedMsg:
+	case DecideClosedMsg, BoardClosedMsg:
 		m.child, m.notice = nil, ""
 		m.chain++
 		return m, m.refresh()
@@ -307,8 +395,8 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // wrapChild wraps the messages cmd sends as child gen's. A batch is
 // wrapped command by command and tea.Quit (ctrl+c) passes through, so the
-// program still runs and quits as the child asks; the decide view uses no
-// other runtime command.
+// program still runs and quits as the child asks; the decide view and the
+// board use no other runtime command.
 func wrapChild(gen int, cmd tea.Cmd) tea.Cmd {
 	if cmd == nil {
 		return nil
@@ -331,29 +419,88 @@ func wrapChild(gen int, cmd tea.Cmd) tea.Cmd {
 	}
 }
 
-// reselect recomputes the filtered rows and puts the cursor back on the
-// selected session, or, when it is gone, on the row nearest its old place.
+// reselect recomputes the rows and puts the cursor back on the selected
+// row; when it is gone, on the row of the same session (a team expanded or
+// collapsed), on its team's row (a teammate's team collapsed), or on the
+// row nearest its old place.
 func (m Model) reselect() Model {
-	m.rows = nil // a fresh slice: earlier copies of the model keep theirs
-	for _, s := range m.sessions {
-		if matches(s, m.filter) {
-			m.rows = append(m.rows, s)
-		}
-	}
-	for i, s := range m.rows {
-		if s.ID == m.selected {
-			m.cursor = i
-		}
+	m.rows = m.buildRows() // a fresh slice: earlier copies of the model keep theirs
+	if i := m.findSelected(); i >= 0 {
+		m.cursor = i
 	}
 	return m.moveTo(m.cursor)
 }
 
+// findSelected is the index of the selected row as reselect looks for it,
+// or -1.
+func (m Model) findSelected() int {
+	if i := slices.IndexFunc(m.rows, func(r row) bool { return r.key() == m.selected }); i >= 0 {
+		return i
+	}
+	if i := slices.IndexFunc(m.rows, func(r row) bool { return r.s.ID == m.selected.id }); i >= 0 {
+		return i
+	}
+	if m.selTeam == "" {
+		return -1
+	}
+	return slices.IndexFunc(m.rows, func(r row) bool { return r.team == m.selTeam })
+}
+
+// buildRows lays out the units of the sessions that pass the filter: a
+// solo session as one row, a team as its group row or, when expanded, its
+// lead's row and its teammates' rows. A team is shown when any member
+// passes the filter, and is shown expanded while a filter is set.
+func (m Model) buildRows() []row {
+	var rows []row
+	for _, u := range sourceUnits(m.sessions) {
+		members := append([]model.Session{u.Lead}, u.Teammates...)
+		if !slices.ContainsFunc(members, func(s model.Session) bool { return matches(s, m.filter) }) {
+			continue
+		}
+		team := u.Lead.TeamID
+		switch {
+		case len(u.Teammates) == 0:
+			rows = append(rows, row{kind: rowSolo, s: u.Lead})
+		case m.filter != "" || m.expanded[team]:
+			rows = append(rows, row{kind: rowLead, s: u.Lead, team: team})
+			for _, s := range u.Teammates {
+				rows = append(rows, row{kind: rowMate, s: s, team: team})
+			}
+		default:
+			rows = append(rows, row{kind: rowGroup, s: u.Lead, team: team, worst: u.Worst, members: members})
+		}
+	}
+	return rows
+}
+
+// sourceUnits groups the sessions into fleet.Units, kept in the Source's
+// order: a unit stands where its first member is. For the ranked sessions
+// the store source gives, that is its worst member, as fleet.Units orders.
+func sourceUnits(sessions []model.Session) []fleet.Unit {
+	at := make(map[string]int, len(sessions))
+	for i, s := range sessions {
+		if _, ok := at[s.ID]; !ok {
+			at[s.ID] = i
+		}
+	}
+	first := func(u fleet.Unit) int {
+		i := at[u.Lead.ID]
+		for _, s := range u.Teammates {
+			i = min(i, at[s.ID])
+		}
+		return i
+	}
+	units := fleet.Units(sessions)
+	slices.SortStableFunc(units, func(a, b fleet.Unit) int { return cmp.Compare(first(a), first(b)) })
+	return units
+}
+
 // matches reports whether the repo cell as shown ("repo@branch", the repo
-// as its basename), the branch or the last update contains filter, ignoring
-// case.
+// as its basename), the branch, the last update or the team member name
+// contains filter, ignoring case.
 func matches(s model.Session, filter string) bool {
 	f := strings.ToLower(filter)
-	for _, field := range []string{repoText(s), s.Branch, s.LastUpdate} {
+	for _, field := range []string{repoText(s), s.Branch, s.LastUpdate, s.TeamMember} {
 		if strings.Contains(strings.ToLower(field), f) {
 			return true
 		}
@@ -364,9 +511,10 @@ func matches(s model.Session, filter string) bool {
 // moveTo selects row i, clamped to the rows, and scrolls it into view.
 func (m Model) moveTo(i int) Model {
 	m.cursor = max(min(i, len(m.rows)-1), 0)
-	m.selected = ""
+	m.selected, m.selTeam = rowKey{}, ""
 	if len(m.rows) > 0 {
-		m.selected = m.rows[m.cursor].ID
+		r := m.rows[m.cursor]
+		m.selected, m.selTeam = r.key(), r.team
 	}
 	if n := m.visibleRows(); n > 0 {
 		m.offset = min(m.offset, m.cursor)
@@ -385,18 +533,48 @@ func (m Model) visibleRows() int {
 	return max(m.height-2, 1)
 }
 
-// current returns the selected session, and false when there are no rows.
-func (m Model) current() (model.Session, bool) {
+// current returns the selected row, and false when there are no rows.
+func (m Model) current() (row, bool) {
 	if len(m.rows) == 0 {
-		return model.Session{}, false
+		return row{}, false
 	}
 	return m.rows[m.cursor], true
 }
 
+// shownSessions is how many sessions the rows stand for.
+func (m Model) shownSessions() int {
+	n := 0
+	for _, r := range m.rows {
+		n += max(len(r.members), 1)
+	}
+	return n
+}
+
+// toggleTeam expands the team of the selected group row, or collapses that
+// of the selected lead row; on any other row it does nothing.
+func (m Model) toggleTeam() Model {
+	r, ok := m.current()
+	if !ok || (r.kind != rowGroup && r.kind != rowLead) {
+		return m
+	}
+	exp := maps.Clone(m.expanded)
+	if exp == nil {
+		exp = map[string]bool{}
+	}
+	if r.kind == rowGroup {
+		exp[r.team] = true
+	} else {
+		delete(exp, r.team)
+	}
+	m.expanded = exp
+	return m.reselect()
+}
+
 // updateRunes handles keys typed faster than the program reads them, which
 // arrive as one message with several runes, one rune at a time; a "/"
-// among them sends the rest into the filter. A "d" that opens the decide
-// view drops the rest: the user has not seen the view yet.
+// among them sends the rest into the filter. A "d", "t" or "n" that opens
+// the decide view or the board drops the rest: the user has not seen the
+// view yet.
 func (m Model) updateRunes(msg tea.KeyMsg) (Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	for _, r := range msg.Runes {
@@ -422,6 +600,11 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case msg.Paste: // pasted text is never a command
 		return m, nil
 	}
+	return m.commandKey(msg)
+}
+
+// commandKey handles a key on the table.
+func (m Model) commandKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc":
 		return m, tea.Quit
@@ -431,12 +614,18 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.moveTo(m.cursor - 1), nil
 	case "enter":
 		return m.jump()
+	case " ":
+		return m.toggleTeam(), nil
 	case "/":
 		m.filtering = true
 	case "x":
 		return m.askKill(), nil
 	case "d":
 		return m.openDecide()
+	case "t":
+		return m.openBoard("")
+	case "n":
+		return m.openBoard(noticePickTask)
 	}
 	return m, nil
 }
@@ -465,13 +654,14 @@ func (m Model) filterKey(msg tea.KeyMsg) Model {
 	return m.reselect()
 }
 
-// jump switches the tmux client to the selected session's pane; in popup
-// mode a successful jump quits.
+// jump switches the tmux client to the selected row's pane (a group row's
+// worst member's); in popup mode a successful jump quits.
 func (m Model) jump() (Model, tea.Cmd) {
-	s, ok := m.current()
+	r, ok := m.current()
 	if !ok {
 		return m, nil
 	}
+	s := r.target()
 	if m.notice = unreachable(s); m.notice != "" {
 		return m, nil
 	}
@@ -489,13 +679,18 @@ func (m Model) jump() (Model, tea.Cmd) {
 
 // askKill asks to confirm killing the selected session's pane. The pane is
 // fixed now, so a refresh that reorders the rows cannot change the target.
+// A group row stands for several panes, so it is refused.
 func (m Model) askKill() Model {
-	s, ok := m.current()
-	if !ok {
+	r, ok := m.current()
+	switch {
+	case !ok:
+		return m
+	case r.kind == rowGroup:
+		m.notice = noticeKillGroup
 		return m
 	}
-	if m.notice = unreachable(s); m.notice == "" {
-		m.killPane = s.Pane
+	if m.notice = unreachable(r.s); m.notice == "" {
+		m.killPane = r.s.Pane
 	}
 	return m
 }

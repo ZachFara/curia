@@ -741,3 +741,50 @@ func TestBoardCloseWaitsForActionInFlight(t *testing.T) {
 		t.Errorf("status line = %q", s)
 	}
 }
+
+// WithNotice opens the board with a notice on its status line, cleaned,
+// until the first key.
+func TestBoardWithNotice(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(fourCards()...)
+	boardClock.set(boardNow)
+	m := reload(t, ui.NewBoard(src, &tmux.Fake{}, boardClock.now, true).WithNotice("pick a task, then n\x1b[2J"))
+	if s := lastLine(m); s != "pick a task, then n" {
+		t.Errorf("status line = %q, want the notice, cleaned", s)
+	}
+	m = bpress(t, m, "j")
+	if s := lastLine(m); strings.Contains(s, "pick a task") {
+		t.Errorf("status line after a key = %q, want the notice gone", s)
+	}
+}
+
+// While an action is in flight the status line says what is running, and
+// keeps saying it after a key that does not act.
+func TestBoardShowsActionInFlight(t *testing.T) {
+	src := &fakeBoardSource{line: "T-1 launched"}
+	src.set(card(1, model.TaskBacklog, ""), card(2, model.TaskBacklog, ""))
+	m := newBoard(t, src, &tmux.Fake{}, 120, true)
+	m = bpress(t, m, "n")
+	boardClock.advance(time.Second)
+	m, act := m.Update(bkey("y"))
+	if act == nil {
+		t.Fatal("y started no spawn")
+	}
+	if s := lastLine(m); s != "spawning T-1…" {
+		t.Errorf("status line = %q, want the spawn in flight", s)
+	}
+	boardClock.advance(time.Second)
+	m = boardAt(t, m, "j")
+	if s := lastLine(m); s != "spawning T-1…" {
+		t.Errorf("status line after a move = %q, want the spawn in flight", s)
+	}
+	m, _ = m.Update(act())
+	if s := lastLine(m); s != "T-1 launched" {
+		t.Errorf("status line after the spawn = %q, want its line", s)
+	}
+	boardClock.advance(keyGap)
+	m, act = m.Update(bkey("r"))
+	if s := lastLine(m); act == nil || s != "setting T-2 to ready…" {
+		t.Errorf("status line while setting = %q, want the action in flight", s)
+	}
+}

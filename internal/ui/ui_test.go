@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,7 +17,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/task"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -31,6 +34,17 @@ type fakeSource struct {
 	counts    map[string]model.OpenCount
 	countsErr error
 	countRead int // calls of OpenDecisions
+	tasks     map[string]model.Task
+	tasksErr  error
+	taskRead  int // calls of Tasks
+}
+
+func (f *fakeSource) Tasks(context.Context) (map[string]model.Task, error) {
+	f.taskRead++
+	if f.tasksErr != nil {
+		return nil, f.tasksErr
+	}
+	return maps.Clone(f.tasks), nil
 }
 
 func (f *fakeSource) Sessions(context.Context) ([]model.Session, error) {
@@ -209,11 +223,11 @@ func TestViewShowsRankedRows(t *testing.T) {
 	if prev != 0 {
 		t.Fatalf("header not on the first line:\n%s", view)
 	}
-	if len(popupColumns) != 9 {
-		t.Errorf("popup has %d columns, want 9", len(popupColumns))
+	if len(popupColumns) != 10 {
+		t.Errorf("popup has %d columns, want 10", len(popupColumns))
 	}
 	if h := strings.Fields(strings.Split(view, "\n")[0]); !slices.Equal(h, []string{
-		"SESSION:WINDOW", "REPO@BRANCH", "MODEL", "CTX", "SUB", "DEC", "LAST", "UPDATE", "AGE",
+		"SESSION:WINDOW", "REPO@BRANCH", "TASK", "MODEL", "CTX", "SUB", "DEC", "LAST", "UPDATE", "AGE",
 	}) {
 		t.Errorf("header = %q, want DEC between SUB and LAST UPDATE", h)
 	}
@@ -520,7 +534,7 @@ func TestSelectionScrollsIntoView(t *testing.T) {
 		})
 	}
 	m, fake, _ := newTest(t, ModePopup, sessions...)
-	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 5}) // header, 3 rows, status
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 5}) // header, 3 rows, status
 	m, _ = press(m, "j", "j", "j", "j", "j")
 	view := m.View()
 	if n := len(strings.Split(view, "\n")); n != 5 {
@@ -793,11 +807,13 @@ func TestPopupHelpNamesDKey(t *testing.T) {
 	}
 }
 
-// fakeChild stands in for the decide view: it records every message it
-// gets, starts with a childPing and closes on "q".
+// fakeChild stands in for the decide view (or, with board set, the task
+// board): it records every message it gets, starts with a childPing and
+// closes on "q" with DecideClosedMsg (BoardClosedMsg for a board).
 type fakeChild struct {
-	id  string
-	got *[]tea.Msg
+	id    string
+	got   *[]tea.Msg
+	board bool
 }
 
 // childPing is the message a fakeChild's Init sends.
@@ -808,12 +824,20 @@ func (c fakeChild) Init() tea.Cmd { return func() tea.Msg { return childPing{c.i
 func (c fakeChild) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	*c.got = append(*c.got, msg)
 	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "q" {
+		if c.board {
+			return c, func() tea.Msg { return BoardClosedMsg{} }
+		}
 		return c, func() tea.Msg { return DecideClosedMsg{} }
 	}
 	return c, nil
 }
 
-func (c fakeChild) View() string { return "decide view of " + c.id }
+func (c fakeChild) View() string {
+	if c.board {
+		return "board view " + c.id
+	}
+	return "decide view of " + c.id
+}
 
 // childFactory returns a decide factory of fakeChilds, the ids it was
 // called with and the messages the children got.
@@ -950,6 +974,7 @@ func TestNarrowWidthStillFitsWithDec(t *testing.T) {
 	sessions := decSessions()
 	sessions[0].LastUpdate = strings.Repeat("a very long last update ", 10)
 	sessions[1].Repo = "a-repository-with-a-really-long-name"
+	sessions[0].Repo = "repo-S1" // the MODEL column is not shown at 60
 	src := &fakeSource{sessions: sessions, counts: map[string]model.OpenCount{"S1": {Blocking: 12, Assume: 3}}}
 	m := refresh(t, New(src, &tmux.Fake{}, config.Default(), func() time.Time { return testNow }, ModePopup))
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
@@ -959,8 +984,8 @@ func TestNarrowWidthStillFitsWithDec(t *testing.T) {
 			t.Errorf("line is %d cells, want at most 60: %q", w, l)
 		}
 	}
-	if got := decCell(t, view, "S1"); got != "15" {
-		t.Errorf("S1's DEC cell at width 60 = %q, want 15:\n%s", got, view)
+	if i := lineWith(view, "repo-S1"); i < 0 || !strings.Contains(strings.Split(view, "\n")[i], "  15  ") {
+		t.Errorf("S1's DEC cell at width 60 is not 15:\n%s", view)
 	}
 }
 
@@ -1154,6 +1179,587 @@ func TestDefect8DecCellShowsUndelivered(t *testing.T) {
 	for id, want := range map[string]string{"S1": "  1 Q1  ", "S2": "  Q2  "} {
 		if i := lineWith(view, "model-"+id); i < 0 || !strings.Contains(lines[i], want) {
 			t.Errorf("%s's row lacks the DEC cell %q:\n%s", id, strings.TrimSpace(want), view)
+		}
+	}
+}
+
+// taskTasks are the tasks the dashboard tests' source knows.
+func taskTasks() map[string]model.Task {
+	return map[string]model.Task{"T-42": {ID: "T-42", Title: "auth refactor"}}
+}
+
+// rowOf is the line of view containing sub.
+func rowOf(t *testing.T, view, sub string) string {
+	t.Helper()
+	i := lineWith(view, sub)
+	if i < 0 {
+		t.Fatalf("no row %q:\n%s", sub, view)
+	}
+	return strings.Split(view, "\n")[i]
+}
+
+// titlesMatch reports whether header fields got are want, each title
+// possibly cut short with an ellipsis to fit.
+func titlesMatch(got, want []string) bool {
+	return slices.EqualFunc(got, want, func(g, w string) bool {
+		return g == w || (strings.HasSuffix(g, ellipsis) && strings.HasPrefix(w, strings.TrimSuffix(g, ellipsis)))
+	})
+}
+
+func TestTaskColumnShowsIdAndTitle(t *testing.T) {
+	s := threeSessions()
+	s[0].TaskID = "T-42" // known
+	s[1].TaskID = "T-7"  // unknown
+	src := &fakeSource{sessions: s, tasks: taskTasks()}
+	m := refresh(t, New(src, &tmux.Fake{}, config.Default(), func() time.Time { return testNow }, ModePopup))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 200, Height: 20})
+	view := m.View()
+	if r := rowOf(t, view, "claude-opus-5-5"); !strings.Contains(r, "  T-42 auth refactor  ") {
+		t.Errorf("known task row = %q, want T-42 auth refactor", r)
+	}
+	if r := rowOf(t, view, "claude-sonnet-4-5"); !regexp.MustCompile(`  T-7 +claude-sonnet`).MatchString(r) {
+		t.Errorf("unknown task row = %q, want T-7 alone", r)
+	}
+	if r := rowOf(t, view, "claude-haiku-4-5"); !regexp.MustCompile(`  notes +claude-haiku`).MatchString(r) {
+		t.Errorf("row without a task = %q, want an empty TASK cell", r)
+	}
+	// Below 60 columns the cell is the id alone.
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 50, Height: 20})
+	view = m.View()
+	if r := rowOf(t, view, "work:@1"); !strings.Contains(r, "T-42") || strings.Contains(view, "auth refactor") {
+		t.Errorf("at 50 columns the TASK cell is not the id alone:\n%s", view)
+	}
+}
+
+// widthSessions are two sessions with a known task, in source order.
+func widthSessions() []model.Session {
+	s := threeSessions()[:2]
+	s[0].TaskID = "T-42"
+	return s
+}
+
+func TestColumnsDropAsWidthShrinks(t *testing.T) {
+	for _, tc := range []struct {
+		width int
+		want  []string
+	}{
+		{130, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "MODEL", "CTX", "SUB", "DEC", "LAST", "UPDATE", "AGE"}},
+		{120, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "MODEL", "CTX", "SUB", "DEC", "LAST", "UPDATE", "AGE"}},
+		{100, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "LAST", "UPDATE", "AGE"}},
+		{90, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "LAST", "UPDATE", "AGE"}},
+		{70, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "AGE"}},
+		{60, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "AGE"}},
+		{50, []string{"SESSION:WINDOW", "TASK", "DEC", "AGE"}},
+	} {
+		src := &fakeSource{sessions: widthSessions(), tasks: taskTasks()}
+		fake := &tmux.Fake{Panes: []tmux.Pane{
+			{ID: "%3", Session: "work", WindowID: "@1", WindowName: "editor"},
+			{ID: "%5", Session: "work", WindowID: "@2", WindowName: "server"},
+		}}
+		m := refresh(t, New(src, fake, config.Default(), func() time.Time { return testNow }, ModePopup))
+		m, _ = m.Update(tea.WindowSizeMsg{Width: tc.width, Height: 20})
+		view := m.View()
+		lines := strings.Split(view, "\n")
+		if h := strings.Fields(lines[0]); !titlesMatch(h, tc.want) {
+			t.Errorf("width %d: header = %q, want %q", tc.width, h, tc.want)
+		}
+		for _, l := range lines {
+			if w := lipgloss.Width(l); w > tc.width {
+				t.Errorf("width %d: line is %d cells: %q", tc.width, w, l)
+			}
+		}
+		if lines[1] == lines[2] {
+			t.Errorf("width %d: the two rows are drawn the same: %q", tc.width, lines[1])
+		}
+	}
+}
+
+// teamSessions are a solo session (solo, working) and a team: lead L
+// (working, task T-42) with teammates alpha (needs a decision), beta
+// (working) and gamma (idle, unseen), ranked as the store source ranks.
+func teamSessions() []model.Session {
+	mate := func(id, member, pane string, state model.State, ago time.Duration) model.Session {
+		return model.Session{
+			ID: id, Pane: pane, TmuxSession: "work", TmuxWindow: "@2", Repo: "api", Branch: "main",
+			State: state, Model: "model-" + id, UpdatedAt: testNow.Add(-ago), LastUpdate: "update " + id,
+			TaskID: "T-42", TeamID: "team-1", TeamRole: model.RoleTeammate, TeamMember: member,
+		}
+	}
+	lead := mate("L", "team-lead", "%10", model.StateWorking, 3*time.Minute)
+	lead.TeamRole = model.RoleLead
+	return fleet.Rank([]model.Session{
+		{
+			ID: "solo", Pane: "%3", TmuxSession: "work", TmuxWindow: "@1", Repo: "curia", Branch: "main",
+			State: model.StateWorking, Model: "model-solo", UpdatedAt: testNow.Add(-time.Minute),
+		},
+		lead,
+		mate("A", "alpha", "%11", model.StateNeedsDecision, 4*time.Minute),
+		mate("B", "beta", "%12", model.StateWorking, 2*time.Minute),
+		mate("C", "gamma", "%13", model.StateIdle, 30*time.Second),
+	})
+}
+
+// teamCounts: A has a blocking ticket, L an assume ticket, B an answer
+// not yet delivered.
+func teamCounts() map[string]model.OpenCount {
+	return map[string]model.OpenCount{"A": {Blocking: 1}, "L": {Assume: 1}, "B": {Undelivered: 1}}
+}
+
+// newTeamTest returns the popup over teamSessions after its first refresh,
+// 200 columns wide.
+func newTeamTest(t *testing.T, mode Mode) (tea.Model, *tmux.Fake, *fakeSource) {
+	t.Helper()
+	fake := &tmux.Fake{Panes: []tmux.Pane{
+		{ID: "%3", Session: "work", WindowID: "@1", WindowName: "editor"},
+		{ID: "%10", Session: "work", WindowID: "@2", WindowName: "server"},
+	}}
+	src := &fakeSource{sessions: teamSessions(), counts: teamCounts(), tasks: taskTasks()}
+	m := refresh(t, New(src, fake, config.Default(), func() time.Time { return testNow }, mode))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 200, Height: 20})
+	return m, fake, src
+}
+
+// bodyLines are the view's lines between the header and the status line
+// that are not blank.
+func bodyLines(m tea.Model) []string {
+	lines := strings.Split(m.View(), "\n")
+	var out []string
+	for _, l := range lines[1 : len(lines)-1] {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func TestTeamShowsAsOneCollapsedRow(t *testing.T) {
+	m, _, _ := newTeamTest(t, ModePopup)
+	rows := bodyLines(m)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %q, want the team's group row and the solo row", rows)
+	}
+	group := rows[0]
+	for _, want := range []string{stateIcon(model.StateNeedsDecision), "▸ work:server +3", "T-42 auth refactor", "model-L", "update L"} {
+		if !strings.Contains(group, want) {
+			t.Errorf("group row %q lacks %q", group, want)
+		}
+	}
+	if !strings.Contains(group, "  2 Q1  ") {
+		t.Errorf("group row %q, want the members' DEC sum 2 Q1", group)
+	}
+	for _, absent := range []string{"alpha", "beta", "gamma", "model-A"} {
+		if strings.Contains(m.View(), absent) {
+			t.Errorf("collapsed team shows %q:\n%s", absent, m.View())
+		}
+	}
+	if s := statusLine(m); !strings.HasPrefix(s, "5 sessions") {
+		t.Errorf("status line = %q, want 5 sessions counted", s)
+	}
+}
+
+func TestSpaceExpandsAndCollapsesTeam(t *testing.T) {
+	m, _, src := newTeamTest(t, ModePopup)
+	m, _ = press(m, " ")
+	rows := bodyLines(m)
+	want := []string{"▾ work:server", "  alpha", "  gamma", "  beta", "work:editor"}
+	if len(rows) != len(want) {
+		t.Fatalf("expanded rows = %q, want %q", rows, want)
+	}
+	for i, w := range want {
+		if !strings.Contains(rows[i], w) {
+			t.Errorf("row %d = %q, want %q", i, rows[i], w)
+		}
+	}
+	if !strings.Contains(rows[1], "model-A") || !strings.Contains(rows[1], stateIcon(model.StateNeedsDecision)) {
+		t.Errorf("teammate row %q does not show alpha's own cells", rows[1])
+	}
+	// Kept across a refresh, even when the members change places.
+	src.sessions = slices.Concat(src.sessions[1:], src.sessions[:1])
+	m = refresh(t, m)
+	if rows := bodyLines(m); len(rows) != 5 {
+		t.Errorf("after a refresh rows = %q, want the team still expanded", rows)
+	}
+	// Space on the lead row collapses; the selection stays on the team.
+	m, _ = press(m, " ")
+	if rows := bodyLines(m); len(rows) != 2 || !strings.Contains(rows[0], "▸ work:server +3") {
+		t.Errorf("after a second space rows = %q, want one group row", rows)
+	}
+	// Space on a teammate row does nothing; on a solo row neither.
+	m, _ = press(m, " ", "j", "j")
+	before := m.View()
+	m, _ = press(m, "k", " ")
+	if rows := bodyLines(m); len(rows) != 5 {
+		t.Errorf("space on a teammate row changed the rows: %q\nbefore:\n%s", rows, before)
+	}
+	m, _ = press(m, "j", "j", "j", " ")
+	if rows := bodyLines(m); len(rows) != 5 {
+		t.Errorf("space on the solo row changed the rows: %q", rows)
+	}
+}
+
+func TestTeamRanksByWorstMember(t *testing.T) {
+	waiting := model.Session{ID: "W", Pane: "%20", State: model.StateWaiting, Model: "model-W", UpdatedAt: testNow}
+	sessions := teamSessions()
+	src := &fakeSource{sessions: fleet.Rank(append(sessions, waiting))}
+	m := refresh(t, New(src, &tmux.Fake{}, config.Default(), func() time.Time { return testNow }, ModePopup))
+	if rows := bodyLines(m); len(rows) != 3 || !strings.Contains(rows[0], "▸") || !strings.Contains(rows[1], "model-W") {
+		t.Errorf("with alpha needing a decision, rows = %q, want the team before the waiting session", rows)
+	}
+	// alpha is now working: the team's worst is working, after waiting.
+	for i := range sessions {
+		if sessions[i].ID == "A" {
+			sessions[i].State = model.StateWorking
+		}
+	}
+	src.sessions = fleet.Rank(append(sessions, waiting))
+	m = refresh(t, m)
+	rows := bodyLines(m)
+	if len(rows) != 3 || !strings.Contains(rows[0], "model-W") || !strings.Contains(rows[1], "▸") {
+		t.Errorf("with no member needing a decision, rows = %q, want the waiting session first", rows)
+	}
+	if !strings.Contains(rows[1], stateIcon(model.StateIdle)) {
+		t.Errorf("group row %q, want gamma's idle icon (its worst member)", rows[1])
+	}
+}
+
+func TestEnterOnGroupJumpsToWorstMember(t *testing.T) {
+	m, fake, _ := newTeamTest(t, ModePopup)
+	_, cmd := press(m, "enter")
+	if got := calls(fake, "SwitchTo"); !slices.Equal(got, []string{"SwitchTo %11"}) {
+		t.Errorf("SwitchTo calls = %q, want alpha's pane %%11", got)
+	}
+	if !isQuit(cmd) {
+		t.Error("popup did not quit after the jump")
+	}
+	// On the expanded lead row Enter jumps to the lead.
+	m, fake, _ = newTeamTest(t, ModePopup)
+	_, _ = press(m, " ", "enter")
+	if got := calls(fake, "SwitchTo"); !slices.Equal(got, []string{"SwitchTo %10"}) {
+		t.Errorf("SwitchTo calls = %q, want the lead's pane %%10", got)
+	}
+}
+
+func TestKillRefusedOnGroupRow(t *testing.T) {
+	m, fake, _ := newTeamTest(t, ModePopup)
+	m, _ = press(m, "x")
+	if s := statusLine(m); s != "expand the team to kill one pane" {
+		t.Errorf("status line = %q, want the refusal", s)
+	}
+	_, _ = press(m, "y")
+	if got := calls(fake, "KillPane"); len(got) != 0 {
+		t.Errorf("killed from a group row: %q", got)
+	}
+	// Expanded, x on a teammate asks for that pane.
+	m, fake, _ = newTeamTest(t, ModePopup)
+	_, _ = press(m, " ", "j", "x", "y")
+	if got := calls(fake, "KillPane"); !slices.Equal(got, []string{"KillPane %11"}) {
+		t.Errorf("KillPane calls = %q, want alpha's pane", got)
+	}
+}
+
+func TestFilterExpandsMatchingTeam(t *testing.T) {
+	m, _, _ := newTeamTest(t, ModePopup)
+	m, _ = press(m, "/", "update C")
+	rows := bodyLines(m)
+	if len(rows) != 4 || !strings.Contains(rows[0], "▾ work:server") {
+		t.Fatalf("filtered rows = %q, want the team expanded and the solo row gone", rows)
+	}
+	m, _, _ = newTeamTest(t, ModePopup)
+	m, _ = press(m, "/", "gamm")
+	if rows := bodyLines(m); len(rows) != 4 {
+		t.Errorf("a member name match: rows = %q, want the team expanded", rows)
+	}
+	m, _ = press(m, "esc") // clears the filter: collapsed again
+	if rows := bodyLines(m); len(rows) != 2 {
+		t.Errorf("after the filter is cleared rows = %q, want the team collapsed", rows)
+	}
+}
+
+func TestSoloRowsUnchanged(t *testing.T) {
+	m, _, _ := newTest(t, ModePopup, threeSessions()...)
+	rows := bodyLines(m)
+	if len(rows) != 3 {
+		t.Fatalf("rows = %q, want one per session", rows)
+	}
+	for i, id := range []string{"claude-opus-5-5", "claude-sonnet-4-5", "claude-haiku-4-5"} {
+		if !strings.Contains(rows[i], id) || strings.ContainsAny(rows[i], "▸▾") {
+			t.Errorf("row %d = %q, want %s in Source order and no team mark", i, rows[i], id)
+		}
+	}
+	// A team member whose lead is not among the sessions is solo too.
+	s := threeSessions()
+	s[0].TeamID, s[0].TeamRole, s[0].TeamMember = "team-9", model.RoleTeammate, "orphan"
+	m, _, _ = newTest(t, ModePopup, s...)
+	if rows := bodyLines(m); len(rows) != 3 || strings.ContainsAny(m.View(), "▸▾") {
+		t.Errorf("a teammate without its lead: rows = %q", rows)
+	}
+}
+
+// boardFactory returns a board factory of fakeChilds, how often it was
+// called and the messages the children got.
+func boardFactory() (func() tea.Model, *int, *[]tea.Msg) {
+	n := 0
+	var got []tea.Msg
+	return func() tea.Model {
+		n++
+		return fakeChild{id: strconv.Itoa(n), got: &got, board: true}
+	}, &n, &got
+}
+
+// withBoard returns m, a Model, WithBoard(open).
+func withBoard(t *testing.T, m tea.Model, open func() tea.Model) tea.Model {
+	t.Helper()
+	dm, ok := m.(Model)
+	if !ok {
+		t.Fatalf("model is a %T, want Model", m)
+	}
+	return dm.WithBoard(open)
+}
+
+func TestTKeyOpensBoardAndClosesBack(t *testing.T) {
+	open, opened, got := boardFactory()
+	m, _, src := newTest(t, ModePopup, threeSessions()...)
+	m = withBoard(t, m, open)
+	if s := statusLine(m); !strings.Contains(s, "t tasks") {
+		t.Errorf("help = %q, want t tasks", s)
+	}
+	m, first := press(m, "t")
+	if *opened != 1 || m.View() != "board view 1" {
+		t.Fatalf("t: factory calls %d, view %q", *opened, m.View())
+	}
+	m = feed(m, first) // the board's Init
+	m, _ = press(m, "x", "j", "enter")
+	want := []tea.Msg{childPing{"1"}, key("x"), key("j"), key("enter")}
+	if !reflect.DeepEqual(*got, want) {
+		t.Errorf("board got %#v, want %#v", *got, want)
+	}
+	reads := src.countRead
+	m, closeCmd := press(m, "q")
+	m, restart := m.Update(closeCmd())
+	if !strings.Contains(m.View(), "claude-opus-5-5") {
+		t.Fatalf("view after BoardClosedMsg is not the table:\n%s", m.View())
+	}
+	if restart == nil {
+		t.Fatal("close started no refresh")
+	}
+	if _, ok := restart().(refreshMsg); !ok || src.countRead != reads+1 {
+		t.Error("close's command is not a refresh")
+	}
+	// A late message of the closed board is dropped, even with a new one open.
+	m, _ = press(m, "t")
+	*got = nil
+	if _, cmd := m.Update(first()); cmd != nil || len(*got) != 0 {
+		t.Errorf("the closed board's message reached the new one: %#v", *got)
+	}
+	// A t in a burst opens the board and drops the rest.
+	m, _, _ = newTest(t, ModePopup, threeSessions()...)
+	m = withBoard(t, m, open)
+	m, cmd := m.Update(key("tq"))
+	if isQuit(cmd) || m.View() != "board view 3" {
+		t.Errorf("q after t in a burst: quit %v, view %q", isQuit(cmd), m.View())
+	}
+}
+
+// dashBoardSource is a BoardSource with one backlog task; Spawn records
+// its calls.
+type dashBoardSource struct{ spawns []string }
+
+func (*dashBoardSource) Cards(context.Context) ([]task.Card, error) {
+	return []task.Card{{Task: model.Task{ID: "T-1", Title: "first", Status: model.TaskBacklog}, Status: model.TaskBacklog}}, nil
+}
+
+func (*dashBoardSource) SetStatus(context.Context, string, model.TaskStatus) error { return nil }
+
+func (s *dashBoardSource) Spawn(_ context.Context, id string) (string, error) {
+	s.spawns = append(s.spawns, id)
+	return id + " launched", nil
+}
+
+// newBoardDash returns the popup over threeSessions with a real board
+// over bsrc, on clock clk.
+func newBoardDash(t *testing.T, bsrc *dashBoardSource, clk *time.Time) tea.Model {
+	t.Helper()
+	now := func() time.Time { return *clk }
+	m := New(&fakeSource{sessions: threeSessions()}, &tmux.Fake{}, config.Default(), now, ModePopup)
+	m = m.WithBoard(func() tea.Model { return NewBoard(bsrc, &tmux.Fake{}, now, true) })
+	return refresh(t, m)
+}
+
+func TestNKeyOpensBoardWithNotice(t *testing.T) {
+	clk := testNow
+	m := newBoardDash(t, &dashBoardSource{}, &clk)
+	m, cmd := press(m, "n")
+	m = feed(m, cmd) // the board's first read
+	if !strings.Contains(m.View(), "first") {
+		t.Fatalf("n did not open the board:\n%s", m.View())
+	}
+	if s := statusLine(m); s != "pick a task, then n" {
+		t.Errorf("status line = %q, want the notice", s)
+	}
+	clk = clk.Add(time.Second)
+	m, _ = press(m, "j")
+	if s := statusLine(m); s == "pick a task, then n" {
+		t.Error("the notice outlived the next key")
+	}
+}
+
+// The board's spawn runs off the update loop; while it is in flight the
+// board says so and refuses another spawn.
+func TestBoardSpawnInFlightRefusesSecond(t *testing.T) {
+	clk := testNow
+	bsrc := &dashBoardSource{}
+	m := newBoardDash(t, bsrc, &clk)
+	m, cmd := press(m, "t")
+	m = feed(m, cmd)
+	clk = clk.Add(time.Second)
+	m, _ = press(m, "n")
+	clk = clk.Add(time.Second)
+	m, spawn := press(m, "y")
+	if spawn == nil {
+		t.Fatal("y started no spawn")
+	}
+	if len(bsrc.spawns) != 0 {
+		t.Fatal("the spawn ran on the update loop")
+	}
+	if s := statusLine(m); !strings.Contains(s, "spawning T-1") {
+		t.Errorf("status line while spawning = %q, want progress", s)
+	}
+	clk = clk.Add(time.Second)
+	m, again := press(m, "n")
+	clk = clk.Add(time.Second)
+	m, yes := press(m, "y")
+	if again != nil || yes != nil {
+		t.Error("a second n, y while spawning started something")
+	}
+	if s := statusLine(m); s == "" {
+		t.Error("no status line")
+	}
+	m = feed(m, spawn)
+	if !slices.Equal(bsrc.spawns, []string{"T-1"}) {
+		t.Errorf("spawns = %q, want one", bsrc.spawns)
+	}
+	if s := statusLine(m); s != "T-1 launched" {
+		t.Errorf("status line after the spawn = %q, want its line", s)
+	}
+}
+
+func TestTKeyWithoutBoard(t *testing.T) {
+	for _, mode := range []Mode{ModeSidebar, ModePopup} {
+		m, _, _ := newTest(t, mode, threeSessions()...)
+		for _, k := range []string{"t", "n"} {
+			m2, cmd := press(m, k)
+			if cmd != nil || strings.Contains(m2.View(), "BACKLOG") {
+				t.Errorf("mode %v: %s without a board opened something", mode, k)
+			}
+			if s := statusLine(m2); s != noticeNoBoard {
+				t.Errorf("mode %v: %s: status line = %q, want %q", mode, k, s, noticeNoBoard)
+			}
+		}
+	}
+	m, _, _ := newTest(t, ModeSidebar, threeSessions()...)
+	if s := statusLine(m); strings.Contains(s, "t tasks") {
+		t.Errorf("sidebar help = %q, want no t key", s)
+	}
+}
+
+func TestTasksErrorKeepsLastTasks(t *testing.T) {
+	s := threeSessions()
+	s[0].TaskID = "T-42"
+	src := &fakeSource{sessions: s, tasks: taskTasks()}
+	m := refresh(t, New(src, &tmux.Fake{}, config.Default(), func() time.Time { return testNow }, ModePopup))
+	src.tasks, src.tasksErr = nil, errors.New("database is locked")
+	m = refresh(t, m)
+	if !strings.Contains(m.View(), "T-42 auth refactor") {
+		t.Errorf("task title gone after a failed read:\n%s", m.View())
+	}
+	if s := statusLine(m); !strings.Contains(s, "refresh failed: database is locked") {
+		t.Errorf("status line = %q, want the error", s)
+	}
+	src.tasksErr = nil
+	m = refresh(t, m)
+	if strings.Contains(m.View(), "auth refactor") || strings.Contains(statusLine(m), "locked") {
+		t.Errorf("after a good empty read:\n%s", m.View())
+	}
+}
+
+func TestSidebarHasNoTaskColumnAndCollapsedTeams(t *testing.T) {
+	m, _, src := newTeamTest(t, ModeSidebar)
+	view := m.View()
+	for _, absent := range []string{"TASK", "T-42", "auth refactor", "alpha", "beta", "gamma"} {
+		if strings.Contains(view, absent) {
+			t.Errorf("sidebar shows %q:\n%s", absent, view)
+		}
+	}
+	if rows := bodyLines(m); len(rows) != 2 || !strings.Contains(rows[0], "▸ work:server +3") {
+		t.Errorf("sidebar rows = %q, want the team collapsed", rows)
+	}
+	if h := strings.Fields(strings.Split(view, "\n")[0]); !slices.Equal(h, []string{"WINDOW", "CTX", "AGE"}) {
+		t.Errorf("sidebar header = %q", h)
+	}
+	if src.taskRead != 0 {
+		t.Errorf("sidebar read Tasks %d times, want never", src.taskRead)
+	}
+}
+
+// hostile is text that tries to draw: escape sequences, bidi controls, a
+// line break, wide characters, and length.
+const hostile = "al\x1b[31mpha\x1b]52;c;eA==\x07\u202e\u2067evil\n数据库迁移" + "-very-long-name-that-goes-on"
+
+func TestTeamTextCannotDrawEscapes(t *testing.T) {
+	sessions := teamSessions()
+	for i := range sessions {
+		sessions[i].TeamMember = hostile
+	}
+	fake := &tmux.Fake{Panes: []tmux.Pane{{ID: "%10", Session: "work", WindowID: "@2", WindowName: "win\x1b[2J\u202e"}}}
+	src := &fakeSource{sessions: sessions, tasks: map[string]model.Task{"T-42": {ID: "T-42", Title: hostile}}}
+	m := refresh(t, New(src, fake, config.Default(), func() time.Time { return testNow }, ModePopup))
+	m, _ = press(m, " ")
+	view := m.View()
+	if !strings.Contains(view, "al?[31mpha") {
+		t.Errorf("member name not drawn cleaned:\n%q", view)
+	}
+	wantClean(t, view)
+}
+
+// wantClean fails when view holds a control or format character.
+func wantClean(t *testing.T, view string) {
+	t.Helper()
+	for _, bad := range []string{"\x1b", "\x07", "\u202e", "\u2067", "\t"} {
+		if strings.Contains(view, bad) {
+			t.Errorf("view contains %q:\n%q", bad, view)
+		}
+	}
+}
+
+// Plan 1 live-check defect 13: the table fits every width, with a team
+// collapsed and expanded, a task column, and long, hostile and wide
+// names; one column draws without a panic.
+func TestDashboardFitsEveryWidth(t *testing.T) {
+	sessions := teamSessions()
+	for i := range sessions {
+		sessions[i].TeamMember = hostile
+		sessions[i].LastUpdate = hostile
+		sessions[i].Repo = "/src/数据库-" + hostile
+	}
+	tasks := map[string]model.Task{"T-42": {ID: "T-42", Title: hostile}}
+	for _, width := range []int{1, 40, 60, 80, 120, 200} {
+		for _, expand := range []bool{false, true} {
+			src := &fakeSource{sessions: sessions, counts: teamCounts(), tasks: tasks}
+			m := refresh(t, New(src, &tmux.Fake{}, config.Default(), func() time.Time { return testNow }, ModePopup))
+			m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: 12})
+			if expand {
+				m, _ = press(m, " ")
+			}
+			view := m.View()
+			for _, l := range strings.Split(view, "\n") {
+				if w := lipgloss.Width(l); w > width {
+					t.Errorf("width %d expanded %v: line is %d cells: %q", width, expand, w, l)
+				}
+			}
+			wantClean(t, view)
+			if n := len(strings.Split(view, "\n")); n != 12 {
+				t.Errorf("width %d expanded %v: %d lines, want the height 12", width, expand, n)
+			}
 		}
 	}
 }

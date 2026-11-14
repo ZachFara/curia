@@ -63,9 +63,10 @@ type BoardModel struct {
 	promptSince time.Time     // when the prompt opened, or last ignored a "y"
 	promptWait  time.Duration // how long after promptSince a "y" counts
 
-	busy     bool // an action is in flight
-	closing  bool // close once the action in flight returns, unless it failed
-	quitting bool // closing was asked by Ctrl+C: quit the program, even embedded
+	busy     bool   // an action is in flight
+	working  string // what the action in flight does, for the status line
+	closing  bool   // close once the action in flight returns, unless it failed
+	quitting bool   // closing was asked by Ctrl+C: quit the program, even embedded
 
 	issued, applied int // sequence numbers of the last refresh started and applied
 
@@ -98,6 +99,12 @@ type boardActedMsg struct {
 // NewBoard returns the board. embedded: closing sends BoardClosedMsg instead of quitting.
 func NewBoard(src BoardSource, tm tmux.Client, now func() time.Time, embedded bool) BoardModel {
 	return BoardModel{src: src, tm: tm, now: now, embedded: embedded}
+}
+
+// WithNotice returns m with notice on its status line until the first key.
+func (m BoardModel) WithNotice(notice string) BoardModel {
+	m.notice, m.noticeErr = notice, false
+	return m
 }
 
 // Init starts the first refresh and with it the one-second chain.
@@ -456,7 +463,7 @@ func (m BoardModel) toggleReady() (BoardModel, tea.Cmd) {
 		return m, nil
 	}
 	src, id := m.src, c.Task.ID
-	return m.act(func(ctx context.Context) boardActedMsg {
+	return m.act("setting "+cardID(c)+" to "+string(to)+"…", func(ctx context.Context) boardActedMsg {
 		return boardActedMsg{verb: "set", err: src.SetStatus(ctx, id, to)}
 	})
 }
@@ -506,16 +513,17 @@ func (m BoardModel) confirmKey(msg tea.KeyMsg) (BoardModel, tea.Cmd) {
 		return m, nil
 	}
 	src, id := m.src, p.Task.ID
-	return m.act(func(ctx context.Context) boardActedMsg {
+	return m.act("spawning "+cardID(p)+"…", func(ctx context.Context) boardActedMsg {
 		line, err := src.Spawn(ctx, id)
 		return boardActedMsg{verb: "spawn", line: line, err: err}
 	})
 }
 
-// act runs f off the event loop. The quiet period that starts now absorbs
-// the repeats of the key that acted.
-func (m BoardModel) act(f func(context.Context) boardActedMsg) (BoardModel, tea.Cmd) {
-	m.busy = true
+// act runs f off the event loop; working says what it does until it
+// returns. The quiet period that starts now absorbs the repeats of the key
+// that acted.
+func (m BoardModel) act(working string, f func(context.Context) boardActedMsg) (BoardModel, tea.Cmd) {
+	m.busy, m.working = true, working
 	m = m.quiet(quietPeriod)
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), boardActionTimeout)
@@ -528,7 +536,7 @@ func (m BoardModel) act(f func(context.Context) boardActedMsg) (BoardModel, tea.
 // started before it returned are out of date and dropped. A close asked
 // for meanwhile happens now, unless the action failed.
 func (m BoardModel) applyActed(msg boardActedMsg) (BoardModel, tea.Cmd) {
-	m.busy = false
+	m.busy, m.working = false, ""
 	if msg.err == nil && m.closing {
 		if m.quitting {
 			return m, tea.Quit
