@@ -550,11 +550,11 @@ func TestMCPAddCommandQuotesBin(t *testing.T) {
 	}
 }
 
-// wantToolRules are the five permission rules AllowTools adds.
+// wantToolRules are the six permission rules AllowTools adds.
 var wantToolRules = []string{
 	"mcp__curia__search_decisions", "mcp__curia__request_decision",
 	"mcp__curia__check_decision", "mcp__curia__withdraw_decision",
-	"mcp__curia__check_messages",
+	"mcp__curia__check_messages", "mcp__curia__complete_task",
 }
 
 // readAllow returns settings["permissions"]["allow"] as strings.
@@ -579,7 +579,7 @@ func TestHooksAddNoPermissionRule(t *testing.T) {
 	}
 }
 
-func TestAllowToolsAddsFifthToAPlan2Install(t *testing.T) {
+func TestAllowToolsAddsMissingToAPlan2Install(t *testing.T) {
 	path := settingsIn(t)
 	writeFile(t, path, `{"model":"opus","permissions":{"allow":["Bash(ls:*)","mcp__curia__check_decision"],"deny":["Bash(rm:*)"]}}`)
 	if err := AllowTools(path, testNow); err != nil {
@@ -588,7 +588,7 @@ func TestAllowToolsAddsFifthToAPlan2Install(t *testing.T) {
 	want := []string{
 		"Bash(ls:*)", "mcp__curia__check_decision",
 		"mcp__curia__search_decisions", "mcp__curia__request_decision", "mcp__curia__withdraw_decision",
-		"mcp__curia__check_messages",
+		"mcp__curia__check_messages", "mcp__curia__complete_task",
 	}
 	if got := readAllow(t, path); !slices.Equal(got, want) {
 		t.Errorf("allow = %q, want %q", got, want)
@@ -655,7 +655,7 @@ func TestToolsAllowed(t *testing.T) {
 	}
 }
 
-func TestUnhooksRemovesTheFiveToolRules(t *testing.T) {
+func TestUnhooksRemovesTheToolRules(t *testing.T) {
 	path := settingsIn(t)
 	allow, _ := json.Marshal(append([]string{"Bash(ls:*)", "mcp__curia"}, wantToolRules...))
 	writeFile(t, path, `{"permissions":{"allow":`+string(allow)+`,"deny":["Bash(rm:*)"]}}`)
