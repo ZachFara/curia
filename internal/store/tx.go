@@ -174,40 +174,15 @@ func (t *Tx) OpenBlocking(ctx context.Context, sessionID string, now time.Time) 
 	return n, nil
 }
 
-// stopCheck counts a session's open blocking tickets and says whether any
-// answer of it is queued, in one read. Both parts use the
-// decisions_session_status index by session_id. Parameters: the session
-// id, now, the session id.
-const stopCheck = `
+// stopState is StopState's one statement: the session's open blocking
+// tickets, whether an answer of it is queued (both by the
+// decisions_session_status index on session_id) and whether an instruction
+// for it is queued (by the messages_undelivered index). Parameters: the
+// session id, now, the session id, the session id.
+const stopState = `
 SELECT
   (SELECT count(*) FROM decisions d WHERE d.session_id = ? AND d.mode = 'blocking' AND ` + openAt + `),
-  EXISTS (SELECT 1 FROM decisions WHERE session_id = ? AND delivery = 'queued')`
-
-// StopCheck is what curia hook Stop reads before it claims anything, in one
-// small statement: the number of blocking tickets of session sessionID open
-// at now (as OpenBlocking counts them), and whether any answer of the
-// session is queued (so ClaimDeliveries has something to claim). A claim
-// changes only the delivery of decided tickets, never which tickets are
-// open, so the count is the same before and after a claim in the same
-// transaction. The hook runs ClaimDeliveries only when queued is true, so
-// the common Stop never prepares the claim's UPDATE ... RETURNING. An empty
-// sessionID has no tickets and nothing queued.
-func (t *Tx) StopCheck(ctx context.Context, sessionID string, now time.Time) (openBlocking int, queued bool, err error) {
-	if sessionID == "" {
-		return 0, false, nil
-	}
-	err = t.tx.QueryRowContext(ctx, stopCheck, sessionID, formatTime(now), sessionID).Scan(&openBlocking, &queued)
-	if err != nil {
-		return 0, false, fail("check stop for", sessionID, err)
-	}
-	return openBlocking, queued, nil
-}
-
-// stopState is StopState's one statement: stopCheck's two parts, and
-// whether an instruction is queued for the session (by the
-// messages_undelivered index). Parameters: the session id, now, the
-// session id, the session id.
-const stopState = stopCheck + `,
+  EXISTS (SELECT 1 FROM decisions WHERE session_id = ? AND delivery = 'queued'),
   EXISTS (SELECT 1 FROM messages WHERE target_session = ? AND status = 'queued' AND kind = 'instruction')`
 
 // StopState is what curia hook Stop reads before it claims anything.
@@ -216,12 +191,16 @@ type StopState struct {
 	Answers, Messages bool // something of that kind is queued for the session
 }
 
-// StopState is StopCheck with one more part, in one small statement: the
-// open blocking tickets of session sessionID at now, whether an answer of it
-// is queued (ClaimDeliveries has something to claim) and whether an
-// instruction for it is queued (ClaimMessages has something to claim). A
-// held, canceled or typed message is not queued. An empty sessionID has
-// nothing.
+// StopState is what curia hook Stop reads before it claims anything, in one
+// small statement: the number of blocking tickets of session sessionID open
+// at now (as OpenBlocking counts them), whether an answer of it is queued
+// (ClaimDeliveries has something to claim) and whether an instruction for
+// it is queued (ClaimMessages has something to claim). The hook runs a
+// claim only when its kind is queued, so the common Stop never prepares a
+// claim's UPDATE ... RETURNING. A claim changes only deliveries, never
+// which tickets are open, so the count is the same before and after a
+// claim in the same transaction. A held, canceled or typed message is not
+// queued. An empty sessionID has nothing.
 func (t *Tx) StopState(ctx context.Context, sessionID string, now time.Time) (StopState, error) {
 	var st StopState
 	if sessionID == "" {
@@ -302,8 +281,10 @@ func (t *Tx) ConfirmTypedMessages(ctx context.Context, sessionID, prompt string,
 		return 0, nil
 	}
 	at := formatTime(now)
+	// msgUndelivered, word for word, lets SQLite read the partial index
+	// messages_undelivered; msgTyped alone would scan the table.
 	typed, err := queryMessages(ctx, t.tx, selectMessages+`
-WHERE target_session = ? AND `+msgTyped+` AND delivered_at <= ?`, sessionID, at)
+WHERE target_session = ? AND `+msgUndelivered+` AND `+msgTyped+` AND delivered_at <= ?`, sessionID, at)
 	if err != nil {
 		return 0, fail("confirm typed messages for", sessionID, err)
 	}

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -45,10 +47,11 @@ var (
 func init() {
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "mcp",
-		Short: "Serve the decision tools over stdio (run by Claude Code)",
-		Long: "A stdio MCP server, one per agent session, with four tools: search_decisions,\n" +
-			"request_decision, check_decision and withdraw_decision. None of them answers a\n" +
-			"ticket. Stdout carries protocol messages only; errors go to the log file.",
+		Short: "Serve the decision and message tools over stdio (run by Claude Code)",
+		Long: "A stdio MCP server, one per agent session, with five tools: search_decisions,\n" +
+			"request_decision, check_decision, withdraw_decision and check_messages. None of\n" +
+			"them answers a ticket or sends a message. Stdout carries protocol messages only;\n" +
+			"errors go to the log file.",
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, _ []string) {
 			if code := mcpServe(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout()); code != 0 {
@@ -85,7 +88,7 @@ func mcpServe(ctx context.Context, in io.Reader, out io.Writer) int {
 		Name: "curia", Version: version, Instructions: mcp.Instructions, Log: logger,
 		Tools: mcp.Tools(mcp.Deps{
 			Store: st, Cfg: cfg, Now: clock, Log: logger,
-			Caller: mcpCaller(st, logger),
+			Caller: mcpCaller(st, cfg.LogPath, logger),
 			Notify: mcpNotify(st, cfg, newTmuxClient(), logger),
 		}),
 	}
@@ -116,14 +119,47 @@ func mcpPrune(ctx context.Context, st *store.Store, now time.Time, logger *slog.
 // CLAUDE_CODE_SESSION_ID when its row is live; else unknown. Repo is the
 // session's, else mcpRepo's directory. CLAUDE_CODE_SESSION_ID goes stale after
 // /clear while this process keeps running, which is why the pane comes first.
-func mcpCaller(st *store.Store, logger *slog.Logger) func(context.Context) mcp.Caller {
+//
+// Team membership is refreshed first (section 4.12), so a teammate is known
+// as one before any view has run; TaskID and TeamRole come from the
+// session row. With no teams directory the refresh costs one stat: it runs
+// only when the caller's row still names a team, to clear it.
+func mcpCaller(st *store.Store, logPath string, logger *slog.Logger) func(context.Context) mcp.Caller {
 	return func(ctx context.Context) mcp.Caller {
+		absent := mcpNoTeams()
+		if !absent {
+			mcpRefreshTeams(ctx, st, logPath, logger)
+		}
 		sess, id := mcpSession(ctx, st, logger)
-		c := mcp.Caller{SessionID: id, Repo: sess.Repo, Pane: sess.Pane}
+		if absent && (sess.TeamID != "" || sess.TeamRole != "") {
+			mcpRefreshTeams(ctx, st, logPath, logger)
+			sess, id = mcpSession(ctx, st, logger)
+		}
+		c := mcp.Caller{SessionID: id, TaskID: sess.TaskID, Repo: sess.Repo, Pane: sess.Pane, TeamRole: sess.TeamRole}
 		if c.Repo == "" {
 			c.Repo = mcpRepo()
 		}
 		return c
+	}
+}
+
+// mcpNoTeams reports whether Claude Code's teams directory is known not to
+// exist, with one stat. Any other answer, failures included, leaves the
+// decision to refreshTeams.
+func mcpNoTeams() bool {
+	dir, err := teamsDir()
+	if err != nil {
+		return false
+	}
+	_, err = os.Lstat(dir)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// mcpRefreshTeams runs refreshTeams, logging its error: a failed refresh
+// leaves the stored team columns as they are, and the call goes on.
+func mcpRefreshTeams(ctx context.Context, st *store.Store, logPath string, logger *slog.Logger) {
+	if err := refreshTeams(ctx, st, logPath); err != nil {
+		logger.Warn("mcp: refresh teams", "err", err.Error())
 	}
 }
 
