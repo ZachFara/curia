@@ -74,6 +74,14 @@
           }
         },
         "name": "withdraw_decision"
+      },
+      {
+        "description": "Read the messages the user sent to this session. Call it when a message says its wording was simplified, or to see whether anything is waiting. New messages come under messages; the last 5 messages already typed into your prompt come again under typed_earlier, newest first, with their full wording.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        },
+        "name": "check_messages"
       }
     ]
   }

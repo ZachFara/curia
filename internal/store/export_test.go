@@ -6,3 +6,9 @@ const (
 	DecisionColumns  = decisionColumns
 	ReturnedDecision = returnedDecision
 )
+
+// The hook path's and the badge's statements, for their query plans.
+const (
+	StopStateQuery   = stopState
+	BadgeExtrasQuery = badgeExtras
+)

@@ -219,3 +219,26 @@ func settleDenied(t *testing.T, id string, state model.State, pane string) model
 		TranscriptPath: settleTranscript(t, settleToolUse+settleDenial), UpdatedAt: at(11, 0),
 	}
 }
+
+// ls (any view that reconciles) refreshes team membership.
+func TestReconcileRefreshesTeams(t *testing.T) {
+	fleetHome(t, []string{"%16", "%17", "%18", "%19"}, teamsCapturedSessions()...)
+	claude := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claude)
+	out, err := runRoot(t, "ls", "--json")
+	if err != nil || strings.Contains(out, teamsCapturedDir) {
+		t.Fatalf("ls --json before the config = %s, %v, want no team", out, err)
+	}
+	teamsWriteCaptured(t, filepath.Join(claude, "teams"))
+	out, err = runRoot(t, "ls", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"team_id": "` + teamsCapturedDir + `"`, `"team_role": "lead"`, `"team_role": "teammate"`, `"team_member": "alpha"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ls --json lacks %s:\n%s", want, out)
+		}
+	}
+}

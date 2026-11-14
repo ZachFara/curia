@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 )
@@ -29,10 +30,57 @@ type Config struct {
 	// Plan 3 additions.
 	Routing Routing `toml:"routing"`
 	// The tmux prefix-table keys curia install's snippet binds for the
-	// dashboard popup, the decide popup and curia next; "" binds none.
+	// dashboard popup, the decide popup, curia next and the message popup; ""
+	// binds none.
 	KeyDashboard string `toml:"key_dashboard"`
 	KeyDecisions string `toml:"key_decisions"`
 	KeyNext      string `toml:"key_next"`
+	KeyMessage   string `toml:"key_message"`
+	// Editor is the command `curia task edit` opens on a temp file, the
+	// file's path appended as the last argument. It is split on single
+	// spaces into an argument vector and run without a shell; there are no
+	// quoting rules, so a path with spaces is not supported. The first word
+	// is an absolute path or a bare program name looked up on PATH. Empty
+	// (the default): no editor.
+	Editor string `toml:"editor"`
+}
+
+// maxEditor bounds the editor option, in bytes.
+const maxEditor = 1024
+
+// EditorArgs is Editor as an argument vector, or nil when it is empty.
+func (c Config) EditorArgs() []string {
+	if c.Editor == "" {
+		return nil
+	}
+	return strings.Split(c.Editor, " ")
+}
+
+// validateEditor checks the editor option: at most maxEditor bytes, no
+// control or other unprintable character, every word between single spaces
+// non-empty, and a first word that is an absolute path or a bare name.
+func validateEditor(v string) error {
+	if v == "" {
+		return nil
+	}
+	if len(v) > maxEditor {
+		return fmt.Errorf("editor must be at most %d bytes, got %d", maxEditor, len(v))
+	}
+	for _, r := range v {
+		if r != ' ' && !unicode.IsPrint(r) {
+			return fmt.Errorf("editor must not hold control or unprintable characters, found %U", r)
+		}
+	}
+	words := strings.Split(v, " ")
+	for _, w := range words {
+		if w == "" {
+			return errors.New("editor must be words separated by single spaces, with none at either end (a path with spaces is not supported)")
+		}
+	}
+	if p := words[0]; strings.Contains(p, "/") && !filepath.IsAbs(p) {
+		return fmt.Errorf("editor's program %q must be an absolute path or a bare name looked up on PATH", p)
+	}
+	return nil
 }
 
 // Default returns the configuration used when no file overrides it.
@@ -53,6 +101,7 @@ func Default() Config {
 		KeyDashboard: "a",
 		KeyDecisions: "A",
 		KeyNext:      "N",
+		KeyMessage:   "m",
 	}
 }
 
@@ -75,6 +124,9 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("config %s: assume_expiry must be positive, got %v", path, c.AssumeExpiry)
 	}
 	if err := c.Routing.validate(); err != nil {
+		return Config{}, fmt.Errorf("config %s: %w", path, err)
+	}
+	if err := validateEditor(c.Editor); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
 	c.DBPath = expandHome(c.DBPath)

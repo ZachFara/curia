@@ -132,7 +132,7 @@ func tmuxKeys() (install.TmuxKeys, error) {
 	if err != nil {
 		return install.TmuxKeys{}, err
 	}
-	return install.TmuxKeys{Dashboard: cfg.KeyDashboard, Decisions: cfg.KeyDecisions, Next: cfg.KeyNext}, nil
+	return install.TmuxKeys{Dashboard: cfg.KeyDashboard, Decisions: cfg.KeyDecisions, Next: cfg.KeyNext, Message: cfg.KeyMessage}, nil
 }
 
 // installTmux writes the snippet and says, per key, whether the snippet binds
@@ -156,6 +156,9 @@ func installTmux(out io.Writer, p installPaths, bin string) error {
 			installSay(out, "  prefix %s (%s): already bound in %s, left alone; to use another key, set %s in %s "+
 				"and run curia install again, or add after the curia block: bind <key> %s",
 				k.Key, k.Name, p.tmuxConf, k.Option, p.config, k.Command)
+		case k.Default != "":
+			installSay(out, "  prefix %s (%s): bound by the snippet, in place of tmux's own %q (curia uninstall restores it)",
+				k.Key, k.Name, k.Default)
 		default:
 			installSay(out, "  prefix %s (%s): bound by the snippet", k.Key, k.Name)
 		}
@@ -264,7 +267,7 @@ func uninstallTmuxHint() string {
 	keys, err := tmuxKeys()
 	if err != nil {
 		d := config.Default()
-		keys = install.TmuxKeys{Dashboard: d.KeyDashboard, Decisions: d.KeyDecisions, Next: d.KeyNext}
+		keys = install.TmuxKeys{Dashboard: d.KeyDashboard, Decisions: d.KeyDecisions, Next: d.KeyNext, Message: d.KeyMessage}
 	}
 	var names []string
 	for _, k := range []string{keys.Dashboard, keys.Decisions, keys.Next} {
@@ -272,11 +275,22 @@ func uninstallTmuxHint() string {
 			names = append(names, k)
 		}
 	}
+	// Unlike the others, tmux binds the message key by default (marking a
+	// pane): while it is still Curia's, uninstall gives that binding back.
+	restore := keys.Message == install.MessageDefaultKey
+	if !restore && install.ValidKey(keys.Message) {
+		names = append(names, keys.Message)
+	}
 	hint := "Restart tmux to drop Curia's key bindings, hook and window marker, or run:\n" +
 		"  tmux set-hook -gu pane-focus-in; tmux set -gu @curia_marker_format"
 	if len(names) > 0 {
 		hint += "\n  for k in " + strings.Join(names, " ") + "; do " +
 			`tmux list-keys -T prefix "$k" 2>/dev/null | grep -q curia && tmux unbind "$k"; done`
+	}
+	if restore {
+		hint += "\n  tmux list-keys -T prefix " + keys.Message + " 2>/dev/null | grep -q curia && tmux bind " +
+			keys.Message + " " + install.MessageDefaultCommand +
+			"\n  (the last line gives prefix " + keys.Message + " back to tmux's own binding, which marks a pane)"
 	}
 	return hint
 }

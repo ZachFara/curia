@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/store"
 )
 
 func TestStatusPrintsBadge(t *testing.T) {
@@ -173,5 +175,92 @@ func TestStatusKeepsWForOlderMarker(t *testing.T) {
 	}
 	if got := getSession(t, db, "a"); got.State != model.StateWaiting || !got.UpdatedAt.Equal(at(11, 45)) {
 		t.Errorf("a = %s at %v, want waiting at 11:45", got.State, got.UpdatedAt)
+	}
+}
+
+// statusMessage stores one message for target in the database at db.
+func statusMessage(t *testing.T, db, target string, kind model.MessageKind, status model.MessageStatus) {
+	t.Helper()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	m := model.Message{
+		Text: "use pnpm", Kind: kind, Sender: model.SenderUser, TargetSession: target,
+		RoutedBy: model.RoutedSend, Status: status, CreatedAt: at(11, 0),
+	}
+	if status == model.MsgHeld {
+		m.HoldUntil = at(11, 1)
+	}
+	if _, err := st.CreateMessage(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStatusCountsUndeliveredMessages(t *testing.T) {
+	// D-4 holds a queued answer for s1; two queued instructions join it.
+	db := decisionsHome(t, decisionsSpecs()[3])
+	seedSessions(t, db, statusSession(model.StateIdle))
+	statusMessage(t, db, "s1", model.KindInstruction, model.MsgQueued)
+	statusMessage(t, db, "s1", model.KindInstruction, model.MsgQueued)
+	if out, err := runRoot(t, "status"); err != nil || out != "Q3" {
+		t.Errorf("status = %q, %v, want \"Q3\"", out, err)
+	}
+}
+
+func TestStatusIgnoresMessagesNobodyCanCollect(t *testing.T) {
+	db := decisionsHome(t)
+	ended, stale := statusSession(model.StateEnded), statusSession(model.StateStale)
+	ended.ID, ended.Pane, stale.ID, stale.Pane = "gone", "%2", "old", "%3"
+	seedSessions(t, db, statusSession(model.StateIdle), ended, stale)
+	statusMessage(t, db, "gone", model.KindInstruction, model.MsgQueued)
+	statusMessage(t, db, "old", model.KindInstruction, model.MsgQueued)
+	statusMessage(t, db, "nobody", model.KindInstruction, model.MsgQueued)
+	statusMessage(t, db, "s1", model.KindRule, model.MsgQueued)
+	statusMessage(t, db, "s1", model.KindInstruction, model.MsgHeld)
+	if out, err := runRoot(t, "status"); err != nil || out != "" {
+		t.Errorf("status = %q, %v, want empty output", out, err)
+	}
+}
+
+func TestBadgeSaysAutoOff(t *testing.T) {
+	db := decisionsHome(t, decisionsSpec{"first", model.ModeBlocking, "2026-11-11T08:00:00.000000000Z", "", decisionsEnd{}})
+	seedSessions(t, db, statusSession(model.StateWorking))
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	if out, err := runRoot(t, "status"); err != nil || out != "D1" {
+		t.Fatalf("status before the trip = %q, %v, want \"D1\"", out, err)
+	}
+	if err := st.SetRoutingTripped(ctx, at(11, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runRoot(t, "status"); err != nil || out != "D1 auto-off" {
+		t.Errorf("status after the trip = %q, %v, want \"D1 auto-off\"", out, err)
+	}
+	if err := st.ResetRouting(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runRoot(t, "status"); err != nil || out != "D1" {
+		t.Errorf("status after the reset = %q, %v, want \"D1\"", out, err)
+	}
+}
+
+func TestStatusStillSilentOnMessageQueryError(t *testing.T) {
+	db, _ := fleetHome(t, nil, model.Session{ID: "a", Agent: "claude", State: model.StateWaiting, Pane: "%1"})
+	raw, err := sql.Open("sqlite", db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.Exec("DROP TABLE messages"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runRoot(t, "status"); err != nil || out != "" {
+		t.Errorf("status with a broken messages table = %q, %v, want empty output and exit 0", out, err)
 	}
 }
