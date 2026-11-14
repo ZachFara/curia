@@ -175,15 +175,18 @@ func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 
 // spawnCheckIdle refuses a task with a live linked session, or whose
 // recorded pane is still open, after marking stale the sessions whose pane
-// is gone. When tmux cannot list its panes (often: no server yet) no pane
-// is open.
+// is gone. A pane is the task's only when tmux lists it on a server that
+// started before the launch (lifecyclePaneStateOf): after a tmux restart
+// the same id names someone else's pane. A listed pane that cannot be told
+// apart (no launch time) still refuses. When tmux cannot list its panes
+// (often: no server yet) no pane is open.
 func spawnCheckIdle(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.Config, t model.Task) error {
 	if err := reconcile(ctx, st, tm, cfg.LogPath, clock()); err != nil {
 		return err
 	}
 	tctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 	defer cancel()
-	panes, _ := tm.ListPanes(tctx)
+	panes, perr := tm.ListPanes(tctx)
 	sessions, err := st.TaskSessions(ctx, t.ID)
 	if err != nil {
 		return err
@@ -193,10 +196,23 @@ func spawnCheckIdle(ctx context.Context, st *store.Store, tm tmux.Client, cfg co
 		return fmt.Errorf("%s is already running in %s (session %s): end that session first",
 			t.ID, spawnWhere(panes, s.Pane), spawnShortID(s.ID))
 	}
-	if t.Pane != "" && slices.ContainsFunc(panes, func(p tmux.Pane) bool { return p.ID == t.Pane }) {
+	if spawnPaneOpen(panes, perr, t) {
 		return fmt.Errorf("%s's window %s is still open: close it first", t.ID, spawnWhere(panes, t.Pane))
 	}
 	return nil
+}
+
+// spawnPaneOpen reports whether t's recorded pane is still its window: tmux
+// lists it and it is not a recycled id (lifecyclePaneStateOf), or it is
+// listed and cannot be told apart.
+func spawnPaneOpen(panes []tmux.Pane, perr error, t model.Task) bool {
+	switch lifecyclePaneStateOf(panes, perr, t.Pane, t.LaunchedAt) {
+	case lifecyclePaneOurs:
+		return true
+	case lifecyclePaneUnknown:
+		return t.Pane != "" && slices.ContainsFunc(panes, func(p tmux.Pane) bool { return p.ID == t.Pane })
+	}
+	return false
 }
 
 // spawnWhere names pane as session:window (pane), from tmux's list.
@@ -220,10 +236,11 @@ func spawnShortID(id string) string {
 }
 
 // spawnClaim takes the launch claim (store.ClaimLaunch), held for the setup
-// limit plus a minute.
+// limit plus a minute while no window is recorded, and only if the task's
+// recorded pane is still t.Pane, the one spawnCheckIdle found closed.
 func spawnClaim(ctx context.Context, st *store.Store, t model.Task) (model.Task, error) {
 	hold := spawnSetupLimit + time.Minute
-	claimed, err := st.ClaimLaunch(ctx, t.ID, clock(), hold)
+	claimed, err := st.ClaimLaunch(ctx, t.ID, t.Pane, clock(), hold)
 	if !errors.Is(err, store.ErrTaskBusy) {
 		return claimed, err
 	}

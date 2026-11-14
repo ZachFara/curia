@@ -346,7 +346,7 @@ func TestSpawnSecondClaimRefused(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Twice", "")
 	first := f.now.Add(-time.Minute)
-	if _, err := f.st.ClaimLaunch(context.Background(), "T-1", first, time.Minute); err != nil {
+	if _, err := f.st.ClaimLaunch(context.Background(), "T-1", "", first, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	_, _, err := f.spawn("T-1", spawnOptions{})
@@ -778,5 +778,61 @@ func spawnKillServer(socket string) {
 	if root, rerr := os.OpenRoot(dir); rerr == nil {
 		_ = root.Remove(socket)
 		_ = root.Close()
+	}
+}
+
+func TestSpawnAgainAfterAgentExits(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Again", "")
+	r, out, err := f.spawn("T-1", spawnOptions{})
+	if err != nil {
+		t.Fatalf("first spawn: %v\n%s", err, out)
+	}
+	sess := model.Session{
+		ID: "1a2b3c4d-0000-4000-8000-000000000000", Agent: "claude", State: model.StateIdle, Pane: r.Pane.ID,
+		TmuxSession: "api-server", TaskID: "T-1", StartedAt: f.now, UpdatedAt: f.now,
+	}
+	if err = f.st.UpsertSession(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	// While the agent's window is open, a second spawn is refused for that.
+	f.now = f.now.Add(time.Minute)
+	if _, _, err = f.spawn("T-1", spawnOptions{}); err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("spawn while the agent runs = %v, want already running", err)
+	}
+	// The agent exits and its window closes: the task spawns again at once.
+	f.fake.Panes = nil
+	f.now = f.now.Add(time.Minute)
+	r2, out, err := f.spawn("T-1", spawnOptions{})
+	if err != nil {
+		t.Fatalf("spawn after the agent exited: %v\n%s", err, out)
+	}
+	if r2.Pane.ID == r.Pane.ID || f.get("T-1").Pane != r2.Pane.ID || !f.get("T-1").LaunchedAt.Equal(f.now) {
+		t.Errorf("second spawn: pane %s, task %+v; want a new window recorded and launched at %v", r2.Pane.ID, f.get("T-1"), f.now)
+	}
+	if w := f.windows(); len(w) != 2 {
+		t.Errorf("windows = %q, want two", w)
+	}
+}
+
+func TestSpawnIgnoresRecycledPaneID(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Recycled", "")
+	launched := f.now.Add(-time.Hour)
+	f.update("T-1", func(tk *model.Task) { tk.Pane, tk.LaunchedAt = "%0", launched })
+	// tmux restarted after the launch, and %0 is now the user's own shell.
+	f.fake.Panes = []tmux.Pane{{ID: "%0", Session: "base", WindowName: "bash", ServerStart: launched.Add(time.Minute)}}
+	if _, out, err := f.spawn("T-1", spawnOptions{}); err != nil {
+		t.Fatalf("spawn with a recycled pane id: %v\n%s", err, out)
+	}
+	if got := f.get("T-1").Pane; got == "%0" {
+		t.Errorf("pane = %s, want the new window", got)
+	}
+	// The same pane on a server that started before the launch is the task's.
+	f.task("Ours", "")
+	f.update("T-2", func(tk *model.Task) { tk.Pane, tk.LaunchedAt = "%0", launched })
+	f.fake.Panes = []tmux.Pane{{ID: "%0", Session: "api-server", WindowName: "T-2", ServerStart: launched.Add(-time.Minute)}}
+	if _, _, err := f.spawn("T-2", spawnOptions{}); err == nil || !strings.Contains(err.Error(), "still open") {
+		t.Fatalf("spawn with the task's own pane open = %v, want still open", err)
 	}
 }
