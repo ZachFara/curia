@@ -48,7 +48,7 @@ func init() {
 		Short: "Record one Claude Code hook event (run by Claude Code's hooks)",
 		Long: "Reads the hook payload on stdin and $TMUX_PANE, and records the event.\n" +
 			"Always exits 0 and prints nothing, except that a Stop which claims queued\n" +
-			"decision answers prints one JSON line blocking the stop with them;\n" +
+			"decision answers or messages prints one JSON line blocking the stop with them;\n" +
 			"errors go to the log file.",
 		Args: cobra.ArbitraryArgs,
 		// Every argument reaches runHook, so a bad one is logged, not printed.
@@ -59,7 +59,7 @@ func init() {
 
 // runHook records the event and exits 0 on every path, panics included.
 // Nothing is written to stderr, and nothing to stdout except the one line
-// hook.Run gives for a Stop that claimed queued answers: both belong to
+// hook.Run gives for a Stop that claimed queued answers or messages: both belong to
 // Claude Code. A watchdog exits after hookDeadline, logging it: stdin has
 // no deadline of its own, and the transcript is read inside the store's
 // write transaction.
@@ -185,10 +185,8 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	if len(res.Stdout) > 0 {
 		if eerr := emit(res.Stdout); eerr != nil {
 			logger.Error("hook output", "event", string(kind), "err", eerr.Error())
-		} else if len(res.Claimed) > 0 {
-			// M8: a "delivered (stop_hook)" that never reached Claude Code
-			// can be told from one that did.
-			logger.Info("hook Stop delivered answers", "ids", strings.Join(res.Claimed, " "))
+		} else {
+			hookLogDelivered(logger, res)
 		}
 	}
 	sess := res.Session
@@ -204,6 +202,18 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 		cancel()
 	}
 	return err
+}
+
+// hookLogDelivered logs, at INFO, the ids of the answers and of the
+// messages a Stop handed over (M8): a "delivered (stop_hook)" that never
+// reached Claude Code can be told from one that did.
+func hookLogDelivered(logger *slog.Logger, res hook.Result) {
+	if len(res.Claimed) > 0 {
+		logger.Info("hook Stop delivered answers", "ids", strings.Join(res.Claimed, " "))
+	}
+	if len(res.ClaimedMessages) > 0 {
+		logger.Info("hook Stop delivered messages", "ids", strings.Join(res.ClaimedMessages, " "))
+	}
 }
 
 // seenIfFocused marks sess's pane seen, and returns sess seen, when the event

@@ -5,11 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
-	"strings"
 	"time"
-	"unicode"
 
+	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 )
 
@@ -264,19 +262,6 @@ WHERE id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND conf
 	return d, found, nil
 }
 
-// agentPrompts are the starts of prompts Claude Code builds itself, a
-// subagent's report or a background task's notification: such a prompt
-// confirms no typed line, whatever it quotes (Ruling 102). message.Names
-// refuses the same starts for messages.
-var agentPrompts = []string{"<task-notification", "<agent-message"}
-
-// agentBuilt reports whether prompt starts, after white space, with one of
-// agentPrompts.
-func agentBuilt(prompt string) bool {
-	start := strings.TrimLeftFunc(prompt, unicode.IsSpace)
-	return slices.ContainsFunc(agentPrompts, func(p string) bool { return strings.HasPrefix(start, p) })
-}
-
 // typedNames matches the decisions a submitted prompt names: "Decision D-n"
 // followed by a space (an answer's wording) or a colon (a retraction's),
 // so D-1 is not taken for D-12. Its parameters are the prompt, twice.
@@ -287,10 +272,10 @@ const typedNames = `(instr(?, 'Decision ' || id || ' ') > 0 OR instr(?, 'Decisio
 // (Ruling 86), in one statement inside the session's write transaction, so
 // the confirmation is written with the UserPromptSubmit's session update or
 // not at all (re-review N4). It returns how many it confirmed. An empty
-// sessionID, or a prompt Claude Code built itself (agentBuilt, Ruling 102),
-// confirms nothing.
+// sessionID, or a prompt Claude Code built itself (message.AgentBuilt,
+// Ruling 102), confirms nothing.
 func (t *Tx) ConfirmTyped(ctx context.Context, sessionID, prompt string, now time.Time) (int64, error) {
-	if sessionID == "" || agentBuilt(prompt) {
+	if sessionID == "" || message.AgentBuilt(prompt) {
 		return 0, nil
 	}
 	res, err := t.tx.ExecContext(ctx, `
