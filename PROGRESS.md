@@ -1,6 +1,129 @@
 # PROGRESS
 
-This file mirrors the plans for humans; it does not replace them. Task order, interfaces and tests come from the current plan, `docs/superpowers/plans/2026-11-13-curia-plan-3-tasks-and-routing.md`. Plan 2 (`docs/superpowers/plans/2026-11-11-curia-plan-2-decisions.md`) is complete; its record is kept below. Plan 1 (`docs/superpowers/plans/2026-11-11-curia-plan-1-foundation.md`) is complete; its record is kept below.
+This file mirrors the plans for humans; it does not replace them. Task order, interfaces and tests come from the current plan, `docs/superpowers/plans/2026-11-13-curia-plan-4-reviews-remote-restore.md`. Plan 3 (`docs/superpowers/plans/2026-11-13-curia-plan-3-tasks-and-routing.md`) is built and awaiting its final review fix wave; its record is kept below. Plan 2 (`docs/superpowers/plans/2026-11-11-curia-plan-2-decisions.md`) is complete; its record is kept below. Plan 1 (`docs/superpowers/plans/2026-11-11-curia-plan-1-foundation.md`) is complete; its record is kept below.
+
+# Plan 4 (Review Queue, Remote Answers and Restore): setup in progress
+
+## Plan 4 status
+
+- **Plan:** `docs/superpowers/plans/2026-11-13-curia-plan-4-reviews-remote-restore.md` (22 tasks, 6 waves). Integration branch: `plan-4` (already cut, from `plan-3`). Every task PR goes into `plan-4`.
+- **Plan 3 is not yet in `main`.** Its final whole-branch review and fix wave are in progress. `plan-4` was cut from `plan-3`, so it does not hold the fix wave: after that fix wave, `plan-3` (and then `main`, once Plan 3 has merged there) must be merged into `plan-4` before Wave 1 starts. The plan's "Plan 3 dependencies to re-verify" table (D1 to D19) is checked against the code at that point; a difference in a name or signature amends the tasks named, a difference in behaviour is a Ruling. If a Plan 3 fix wave adds migration `0005`, this plan's migration takes the next free number.
+- **Setup (plan section 6):** PR `chore/plan4-setup` into `plan-4` carries the shared-file changes: CI on `plan-4`, the `CURIA_NTFY_TOKEN` line in the test guard of `cmd/curia/main_test.go`, AGENTS.md, decision records 0021 to 0024, and this section. Items 1 (no change to `go.mod`, `go.sum`, `Makefile`, `lefthook.yml`, `.golangci.yml`, `scripts/check-layout.sh`, `.goreleaser.yaml`: no module and no package is added) and 8 (migration `0005_reviews.sql` is Task 6's) need no change. Not done by this PR: the `README.md` update (written when Wave 5 has merged, in the PR of `plan-4` into `main`) and the fixtures of plan section 6, item 6 (listed below).
+- **Live probes R1 to R3, N1 and N2 (plan section 14) have not run.** Their results become Rulings from 112 and AGENTS.md entries, and may amend tasks before dispatch. N1 and N2 wait for the owner's approval (see Plan 4 Open Questions, 11). Wave 1 does not start until the probes that may run have reported, Plan 3 is merged into `plan-4` as above, and this setup PR is merged.
+- **Addressed by this plan:** Plan 2 final-review M7 and Plan 1 Open Question 13 (a session's tmux server: Tasks 2, 6, 10, 13, 14, 18; decision 0023); F8's merge expiry and review link (Tasks 6, 8); the `R` count of the badge that Plan 1 left at zero (Task 21).
+- **Reviews:** only at the final PR (owner's decision of 2026-11-13). No per-task review and no pre-flight review: a task merges when its named tests and `make check` pass and CI is green, and it is one commit.
+- **Process:** one commit per task, with cheap checks first (`gofumpt -l`, `.bin/golangci-lint run` on the task's packages, `go vet`, the focused `go test -race`); the gate lock is a fair queue (wait, never start a second run); `make check` output is never piped through `tail`.
+
+## Plan 4 waves
+
+Every task's done criteria also include: `make check` passes in the task's worktree; the PR into `plan-4` uses the PR template; CI (`check`) is green; the task is one commit; no shared file is touched (plan section 2). The tests named per task are those of the plan's task text; the plan is the authority.
+
+Model column: the plan's suggested models (section 7), **suggested, confirmed at dispatch**. Needs column: the plan's dependencies (section 7); a task consumes only what an earlier wave merged, or what `main` holds after Plan 3.
+
+### Before wave 1
+
+| Step | Owner | Done criteria | Status |
+| --- | --- | --- | --- |
+| Plan 3 into `plan-4` | orchestrator | Plan 3's final fix wave merged; `plan-3` (then `main`) merged into `plan-4`; the plan's D1 to D19 table checked against the merged code | waiting on Plan 3's fix wave |
+| Live probes R1 to R3, N1, N2 | orchestrator | each run as plan section 14 prescribes (private tmux server, temp `HOME` and `CURIA_DB`, `claude --settings <temp file> --setting-sources project`); results recorded as Rulings from 112 and in AGENTS.md; the tasks each probe names amended before dispatch; fixtures of plan section 6, item 6 committed | not run; N1 and N2 wait for the owner's approval |
+| Setup PR (plan section 6) | orchestrator | `chore/plan4-setup` merged into `plan-4`; `make check` and CI green | open |
+
+### Wave 1
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Types and config | Sonnet (suggested, confirmed at dispatch) | nothing | plan task 1 complete; `TestPlan4Defaults`, `TestLoadPlan4Overrides`, `TestBadReviewConfigRejected`, `TestBadNtfyConfigRejected`, `TestPlainHTTPOnlyInsideTailnet`, `TestBadServeConfigRejected`, `TestNonPositiveRestoreMaxAgeRejected`, `TestParseQuiet`, `TestTailscaleAddr`, `TestNtfyEnabledAndDeviceNames` pass under `-race` | not started |
+| 2 | tmux: the server's socket | Sonnet (suggested, confirmed at dispatch) | nothing | plan task 2 complete; `TestListPanesReportsSocket`, `TestPaneInfoReportsSocket`, `TestParsePanesSocketRules` pass under `-race` | not started |
+| 3 | Install: sixth tool and the skill | Sonnet (suggested, confirmed at dispatch) | nothing | plan task 3 complete; `TestAllowToolsAddsSixthToAPlan3Install`, `TestUnhooksRemovesTheSixToolRules`, `TestSkillExplainsFinishing`, `TestInstallBindsNoPlan4Key`, `TestInstallAllowsSixToolsByDefault` pass under `-race` | not started |
+| 4 | Board: review and done | Opus (suggested, confirmed at dispatch) | nothing | plan task 4 complete; `TestBoardShowsReviewColumn`, `TestBoardHidesDoneUntilToggled`, `TestBoardDoneColumnNeedsWidth`, `TestBoardSelectionLeavesHiddenCard`, `TestBoardNoSpawnOrReadyOnReviewOrDone`, `TestBoardNarrowListsReview`, `TestBoardPastedDIsNotACommand` pass under `-race` | not started |
+
+### Wave 2
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 5 | Review rules and the brief | Sonnet (suggested, confirmed at dispatch) | 1 | plan task 5 complete; `TestValidReviewID`, `TestValidateCompletionReportsEveryProblem`, `TestNormalizeCompletionCleans`, `TestNormalizeNote`, `TestNoteMessage`, `TestPRTitleHasNoMention`, `TestPRBodyLayout`, `TestPRBodyFencesSummary`, `TestPRBodyCapsAtEightKiB`, `TestPRBodyDetailCannotMention`, `TestBriefWording`, `TestBriefNamesCompleteTask` pass under `-race` | not started |
+| 6 | Store: reviews and the session's server | Opus (suggested, confirmed at dispatch) | 1 | plan task 6 complete; `TestMigrationAddsReviewsAndPushes`, `TestMigrationOnPlan3Database`, `TestSessionSocketRoundTrip`, `TestOldUpsertKeepsSocket`, `TestCompleteTaskOpensThenUpdates`, `TestCompleteTaskAfterCloseOpensNew`, `TestCompleteTaskNeedsLiveTask`, `TestConcurrentCompletesOneReview`, `TestConcurrentCompletesDistinctIDs`, `TestReviewRoundTrip`, `TestCloseReviewTable`, `TestCloseReviewTwiceIsRefused`, `TestConcurrentClosesOneWins`, `TestApproveExpiresTaskAssumptions`, `TestChangesRequestedExpiresNothing`, `TestDropSetsTaskDropped`, `TestLatestReviewsIsNewestPerTask`, `TestPendingReviewsSkipsDroppedTasks`, `TestListReviewsFilters`, `TestTaskDecisionsByTask`, `TestTaskRun` pass under `-race` | not started |
+| 7 | ntfy: rules and sender | Opus (suggested, confirmed at dispatch) | 1 | plan task 7 complete; `TestNotBeforeTable`, `TestDecisionPushWording`, `TestDecisionPushButtons`, `TestDecisionPushFourOptions`, `TestDecisionPushIrreversibleHasNoButtons`, `TestDecisionPushWithoutServe`, `TestPushTextIsClean`, `TestReviewPushWording`, `TestNewTokenShapeAndHash`, `TestPublishMatchesCapturedRequest`, `TestPublishSetsBearerOnlyWhenGiven`, `TestPublishStatusTable`, `TestPublishDoesNotFollowRedirect`, `TestPublishTimesOut`, `TestPublishErrorLeaksNothing` pass under `-race` | not started |
+| 8 | Review view | Opus (suggested, confirmed at dispatch) | 1 | plan task 8 complete; `TestReviewShowsDetailInOrder`, `TestReviewAssumptionsAreRedAndFirst`, `TestReviewCostNotRecorded`, `TestReviewDiffNoteShown`, `TestReviewEmptyQueueAndNoReviewForTask`, `TestReviewMovesBetweenReviews`, `TestReviewKeepsShownReviewAcrossRefresh`, `TestApproveNeedsConfirmationAfterDwell`, `TestApprovePromptNamesAssumptions`, `TestApprovePromptSaysMergeOrPR`, `TestActionKeysWaitForDwell`, `TestPromptCanceledWhenReviewChanges`, `TestRequestChangesSendsNote`, `TestNoteInputCap`, `TestHeldEnterDoesNotSendNote`, `TestDropNeedsConfirmation`, `TestReviewPasteIsNotACommand`, `TestKeysIgnoredWhileActionRuns`, `TestQuietAfterAction`, `TestActionErrorShown`, `TestOpenDiffRunsSourceCommand`, `TestReviewEmbeddedCloseSendsMessage`, `TestReviewTextCannotDrawEscapes`, `TestReviewNarrowWidth`, `TestReviewSourceErrorKeepsLastDetail` pass under `-race` | not started |
+
+### Wave 3
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 9 | Store: pushes and the restore claim | Opus (suggested, confirmed at dispatch) | 6 | plan task 9 complete; `TestEnqueueOnePerDeviceOnce`, `TestPushRoundTrip`, `TestPushesDueRespectsNotBefore`, `TestClaimPushOldestDueFirst`, `TestClaimPushReclaimsDeadSender`, `TestPushClaimedExactlyOnce`, `TestFinishPushTable`, `TestFinishPushCutsErrorText`, `TestUsePushTokenOnce`, `TestUsePushTokenRefusals`, `TestUsePushTokenRace`, `TestClaimRestoreOneHolder` pass under `-race` | not started |
+| 10 | Fleet and attention: review-ready, other servers | Opus (suggested, confirmed at dispatch) | 2, 6 | plan task 10 complete; `TestWithReviewsMarksLiveSessionsOfPendingTasks`, `TestWithReviewsDoesNotMutateInput`, `TestRankPutsReviewReadyAfterWaiting`, `TestReviewPendingWorkingSessionRanksAsWorking`, `TestNextJumpsToReviewReady`, `TestReconcileLeavesOtherServerAlone`, `TestReconcileSameServerStillMarksStale`, `TestReconcileUnknownSocketBehavesAsBefore`, `TestReconcileRecheckHonoursSocket`, `TestMarkerBlueForUnseenReviewPending`, `TestWindowMarkerRedBeatsBlue`, `TestApplySetsBlueFromPendingReview`, `TestApplyWithoutReviewsTableStillAppliesRed`, `TestMarkerFormatDrawsBlueAndRed`, `TestMarkerUpgradeNeedsOnlyTheOption` pass under `-race` | not started |
+| 11 | Task status from reviews | Sonnet (suggested, confirmed at dispatch) | 6 | plan task 11 complete; `TestDeriveWithReviews`, `TestCardsCarryNewestReviewAndOrder`, `TestTaskLsShowsReviewThenDone`, `TestTaskLsStatusFilterReviewAndDone` pass under `-race` | not started |
+| 12 | MCP: `complete_task` | Opus (suggested, confirmed at dispatch) | 5, 6 | plan task 12 complete; `TestToolSurfaceIsExactlySix`, `TestCompleteCreatesReview`, `TestCompleteAgainUpdates`, `TestCompleteCallsReviewedWithPane`, `TestCompleteInvalidListsAllProblems`, `TestCompleteCleansText`, `TestCompleteTeammateRefused`, `TestCompleteWithoutTaskRefused`, `TestCompleteUnknownOrDroppedTask`, `TestCompleteStoreErrorIsInternal`, `TestCompleteIgnoresExtraArguments`, `TestMCPOverPipesListsSixTools`, `TestCompleteTaskOverPipes` pass under `-race` | not started |
+| 13 | Hook: record the server | Opus (suggested, confirmed at dispatch) | 2, 6 | plan task 13 complete; `TestSessionStartStoresSocket`, `TestSessionStartOutsideTmuxHasNoSocket`, `TestResumeInNewServerReplacesSocket`, `TestSocketFilledMidRunOnlyWhenEmpty`, `TestCompactionKeepsSocket`, `TestSessionStartStillOneTmuxCall`, `TestHookStoresSocketFromFakeTmux`, `TestHookLatencyUnchanged` pass under `-race` | not started |
+
+### Wave 4
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 14 | Deliver: never type across servers | Opus (suggested, confirmed at dispatch) | 2, 6 | plan task 14 complete; `TestAnswerNotTypedAcrossServers`, `TestAnswerTypedOnSameServer`, `TestAnswerUnknownSocketTypedAsBefore`, `TestCrossServerNoteIsClean`, `TestCrossServerRefusalLeavesAnswerCollectable`, `TestMessageNotTypedAcrossServers`, `TestMessageTypedOnSameServer` pass under `-race` | not started |
+| 15 | Push outbox and MCP wiring | Opus (suggested, confirmed at dispatch) | 7, 9, 12 | plan task 15 complete; `TestNoNtfyConfiguredNoNetwork`, `TestEnqueueOnePerDeviceWithQuietHours`, `TestFlushSendsDuePushes`, `TestFlushHoldsUntilQuietEnds`, `TestFlushButtonsNeedPublicURL`, `TestFlushTokenIsNotStoredInClear`, `TestFlushDropsAnsweredTicket`, `TestFlushDropsRemovedDevice`, `TestFlushRetriesThenFails`, `TestFlushRejectedIsNotRetried`, `TestFlushRetryRespectsCap`, `TestTwoFlushersSendOnce`, `TestFlushReviewPush`, `TestPushLoopKickAndTick`, `TestMCPBlockingTicketIsPushed`, `TestMCPNewReviewIsPushedOnce`, `TestMCPNewReviewMarksWindowBlue`, `TestMCPPushDoesNotDelayTheTool`, `TestMCPStopsLoopOnEOF`, `TestBadNtfyTokenIgnored` pass under `-race` | not started |
+| 16 | `curia review` | Opus (suggested, confirmed at dispatch) | 5, 6, 8 | plan task 16 complete; `TestDiffStatAgainstBase`, `TestDiffStatNotes`, `TestDiffStatIsCappedAndClean`, `TestDiffStatWorksWithoutWorktree`, `TestMergeHappyPath`, `TestMergeRefusals`, `TestMergeConflictAborts`, `TestMergeHookFailureAborts`, `TestMergeKeepsMyLocalChanges`, `TestNeverForces`, `TestPRPushesAndCallsGh`, `TestPRArgvIsDirect`, `TestPRRejectsOddURL`, `TestPRGhMissingOrFailing`, `TestDiffCmdTable`, `TestReviewRefusesInsideAgent`, `TestReviewApproveMerges`, `TestReviewApproveExpiresAssumptions`, `TestReviewApprovePRFlagAndConfig`, `TestReviewApproveFailureStaysPending`, `TestReviewRequestChangesDelivers`, `TestReviewRequestChangesQueuesForWorkingAgent`, `TestReviewRequestChangesTargetsLeadNotTeammate`, `TestReviewRequestChangesWithoutLiveAgent`, `TestReviewNoteFromStdinAndBounds`, `TestReviewDrop`, `TestReviewActionReappliesMarker`, `TestReviewFlagErrors`, `TestReviewResolveByTaskAndByReview`, `TestReviewJSON`, `TestReviewWithoutTerminalNeedsAnAction`, `TestReviewOutputIsSanitised`, `TestReviewSourceDetail`, `TestReviewSourceQueueRunsNoGit` pass under `-race` | not started |
+| 17 | `curia reviews` | Sonnet (suggested, confirmed at dispatch) | 6 | plan task 17 complete; `TestReviewsLsDefaultIsPending`, `TestReviewsLsStatusFilterAndAll`, `TestReviewsLsJSONGolden`, `TestReviewsLsEmptyIsEmptyArray`, `TestReviewsLsTableStatusWords`, `TestReviewsLsTableIsSanitised`, `TestReviewsLsAllowedInsideAgent` pass under `-race` | not started |
+| 18 | `curia restore` | Opus (suggested, confirmed at dispatch) | 2, 6, 9 | plan task 18 complete; `TestRestoreRefusesInsideAgent`, `TestRestoreNeedsATmuxServer`, `TestPlanClassifiesEverySession`, `TestPlanPaneReusedAfterServerRestartIsNotLive`, `TestPlanSinceWindow`, `TestPlanCapsAtThirtyTwo`, `TestRestoreDryRunChangesNothing`, `TestRestoreNeedsConfirmation`, `TestRestoreSecondRunRefused`, `TestRestoreLinkedTaskGoesThroughLaunch`, `TestRestoreUnlinkedSessionRunsClaudeResume`, `TestRestoreNeverPassesStoredTextToTmux`, `TestRestoreNeverAddsPermissionFlags`, `TestRestoreWaitsForSessionToReport`, `TestRestoreReportsSilentSession`, `TestRestoreNewSessionIDEndsOldRow`, `TestRestoreNewWindowFailureContinues`, `TestRestoreTeamLead`, `TestRestoreLeavesLiveTeammateAlone`, `TestRestoreWithoutClaude`, `TestRestoreOtherServerUntouched`, `TestRestoreOutputIsSanitised`, `TestRestoreInRealTmux` pass under `-race` | not started |
+
+### Wave 5
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 19 | `curia serve` | Opus (suggested, confirmed at dispatch) | 9, 15 | plan task 19 complete; `TestServeRoutes`, `TestAnswerHappyPath`, `TestAnswerQueuedWhenAgentBusy`, `TestAnswerAuthTable`, `TestAnswerTokenIsSingleUse`, `TestAnswerBadRequests`, `TestAnswerUnknownOption`, `TestAnswerNoLongerOpen`, `TestAnswerIrreversibleRefused`, `TestAnswerRateLimit`, `TestAnswerStoreErrorIsInternal`, `TestServeNeverLogsOrEchoesTheToken`, `TestServeResponsesAreClean`, `TestServeListenAddrTable`, `TestServeRefusesPublicAddress`, `TestServeNeedsPublicURL`, `TestServeRefusesInsideAgent`, `TestServeListensAndShutsDown`, `TestServeHeaderLimits` pass under `-race` | not started |
+| 20 | Dashboard: the `r` key | Opus (suggested, confirmed at dispatch) | 6, 8, 16 | plan task 20 complete; `TestRKeyOpensReviewForRowsTask`, `TestRKeyOnGroupRowUsesLeadTask`, `TestRKeyWithoutPendingReview`, `TestRKeyWithoutFactory`, `TestRKeyDisabledInSidebar`, `TestReviewClosedReturnsToDashboard`, `TestPastedRIsNotACommand`, `TestReviewReadyRowIcon`, `TestReviewsErrorKeepsLastMap`, `TestHelpLineNamesReview`, `TestStoreSourceReviews`, `TestDashboardOffersReviewInPopupOnly` pass under `-race` | not started |
+| 21 | Badge and ranking in the commands | Sonnet (suggested, confirmed at dispatch) | 6, 10 | plan task 21 complete; `TestListSettledMarkedMarksReviews`, `TestListSettledMarkedSurvivesReviewReadError`, `TestStatusCountsPendingReviews`, `TestStatusIgnoresClosedAndDroppedReviews`, `TestStatusStillSilentOnReviewQueryError`, `TestNextJumpsToReviewReadySession`, `TestLsRanksReviewReadyAfterWaiting` pass under `-race` | not started |
+
+### Wave 6
+
+| Task | Title | Model (suggested, confirmed at dispatch) | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 22 | End-to-end acceptance (Wave 6) | Opus (suggested, confirmed at dispatch) | everything | plan task 22 complete; `TestReviewsEndToEnd` pass under `-race` | not started |
+
+## Plan 4 smoke and live checks
+
+Run by the orchestrator on `plan-4` after each wave, as plan section 7 lists them (temp `HOME` and `CURIA_DB`, a private tmux server; Plan 2's lesson was that every Critical defect came from a live run).
+
+| After wave | Check | Result |
+| --- | --- | --- |
+| 2 | `make check`; open the wave-2 database with the Plan 3 binary's `curia ls` and `curia task ls`, and the reverse: both work | none yet |
+| 3 | by hand over a pipe: `tools/list` shows six; `complete_task` from a session with `CURIA_TASK_ID` creates `R-1`; `curia task ls` shows `review`; `curia hook SessionStart` in the private server stores its socket | none yet |
+| 4 | **live check A** (real Claude Code as plan section 14 prescribes): a spawned agent finishes a small task and calls `complete_task` unprompted; `curia review` shows it; `c` with a note reaches the agent by typing and, in a second run, by the Stop hook; `a` merges in a throwaway repository; with a local `ntfy serve` (or a throwaway topic) a blocking ticket's push arrives; `curia restore` after `tmux kill-server` brings the agent back and it continues | none yet |
+| 5 | **live check B:** `curia serve` on loopback answers a real pushed ticket with `curl` and the agent receives the answer; the badge shows `R1` in a real status line; `r` in the real popup, including a held Enter in the note input; the owner's phone check (Plan 4 Open Question 6), if the owner is present | none yet |
+| 6 | Task 22, plus `deadcode ./...` without `-test`: only test doubles are reported | none yet |
+
+## Plan 4 Rulings
+
+Format: Ruling: what — why — cost if wrong. **Plan 4's rulings start at 112.** Rulings 97 to 111 were made during Plan 3's build and are recorded by Plan 3's records step, not here.
+
+## Plan 4 Open Questions
+
+Plan section 15. Each has the plan's default and blocks nothing; **the project proceeds on every default** until the owner answers.
+
+1. **Approve: merge locally, or open a pull request?** Default: `merge` (`git merge --no-ff` into the base in your checkout, never pushed); `review.approve = "pr"` or `--pr` for the other. Proceeding on the default.
+2. **The spec asks for a per-device token; the plan gives each device its own topic and each notification a one-time token** (plan decision 16). Default: as planned. The alternative, a long-lived token per device, would be stored in clear on this machine and sent in every notification. Proceeding on the default.
+3. **Should a review be approvable from the phone?** Default: no; the push only tells you it is waiting. Proceeding on the default.
+4. **The blue window marker clears when you focus the pane, while the review still waits** (the spec's words; plan decision 20). Default: as the spec says; the badge's `R` and the dashboard keep showing it. Say so if blue should stay until the review is closed. Proceeding on the default.
+5. **ntfy topics in `~/.config/curia/config.toml`.** Your dotfiles are managed by chezmoi; a topic is what lets someone read your ticket text. Default: the config file, with the access token only in `CURIA_NTFY_TOKEN` (a Keychain item `env:CURIA_NTFY_TOKEN`). Say so if topics should come from the environment too. Proceeding on the default.
+6. **A check only your phone can do:** whether the ntfy app performs an action against `http://<tailscale ip>:8787`, or needs `https` (then `tailscale serve` in front of a loopback listener, with `public_url` set to the `https://<machine>.<tailnet>.ts.net` address), and whether `curia decide` is usable in your phone's SSH app at its width (Plan 2 Open Question 21 asked the same about bracketed paste). Default: both forms are supported; nothing depends on the answer. Proceeding on the default.
+7. **One real `gh pr create`** on a throwaway repository of yours, to confirm Task 16's pull-request path end to end. Default: not run; the path is tested against a local bare remote and a stand-in `gh`. Proceeding on the default.
+8. **Quiet hours and the bell.** Default: quiet hours hold back only ntfy pushes (plan decision 27). Proceeding on the default.
+9. **Restore's window.** Default: sessions active in the last 24 hours, shown and confirmed before anything starts (plan decisions 22, 23). Proceeding on the default.
+10. **Dropping from a review leaves the agent running** (plan decision 12). Default: yes; kill it from the dashboard. Proceeding on the default.
+11. **The two ntfy probes (N1, N2) publish to a service outside this machine and wait for the owner's approval.** Plan section 14 prescribes a local `ntfy serve` when the binary is available and otherwise `https://ntfy.sh` with a random topic and placeholder text; the second is a message sent to a third-party service. Until the owner approves, the tasks build on recorded-shape fixtures: Task 7 and Task 19 follow the request shape plan section 4.7 assumes, and the fixtures `publish-accepted.json` and `publish-reply.json` are not committed. Proceeding on the default (no run until approved).
+
+## Plan 4 Ledger
+
+- 2026-11-14: setup PR `chore/plan4-setup` into `plan-4` opened (this change). Not done by it: the `README.md` update (after Wave 5), and the fixtures of plan section 6, item 6, for the orchestrator once the probes have run.
+
+## Plan 4 fixtures expected from the probes (plan section 6, item 6)
+
+Committed by the orchestrator from the probes, never generated by a task:
+
+- `internal/notify/testdata/ntfy/publish-accepted.json` (N1: one request ntfy accepted, with the token replaced by `TOKEN`)
+- `internal/notify/testdata/ntfy/publish-reply.json` (N1: its reply)
+- `internal/deliver/testdata/prompt/p4-idle-after-resume.txt` (R1: the idle prompt after a resume)
+- any dialog screen probe R1 saw, into `internal/deliver/testdata/prompt/`
 
 # Plan 3 (Tasks, Spawning, Teams and Message Routing): setup in progress
 
