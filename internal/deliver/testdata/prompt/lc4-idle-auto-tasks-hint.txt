@@ -1,0 +1,50 @@
+ ▐▛███▛█   Claude Code v2.1.325
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /tmp/probe/p2/.curia-worktrees/api-T-9
+
+
+❯ /clear
+
+❯ Reply with only the word OK2.
+
+⏺ OK
+
+✻ Churned for 1s · done 8:01 PM
+
+❯ Use the Agent tool to start exactly one general-purpose subagent whose only job is to run the Bash command: echo hi-from-subagent  and report its output. Wait for it, then tell me the output in one
+  line.
+
+⏺ Agent(Run echo command)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+⏺ The subagent is running in the background. I'll give you its output once the completion notification arrives.
+
+✻ Waiting for 1 background agent to finish
+
+› Message from @general-purpose (ctrl+o to expand)
+
+⏺ The subagent reported: hi-from-subagent
+
+⏺ Agent "Run echo command" finished · 4s
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · /tasks to see subagents
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

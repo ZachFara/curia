@@ -1,0 +1,50 @@
+host% claude --settings /tmp/probe/settings.json --setting-sources project --mcp-
+config /tmp/probe/mcp.json --strict-mcp-config --model haiku --resume b071610c-6060-460a-a120-7
+a0f3146c332
+ ▐▛███▛█   Claude Code v2.1.325
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /tmp/probe/p2/.curia-worktrees/api-T-4
+
+
+❯ Remember the word HERON-5512. Reply with only OK.
+
+⏺ OK
+
+✻ Cooked for 2s · done 8:02 PM
+
+❯ /exit
+  ⎿  Bye!
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents                                                                                                                               ◐ medium · /effort
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

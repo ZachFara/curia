@@ -32,16 +32,20 @@ const (
 	// promptSubagents: the main agent waits for background subagents, one
 	// of which may open a permission dialog at any moment.
 	promptSubagents
-	// promptAgents: the footer offers or lists background agents ("← for
-	// agents", "↓ to manage" with the agents listed under the box).
+	// promptAgents: the footer offers background agents ("← for agents").
 	promptAgents
+	// promptManage: background agents, or a live team's teammates, are
+	// listed under the box ("↓ to manage"). Nothing is typed to a team lead
+	// while its teammates are alive.
+	promptManage
 	// promptShell: the pane shows a shell prompt: the session's Claude Code
 	// has exited or died.
 	promptShell
 )
 
 // The parts of Claude Code's screen these rules read, as captured from
-// Claude Code 2.1.323 (live checks 2 and 3; fixtures in testdata/prompt).
+// Claude Code 2.1.323 (live checks 2 and 3) and 2.1.325 (Plan 3's live
+// probe; fixtures in testdata/prompt).
 // The input box is a rule line, one line starting "❯" (an empty prompt is
 // "❯" and a no-break space), another rule line, then the footer.
 const (
@@ -65,11 +69,15 @@ var dialogHints = []string{
 	"Esc to cancel", "Enter to continue", "Enter to confirm", "Enter to select", "Esc to clear", "Esc to close",
 }
 
-// agentHints are what the footer shows when it offers or lists background
-// agents: "← for agents" on a fresh session, "↓ to manage" with the agents
-// listed under the input box (live check 3). They are read under the box
-// only (underBox).
-var agentHints = []string{"← for agents", "↓ to manage"}
+// offerHints and manageHints are what the footer shows when it offers or
+// lists background agents: "← for agents" on a fresh or resumed session,
+// "↓ to manage" with background agents or a team's teammates listed under
+// the input box (live checks 3 and 4). They are read under the box only
+// (underBox).
+var (
+	offerHints  = []string{"← for agents"}
+	manageHints = []string{"↓ to manage"}
+)
 
 // shellPrompt matches the last line of a pane that shows a shell prompt,
 // such as "host%", "sh-3.2$" or "$": Claude Code has exited or died there.
@@ -79,14 +87,20 @@ var shellPrompt = regexp.MustCompile(`^[\w.@:~/-]*[%$#]$`)
 var numberedChoice = regexp.MustCompile(`^\s*❯\s*[0-9]+\.\s`)
 
 // idleFooters are the footer lines of an idle prompt, one per permission
-// mode, exactly as captured at 60 to 320 columns (live check 3). Nothing
-// else is accepted: a running turn appends " · esc to interrupt", a fresh
-// session " · ← for agents", a narrow pane cuts the line short.
+// mode, exactly as captured at 60 to 320 columns (live check 3), and the
+// auto mode one with the " · /tasks to see subagents" that Claude Code
+// 2.1.325 keeps once a subagent has run in the session (Ruling 101; no
+// capture shows that hint with another mode, so it is accepted with auto
+// mode only). Nothing else is accepted: a running turn appends " · esc to
+// interrupt", a fresh session " · ← for agents", running agents or a live
+// team " · ↓ to manage", tmux a hint about focus events, and a narrow pane
+// cuts the line short.
 var idleFooters = []string{
 	"⏵⏵ auto mode on (shift+tab to cycle)",
 	"⏵⏵ accept edits on (shift+tab to cycle)",
 	"⏸ plan mode on (shift+tab to cycle)",
 	"⏸ manual mode on · ? for shortcuts",
+	"⏵⏵ auto mode on (shift+tab to cycle) · /tasks to see subagents",
 }
 
 // readPrompt says what screen, a capture of an agent's pane, shows about
@@ -99,7 +113,9 @@ func readPrompt(screen string) promptState {
 		return promptShell
 	case hasHint(lines, dialogHints) || hasNumberedChoice(lines):
 		return promptDialog
-	case hasHint(underBox(lines), agentHints):
+	case hasHint(underBox(lines), manageHints):
+		return promptManage
+	case hasHint(underBox(lines), offerHints):
 		return promptAgents
 	}
 	bottom := lastRule(lines, len(lines))

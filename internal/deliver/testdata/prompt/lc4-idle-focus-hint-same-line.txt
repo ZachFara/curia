@@ -1,0 +1,50 @@
+host% claude --settings /tmp/probe/settings.json --setting-sources project --mcp-
+config /tmp/probe/mcp.json --strict-mcp-config --model haiku "Remember the word HERON-5512. Rep
+ly with only OK."
+ ▐▛███▛█   Claude Code v2.1.325
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /tmp/probe/p2/.curia-worktrees/api-T-4
+
+
+❯ Remember the word HERON-5512. Reply with only OK.
+
+⏺ OK
+
+✻ Cooked for 2s · done 8:02 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)                                                            tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

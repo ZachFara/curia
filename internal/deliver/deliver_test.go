@@ -879,7 +879,8 @@ func TestDefects123PaneCheckedBeforeTyping(t *testing.T) {
 		{fixture: "lc3-menu-rewind.txt", why: "a dialog or menu is open in the agent's pane; nothing typed"},
 		{fixture: "lc3-screen-config.txt", why: "a dialog or menu is open in the agent's pane; nothing typed"},
 		{fixture: "lc3-busy-running-turn.txt", why: "agent's pane shows a running turn; nothing typed"},
-		{fixture: "lc3-agents-listed-main-stopped.txt", why: "the agent's prompt lists background agents (or offers them); nothing typed"},
+		{fixture: "lc3-agents-listed-main-stopped.txt", why: "background agents or teammates are listed under the agent's prompt " +
+			"(nothing is typed to a team lead while its teammates are alive); nothing typed"},
 		{fixture: "built-waiting-background.txt", why: "agent is waiting for background subagents; nothing typed"},
 		{fixture: "lc3-shell-after-kill.txt", why: "the pane shows a shell: the session's Claude Code is not at its prompt; nothing typed"},
 		{fixture: "lc3-idle-auto-34col.txt", why: "prompt not recognized (Claude Code's screen may have changed); nothing typed"},
