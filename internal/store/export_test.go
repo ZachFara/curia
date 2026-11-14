@@ -12,3 +12,17 @@ const (
 	StopStateQuery   = stopState
 	BadgeExtrasQuery = badgeExtras
 )
+
+// The reviews' and the task views' statements, for their query plans.
+const (
+	PendingReviewTasksQuery    = pendingReviewTasks
+	PendingReviewsQuery        = pendingReviewsCount
+	LatestReviewsQuery         = latestReviews
+	TaskDecisionsQuery         = taskDecisions
+	TaskRunQuery               = taskRun
+	ExpireTaskAssumptionsQuery = expireTaskAssumptions
+	PendingReviewOfTaskQuery   = updatePendingReview
+)
+
+// ListReviewsQuery is ListReviews' statement and arguments for f.
+var ListReviewsQuery = listReviewsQuery

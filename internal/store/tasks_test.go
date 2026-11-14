@@ -125,8 +125,8 @@ func TestMigrationAddsTasksAndMessages(t *testing.T) {
 			t.Errorf("sessions.%s = %s notnull=%d, want nullable TEXT", col, typ, notNull)
 		}
 	}
-	if n := countMigrations(t, path); n != 4 {
-		t.Errorf("schema_migrations has %d rows, want 4", n)
+	if n := countMigrations(t, path); n != 5 {
+		t.Errorf("schema_migrations has %d rows, want 5", n)
 	}
 }
 
@@ -271,8 +271,8 @@ func TestMigrationOnPlan2Database(t *testing.T) {
 
 	s := open(t, path)
 	if names := migrationNames(t, db); !reflect.DeepEqual(names,
-		[]string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql"}) {
-		t.Errorf("migrations = %v, want 0001 to 0004", names)
+		[]string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql"}) {
+		t.Errorf("migrations = %v, want 0001 to 0005", names)
 	}
 	sess := get(t, s, "old")
 	want := model.Session{

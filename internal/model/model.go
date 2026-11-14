@@ -45,6 +45,11 @@ type Session struct {
 	// never stored; fleet.WithReviews sets it.
 	Socket        string
 	ReviewPending bool
+	// EndReason is why an ended session ended (SessionEnd's reason, stored
+	// normalised by the store and only while the session is ended; Ruling
+	// 117): "other" when tmux was killed or crashed, a user's own exit
+	// otherwise.
+	EndReason string
 }
 
 // Team roles.
