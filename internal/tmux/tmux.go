@@ -18,6 +18,11 @@ type Pane struct {
 	// id names the same pane only for sessions started after this.
 	ServerStart time.Time
 	WindowName  string
+	// Socket is the socket path of the tmux server that holds the pane
+	// (#{socket_path}), empty when tmux did not report a usable one. It is
+	// text from outside: kept only when absolute, at most 256 bytes, valid
+	// UTF-8 and free of control characters.
+	Socket string
 }
 
 // Client is everything Curia needs from tmux.
