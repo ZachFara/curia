@@ -41,6 +41,9 @@ func TestDefaults(t *testing.T) {
 	if c.AssumeExpiry != 24*time.Hour || c.NotifyBell || c.NotifyMacOS {
 		t.Errorf("decision defaults = %v/%v/%v", c.AssumeExpiry, c.NotifyBell, c.NotifyMacOS)
 	}
+	if c.Routing.AutoSend || c.Routing.AutoThreshold != 0.9 || c.Routing.Aliases == nil || len(c.Routing.Aliases) != 0 {
+		t.Errorf("routing defaults = %+v", c.Routing)
+	}
 }
 
 func TestLoadMissingFileReturnsDefaults(t *testing.T) {
@@ -151,5 +154,68 @@ func TestNonPositiveAssumeExpiryRejected(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "assume_expiry") {
 			t.Errorf("assume_expiry %s: err = %v", v, err)
 		}
+	}
+}
+
+func TestRoutingDefaults(t *testing.T) {
+	r := config.Default().Routing
+	if r.AutoSend || r.AutoThreshold != 0.9 {
+		t.Errorf("routing = %+v", r)
+	}
+	if r.Aliases == nil || len(r.Aliases) != 0 {
+		t.Errorf("Aliases = %#v, want non-nil and empty", r.Aliases)
+	}
+}
+
+func TestLoadRoutingOverrides(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	body := "[routing]\nauto_send = true\nauto_threshold = 0.95\n[routing.aliases]\napi = \"api-server\"\n"
+	got, err := config.Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := got.Routing
+	if !r.AutoSend || r.AutoThreshold != 0.95 || !reflect.DeepEqual(r.Aliases, map[string]string{"api": "api-server"}) {
+		t.Errorf("routing = %+v", r)
+	}
+}
+
+func TestLoadRoutingPartialKeepsDefaults(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	got, err := config.Load(writeConfig(t, "[routing]\nauto_send = true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Routing.AutoThreshold != 0.9 || got.Routing.Aliases == nil {
+		t.Errorf("routing = %+v", got.Routing)
+	}
+}
+
+func TestBadRoutingRejected(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	long := strings.Repeat("x", 201)
+	cases := []struct{ name, body, key string }{
+		{"zero", "[routing]\nauto_threshold = 0\n", "routing.auto_threshold"},
+		{"high", "[routing]\nauto_threshold = 1.5\n", "routing.auto_threshold"},
+		{"negative", "[routing]\nauto_threshold = -1\n", "routing.auto_threshold"},
+		{"alias name space", "[routing.aliases]\n\"a b\" = \"x\"\n", "routing.aliases.a b"},
+		{"alias name empty", "[routing.aliases]\n\"\" = \"x\"\n", "routing.aliases."},
+		{"alias name long", "[routing.aliases]\n" + strings.Repeat("a", 65) + " = \"x\"\n", "routing.aliases." + strings.Repeat("a", 65)},
+		{"alias value empty", "[routing.aliases]\napi = \"\"\n", "routing.aliases.api"},
+		{"alias value long", "[routing.aliases]\napi = \"" + long + "\"\n", "routing.aliases.api"},
+	}
+	for _, tc := range cases {
+		_, err := config.Load(writeConfig(t, tc.body))
+		if err == nil || !strings.Contains(err.Error(), tc.key) {
+			t.Errorf("%s: err = %v, want mention of %q", tc.name, err, tc.key)
+		}
+	}
+}
+
+func TestRoutingBoundariesAccepted(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	body := "[routing]\nauto_threshold = 1\n[routing.aliases]\n" + strings.Repeat("a", 64) + " = \"" + strings.Repeat("x", 200) + "\"\n\"A.b_c-1\" = \"y\"\n"
+	if _, err := config.Load(writeConfig(t, body)); err != nil {
+		t.Fatal(err)
 	}
 }
