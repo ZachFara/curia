@@ -20,6 +20,10 @@ GOFUMPT_VERSION       := v0.12.0
 STATICCHECK_VERSION   := v0.8.2
 DEADCODE_VERSION      := v0.52.0
 
+# GoReleaser is not a `make check` tool: it is run with `go run` by
+# release-snapshot, and by .github/workflows/release.yml at the same version.
+GORELEASER_VERSION    := v2.20.2
+
 GOLANGCI_LINT := $(BIN)/golangci-lint
 GOFUMPT       := $(BIN)/gofumpt
 STATICCHECK   := $(BIN)/staticcheck
@@ -33,14 +37,14 @@ BOUNDARY_LINTERS   := depguard
 # Every tracked or untracked-but-not-ignored Go file (skips .scratch/ etc.).
 GO_FILES = $$(git ls-files --cached --others --exclude-standard -- '*.go')
 
-.PHONY: check check-gates tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout test build clean
+.PHONY: check check-gates tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test build release-snapshot clean
 
 ## check: run every gate, in order. This is what the hook and CI run.
 check:
 	@scripts/with-test-lock.sh $(MAKE) --no-print-directory check-gates
 
 ## check-gates: the gates themselves; `check` runs them under the worktree lock
-check-gates: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout test
+check-gates: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test
 	@echo "==> make check: all gates passed"
 
 ## tools: install the pinned tool versions into .bin/
@@ -132,6 +136,11 @@ layout:
 	@echo "==> layout check"
 	scripts/check-layout.sh
 
+## install-script: offline tests of scripts/install.sh (no network, no real home)
+install-script:
+	@echo "==> install.sh tests"
+	@sh scripts/install_test.sh
+
 ## test: all tests under the race detector
 # Packages run one at a time (-p 1): several packages hold latency gates
 # (the hook's 20 ms budget, the end-to-end 50 ms budget), and with packages
@@ -145,6 +154,10 @@ test:
 build:
 	go build -o curia ./cmd/curia
 
+## release-snapshot: build every release archive locally into dist/ (gitignored); publishes nothing
+release-snapshot:
+	go run github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION) release --snapshot --clean
+
 ## clean: remove the built binary and installed tools
 clean:
-	rm -rf curia $(BIN)
+	rm -rf curia dist $(BIN)

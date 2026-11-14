@@ -1,0 +1,47 @@
+# Publishes a release when a version tag is pushed: runs the same gate as CI,
+# then GoReleaser (.goreleaser.yaml) builds the archives and checksums, creates
+# the GitHub release and updates the Homebrew formula in ZachFara/homebrew-tap.
+# It never runs for pull requests or branch pushes.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: GoReleaser builds the changelog from the commits since
+      # the previous tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Reads the toolchain directive in go.mod, so the release uses the same
+      # Go as CI and local builds.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # tmux is installed so the real-tmux tests run instead of skipping.
+      - name: install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: make check
+        run: make check
+
+      # The version is the same one `make release-snapshot` uses.
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: v2.20.2
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

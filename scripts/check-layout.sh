@@ -13,11 +13,13 @@ cd "$(git rev-parse --show-toplevel)"
 root_files=(
 	.gitignore
 	.golangci.yml
+	.goreleaser.yaml
 	AGENTS.md
 	CLAUDE.md
 	Makefile
 	LICENSE
 	PROGRESS.md
+	README.md
 	go.mod
 	go.sum
 	lefthook.yml
