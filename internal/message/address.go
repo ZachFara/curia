@@ -135,24 +135,32 @@ func validName(name string) bool {
 	return true
 }
 
-// notMessages are the starts of prompts that Claude Code builds itself, from
-// a background task or another agent; such a prompt never confirms a typed
-// line, whatever it holds (Ruling 102).
-var notMessages = []string{"<task-notification", "<agent-message"}
+// agentPrompts are the starts of prompts that Claude Code builds itself,
+// from a background task or another agent (Ruling 102).
+var agentPrompts = []string{"<task-notification", "<agent-message"}
+
+// AgentBuilt reports whether prompt is one Claude Code built itself: it
+// starts, after white space, with "<task-notification" (a background task's
+// notification) or "<agent-message" (a subagent's report). Such a prompt
+// confirms no typed line, neither a message nor an answer, whatever it
+// quotes (Ruling 102); this is the one list of those starts.
+func AgentBuilt(prompt string) bool {
+	start := strings.TrimLeftFunc(prompt, unicode.IsSpace)
+	for _, p := range agentPrompts {
+		if strings.HasPrefix(start, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // Names reports whether prompt holds the typed line of message id: "Message
 // <id> " (the id, then a space), so M-1 is not taken for M-12. An id that is
-// not valid, or a prompt that starts (after white space) with
-// "<task-notification" or "<agent-message", names nothing.
+// not valid, or a prompt Claude Code built itself (AgentBuilt), names
+// nothing.
 func Names(prompt, id string) bool {
-	if !ValidID(id) {
+	if !ValidID(id) || AgentBuilt(prompt) {
 		return false
-	}
-	start := strings.TrimLeftFunc(prompt, unicode.IsSpace)
-	for _, p := range notMessages {
-		if strings.HasPrefix(start, p) {
-			return false
-		}
 	}
 	return strings.Contains(prompt, "Message "+id+" ")
 }

@@ -714,6 +714,137 @@ func TestHookExitsZeroAndSilentWhenDecisionQueryFails(t *testing.T) {
 	}
 }
 
+// hookQueueMessages stores a queued instruction from the user to session
+// for each of texts in the store at db, and returns their ids.
+func hookQueueMessages(t *testing.T, db, session string, texts ...string) []string {
+	t.Helper()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	var ids []string
+	for _, text := range texts {
+		m, err := st.CreateMessage(context.Background(), model.Message{
+			Text: text, Kind: model.KindInstruction, Sender: model.SenderUser, TargetSession: session,
+			RoutedBy: model.RoutedAddress, Status: model.MsgQueued, CreatedAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+// hookMessageStatus returns message id's status and delivery path.
+func hookMessageStatus(t *testing.T, db, id string) (model.MessageStatus, model.DeliveryVia) {
+	t.Helper()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	m, found, err := st.GetMessage(context.Background(), id)
+	if err != nil || !found {
+		t.Fatalf("GetMessage(%s) = found %v, err %v", id, found, err)
+	}
+	return m.Status, m.DeliveredVia
+}
+
+func TestStdoutOnlyOnBlockedStopWithMessages(t *testing.T) {
+	db := hookHome(t)
+	body := `{"session_id":"A","cwd":"` + t.TempDir() + `"}`
+	hookWantExitZero(t, hookRunStreams(t, strings.NewReader(body), "hook", "SessionStart"))
+	ids := hookQueueMessages(t, db, "A", "use pnpm, not npm", "then run the api tests")
+	for _, kind := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "SubagentStop"} {
+		res := hookRunStreams(t, strings.NewReader(body), "hook", kind)
+		hookWantExitZero(t, res)
+		if res.stdout != "" {
+			t.Errorf("%s with queued messages wrote %q, want nothing", kind, res.stdout)
+		}
+	}
+	if got, _ := hookMessageStatus(t, db, ids[0]); got != model.MsgQueued {
+		t.Fatalf("before Stop %s is %s, want queued", ids[0], got)
+	}
+
+	res := hookRunStreams(t, strings.NewReader(body), "hook", "Stop")
+	hookWantExitZero(t, res)
+	want := `{"decision":"block","reason":"Curia: messages for you.\nMessage M-1 from the user: use pnpm, not npm.\nMessage M-2 from the user: then run the api tests."}` + "\n"
+	if res.stdout != want {
+		t.Errorf("Stop wrote\n %q\nwant\n %q", res.stdout, want)
+	}
+	// M8: the log names the messages the Stop handed over.
+	if len(res.log) != 1 || !strings.Contains(res.log[0], `level=INFO msg="hook Stop delivered messages" ids="M-1 M-2"`) {
+		t.Errorf("log = %q, want one INFO line naming M-1 and M-2", res.log)
+	}
+	for _, id := range ids {
+		if got, via := hookMessageStatus(t, db, id); got != model.MsgDelivered || via != model.ViaStopHook {
+			t.Errorf("after Stop %s is %s via %q, want delivered via stop_hook", id, got, via)
+		}
+	}
+	res = hookRunStreams(t, strings.NewReader(body), "hook", "Stop")
+	hookWantExitZero(t, res)
+	if res.stdout != "" {
+		t.Errorf("Stop with nothing queued wrote %q, want nothing", res.stdout)
+	}
+}
+
+// Answers and messages at once: still one line, answers first, and one log
+// line for each kind.
+func TestHookStopPrintsAnswersThenMessages(t *testing.T) {
+	db := hookHome(t)
+	body := `{"session_id":"A","cwd":"` + t.TempDir() + `"}`
+	hookWantExitZero(t, hookRunStreams(t, strings.NewReader(body), "hook", "SessionStart"))
+	answer := hookQueueAnswer(t, db, "A")
+	ids := hookQueueMessages(t, db, "A", "and rebase on main")
+	res := hookRunStreams(t, strings.NewReader(body), "hook", "Stop")
+	hookWantExitZero(t, res)
+	if strings.Count(res.stdout, "\n") != 1 || !strings.HasPrefix(res.stdout, `{"decision":"block","reason":"Curia: decisions answered`) ||
+		!strings.Contains(res.stdout, `Continue.\nCuria: messages for you.\nMessage M-1 from the user: and rebase on main."}`) {
+		t.Errorf("Stop wrote %q, want one line with the answer, then the message", res.stdout)
+	}
+	if len(res.log) != 2 || !strings.Contains(res.log[0], `level=INFO msg="hook Stop delivered answers" ids=`+answer) ||
+		!strings.Contains(res.log[1], `level=INFO msg="hook Stop delivered messages" ids=`+ids[0]) {
+		t.Errorf("log = %q, want the answer line, then the message line", res.log)
+	}
+}
+
+// A message query that fails, the claim or the read before it, is logged;
+// the hook prints nothing, writes nothing to stderr and exits 0.
+func TestHookExitsZeroAndSilentWhenMessageQueryFails(t *testing.T) {
+	for _, tc := range []struct{ name, sql, want string }{
+		{"claim", `CREATE TRIGGER no_claim BEFORE UPDATE ON messages BEGIN SELECT RAISE(FAIL, 'boom'); END`, "boom"},
+		{"read", `ALTER TABLE messages RENAME TO messages_gone`, "no such table: messages"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := hookHome(t)
+			body := `{"session_id":"A","cwd":"` + t.TempDir() + `"}`
+			hookWantExitZero(t, hookRunStreams(t, strings.NewReader(body), "hook", "SessionStart"))
+			hookQueueMessages(t, db, "A", "use pnpm")
+			raw, err := sql.Open("sqlite", db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = raw.Close() }()
+			if _, err = raw.Exec(tc.sql); err != nil {
+				t.Fatal(err)
+			}
+			res := hookRunStreams(t, strings.NewReader(body), "hook", "Stop")
+			hookWantExitZero(t, res)
+			if res.stdout != "" {
+				t.Errorf("stdout = %q, want nothing", res.stdout)
+			}
+			if len(res.log) != 1 || !strings.Contains(res.log[0], "hook failed") || !strings.Contains(res.log[0], tc.want) {
+				t.Errorf("log = %q, want one line with %q", res.log, tc.want)
+			}
+			if s := getSession(t, db, "A"); s.State != model.StateIdle {
+				t.Errorf("A is %s, want idle: the Stop is still recorded", s.State)
+			}
+		})
+	}
+}
+
 // A claim that committed is delivered even when Run also reports an error
 // (a transcript it could not read): the answer is no longer queued.
 func TestHookEmitsBlockBesideAnError(t *testing.T) {
