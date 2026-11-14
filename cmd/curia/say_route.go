@@ -208,6 +208,7 @@ func sayAddressed(addr message.Address, rest string, kind model.MessageKind, can
 	if len(matches) == 0 && addr.TaskID == "" {
 		matches = sayTeamLeads(sayUnalias(addr.Name, aliases), sessions, cands)
 	}
+	matches = route.ForKind(kind, matches, cands)
 	if len(matches) == 0 {
 		if addr.TaskID != "" {
 			return sayPlan{}, fmt.Errorf("%s is not a target: no such task, or it is in review, done or dropped", addr.TaskID)
@@ -246,7 +247,8 @@ func sayUnalias(name string, aliases map[string]string) string {
 func sayTeamLeads(name string, sessions []model.Session, cands []route.Candidate) []route.Candidate {
 	var teams []string
 	for _, s := range sessions {
-		if s.TeamRole == model.RoleTeammate && s.TeamID != "" && s.Branch == name && s.State != model.StateEnded {
+		if s.TeamRole == model.RoleTeammate && s.TeamID != "" && s.Branch == name &&
+			s.State != model.StateEnded && s.State != model.StateStale {
 			teams = append(teams, s.TeamID)
 		}
 	}
