@@ -9,7 +9,8 @@ import (
 
 // promptFixture reads testdata/prompt/name. Files named lc2-* and lc3-*
 // are raw `capture-pane -p` captures of Claude Code 2.1.323 from live checks
-// 2 and 3 (home paths, user and host names replaced). Files named built-*
+// 2 and 3, and lc4-* of Claude Code 2.1.325 from Plan 3's live probe (home
+// paths, user and host names replaced). Files named built-*
 // were not captured: they are a captured screen changed as a report
 // describes (built-esc-again: the "Esc again to clear" footer, never shown
 // in live check 3; built-waiting-background: the waiting line without the
@@ -37,15 +38,26 @@ var promptCases = map[string]promptState{
 	"lc3-idle-auto-after-subagent.txt":    promptEmpty,
 	"lc3-idle-auto-after-clear.txt":       promptEmpty,
 	"lc3-idle-auto-after-argv-prompt.txt": promptEmpty,
+	// Ruling 101: after a subagent has run, 2.1.325 keeps "/tasks to see
+	// subagents" in the auto mode footer (the only mode captured with it).
+	"lc4-idle-auto-tasks-hint.txt": promptEmpty,
+	// A team lead after its team was shut down: the plain footer again.
+	"lc4-idle-lead-after-team-shutdown.txt": promptEmpty,
+	// Refused: tmux's focus-events hint, on the footer line or under it.
+	"lc4-idle-focus-hint-same-line.txt":    promptUnknown,
+	"lc4-fresh-focus-hint-second-line.txt": promptUnknown,
 	// Refused, and safe: a footer cut short at 34 columns.
 	"lc3-idle-auto-34col.txt": promptUnknown,
 	// A fresh session's dim placeholder reads as a draft: a plain capture
 	// cannot tell them apart (live check 3, defect 3).
 	"lc3-idle-fresh-acceptedits-placeholder.txt": promptDraft,
-	// Agents offered or listed under the box.
+	// Agents offered under the box.
 	"lc3-idle-fresh-agents-hint.txt":        promptAgents,
 	"lc3-idle-fresh-manual-placeholder.txt": promptAgents,
-	"lc3-agents-listed-main-stopped.txt":    promptAgents,
+	"lc4-resume-agents-hint.txt":            promptAgents,
+	// Background agents or a live team's teammates listed under the box.
+	"lc3-agents-listed-main-stopped.txt": promptManage,
+	"lc4-team-lead-agents-listed.txt":    promptManage,
 	// Drafts.
 	"lc3-draft-oneline.txt":             promptDraft,
 	"lc3-draft-multiline-backslash.txt": promptDraft,
@@ -104,7 +116,9 @@ func TestDefects123ReadPrompt(t *testing.T) {
 	for state, want := range map[promptState]string{
 		promptDialog: "a dialog or menu is open in the agent's pane; nothing typed",
 		promptAgents: "the agent's prompt lists background agents (or offers them); nothing typed",
-		promptShell:  "the pane shows a shell: the session's Claude Code is not at its prompt; nothing typed",
+		promptManage: "background agents or teammates are listed under the agent's prompt " +
+			"(nothing is typed to a team lead while its teammates are alive); nothing typed",
+		promptShell: "the pane shows a shell: the session's Claude Code is not at its prompt; nothing typed",
 	} {
 		if promptNotes[state] != want {
 			t.Errorf("note for %d = %q, want %q", state, promptNotes[state], want)
@@ -127,9 +141,40 @@ func TestReadPromptFailsSafeOnChanges(t *testing.T) {
 		"short rule":           "x\n" + "─────\n❯\u00a0\n" + rule + "\n",
 		"running footer":       strings.Replace(idle, "(shift+tab to cycle)", "(shift+tab to cycle) · esc to interrupt", 1),
 		"mode not captured":    strings.Replace(idle, "auto mode on", "bypass permissions on", 1),
+		// Ruling 101 accepts the /tasks hint only as captured: after the auto
+		// mode footer, alone.
+		"tasks hint twice":       strings.Replace(idle, "(shift+tab to cycle)", "(shift+tab to cycle) · /tasks to see subagents · /tasks to see subagents", 1),
+		"tasks hint and manage":  strings.Replace(idle, "(shift+tab to cycle)", "(shift+tab to cycle) · /tasks to see subagents · ↓ to manage", 1),
+		"tasks hint and running": strings.Replace(idle, "(shift+tab to cycle)", "(shift+tab to cycle) · /tasks to see subagents · esc to interrupt", 1),
+		"tasks hint before mode": strings.Replace(idle, "⏵⏵ auto mode on (shift+tab to cycle)", "/tasks to see subagents · ⏵⏵ auto mode on (shift+tab to cycle)", 1),
+		"tasks hint, other text": strings.Replace(idle, "(shift+tab to cycle)", "(shift+tab to cycle) · /tasks to see agents", 1),
 	} {
 		if got := readPrompt(screen); got == promptEmpty {
 			t.Errorf("%s: read as an empty prompt", name)
+		}
+	}
+}
+
+// Ruling 101: the "/tasks to see subagents" hint is accepted after the auto
+// mode footer, the only mode a capture shows it with; with the other three
+// modes' footers it is refused until a capture shows them.
+func TestTasksHintOnlyWhereCaptured(t *testing.T) {
+	idle := promptFixture(t, "lc4-idle-auto-tasks-hint.txt")
+	if got := readPrompt(idle); got != promptEmpty {
+		t.Fatalf("captured /tasks footer: readPrompt = %d, want empty", got)
+	}
+	for _, footer := range []string{
+		"⏵⏵ accept edits on (shift+tab to cycle)",
+		"⏸ plan mode on (shift+tab to cycle)",
+		"⏸ manual mode on · ? for shortcuts",
+	} {
+		screen := strings.Replace(idle, "⏵⏵ auto mode on (shift+tab to cycle)", footer, 1)
+		if got := readPrompt(screen); got != promptUnknown {
+			t.Errorf("%s · /tasks to see subagents: readPrompt = %d, want unknown", footer, got)
+		}
+		plain := strings.Replace(screen, " · /tasks to see subagents", "", 1)
+		if got := readPrompt(plain); got != promptEmpty {
+			t.Errorf("%s alone: readPrompt = %d, want empty (setup)", footer, got)
 		}
 	}
 }
