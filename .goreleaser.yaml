@@ -79,8 +79,10 @@ brews:
       Claude Code and to add its tmux snippet to ~/.tmux.conf. Run
       `curia uninstall` before `brew uninstall curia` to remove them again.
 
-      The hooks record this binary's versioned path under Cellar. To upgrade,
-      run `curia uninstall`, then `brew upgrade curia`, then `curia install`.
+      The hooks record the stable path of this binary (the symlink on your
+      PATH), so `brew upgrade curia` needs nothing else. If you installed an
+      older release, which recorded the versioned path under Cellar, run
+      `curia install` once after upgrading to replace those entries.
 
       Curia needs Claude Code, which this formula does not install:
       https://claude.com/claude-code

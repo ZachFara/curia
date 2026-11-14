@@ -54,7 +54,9 @@ Restart running Claude Code sessions afterwards so they pick up the hooks, skill
 
 `curia uninstall` removes what install added: the hook entries, the four permission rules, the MCP server, the skill, the tmux block and the snippet file. Restart tmux, or follow the commands it prints, to drop the key bindings and the hook from a running server. Curia's database in `~/.local/share/curia/` is not deleted.
 
-The hook and MCP entries record the full path of the `curia` binary, with symlinks resolved. With Homebrew that is a versioned path under `Cellar`, which stops existing after an upgrade. To upgrade, run `curia uninstall`, then `brew upgrade curia`, then `curia install`. The install script and `go install` give a stable path, so rerunning them is enough.
+The hook, MCP and tmux entries record the path you would type to run `curia`: the `curia` found on `PATH` when it is the running binary (with Homebrew, the stable symlink `/opt/homebrew/bin/curia`, not the versioned path under `Cellar`), otherwise the path the binary was started by. `curia install` prints the path it recorded, and warns when that path is versioned or not on `PATH`, because the entries break if that file moves; put `curia` on `PATH` and run `curia install` again to fix that.
+
+A `brew upgrade curia` needs nothing else. If you installed an older release, which recorded the `Cellar` path, run `curia install` once after upgrading: it replaces those entries with the stable path, and `curia uninstall` removes them either way.
 
 ## Keys and commands
 
