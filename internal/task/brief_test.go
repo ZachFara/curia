@@ -17,7 +17,7 @@ Rules for this session:
 const teamLine = "- You may form an agent team if the task splits into independent parts. You are the lead: teammates bring their questions to you, and only you raise Curia decision tickets.\n"
 
 const briefTail = `- Commit your work on this branch as you go. Do not push, merge or open a pull request unless the task says so.
-- When the task is finished, make sure everything is committed, then end your turn with a short summary: what you changed, how you tested it, and anything left open.
+- When the task is finished, make sure everything is committed, then call the curia MCP tool complete_task with a short summary (what you changed, how you tested it, anything left open) and the state of the tests, and end your turn. The user reviews the work; if they ask for changes, their note arrives as a message.
 
 Task T-42: Fix auth
 
@@ -40,5 +40,17 @@ func TestBriefKeepsBody(t *testing.T) {
 	body := "run $(x) and \"quotes\" 'q'\n;\n`tick`"
 	if got := Brief(bt(body), true); !strings.HasSuffix(got, "\n\n"+body) {
 		t.Errorf("body altered: %q", got)
+	}
+}
+
+func TestBriefNamesCompleteTask(t *testing.T) {
+	for _, team := range []bool{false, true} {
+		got := Brief(bt("Do it."), team)
+		if n := strings.Count(got, "complete_task"); n != 1 {
+			t.Errorf("team=%v: complete_task appears %d times", team, n)
+		}
+		if strings.Contains(got, "end your turn with a short summary") {
+			t.Errorf("team=%v: old wording remains", team)
+		}
 	}
 }

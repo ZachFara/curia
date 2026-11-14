@@ -20,7 +20,7 @@ func Brief(t model.Task, team bool) string {
 		b.WriteString(teamRule)
 	}
 	b.WriteString("- Commit your work on this branch as you go. Do not push, merge or open a pull request unless the task says so.\n")
-	b.WriteString("- When the task is finished, make sure everything is committed, then end your turn with a short summary: what you changed, how you tested it, and anything left open.\n\n")
+	b.WriteString("- When the task is finished, make sure everything is committed, then call the curia MCP tool complete_task with a short summary (what you changed, how you tested it, anything left open) and the state of the tests, and end your turn. The user reviews the work; if they ask for changes, their note arrives as a message.\n\n")
 	b.WriteString("Task " + t.ID + ": " + t.Title + "\n\n")
 	b.WriteString(t.Body)
 	return b.String()
