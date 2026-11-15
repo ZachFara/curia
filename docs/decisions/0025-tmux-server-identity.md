@@ -1,4 +1,4 @@
-# 0023. tmux server identity
+# 0025. tmux server identity
 
 Status: accepted (Plan 4 setup). Closes Plan 2 final-review M7 and Plan 1 Open Question 13.
 
