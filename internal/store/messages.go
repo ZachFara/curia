@@ -490,19 +490,6 @@ func (s *Store) CheckMessages(ctx context.Context, callerSession string, now tim
 	if callerSession == "" {
 		return nil, nil
 	}
-	// Nothing to claim or confirm (the usual case): read, with no write
-	// transaction.
-	var pending bool
-	if err := s.db.QueryRowContext(ctx, checkPendingQuery, callerSession).Scan(&pending); err != nil {
-		return nil, failMessage("check messages for", callerSession, err)
-	}
-	if !pending {
-		out, err := queryMessages(ctx, s.db, checkTypedQuery, "[]", callerSession)
-		if err != nil {
-			return nil, failMessage("check messages for", callerSession, err)
-		}
-		return out, nil
-	}
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, failMessage("check messages for", callerSession, err)
@@ -530,8 +517,6 @@ func (s *Store) CheckMessages(ctx context.Context, callerSession string, now tim
 // CheckMessages' statements. msgUndelivered, word for word, lets SQLite
 // read the partial index messages_undelivered.
 const (
-	checkPendingQuery = `SELECT EXISTS (SELECT 1 FROM messages
-WHERE target_session = ? AND ` + msgUndelivered + ` AND (status = 'queued' AND kind = 'instruction' OR ` + msgTyped + `))`
 	checkClaimQuery = `
 UPDATE messages SET status = 'delivered', delivered_via = 'check', delivered_at = ?, confirmed_at = ?
 WHERE target_session = ? AND ` + msgUndelivered + ` AND status = 'queued' AND kind = 'instruction' RETURNING n`
