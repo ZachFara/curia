@@ -1,0 +1,21 @@
+{
+ "schema_version": 1,
+ "session_id": "7c1e5a52-0f1b-4c1e-9a53-5d3f0c1a2b44",
+ "at": "2026-11-11T13:40:00Z",
+ "model": "claude-sonnet-4-5",
+ "cost_usd": 4.12,
+ "context_used": 142000,
+ "context_max": 200000,
+ "cache_expires_at": "2026-11-11T14:05:00Z",
+ "cache_rebuild_usd": 1.68,
+ "rate_limits": {
+  "five_hour": {
+   "used_percentage": 62,
+   "resets_at": "2026-11-11T16:00:00Z"
+  },
+  "seven_day": {
+   "used_percentage": 31,
+   "resets_at": "2026-11-14T09:00:00Z"
+  }
+ }
+}
