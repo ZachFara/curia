@@ -21,7 +21,11 @@ import (
 // ended nor already stale and whose non-empty Pane is not among live, or
 // whose non-zero StartedAt is before the live server's start: a restarted
 // server numbers its panes from %0 again, so the pane id now names another
-// pane. A session with no pane (started outside tmux) is never marked stale.
+// pane. A session with no pane (started outside tmux) is never marked stale,
+// and neither is one recorded on another tmux server: its Socket is known and
+// differs from the live server's, the first non-empty Socket among live
+// (pane ids are reused across servers). An unknown socket on either side
+// decides nothing.
 // Each change goes through store.UpdateSession and re-checks the stored row,
 // because a hook may have moved, restarted or ended the session since it was
 // listed. It returns the distinct non-empty tmux windows of the sessions it
@@ -50,8 +54,9 @@ func Reconcile(ctx context.Context, st *store.Store, live []tmux.Pane, now time.
 
 // server is what Reconcile knows of the live tmux server.
 type server struct {
-	alive map[string]bool
-	start time.Time // zero when no pane reported it
+	alive  map[string]bool
+	start  time.Time // zero when no pane reported it
+	socket string    // "" when no pane reported it
 }
 
 func newServer(live []tmux.Pane) server {
@@ -61,16 +66,22 @@ func newServer(live []tmux.Pane) server {
 		if p.ServerStart.After(srv.start) {
 			srv.start = p.ServerStart
 		}
+		if srv.socket == "" {
+			srv.socket = p.Socket
+		}
 	}
 	return srv
 }
 
 // goneFrom reports whether s is still a live session in pane whose pane is
-// gone, that is, whether s should become stale: pane is not on the server,
-// or s started before the server did.
+// gone, that is, whether s should become stale: s is not on another server,
+// and pane is not on the server or s started before the server did.
 func (srv server) goneFrom(s model.Session, pane string) bool {
 	if s.Pane == "" || s.Pane != pane || s.State == model.StateEnded || s.State == model.StateStale {
 		return false
+	}
+	if s.Socket != "" && srv.socket != "" && s.Socket != srv.socket {
+		return false // on another server, whose panes were not listed
 	}
 	return !srv.alive[pane] || (!s.StartedAt.IsZero() && s.StartedAt.Before(srv.start))
 }
@@ -96,9 +107,22 @@ func markStale(ctx context.Context, st *store.Store, listed model.Session, srv s
 	return window, nil
 }
 
-// Rank groups, in order: needs_decision, waiting, idle-unseen, working,
-// idle-seen, stale, then any state it does not know. Within a group the
-// oldest UpdatedAt comes first. Rank returns a new slice; s is unchanged.
+// WithReviews returns a copy of sessions in which ReviewPending is set on every session that is neither
+// ended nor stale and whose TaskID is a key of pending (task id to review id). The input is not changed.
+func WithReviews(sessions []model.Session, pending map[string]string) []model.Session {
+	out := slices.Clone(sessions)
+	for i := range out {
+		_, ok := pending[out[i].TaskID]
+		out[i].ReviewPending = ok && out[i].TaskID != "" &&
+			out[i].State != model.StateEnded && out[i].State != model.StateStale
+	}
+	return out
+}
+
+// Rank groups, in order: needs_decision, waiting, review-ready (idle with
+// ReviewPending, seen or not), idle-unseen, working, idle-seen, stale, then
+// any state it does not know. Within a group the oldest UpdatedAt comes
+// first. Rank returns a new slice; s is unchanged.
 func Rank(s []model.Session) []model.Session {
 	out := slices.Clone(s)
 	slices.SortStableFunc(out, func(a, b model.Session) int {
@@ -111,6 +135,7 @@ func Rank(s []model.Session) []model.Session {
 const (
 	groupNeedsDecision = iota
 	groupWaiting
+	groupReviewReady
 	groupIdleUnseen
 	groupWorking
 	groupIdleSeen
@@ -127,6 +152,9 @@ func group(s model.Session) int {
 	case model.StateWaiting:
 		return groupWaiting
 	case model.StateIdle:
+		if s.ReviewPending {
+			return groupReviewReady
+		}
 		if unseen(s) {
 			return groupIdleUnseen
 		}
@@ -189,7 +217,8 @@ func Badge(c Counts) string {
 }
 
 // Next returns the first ranked session that has a pane and is
-// needs_decision, waiting or idle-unseen, and false if there is none.
+// needs_decision, waiting, review-ready or idle-unseen, and false if there
+// is none.
 func Next(s []model.Session) (model.Session, bool) {
 	for _, x := range Rank(s) {
 		if x.Pane != "" && group(x) <= groupJump {
