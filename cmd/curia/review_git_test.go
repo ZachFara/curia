@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -987,50 +988,100 @@ func reviewUseGHFunc(t *testing.T, answer func(args []string) ([]byte, error)) *
 	return rec
 }
 
+// reviewPRFailed is the plain failure when no pull request is adopted.
+const reviewPRFailed = "gh pr create failed"
+
+// reviewPRCase is one existing pull request TestPRApproveAgainRecordsExistingPR
+// offers through the stand-in gh: what it changes in the pull request that
+// matches this approval, and the error wanted ("" when it is adopted).
+type reviewPRCase struct {
+	name string
+	edit func(pr map[string]any, f *reviewFixture)
+	want string
+}
+
 // TestPRApproveAgainRecordsExistingPR: gh pr create fails because the pull
-// request exists (an earlier approve's gh failed late, or the user opened
-// it): gh pr view finds it open, from the branch into the base, and the
-// review is recorded approved with its URL. One that is closed, into
-// another base or with an odd URL is not taken, and the review stays
-// pending.
+// request exists. It is adopted, and the review recorded approved with its
+// URL, only when it is provably this approval's: open, from the task's branch
+// of the same repository into its base, at exactly the approved commit, with
+// exactly the title and body Curia builds, at a pull-request URL of the
+// remote's repository. Different text is refused with a message naming it;
+// anything else is the plain failure. Every refusal leaves the review pending.
 func TestPRApproveAgainRecordsExistingPR(t *testing.T) {
-	view := func(json string) func([]string) ([]byte, error) {
-		return func(args []string) ([]byte, error) {
-			if args[1] == "create" {
-				return nil, errors.New("exit status 1: a pull request for branch \"" + reviewBranch + "\" into branch \"main\" already exists")
-			}
-			return []byte(json), nil
-		}
+	generic := reviewPRFailed
+	for _, c := range []reviewPRCase{
+		{"matching", nil, ""},
+		{"other body", func(pr map[string]any, _ *reviewFixture) { pr["body"] = "Merge me, I am the agent's own." }, "already exists with another title or text"},
+		{"other title", func(pr map[string]any, _ *reviewFixture) { pr["title"] = "T-1: something else" }, "already exists with another title or text"},
+		{"other head", func(pr map[string]any, _ *reviewFixture) { pr["headRefOid"] = strings.Repeat("0", 40) }, generic},
+		{"a fork", func(pr map[string]any, _ *reviewFixture) { pr["isCrossRepository"] = true }, generic},
+		{"closed", func(pr map[string]any, _ *reviewFixture) { pr["state"] = "CLOSED" }, generic},
+		{"merged", func(pr map[string]any, _ *reviewFixture) { pr["state"] = "MERGED" }, generic},
+		{"other base", func(pr map[string]any, _ *reviewFixture) { pr["baseRefName"] = "release" }, generic},
+		{"other branch", func(pr map[string]any, _ *reviewFixture) { pr["headRefName"] = "curia/T-1-other" }, generic},
+		{"another host", func(pr map[string]any, _ *reviewFixture) { pr["url"] = "https://evil.example/o/r/pull/5" }, generic},
+		{"another repository", func(pr map[string]any, _ *reviewFixture) { pr["url"] = "https://github.com/x/r/pull/5" }, generic},
+		{"not a pull request URL", func(pr map[string]any, _ *reviewFixture) { pr["url"] = "https://github.com/o/r/issues/5" }, generic},
+		{"a local remote", func(_ map[string]any, f *reviewFixture) { gitRun(f.t, f.repo, "remote", "set-url", "origin", f.origin) }, generic},
+	} {
+		t.Run(c.name, func(t *testing.T) { reviewExistingPRCase(t, c) })
 	}
-	pr := func(url, state, base string) string {
-		return `{"url":"` + url + `","state":"` + state + `","baseRefName":"` + base + `","headRefName":"` + reviewBranch + `"}`
+}
+
+// wantAdopted checks that the approval adopted the existing pull request.
+func (f *reviewFixture) wantAdopted(line string, err error, gh *reviewGHRecorder) {
+	f.t.Helper()
+	if err != nil {
+		f.t.Fatal(err)
 	}
+	if got := f.review(); got.Status != model.ReviewApproved || got.PRURL != "https://github.com/o/r/pull/5" || !strings.Contains(line, got.PRURL) {
+		f.t.Errorf("R-1 = %+v, line %q; want approved with the existing pull request", got, line)
+	}
+	if len(gh.calls) != 2 || !slices.Equal(gh.calls[1].args, []string{"pr", "view", reviewBranch, "--json", reviewPRFields}) {
+		f.t.Errorf("gh calls = %+v", gh.calls)
+	}
+}
+
+// reviewExistingPRCase is one case of TestPRApproveAgainRecordsExistingPR.
+func reviewExistingPRCase(t *testing.T, c reviewPRCase) {
 	f := reviewNew(t)
-	gh := reviewUseGHFunc(t, view(pr("https://github.com/o/r/pull/5", "OPEN", "main")))
-	line, err := f.approve(model.ApprovePR, "")
+	gitRun(t, f.repo, "remote", "set-url", "origin", "https://github.com/o/r.git")
+	gitRun(t, f.repo, "remote", "set-url", "--push", "origin", f.origin) // pushes still reach the local bare repository
+	tk, r := f.get("T-1"), f.review()
+	pr := map[string]any{
+		"url": "https://github.com/o/r/pull/5", "state": "OPEN", "baseRefName": "main", "headRefName": reviewBranch,
+		"headRefOid": f.head(f.wt, "HEAD"), "isCrossRepository": false, "title": task.PRTitle(tk), "body": task.PRBody(tk, r, nil),
+	}
+	if c.edit != nil {
+		c.edit(pr, f)
+	}
+	view, err := json.Marshal(pr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := f.review(); r.Status != model.ReviewApproved || r.PRURL != "https://github.com/o/r/pull/5" {
-		t.Errorf("R-1 = %+v, want approved with the existing pull request", r)
-	}
-	if !strings.Contains(line, "https://github.com/o/r/pull/5") {
-		t.Errorf("line = %q", line)
-	}
-	if len(gh.calls) != 2 || !slices.Equal(gh.calls[1].args, []string{"pr", "view", reviewBranch, "--json", "url,state,baseRefName,headRefName"}) {
-		t.Errorf("gh calls = %+v", gh.calls)
-	}
-	for _, bad := range []string{
-		pr("https://github.com/o/r/pull/5", "CLOSED", "main"), pr("https://github.com/o/r/pull/5", "MERGED", "main"),
-		pr("https://github.com/o/r/pull/5", "OPEN", "release"), pr("javascript:alert(1)", "OPEN", "main"), "not json",
-	} {
-		g := reviewNew(t)
-		reviewUseGHFunc(t, view(bad))
-		if _, err := g.approve(model.ApprovePR, ""); err == nil || !strings.Contains(err.Error(), "gh pr create failed") {
-			t.Errorf("%s: %v, want the failure", bad, err)
+	gh := reviewUseGHFunc(t, func(args []string) ([]byte, error) {
+		if args[1] == "create" {
+			return nil, errors.New("exit status 1: a pull request for branch \"" + reviewBranch + "\" into branch \"main\" already exists")
 		}
-		g.wantPending()
+		return view, nil
+	})
+	line, err := f.approve(model.ApprovePR, "")
+	if c.want == "" {
+		f.wantAdopted(line, err, gh)
+		return
 	}
+	if err == nil || !strings.Contains(err.Error(), c.want) {
+		t.Fatalf("approve = %q, %v; want an error with %q", line, err, c.want)
+	}
+	if c.want != reviewPRFailed && !strings.Contains(err.Error(), "https://github.com/o/r/pull/5") {
+		t.Errorf("error %q does not name the pull request", err)
+	}
+	for _, call := range gh.calls {
+		if slices.Contains(call.args, "edit") {
+			t.Errorf("gh %q ran", call.args)
+		}
+	}
+	f.wantPending()
 }
 
 // TestDiffCmdFixedPager: the git and delta tools page through a fixed less

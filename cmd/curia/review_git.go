@@ -626,43 +626,94 @@ func reviewOpenPR(ctx context.Context, t model.Task, r model.Review, decided []m
 	if err = reviewSameHead(ctx, t, head); err != nil {
 		return "", fmt.Errorf("%s, but %w", pushed, err)
 	}
+	title, body := task.PRTitle(t), task.PRBody(t, r, decided)
 	gctx, cancel := context.WithTimeout(ctx, reviewGHLimit)
 	defer cancel()
-	out, err := reviewGH(gctx, t.Repo, "pr", "create", "--base", t.BaseBranch, "--head", t.Branch,
-		"--title", task.PRTitle(t), "--body", task.PRBody(t, r, decided))
+	out, err := reviewGH(gctx, t.Repo, "pr", "create", "--base", t.BaseBranch, "--head", t.Branch, "--title", title, "--body", body)
 	if err == nil {
 		return reviewPRURL(out), nil
 	}
-	// The pull request may exist already: opened by an earlier approve whose
-	// gh failed late, or by hand as the message below suggests (I8).
-	if url := reviewOpenPRURL(context.WithoutCancel(ctx), t); url != "" {
+	// The pull request may exist already, opened by an earlier approve whose gh failed late: it is adopted
+	// only when it is provably this approval's (reviewExistingPR).
+	url, other := reviewExistingPR(context.WithoutCancel(ctx), t, remote, head, title, body)
+	switch {
+	case other != nil:
+		return "", fmt.Errorf("%s, but %w", pushed, other)
+	case url != "":
 		return url, nil
 	}
-	return "", fmt.Errorf("%s, but gh pr create failed: %s. The review stays pending: approve again to retry, or open the pull request "+
-		"yourself and approve again to record it", pushed, sanitize.Line(err.Error(), reviewGitErrMax))
+	return "", fmt.Errorf("%s, but gh pr create failed: %s. The review stays pending: approve again to retry",
+		pushed, sanitize.Line(err.Error(), reviewGitErrMax))
 }
 
-// reviewOpenPRURL is the URL of the open pull request of t's branch into t's base, as gh pr view says
-// (argv, bounded by reviewGHLimit), or "" when there is none, gh fails, or what it prints is not one
-// plain https URL of the same form gh pr create's is kept in.
-func reviewOpenPRURL(ctx context.Context, t model.Task) string {
+// reviewPRView is what reviewExistingPR reads of gh pr view's JSON. It is untrusted: every field is
+// compared with what this approval expects, or validated, before use.
+type reviewPRView struct {
+	URL               string `json:"url"`
+	State             string `json:"state"`
+	BaseRefName       string `json:"baseRefName"`
+	HeadRefName       string `json:"headRefName"`
+	HeadRefOid        string `json:"headRefOid"`
+	IsCrossRepository bool   `json:"isCrossRepository"`
+	Title             string `json:"title"`
+	Body              string `json:"body"`
+}
+
+// reviewPRFields are the fields reviewExistingPR asks gh pr view for.
+const reviewPRFields = "url,state,baseRefName,headRefName,headRefOid,isCrossRepository,title,body"
+
+// reviewExistingPR looks for the pull request of t's branch when gh pr create failed, and returns its URL
+// when it is provably the one this approval would have opened: open, from t's branch of the same repository
+// (not a fork) into t's base, at exactly commit head, with exactly title and body, at the URL of a pull
+// request of the repository remote names. One that matches in all but its title or text was not opened by
+// Curia for this review: other says so and names its URL, and the review stays pending; Curia never edits
+// it. Anything else, a gh that fails included, is "" and nil.
+func reviewExistingPR(ctx context.Context, t model.Task, remote, head, title, body string) (url string, other error) {
+	pr, ok := reviewViewPR(ctx, t)
+	if !ok || pr.State != "OPEN" || pr.IsCrossRepository || pr.BaseRefName != t.BaseBranch ||
+		pr.HeadRefName != t.Branch || pr.HeadRefOid != head || !reviewRepoPRURL(ctx, t, remote, pr.URL) {
+		return "", nil
+	}
+	if pr.Title != title || pr.Body != body {
+		return "", fmt.Errorf("a pull request for %s already exists with another title or text than Curia gives this review: %s. "+
+			"Curia did not open it, so it is neither recorded nor changed; the review stays pending. Look at it, then close it "+
+			"and approve again, or approve with --merge", t.Branch, pr.URL)
+	}
+	return pr.URL, nil
+}
+
+// reviewViewPR is gh pr view's JSON for t's branch (argv, bounded by reviewGHLimit; gh's output is capped),
+// and whether gh gave one.
+func reviewViewPR(ctx context.Context, t model.Task) (reviewPRView, bool) {
 	gctx, cancel := context.WithTimeout(ctx, reviewGHLimit)
 	defer cancel()
-	out, err := reviewGH(gctx, t.Repo, "pr", "view", t.Branch, "--json", "url,state,baseRefName,headRefName")
+	out, err := reviewGH(gctx, t.Repo, "pr", "view", t.Branch, "--json", reviewPRFields)
+	var pr reviewPRView
+	if err != nil || json.Unmarshal(out, &pr) != nil {
+		return reviewPRView{}, false
+	}
+	return pr, true
+}
+
+// reviewRemoteURL is the form of a remote's URL whose host and repository path a pull request's URL must
+// share: https://host/owner/repo, git@host:owner/repo or ssh://git@host/owner/repo, with or without .git.
+var reviewRemoteURL = regexp.MustCompile(`^(?:https://|ssh://git@|git@)([A-Za-z0-9.-]{1,100})[/:]([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100}?)(?:\.git)?/?$`)
+
+// reviewRepoPRURL reports whether url is the URL of a pull request of the repository t's remote names:
+// https://<its host>/<owner>/<repo>/pull/<number>. A remote whose URL has no such form (a local path) has
+// no pull request URL that can be checked, so none is accepted.
+func reviewRepoPRURL(ctx context.Context, t model.Task, remote, url string) bool {
+	got, err := worktreeRun(ctx, worktreeGitLimit, t.Repo, "remote", "get-url", "--", remote)
 	if err != nil {
-		return ""
+		return false
 	}
-	var pr struct {
-		URL         string `json:"url"`
-		State       string `json:"state"`
-		BaseRefName string `json:"baseRefName"`
-		HeadRefName string `json:"headRefName"`
+	m := reviewRemoteURL.FindStringSubmatch(got)
+	if m == nil {
+		return false
 	}
-	if json.Unmarshal(out, &pr) != nil || pr.State != "OPEN" || pr.BaseRefName != t.BaseBranch ||
-		pr.HeadRefName != t.Branch || !reviewURLPattern.MatchString(pr.URL) {
-		return ""
-	}
-	return pr.URL
+	want := regexp.MustCompile(`^https://` + regexp.QuoteMeta(m[1]) + `/` + regexp.QuoteMeta(m[2]) + `/` +
+		regexp.QuoteMeta(m[3]) + `/pull/[1-9][0-9]{0,9}$`)
+	return want.MatchString(url)
 }
 
 // reviewSameHead refuses when t's branch is no longer at head.

@@ -1194,7 +1194,7 @@ func TestApproveFlagRefusesMovedBranch(t *testing.T) {
 func TestApproveFlagAcceptsPrefix(t *testing.T) {
 	f := reviewNew(t)
 	head := f.head(f.wt, "HEAD")
-	for _, bad := range []string{head[:6], strings.ToUpper(head[:7]), "HEAD", "main", "-x", "--upload-pack=x", head + "0", "g" + head[:7]} {
+	for _, bad := range []string{head[:6], "ABCDEF" + head[6:7], "HEAD", "main", "-x", "--upload-pack=x", head + "0", "g" + head[:7]} {
 		if _, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", bad); err == nil ||
 			!strings.Contains(err.Error(), "give the commit id you looked at, 7 to 64 lower-case hex digits") {
 			t.Errorf("--head %q: %v, want the refusal", bad, err)
