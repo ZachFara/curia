@@ -136,7 +136,16 @@ func listSettled(ctx context.Context, st *store.Store, f store.ListFilter, logPa
 func listSettledMarked(ctx context.Context, st *store.Store, client tmux.Client, f store.ListFilter, logPath string, now time.Time) ([]model.Session, error) {
 	sessions, windows, err := listSettled(ctx, st, f, logPath, now)
 	applyMarkers(ctx, client, st, logPath, "settle attention marker", windows)
-	return sessions, err
+	if err != nil {
+		return sessions, err
+	}
+	// A failed read leaves the sessions unmarked: ranking is a view, not a reason to fail.
+	pending, perr := st.PendingReviewTasks(ctx)
+	if perr != nil {
+		logWarn(logPath, "read pending reviews", "err", perr)
+		return sessions, nil
+	}
+	return fleet.WithReviews(sessions, pending), nil
 }
 
 // logWarn appends one warning to the log file at logPath, if it opens.
