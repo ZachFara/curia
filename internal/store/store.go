@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"modernc.org/sqlite" // also registers the pure-Go "sqlite" driver
@@ -32,6 +33,11 @@ var migrations embed.FS
 // and several Stores (in one or many processes) may share one file.
 type Store struct {
 	db *sql.DB
+
+	// restoreMu guards restoreClaim, the meta value of the restore claim
+	// this Store holds ("" for none), which ReleaseRestore gives up.
+	restoreMu    sync.Mutex
+	restoreClaim string
 }
 
 // ListFilter selects which sessions ListSessions returns.
