@@ -389,18 +389,13 @@ func TestMergeConflictAborts(t *testing.T) {
 			}
 			before, status := f.head(f.repo, "HEAD"), f.status()
 			_, err := f.approve(model.ApproveMerge, "")
-			if err == nil || !strings.HasSuffix(err.Error(), "; nothing was merged") || !strings.Contains(err.Error(), "CONFLICT") {
+			if err == nil || !strings.Contains(err.Error(), "; nothing was merged") || !strings.Contains(err.Error(), "CONFLICT") {
 				t.Fatalf("approve error = %v, want git's conflict message ending in \"; nothing was merged\"", err)
 			}
-			if f.hasMergeHead() {
-				t.Error("MERGE_HEAD is left")
+			if !strings.Contains(err.Error(), "git may have left ORIG_HEAD") || !strings.HasSuffix(err.Error(), ": they are harmless and need nothing") {
+				t.Errorf("approve error = %v, want the note on git's leftover files", err)
 			}
-			if got := f.status(); got != status {
-				t.Errorf("status = %q, want %q as before", got, status)
-			}
-			if got := f.head(f.repo, "HEAD"); got != before {
-				t.Errorf("HEAD moved to %s", got)
-			}
+			f.wantAsBefore(before, status)
 			f.wantPending()
 		})
 	}
@@ -413,7 +408,7 @@ func TestMergeHookFailureAborts(t *testing.T) {
 			lifecycleHooks(f.spawnFixture, hook, "#!/bin/sh\necho \"refused by "+hook+"\" >&2\nexit 1\n")
 			before := f.head(f.repo, "HEAD")
 			_, err := f.approve(model.ApproveMerge, "")
-			if err == nil || !strings.Contains(err.Error(), "refused by "+hook) || !strings.HasSuffix(err.Error(), "; nothing was merged") {
+			if err == nil || !strings.Contains(err.Error(), "refused by "+hook) || !strings.Contains(err.Error(), "; nothing was merged") {
 				t.Fatalf("approve error = %v, want the hook's message and \"; nothing was merged\"", err)
 			}
 			if f.hasMergeHead() {
@@ -449,7 +444,7 @@ func TestMergeKeepsMyLocalChanges(t *testing.T) {
 	worktreeWrite(t, filepath.Join(g.repo, "README"), "my edit\n")
 	before, status := g.head(g.repo, "HEAD"), g.status()
 	_, err := g.approve(model.ApproveMerge, "")
-	if err == nil || !strings.Contains(err.Error(), "would be overwritten") || !strings.HasSuffix(err.Error(), "; nothing was merged") {
+	if err == nil || !strings.Contains(err.Error(), "would be overwritten") || !strings.Contains(err.Error(), "; nothing was merged") {
 		t.Fatalf("overlapping change: error = %v, want git's refusal", err)
 	}
 	if got := lifecycleRead(t, filepath.Join(g.repo, "README")); got != "my edit\n" {
@@ -784,7 +779,7 @@ func TestDiffCmdTable(t *testing.T) {
 		want []string
 	}{
 		{"git", []string{"/opt/bin/git", "-C", f.repo, "diff", rng}},
-		{"delta", []string{"/opt/bin/git", "-C", f.repo, "-c", "core.pager=delta", "diff", rng}},
+		{"delta", []string{"/opt/bin/git", "-C", f.repo, "-c", "core.pager=delta --paging=always", "diff", rng}},
 		{"lazygit", []string{"/opt/bin/lazygit", "-p", f.wt}},
 		{"nvim", []string{"/opt/bin/git", "-C", f.repo, "difftool", "--no-prompt", "--tool=nvimdiff", rng}},
 	} {
@@ -912,7 +907,7 @@ func reviewCutShortCase(t *testing.T, hook string) {
 	_, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.now)
 	if err == nil || !strings.Contains(err.Error(), "cut short before it recorded the merge") ||
 		!strings.Contains(err.Error(), "Curia undid what it had staged (git reset --merge)") ||
-		!strings.HasSuffix(err.Error(), "Nothing was merged") {
+		!strings.Contains(err.Error(), "Nothing was merged") {
 		t.Fatalf("approve error = %v, want the cut-short merge undone", err)
 	}
 	f.wantAsBefore(before, status)
@@ -1035,5 +1030,110 @@ func TestPRApproveAgainRecordsExistingPR(t *testing.T) {
 			t.Errorf("%s: %v, want the failure", bad, err)
 		}
 		g.wantPending()
+	}
+}
+
+// TestDiffCmdFixedPager: the git and delta tools page through a fixed less
+// that stays until the user leaves it; no pager variable of the caller's
+// environment reaches them.
+func TestDiffCmdFixedPager(t *testing.T) {
+	f := reviewNew(t)
+	for _, v := range reviewPagerVars {
+		t.Setenv(v, "sh -c 'touch /tmp/pwned' F")
+	}
+	reviewUseDiffTools(t, func(name string) (string, error) { return "/opt/bin/" + name, nil })
+	for tool, want := range map[string][]string{
+		"git":   {"LESS=-R -X", "GIT_PAGER=less"},
+		"delta": {"LESS=-R -X", "DELTA_PAGER=less -R -X"},
+	} {
+		cmd, err := reviewDiffCmd(f.get("T-1"), tool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, kv := range cmd.Env {
+			name, _, _ := strings.Cut(kv, "=")
+			if slices.Contains(reviewPagerVars, name) {
+				got = append(got, kv)
+			}
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: pager variables %q, want exactly %q", tool, got, want)
+		}
+	}
+}
+
+// TestDiffToolStaysOnScreen runs the git tool's command in a pane of a
+// private tmux server, for a diff that fits the screen and one that does
+// not: either way the pager is still there a moment later (git's own LESS=FRX
+// quit at once on the short one), and q leaves it.
+func TestDiffToolStaysOnScreen(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH")
+	}
+	if _, err := exec.LookPath("less"); err != nil {
+		t.Skip("less not on PATH")
+	}
+	for _, size := range []int{1, 400} {
+		t.Run(fmt.Sprintf("%d lines", size), func(t *testing.T) { reviewDiffInTmux(t, size) })
+	}
+}
+
+// reviewDiffInTmux is one case of TestDiffToolStaysOnScreen: a diff of
+// lines added lines, in a 100 x 30 pane.
+func reviewDiffInTmux(t *testing.T, lines int) {
+	f := reviewNew(t)
+	f.commitOnBranch("long.txt", strings.Repeat("a line of the diff\n", lines), "long")
+	reviewUseDiffTools(t, exec.LookPath) // the real git
+	cmd, err := reviewDiffCmd(f.get("T-1"), "git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := fmt.Sprintf("curia-test-%d-diff%d", os.Getpid(), lines)
+	// The server takes the environment of the client that starts it: the diff
+	// command's own, without git's repository variables (lefthook's
+	// pre-commit exports GIT_DIR, which would point the pane's git elsewhere).
+	tm := func(args ...string) string {
+		c := exec.Command("tmux", append([]string{"-L", sock, "-f", os.DevNull}, args...)...)
+		c.Env = cmd.Env
+		out, _ := c.CombinedOutput()
+		return strings.TrimSpace(string(out))
+	}
+	t.Cleanup(func() { spawnKillServer(sock) })
+	tm("new-session", "-d", "-x", "100", "-y", "30", "sleep", "60")
+	tm("set-option", "-g", "remain-on-exit", "on")
+	// The pane runs the command as built: its argv, and the variables it sets
+	// for itself (tmux's -e), on a terminal.
+	args := []string{"respawn-pane", "-k", "-t", "=0:"}
+	for _, kv := range cmd.Env {
+		if name, _, _ := strings.Cut(kv, "="); slices.Contains(reviewPagerVars, name) || name == "PATH" || name == "HOME" {
+			args = append(args, "-e", kv)
+		}
+	}
+	tm(append(append(args, cmd.Path), cmd.Args[1:]...)...)
+	time.Sleep(1500 * time.Millisecond)
+	if dead := tm("display-message", "-p", "-t", "=0:", "#{pane_dead}"); dead != "0" {
+		t.Fatalf("the diff left the screen at once (pane_dead %q): %q", dead, tm("capture-pane", "-p", "-t", "=0:"))
+	}
+	if screen := tm("capture-pane", "-p", "-t", "=0:"); !strings.Contains(screen, "a line of the diff") {
+		t.Errorf("the diff is not on screen:\n%s", screen)
+	}
+	tm("send-keys", "-t", "=0:", "q")
+	for deadline := time.Now().Add(5 * time.Second); tm("display-message", "-p", "-t", "=0:", "#{pane_dead}") != "1"; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("q did not leave the pager")
+		}
+	}
+}
+
+// TestDiffStatKeepsLeadingSpace: the stat's first line keeps the spaces git
+// puts before a file name shorter than the others, so its columns line up.
+func TestDiffStatKeepsLeadingSpace(t *testing.T) {
+	f := reviewNew(t)
+	f.commitOnBranch("a_much_longer_file_name.go", "package auth\n", "long name")
+	stat, _, _ := reviewDiffStat(context.Background(), f.get("T-1"), 100)
+	lines := strings.Split(stat, "\n")
+	if len(lines) < 3 || !strings.HasPrefix(lines[0], " ") || strings.Index(lines[0], "|") != strings.Index(lines[1], "|") {
+		t.Errorf("stat lines are not aligned:\n%s", stat)
 	}
 }

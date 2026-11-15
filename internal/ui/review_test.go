@@ -224,8 +224,11 @@ func newReviewRun(t *testing.T, src *fakeReviews, opts ReviewOptions, width, hei
 	t.Helper()
 	r := &reviewRun{t: t, clk: &sayClock{t: reviewStart}}
 	m := NewReview(src, r.clk.now, opts)
-	m.tick = func(d time.Duration, _ tea.Msg) tea.Cmd {
+	m.tick = func(d time.Duration, msg tea.Msg) tea.Cmd {
 		r.ticks = append(r.ticks, d)
+		if c, ok := msg.(reviewConfirmMsg); ok { // burstGap passes with no other key, unless a test steps
+			return func() tea.Msg { return c }
+		}
 		return nil
 	}
 	m.run = func(c *exec.Cmd, fn tea.ExecCallback) tea.Cmd {
@@ -432,7 +435,7 @@ func TestReviewShowsDetailInOrder(t *testing.T) {
 		"Diff against main:",
 		" auth/refresh.go | 12 ++++++------",
 		" 1 file changed, 6 insertions(+), 6 deletions(-)",
-		"Decisions on this task:",
+		"Decided tickets on this task:",
 		"D-4 answered: Retry the refresh on 401? → A Retry once",
 		"Sessions: 3 (lead and 2 teammates) · duration 1h12m · cost not recorded",
 		"a merge into main",
@@ -716,7 +719,8 @@ func TestActionDropsStaleReads(t *testing.T) {
 	stale := read() // R-1 still pending
 	r.at(0, "a")
 	r.clk.advance(reviewGap)
-	approve := r.step(rvKey("y"))
+	confirm := r.step(rvKey("y"))
+	approve := r.step(confirm())
 	r.step(approve()) // its refresh is not run yet
 	r.wantShown("R-2")
 	r.feed(stale)
@@ -1091,7 +1095,11 @@ func TestKeysIgnoredWhileActionRuns(t *testing.T) {
 	r := openReview(t, src, ReviewOptions{})
 	r.at(0, "a")
 	r.clk.advance(reviewGap)
-	approve := r.step(rvKey("y")) // Approve has not returned
+	confirm := r.step(rvKey("y")) // burstGap passes with no other key
+	if confirm == nil {
+		t.Fatal("y waits for nothing")
+	}
+	approve := r.step(confirm()) // Approve has not returned
 	if approve == nil {
 		t.Fatal("y started nothing")
 	}
@@ -1437,5 +1445,127 @@ func TestReviewResultListsEveryOutcome(t *testing.T) {
 	r.at(reviewGap, "y")
 	if got, want := r.review().Result(), []string{"done", "drop failed: refused"}; !slices.Equal(got, want) {
 		t.Errorf("Result() = %q, want %q", got, want)
+	}
+}
+
+// TestConfirmRefusesYAndEnterTogether: a paste the terminal does not
+// bracket delivers "y" and a line break as two keys 1 ms apart. The "y" is
+// refused (the burst rule), whether the Enter comes before the y's wait for
+// burstGap ends or the y's wait message comes first only in the test; the
+// prompt stays open with its wait restarted, and nothing is approved or
+// dropped. A "y" alone after the quiet period then confirms.
+func TestConfirmRefusesYAndEnterTogether(t *testing.T) {
+	for _, k := range []string{"a", "x"} {
+		src := &fakeReviews{line: "done"}
+		src.set(rvDetail(1))
+		r := openReview(t, src, ReviewOptions{})
+		r.at(0, k)
+		r.clk.advance(reviewGap)
+		wait := r.step(rvKey("y"))
+		r.clk.advance(time.Millisecond)
+		r.feed(rvKey("enter"))
+		r.run(wait) // the y's wait ends after the Enter came: it acts on nothing
+		wantActions(t, src)
+		if n := r.review().notice; n != noticeTooSoon {
+			t.Errorf("%s: notice = %q, want %q", k, n, noticeTooSoon)
+		}
+		if mode := r.review().mode; mode == reviewBrowse {
+			t.Errorf("%s: the prompt closed", k)
+		}
+		r.clk.advance(time.Millisecond)
+		r.feed(rvKey("y")) // still the same paste: too soon after the Enter
+		wantActions(t, src)
+		r.at(quietPeriod, "y")
+		want := "Approve R-1"
+		if k == "x" {
+			want = "Drop R-1"
+		}
+		wantActions(t, src, want)
+	}
+}
+
+// TestConfirmAcceptsYAlone: a "y" on its own, after the dwell and with no
+// key within burstGap of it, confirms once burstGap has passed.
+func TestConfirmAcceptsYAlone(t *testing.T) {
+	src := &fakeReviews{line: "R-1 approved: merged"}
+	src.set(rvDetail(1))
+	r := openReview(t, src, ReviewOptions{})
+	r.at(0, "a")
+	r.clk.advance(reviewGap)
+	wait := r.step(rvKey("y"))
+	wantActions(t, src) // nothing before burstGap has passed
+	if !slices.Contains(r.ticks, burstGap) {
+		t.Errorf("ticks = %v, want a wait of burstGap", r.ticks)
+	}
+	r.run(wait)
+	wantActions(t, src, "Approve R-1")
+}
+
+// TestConfirmActedBeforeLaterKey: what is intended for a "y" followed 200
+// ms later by an unrelated key: the confirmation has already acted on the
+// "y" (200 ms is past burstGap: two presses, not one paste), and the later
+// key is ignored while the action runs. The same holds when the y's wait
+// message is late and the key comes first.
+func TestConfirmActedBeforeLaterKey(t *testing.T) {
+	src := &fakeReviews{line: "R-1 approved: merged"}
+	src.set(rvDetail(1), rvDetail(2))
+	r := openReview(t, src, ReviewOptions{})
+	r.at(0, "a")
+	r.at(reviewGap, "y") // its wait ends, with no other key, before the next key
+	r.at(200*time.Millisecond, "x")
+	wantActions(t, src, "Approve R-1")
+	r.wantPrompt(reviewBrowse)
+
+	late := &fakeReviews{line: "R-1 approved: merged"}
+	late.set(rvDetail(1), rvDetail(2))
+	l := openReview(t, late, ReviewOptions{})
+	l.at(0, "a")
+	l.clk.advance(reviewGap)
+	_ = l.step(rvKey("y")) // its wait message never comes
+	l.at(200*time.Millisecond, "x")
+	wantActions(t, late, "Approve R-1")
+	if mode := l.review().mode; mode == reviewConfirmDrop {
+		t.Error("the later x opened the drop prompt")
+	}
+}
+
+// TestDiffToolReturnHoldsCloseKeys: after the diff tool returns, q and Esc
+// (the keys that closed the pager, pressed again, or typed for the pager
+// after a tool that came back at once) do not close the view during the
+// quiet period, and each restarts it; after a pause q closes. Alone and
+// embedded in the dashboard.
+func TestDiffToolReturnHoldsCloseKeys(t *testing.T) {
+	for _, embedded := range []bool{false, true} {
+		src := &fakeReviews{diff: exec.Command("git", "diff")}
+		src.set(rvDetail(1))
+		r := openReview(t, src, ReviewOptions{Embedded: embedded})
+		r.at(0, "o") // the tool returns at once
+		for _, k := range []string{"q", "esc", "q"} {
+			r.at(quietPeriod-50*time.Millisecond, k)
+			if r.quit || r.closed {
+				t.Fatalf("embedded %v: %q %v after the previous key closed the view", embedded, k, quietPeriod-50*time.Millisecond)
+			}
+		}
+		r.at(quietPeriod+time.Millisecond, "q")
+		if !r.quit && !r.closed {
+			t.Errorf("embedded %v: q after the quiet period did not close the view", embedded)
+		}
+	}
+}
+
+// TestDecidedHeadingUnderAssumption: with an unconfirmed assumption and no
+// decided ticket, the heading says the decided ones are none, not the
+// decisions (live check defect 8).
+func TestDecidedHeadingUnderAssumption(t *testing.T) {
+	d := rvDetail(1)
+	d.Decided = nil
+	d.Assumptions = []model.Decision{{ID: "D-1", Question: "Footer wording?", Assumption: "Open daily.", Mode: model.ModeAssume, Status: model.StatusOpen}}
+	src := &fakeReviews{}
+	src.set(d)
+	r := openReview(t, src, ReviewOptions{})
+	r.wantIn("D-1 unconfirmed assumption")
+	r.wantIn("Decided tickets on this task: none")
+	if strings.Contains(r.view(), "Decisions on this task: none") {
+		t.Errorf("the old heading is shown:\n%s", r.view())
 	}
 }

@@ -72,9 +72,12 @@ func NormalizeNote(note string) (string, error) {
 	return note, nil
 }
 
-// NoteMessage is the message that carries a change request.
+// NoteMessage is the message that carries a change request. Its fixed words
+// hold none of the characters a typed line strips (a colon, a message id:
+// Ruling 105), so only the developer's own note can make a typed change
+// request "Wording simplified".
 func NoteMessage(reviewID, taskID, note string) string {
-	return "Review " + reviewID + " of " + taskID + ": changes requested. " + note
+	return "Changes requested in review " + reviewID + " of " + taskID + ". " + note
 }
 
 // PRTitle is the task id and title on one line, without mentions, at most

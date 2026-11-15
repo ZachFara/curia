@@ -2187,6 +2187,19 @@ func (p *dashPump) step(k tea.KeyMsg) tea.Cmd {
 	return cmd
 }
 
+// stepConfirm sends y and returns the action its confirmation starts, once
+// burstGap has passed with no other key, without running it.
+func (p *dashPump) stepConfirm() tea.Cmd {
+	p.t.Helper()
+	wait := p.step(key("y"))
+	if wait == nil {
+		return nil
+	}
+	var cmd tea.Cmd
+	p.m, cmd = p.m.Update(wait())
+	return cmd
+}
+
 // child is the review view the dashboard shows, or fails.
 func (p *dashPump) child() ReviewModel {
 	p.t.Helper()
@@ -2209,7 +2222,12 @@ func realReviewFactory(src ReviewSource, now func() time.Time) (func(string) tea
 	return func(id string) tea.Model {
 		opened = append(opened, id)
 		rm := NewReview(src, now, ReviewOptions{TaskID: id, Embedded: true})
-		rm.tick = func(time.Duration, tea.Msg) tea.Cmd { return nil }
+		rm.tick = func(_ time.Duration, msg tea.Msg) tea.Cmd {
+			if c, ok := msg.(reviewConfirmMsg); ok { // burstGap passes with no other key
+				return func() tea.Msg { return c }
+			}
+			return nil
+		}
 		return rm
 	}, &opened
 }
@@ -2321,7 +2339,7 @@ func TestEmbeddedReviewApproveInFlight(t *testing.T) {
 	clk.advance(reviewGap)
 	p.key(key("a"))
 	clk.advance(time.Second)
-	approve := p.step(key("y"))
+	approve := p.stepConfirm()
 	if approve == nil {
 		t.Fatal("y started nothing")
 	}

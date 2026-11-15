@@ -1522,3 +1522,48 @@ func TestRestoreStaleTeamAfterPowerCut(t *testing.T) {
 		}
 	}
 }
+
+// TestRestoreKeepsReviewMarker: a task's session that was unseen with a
+// review waiting before the crash comes back unseen, so its window gets the
+// blue review-ready marker again, though its SessionStart marked it seen;
+// one that had been looked at stays seen.
+func TestRestoreKeepsReviewMarker(t *testing.T) {
+	for _, unseen := range []bool{true, false} {
+		f := restoreNewFixture(t)
+		tk := f.restoreLinked("T-1", nil)
+		s := f.linkedSession(1, tk)
+		if !unseen {
+			if err := f.st.UpdateSession(context.Background(), s.ID, func(cur model.Session, _ bool) model.Session {
+				cur.SeenAt = cur.UpdatedAt
+				return cur
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, _, err := f.st.CompleteTask(context.Background(), model.Review{
+			TaskID: "T-1", SessionID: s.ID, Summary: "Done.",
+			Tests: model.TestsPassed, CreatedAt: f.now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		f.onSleep = func(n int) {
+			if n == 1 { // the resumed session's SessionStart: live in the new window, and seen
+				if err := f.st.UpdateSession(context.Background(), s.ID, func(cur model.Session, _ bool) model.Session {
+					cur.Pane, cur.TmuxWindow, cur.State, cur.EndReason = "%100", "@100", model.StateIdle, ""
+					cur.StartedAt, cur.UpdatedAt, cur.SeenAt = f.now, f.now, f.now
+					return cur
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		f.tm.Calls = nil
+		if out, err := f.run(nil, "--yes"); err != nil {
+			t.Fatalf("restore: %v\n%s", err, out)
+		}
+		blue := slices.Contains(f.tm.Calls, "SetWindowOption @100 @curia_marker blue")
+		if got := f.get(s.ID); got.SeenAt.IsZero() != unseen || blue != unseen {
+			t.Errorf("unseen before %v: seen at %v, blue marker %v (calls %q)", unseen, got.SeenAt, blue, f.tm.Calls)
+		}
+	}
+}

@@ -51,6 +51,19 @@ const quietPeriod = 750 * time.Millisecond
 // pause of this length.
 const answeredQuiet = 2 * time.Second
 
+// burstGap is the burst rule's time half: a key that comes within it of
+// another key, before or after, arrived with it, as the keys of one read
+// (split) do. A terminal delivers a paste that is not bracketed, "y" and a
+// line break say, as keys this close; a person's two presses are further
+// apart. inBurst is the rule.
+const burstGap = 50 * time.Millisecond
+
+// inBurst reports whether a key at at came within burstGap of the key at
+// other (zero: there was none).
+func inBurst(at, other time.Time) bool {
+	return !other.IsZero() && at.Sub(other).Abs() < burstGap
+}
+
 // dwell is how long a ticket must have been on screen before an answer key
 // acts on it, and a confirmation open before "y" gives it (Ruling 66). The
 // terminal is written on a frame ticker, not after every message, so keys

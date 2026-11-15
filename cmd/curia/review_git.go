@@ -199,19 +199,24 @@ func reviewDiffNote(ctx context.Context, t model.Task, head, path string, onDisk
 }
 
 // reviewStatAt is git diff --stat of t's base...head (three dots: the
-// changes since the branch left its base), cleaned by sanitize.Block and
+// changes since the branch left its base), its leading spaces kept, cleaned by sanitize.Block and
 // cut at 200 lines and 64 KiB with a line saying how many more there were.
 // No external diff or text conversion runs.
 func reviewStatAt(ctx context.Context, t model.Task, head string, width int) (string, error) {
 	if !reviewHeadPattern.MatchString(head) {
 		return "", fmt.Errorf("refusing commit %q", sanitize.Line(head, 80))
 	}
-	out, err := worktreeRun(ctx, worktreeGitLimit, t.Repo, "diff", "--no-color", "--no-ext-diff", "--no-textconv",
+	sctx, cancel := context.WithTimeout(ctx, worktreeGitLimit)
+	defer cancel()
+	res := runGit(sctx, t.Repo, "diff", "--no-color", "--no-ext-diff", "--no-textconv",
 		"--stat="+strconv.Itoa(width), t.BaseBranch+"..."+head, "--")
-	if err != nil {
-		return "", err
+	if res.err != nil {
+		return "", worktreeGitError(res, worktreeGitLimit)
 	}
-	s := sanitize.Block(out, 0)
+	// The untrimmed output: git pads every file name, the first one's too,
+	// to line the columns up (live check defect 3). Block keeps leading
+	// spaces and drops trailing ones and the last line break.
+	s := sanitize.Block(res.raw, 0)
 	if s == "" {
 		return "", nil
 	}
@@ -480,7 +485,7 @@ func reviewMergeFailed(ctx context.Context, t model.Task, res gitResult, before 
 		return fmt.Errorf("%s; %s moved from %s to %s: check git -C %s log", msg, t.BaseBranch,
 			reviewShort(before.head), sanitize.Line(reviewShort(after.head), 20), repo)
 	case after.status == before.status:
-		return fmt.Errorf("%s; nothing was merged", msg)
+		return fmt.Errorf("%s; nothing was merged%s", msg, reviewLeftovers(actx, t.Repo))
 	case !underWay && reviewCutShort(res, before):
 		return reviewUndoCutShort(actx, t, msg, before)
 	case underWay:
@@ -532,7 +537,33 @@ func reviewUndoCutShort(ctx context.Context, t model.Task, msg string, before re
 		return fmt.Errorf("%s; after git reset --merge, %s still differs from before the merge (%s): check it there",
 			cut, repo, reviewStateDiff(before, after))
 	}
-	return fmt.Errorf("%s; Curia undid what it had staged (git reset --merge) and %s is as it was. Nothing was merged", cut, repo)
+	return fmt.Errorf("%s; Curia undid what it had staged (git reset --merge) and %s is as it was. Nothing was merged%s",
+		cut, repo, reviewLeftovers(ctx, t.Repo))
+}
+
+// reviewLeftoverFiles are the files git may leave in its directory after a merge that did not complete:
+// pointers to commits (where HEAD was, the attempted merge's tree) that change nothing in the checkout.
+var reviewLeftoverFiles = []string{"ORIG_HEAD", "AUTO_MERGE"}
+
+// reviewLeftovers is the sentence that names the reviewLeftoverFiles in repo's git directory, "" when none
+// is there (live check defect 9): HEAD and git status are as before, so they are no difference to report,
+// but a user who looks finds them.
+func reviewLeftovers(ctx context.Context, repo string) string {
+	dir, err := worktreeRun(ctx, worktreeGitLimit, repo, "rev-parse", "--absolute-git-dir")
+	if err != nil || !filepath.IsAbs(dir) {
+		return ""
+	}
+	var found []string
+	for _, f := range reviewLeftoverFiles {
+		if fi, err := os.Lstat(filepath.Join(dir, f)); err == nil && fi.Mode().IsRegular() {
+			found = append(found, f)
+		}
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	return ". git may have left " + strings.Join(found, " and ") + " in " + sanitize.Line(dir, 300) +
+		": they are harmless and need nothing"
 }
 
 // reviewStateMax bounds the status lines reviewStateDiff names, each way.
@@ -657,8 +688,42 @@ func reviewPRURL(out []byte) string {
 	return ""
 }
 
+// reviewPagerVars are the variables a pager may come from, which the diff
+// command of the git and delta tools does not inherit: it sets its own.
+var reviewPagerVars = []string{"GIT_PAGER", "PAGER", "LESS", "DELTA_PAGER", "BAT_PAGER", "LV"}
+
+// reviewPagerEnv is the fixed pager of the git and delta diff tools: less, without -F (git's default LESS is
+// FRX, whose -F quits at once when the diff fits one screen, so the view came back before the diff was seen
+// and the next q, meant for the pager, closed the view), with -R (git's and delta's colors) and -X (no screen
+// clearing on exit, so the last page stays readable). Constants only: nothing here comes from the config or
+// the caller's environment. GIT_PAGER names the pager for the git tool; the delta tool's pager is delta,
+// named by -c core.pager, which pages through DELTA_PAGER.
+const (
+	reviewLess       = "-R -X"
+	reviewGitPager   = "less"
+	reviewDeltaPager = "less -R -X"
+)
+
+// reviewDiffEnv is gitEnv without reviewPagerVars, plus the fixed pager of
+// tool (reviewPagerEnv).
+func reviewDiffEnv(tool string) []string {
+	env := slices.DeleteFunc(gitEnv(), func(kv string) bool {
+		name, _, _ := strings.Cut(kv, "=")
+		return slices.Contains(reviewPagerVars, name)
+	})
+	env = append(env, "LESS="+reviewLess)
+	switch tool {
+	case "git":
+		env = append(env, "GIT_PAGER="+reviewGitPager)
+	case "delta":
+		env = append(env, "DELTA_PAGER="+reviewDeltaPager)
+	}
+	return env
+}
+
 // reviewDiffCmd is the command of section 4.6's diff table for tool.
-// It is not bound to a context: it runs as long as the user keeps the tool open.
+// It is not bound to a context: it runs as long as the user keeps the tool open; the git and delta tools
+// page through a less that stays until the user leaves it, whatever the diff's length (reviewDiffEnv).
 func reviewDiffCmd(t model.Task, tool string) (*exec.Cmd, error) {
 	if err := reviewCheckNames(t); err != nil {
 		return nil, err
@@ -670,7 +735,7 @@ func reviewDiffCmd(t model.Task, tool string) (*exec.Cmd, error) {
 	case "git":
 		bin, args = "git", []string{"-C", t.Repo, "diff", rng}
 	case "delta":
-		bin, args, needs = "git", []string{"-C", t.Repo, "-c", "core.pager=delta", "diff", rng}, []string{"delta"}
+		bin, args, needs = "git", []string{"-C", t.Repo, "-c", "core.pager=delta --paging=always", "diff", rng}, []string{"delta"}
 	case "lazygit":
 		bin, args = "lazygit", []string{"-p", reviewDiffDir(t)}
 	case "nvim":
@@ -688,7 +753,7 @@ func reviewDiffCmd(t model.Task, tool string) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("the diff tool %s is not on PATH: install it, or set review.diff_tool", bin)
 	}
 	cmd := exec.Command(path, args...)
-	cmd.Env = gitEnv()
+	cmd.Env = reviewDiffEnv(tool)
 	return cmd, nil
 }
 

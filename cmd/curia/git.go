@@ -118,10 +118,13 @@ func requireRegular(fi os.FileInfo, err error) error {
 	return nil
 }
 
-// gitResult is the outcome of one git call.
+// gitResult is the outcome of one git call. out and stderr are trimmed;
+// raw is stdout as git wrote it (runGit only), for output whose leading
+// spaces mean something, such as a diff stat's column alignment.
 type gitResult struct {
 	args        []string
 	out, stderr string
+	raw         string
 	err         error
 	timedOut    bool
 }
@@ -152,7 +155,8 @@ func runGit(ctx context.Context, cwd string, args ...string) gitResult {
 	res := gitResult{args: args}
 	res.err = cmd.Run()
 	res.timedOut = ctx.Err() != nil
-	res.out, res.stderr = strings.TrimSpace(out.String()), strings.TrimSpace(stderr.String())
+	res.raw = out.String()
+	res.out, res.stderr = strings.TrimSpace(res.raw), strings.TrimSpace(stderr.String())
 	return res
 }
 

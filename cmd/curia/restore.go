@@ -20,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ZachFara/curia/internal/attention"
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/deliver"
 	"github.com/ZachFara/curia/internal/fleet"
@@ -705,6 +706,7 @@ func restoreExecute(ctx context.Context, e restoreEnv, rows, todo []restoreRow) 
 			_, _ = fmt.Fprintln(e.out, "tmux did not list its panes, so restore ended no other row")
 		} else {
 			restoreEndOthers(ctx, e, rows, l, srv)
+			restoreKeepUnseen(ctx, e, l, fleet.Socket(panes))
 		}
 		if l.row.Session.TeamRole == model.RoleLead {
 			restoreNotice(ctx, e, l)
@@ -902,6 +904,36 @@ func restoreLine(l *restoreLaunch) string {
 	}
 	return fmt.Sprintf("%s did not report within %v; look at %s: it may be waiting at a dialog (such as the trust dialog). "+
 		"Answer it there rather than running curia restore again", short, restoreWait, where)
+}
+
+// restoreKeepUnseen gives a restored session back the "not looked at" it had before the crash: the resumed
+// session's SessionStart marks it seen, so a task's review-ready (blue) marker, or a red one, would not come
+// back (live check defect 6). When the planned row had not been looked at since its last activity (its
+// transcript's last write: reconcile's stale mark moved updated_at), the live row's seen time is cleared,
+// unless it was looked at after the resume, and its window's marker is applied again. A failure is logged.
+func restoreKeepUnseen(ctx context.Context, e restoreEnv, l *restoreLaunch, socket string) {
+	planned := l.row.Session
+	if !planned.SeenAt.Before(l.row.LastActive) {
+		return
+	}
+	id := cmp.Or(l.newID, planned.ID)
+	var window string
+	err := e.st.UpdateSession(ctx, id, func(cur model.Session, found bool) model.Session {
+		if found && cur.Pane == l.pane.ID && !cur.SeenAt.After(cur.StartedAt) {
+			cur.SeenAt, window = time.Time{}, cur.TmuxWindow
+		}
+		return cur
+	})
+	if err == nil && window != "" {
+		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
+		defer cancel()
+		if err = attention.Apply(actx, e.tm, e.st, window, socket); errors.Is(err, tmux.ErrNoWindow) {
+			err = nil
+		}
+	}
+	if err != nil {
+		e.log.Warn("restore: keep a restored session unseen", "session", id, "err", err.Error())
+	}
 }
 
 // restoreEndOthers sets ended the rows a restored session replaces: its old

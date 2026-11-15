@@ -93,7 +93,7 @@ func TestNormalizeNote(t *testing.T) {
 }
 
 func TestNoteMessage(t *testing.T) {
-	if got := NoteMessage("R-3", "T-42", "handle nil"); got != "Review R-3 of T-42: changes requested. handle nil" {
+	if got := NoteMessage("R-3", "T-42", "handle nil"); got != "Changes requested in review R-3 of T-42. handle nil" {
 		t.Errorf("got %q", got)
 	}
 	got := NoteMessage("R-999999999", "T-999999999", strings.Repeat("é", 600))

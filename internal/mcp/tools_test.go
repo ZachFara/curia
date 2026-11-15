@@ -289,7 +289,7 @@ func TestSchemasAreExact(t *testing.T) {
   "reason":{"type":"string","maxLength":300},
   "precedent_id":{"type":"string","description":"The past decision that settles this, if one does."}}}`,
 		"check_messages": `{"type":"object","properties":{}}`,
-		"complete_task":  `{"type":"object","required":["summary","tests_status"],"properties":{"summary":{"type":"string"},"tests_status":{"type":"string","enum":["passed","failed","not_run"]},"tests_detail":{"type":"string"}}}`,
+		"complete_task":  `{"type":"object","required":["summary","tests_status"],"properties":{"summary":{"type":"string","maxLength":2000},"tests_status":{"type":"string","enum":["passed","failed","not_run"]},"tests_detail":{"type":"string","maxLength":200}}}`,
 	}
 	if len(want) != len(f.tools)-1 {
 		t.Fatalf("schemas checked for %d tools, want all but request_decision", len(want))
