@@ -63,7 +63,12 @@ func statusBadge(ctx context.Context, args []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	reviews, err := st.PendingReviews(ctx)
+	if err != nil {
+		return "", err
+	}
 	counts := fleet.Count(sessions, openBlocking, undelivered+messages)
+	counts.Reviews = reviews
 	counts.AutoOff = autoOff
 	return fleet.Badge(counts), nil
 }

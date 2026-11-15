@@ -165,3 +165,18 @@ func TestNextSkipsSettledSession(t *testing.T) {
 		t.Errorf("log = %q, want none", log)
 	}
 }
+
+func TestNextJumpsToReviewReadySession(t *testing.T) {
+	db, fake := fleetHome(t, []string{"%1", "%2"})
+	task := statusReviewTask(t, db, "one")
+	seedSessions(t, db,
+		model.Session{ID: "work", Agent: "claude", State: model.StateWorking, Pane: "%1", UpdatedAt: at(9, 0)},
+		model.Session{ID: "rev", Agent: "claude", State: model.StateIdle, Pane: "%2", TaskID: task, UpdatedAt: at(11, 0), SeenAt: at(11, 30)},
+	)
+	if out, err := runRoot(t, "next"); err != nil || out != "" {
+		t.Errorf("next = %q, %v, want no output", out, err)
+	}
+	if want := []string{"ListPanes", "SwitchTo %2"}; !reflect.DeepEqual(fake.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
+	}
+}

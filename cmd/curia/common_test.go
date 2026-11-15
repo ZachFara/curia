@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -241,4 +243,51 @@ func TestReconcileRefreshesTeams(t *testing.T) {
 			t.Errorf("ls --json lacks %s:\n%s", want, out)
 		}
 	}
+}
+
+func TestListSettledMarkedMarksReviews(t *testing.T) {
+	db, _ := fleetHome(t, []string{"%1", "%2"})
+	task := statusReviewTask(t, db, "one")
+	seedSessions(t, db,
+		model.Session{ID: "rev", Agent: "claude", State: model.StateIdle, Pane: "%1", TaskID: task, UpdatedAt: at(11, 0)},
+		model.Session{ID: "other", Agent: "claude", State: model.StateIdle, Pane: "%2", TaskID: "T-99", UpdatedAt: at(11, 0)},
+	)
+	st := openTestStore(t, db)
+	sessions, err := listSettledMarked(context.Background(), st, useFakeTmux(t), store.ListFilter{}, "", fleetNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, s := range sessions {
+		got[s.ID] = s.ReviewPending
+	}
+	if want := map[string]bool{"rev": true, "other": false}; !maps.Equal(got, want) {
+		t.Errorf("ReviewPending = %v, want %v", got, want)
+	}
+}
+
+func TestListSettledMarkedSurvivesReviewReadError(t *testing.T) {
+	db, _ := fleetHome(t, []string{"%1"})
+	task := statusReviewTask(t, db, "one")
+	seedSessions(t, db, model.Session{ID: "rev", Agent: "claude", State: model.StateIdle, Pane: "%1", TaskID: task, UpdatedAt: at(11, 0)})
+	statusExec(t, db, "DROP TABLE reviews")
+	st := openTestStore(t, db)
+	logPath := config.Default().LogPath
+	sessions, err := listSettledMarked(context.Background(), st, useFakeTmux(t), store.ListFilter{}, logPath, fleetNow)
+	if err != nil || len(sessions) != 1 || sessions[0].ReviewPending {
+		t.Fatalf("sessions = %+v, %v, want the one session, unmarked", sessions, err)
+	}
+	if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "pending reviews") {
+		t.Errorf("log = %q, want one warning about the review read", log)
+	}
+}
+
+func openTestStore(t *testing.T, db string) *store.Store {
+	t.Helper()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
 }
