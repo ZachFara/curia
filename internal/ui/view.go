@@ -82,7 +82,31 @@ var (
 	staleStyle  = lipgloss.NewStyle().Faint(true)
 	helpStyle   = lipgloss.NewStyle().Faint(true)
 	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	reviewStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 )
+
+// reviewReady reports whether s is review-ready: idle, with its task's
+// review waiting.
+func reviewReady(s model.Session) bool {
+	return s.ReviewPending && s.State == model.StateIdle
+}
+
+// rowIcon is the state cell of s: a review-ready session's "◆", else its
+// state's icon.
+func rowIcon(s model.Session) string {
+	if reviewReady(s) {
+		return "◆"
+	}
+	return stateIcon(s.State)
+}
+
+// stateStyle colors the state cell of s: blue when it is review-ready.
+func stateStyle(s model.Session) lipgloss.Style {
+	if reviewReady(s) {
+		return reviewStyle
+	}
+	return lipgloss.NewStyle()
+}
 
 // levelStyle colors a context percentage: green, yellow, red, or plain when
 // the level is unknown.
@@ -203,7 +227,7 @@ func (m Model) cells(r row, cols []column) []string {
 	for i, c := range cols {
 		switch c {
 		case colState:
-			out[i] = stateIcon(r.target().State)
+			out[i] = rowIcon(r.target())
 		case colWindow:
 			out[i] = m.windowCell(r)
 		case colTask:
@@ -374,7 +398,8 @@ func (m Model) renderHeader(cols []column, widths []int, gap int) string {
 }
 
 // renderRow lays out one row: dim when its state is stale, reversed when
-// selected, the context cell colored by its level.
+// selected, the state cell blue when review-ready, the context cell
+// colored by its level.
 func (m Model) renderRow(r row, cells []string, cols []column, widths []int, gap int, selected bool) string {
 	s := r.s
 	base := lipgloss.NewStyle()
@@ -389,6 +414,8 @@ func (m Model) renderRow(r row, cells []string, cols []column, widths []int, gap
 	for i, c := range cols {
 		st := base
 		switch c {
+		case colState:
+			st = stateStyle(r.target()).Inherit(base)
 		case colContext:
 			st = levelStyle(level).Inherit(base)
 		case colDecisions:
@@ -433,7 +460,7 @@ func (m Model) helpText() string {
 		text = fmt.Sprintf("%d of %d sessions match /%s", m.shownSessions(), len(m.sessions), m.filter)
 	}
 	if m.mode == ModePopup {
-		text += "  enter jump  d decisions  t tasks  / filter  x kill  q quit"
+		text += "  enter jump  d decisions  r review  t tasks  / filter  x kill  q quit"
 	}
 	return text
 }

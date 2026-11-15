@@ -35,10 +35,10 @@ func init() {
 			"each session's task and open decisions (DEC, red when one blocks); an agent\n" +
 			"team is one row, which Space expands. j/k or the arrows move, Enter or a\n" +
 			"click jumps to the session's pane (a team's: the member most in need of you)\n" +
-			"and closes the popup, d opens the session's decisions to answer them (not\n" +
-			"inside an agent session), t opens the task board (n there spawns a task), /\n" +
-			"filters on repo, branch, last update and member name, x then y kills the\n" +
-			"pane, q or Esc quits.",
+			"and closes the popup, d opens the session's decisions to answer them and r\n" +
+			"the review waiting for its task (neither inside an agent session), t opens\n" +
+			"the task board (n there spawns a task), / filters on repo, branch, last\n" +
+			"update and member name, x then y kills the pane, q or Esc quits.",
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			return runDashboard(ui.ModePopup, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -73,19 +73,25 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 		bsrc := boardSource{st: st, tm: client, cfg: cfg}
 		m = m.WithBoard(func() tea.Model { return ui.NewBoard(bsrc, client, clock, true) })
 	}
-	// d answers through curia decide's path, so it refuses inside an agent
-	// session as curia decide does (spec section 7): no factory is set,
-	// and the dashboard says why when d is pressed.
-	// T16: without its log file the dashboard still starts, without d.
+	// d answers through curia decide's path and r acts through curia
+	// review's, so both refuse inside an agent session as those commands
+	// do (spec section 7): no factory is set, and the dashboard says why
+	// when d or r is pressed.
+	// T16: without its log file the dashboard still starts, without d or r.
 	if mode == ui.ModePopup && refuseInsideAgent() == nil {
 		logger, closeLog, err := openLog(cfg.LogPath)
 		if err != nil {
-			return runProgram(m.WithoutDecide("decisions cannot be answered here: the log file cannot be opened"), opts...)
+			return runProgram(m.WithoutDecide("decisions cannot be answered here: the log file cannot be opened").
+				WithoutReview("reviews cannot be opened here: the log file cannot be opened"), opts...)
 		}
 		defer func() { _ = closeLog() }()
 		dsrc, via := newDecideSource(st, client, logger), decideVia()
 		m = m.WithDecide(func(id string) tea.Model {
 			return ui.NewDecide(dsrc, clock, ui.DecideOptions{SessionID: id, Embedded: true, Via: via})
+		})
+		rsrc := newReviewSource(st, client, cfg, logger, via)
+		m = m.WithReview(func(id string) tea.Model {
+			return ui.NewReview(rsrc, clock, ui.ReviewOptions{TaskID: id, Embedded: true})
 		})
 	}
 	return runProgram(m, opts...)
@@ -134,6 +140,12 @@ func (s storeSource) Tasks(ctx context.Context) (map[string]model.Task, error) {
 		out[t.ID] = t
 	}
 	return out, nil
+}
+
+// Reviews returns the id of the pending review of each task not stored
+// dropped, by task id, for the r key.
+func (s storeSource) Reviews(ctx context.Context) (map[string]string, error) {
+	return s.st.PendingReviewTasks(ctx)
 }
 
 // boardSource is the task board's ui.BoardSource over the store.
