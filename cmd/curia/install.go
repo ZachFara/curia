@@ -402,20 +402,24 @@ func uninstallMCP(ctx context.Context, out io.Writer, config, bin string) error 
 
 func init() {
 	installCmd := &cobra.Command{
-		Use:   "install",
-		Short: "Register Curia's hooks, skill and MCP server with Claude Code and add the tmux snippet",
-		Args:  cobra.NoArgs,
-		RunE:  runInstall,
+		Use:         "install",
+		Short:       "Register Curia's hooks, skill and MCP server with Claude Code and add the tmux snippet",
+		Annotations: userOnlyMark(),
+		Args:        cobra.NoArgs,
+		// It rewrites the user's Claude Code settings and tmux configuration.
+		RunE: userOnlyRunE("install", "install Curia", runInstall),
 	}
 	installCmd.Flags().BoolVar(&installNoAllowMCPTools, "no-allow-mcp-tools", false,
 		"do not add the five curia MCP tools to Claude's permissions.allow (they are allowed by default)")
 	rootCmd.AddCommand(
 		installCmd,
 		&cobra.Command{
-			Use:   "uninstall",
-			Short: "Remove what curia install added",
-			Args:  cobra.NoArgs,
-			RunE:  runUninstall,
+			Use:         "uninstall",
+			Short:       "Remove what curia install added",
+			Annotations: userOnlyMark(),
+			Args:        cobra.NoArgs,
+			// An agent removing Curia's hooks would switch its tracking off.
+			RunE: userOnlyRunE("uninstall", "uninstall Curia", runUninstall),
 		},
 	)
 }

@@ -923,6 +923,75 @@ var userOnlyCommands = map[string][]string{
 	"curia task edit":       {"T-1", "--title", "x"},
 	"curia task ready":      {"T-1"},
 	"curia task import":     {"--backlog-md"},
+	"curia install":         {},
+	"curia uninstall":       {},
+}
+
+// userNotOnlyCommands are the leaf commands anyone, an agent included, may
+// run, each with why (re-review A, I1). Every leaf command is in this table
+// or in userOnlyCommands; TestEveryCommandIsClassified fails on one in
+// neither, so a new command cannot be added without that decision.
+var userNotOnlyCommands = map[string]string{
+	"curia decisions ls":          "reads the tickets only",
+	"curia hook":                  "run by Claude Code's hooks; records the calling session's own event",
+	"curia launch":                "runs the agent in the caller's own process; spawn decides what is started",
+	"curia ls":                    "reads the sessions only",
+	"curia mcp":                   "run by Claude Code; its tools cannot decide, send, spawn or pause",
+	"curia messages ls":           "reads the messages only",
+	"curia next":                  "moves the tmux client to a session; changes nothing",
+	"curia read":                  "reads a pane's last lines, as tmux capture-pane does",
+	"curia routing stats":         "reads the routing counts only",
+	"curia seen":                  "attention bookkeeping, run by tmux on pane focus",
+	"curia send":                  "agents may send; labeled, limited and never from the user (Rulings 112, 113)",
+	"curia sidebar":               "a view; its user actions go through the guard (uiUserActions)",
+	"curia spawn":                 "agents may spawn ready tasks only (Ruling 113)",
+	"curia status":                "prints the badge",
+	"curia task ls":               "reads the tasks only",
+	"curia ui":                    "a view; its user actions go through the guard (uiUserActions)",
+	"curia version":               "prints the version",
+	"curia help":                  "cobra's help",
+	"curia completion":            "cobra's shell completion scripts",
+	"curia completion bash":       "cobra's shell completion script",
+	"curia completion fish":       "cobra's shell completion script",
+	"curia completion powershell": "cobra's shell completion script",
+	"curia completion zsh":        "cobra's shell completion script",
+}
+
+// unclassifiedCommands are the leaf commands under root in neither table,
+// and the ones in both.
+func unclassifiedCommands(root *cobra.Command) []string {
+	var out []string
+	userOnlyWalk(root, func(c *cobra.Command) {
+		if c.HasSubCommands() {
+			return
+		}
+		path := c.CommandPath()
+		_, only := userOnlyCommands[path]
+		_, not := userNotOnlyCommands[path]
+		if only == not {
+			out = append(out, path)
+		}
+	})
+	return out
+}
+
+func TestEveryCommandIsClassified(t *testing.T) {
+	for _, path := range unclassifiedCommands(rootCmd) {
+		t.Errorf("%s is in neither userOnlyCommands nor userNotOnlyCommands (or in both): decide whether only the user may run it", path)
+	}
+	for path := range userNotOnlyCommands {
+		if marked := userOnlyMarked(t); marked[path] {
+			t.Errorf("%s is marked user-only but listed as not", path)
+		}
+	}
+	// The test of the test: a command added the way a new one would be, with
+	// no mark and no guard, is reported.
+	dummy := &cobra.Command{Use: "approve-everything", RunE: func(*cobra.Command, []string) error { return nil }}
+	rootCmd.AddCommand(dummy)
+	defer rootCmd.RemoveCommand(dummy)
+	if got := unclassifiedCommands(rootCmd); !slices.Contains(got, "curia approve-everything") {
+		t.Errorf("an unclassified command is not reported: %v", got)
+	}
 }
 
 // userOnlyWalk calls f on every command under c.
