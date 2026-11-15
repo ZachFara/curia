@@ -239,10 +239,11 @@ func (s *Store) UpdateSession(ctx context.Context, id string, fn func(s model.Se
 
 // upsert is the single INSERT ... ON CONFLICT statement behind UpsertSession
 // and UpdateSession. It names the columns it writes, so the team columns
-// (written only by SetTeams) and Plan 2's cache columns survive it, and an
-// older binary's upsert, which names neither tmux_socket nor end_reason,
-// leaves those columns alone. An empty task id, worktree or socket is
-// stored as NULL, like the pane; the end reason as endReason says.
+// (written only by SetTeams) and the cost and cache columns (written only
+// by Ingest) survive it, and an older binary's upsert, which names neither
+// tmux_socket nor end_reason, leaves those columns alone. An empty task id,
+// worktree or socket is stored as NULL, like the pane; the end reason as
+// endReason says.
 func upsert(ctx context.Context, e dbtx, sess model.Session) error {
 	_, err := e.ExecContext(ctx, `
 INSERT INTO sessions (
@@ -291,8 +292,10 @@ func endReason(sess model.Session) any {
 }
 
 // selectSessions reads every column Session maps to. Each nullable column is
-// COALESCEd (times are scanned as NullString), so a row written by something
-// other than Store with NULLs in it cannot break a whole list.
+// COALESCEd (times are scanned as NullString, cost_usd as NullFloat64 for
+// CostKnown), so a row written by something other than Store with NULLs in
+// it cannot break a whole list. The four cost columns are written only by
+// Ingest; upsert names none of them.
 const selectSessions = `
 SELECT COALESCE(id, ''), COALESCE(agent, ''), COALESCE(tmux_pane, ''), COALESCE(tmux_session, ''),
   COALESCE(tmux_window, ''), COALESCE(cwd, ''), COALESCE(repo, ''), COALESCE(branch, ''),
@@ -300,7 +303,8 @@ SELECT COALESCE(id, ''), COALESCE(agent, ''), COALESCE(tmux_pane, ''), COALESCE(
   COALESCE(subagents_active, 0), COALESCE(last_update, ''), seen_at, COALESCE(transcript_path, ''),
   started_at, updated_at, transcript_offset, COALESCE(task_id, ''), COALESCE(worktree, ''),
   COALESCE(team_id, ''), COALESCE(team_role, ''), COALESCE(team_member, ''), COALESCE(tmux_socket, ''),
-  COALESCE(end_reason, '')
+  COALESCE(end_reason, ''), cost_usd, cache_expires_at, COALESCE(cache_rebuild_usd, 0),
+  COALESCE(recache_tokens, 0)
 FROM sessions`
 
 // GetSession returns the session with the given id, and false if there is none.
@@ -356,13 +360,18 @@ type scanner interface {
 
 func scanSession(sc scanner) (model.Session, error) {
 	var sess model.Session
-	var seen, started, updated sql.NullString
+	var seen, started, updated, cache sql.NullString
+	var cost sql.NullFloat64
 	err := sc.Scan(&sess.ID, &sess.Agent, &sess.Pane, &sess.TmuxSession, &sess.TmuxWindow, &sess.Cwd,
 		&sess.Repo, &sess.Branch, &sess.State, &sess.Model, &sess.ContextUsed, &sess.ContextMax,
 		&sess.SubagentsActive, &sess.LastUpdate, &seen, &sess.TranscriptPath, &started, &updated,
 		&sess.TranscriptOffset, &sess.TaskID, &sess.Worktree, &sess.TeamID, &sess.TeamRole, &sess.TeamMember,
-		&sess.Socket, &sess.EndReason)
+		&sess.Socket, &sess.EndReason, &cost, &cache, &sess.CacheRebuildUSD, &sess.RecacheTokens)
 	if err != nil {
+		return model.Session{}, err
+	}
+	sess.CostUSD, sess.CostKnown = cost.Float64, cost.Valid
+	if sess.CacheExpiresAt, err = parseTime(cache); err != nil {
 		return model.Session{}, err
 	}
 	if sess.SeenAt, err = parseTime(seen); err != nil {

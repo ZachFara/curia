@@ -164,11 +164,11 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	open(t, path)
-	if n := countMigrations(t, path); n != 6 {
-		t.Errorf("schema_migrations has %d rows, want 6", n)
+	if n := countMigrations(t, path); n != 7 {
+		t.Errorf("schema_migrations has %d rows, want 7", n)
 	}
 	names := migrationNames(t, rawDB(t, path))
-	if want := []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("migration names = %v, want %v", names, want)
 	}
 }
@@ -178,7 +178,7 @@ func TestOpenIsIdempotent(t *testing.T) {
 // Plan 3's send limits, merged with their names kept) apply in a fixed order.
 var allMigrations = []string{
 	"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql",
-	"0005_reviews.sql", "0005_send_limits.sql",
+	"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql",
 }
 
 // plan3Applied is what a Plan 3 binary (with the fix wave) applies.
@@ -254,8 +254,9 @@ func wantMergedSchema(t *testing.T, db *sql.DB) {
 // the merge of plan-3 into plan-4 keeps both 0005 files under their names
 // (renaming one would run it again on a database that has it). Open
 // applies both, in file name order, on a fresh database, on a Plan 4
-// database (0005_reviews.sql applied) and on a Plan 3 database
-// (0005_send_limits.sql applied), and each runs once.
+// database (0005_reviews.sql applied), on a Plan 3 database
+// (0005_send_limits.sql applied) and on a merged Plan 4 database (both
+// applied), and each runs once; 0006_cost.sql follows both.
 func TestBothMigrationsNumberedFive(t *testing.T) {
 	for _, c := range []struct {
 		name    string
@@ -264,7 +265,8 @@ func TestBothMigrationsNumberedFive(t *testing.T) {
 	}{
 		{"fresh", nil, allMigrations},
 		{"plan 4 database", allMigrations[:5], allMigrations},
-		{"plan 3 database", plan3Applied, append(slices.Clone(plan3Applied), "0005_reviews.sql")},
+		{"plan 3 database", plan3Applied, append(slices.Clone(plan3Applied), "0005_reviews.sql", "0006_cost.sql")},
+		{"plan 4 database with both 0005 files", allMigrations[:6], allMigrations},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			path := dbPath(t)
@@ -611,8 +613,8 @@ func TestConcurrentOpenOfFreshFile(t *testing.T) {
 	for round := range 10 {
 		path := filepath.Join(t.TempDir(), fmt.Sprintf("round%d.db", round))
 		openAndUpsertConcurrently(t, path, openers)
-		if n := countMigrations(t, path); n != 6 {
-			t.Errorf("round %d: schema_migrations has %d rows, want 6", round, n)
+		if n := countMigrations(t, path); n != 7 {
+			t.Errorf("round %d: schema_migrations has %d rows, want 7", round, n)
 		}
 		got, err := open(t, path).ListSessions(context.Background(), store.ListFilter{})
 		if err != nil {

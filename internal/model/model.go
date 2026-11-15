@@ -51,11 +51,14 @@ type Session struct {
 	// otherwise.
 	EndReason string
 	// Plan 5 cost columns, written only by store.Ingest. CostKnown false:
-	// cost_usd is NULL. A zero CacheExpiresAt means unknown.
+	// cost_usd is NULL. A zero CacheExpiresAt means unknown. RecacheTokens
+	// is how many tokens a rebuild of the cold cache would write (Ruling
+	// P5-R2: the status line reports tokens, not dollars); 0 means unknown.
 	CostUSD         float64
 	CostKnown       bool
 	CacheExpiresAt  time.Time
 	CacheRebuildUSD float64
+	RecacheTokens   int64
 }
 
 // Team roles.

@@ -308,7 +308,7 @@ func (s *Store) OpenTickets(ctx context.Context, now time.Time) ([]model.Ticket,
 	rows, err := s.db.QueryContext(ctx, selectDecisions+`,
   COALESCE(s.state, ''), COALESCE(s.tmux_pane, ''), COALESCE(s.tmux_session, ''),
   COALESCE(s.tmux_window, ''), COALESCE(s.branch, ''), COALESCE(s.context_used, 0),
-  s.cache_expires_at, COALESCE(s.cache_rebuild_usd, 0)
+  s.cache_expires_at, COALESCE(s.cache_rebuild_usd, 0), COALESCE(s.recache_tokens, 0)
 FROM decisions d LEFT JOIN sessions s ON s.id = d.session_id
 WHERE `+openAt+`
 ORDER BY d.n`, formatTime(now))
@@ -321,7 +321,7 @@ ORDER BY d.n`, formatTime(now))
 		var t model.Ticket
 		var cache sql.NullString
 		t.Decision, err = scanDecision(rows, &t.SessionState, &t.Pane, &t.TmuxSession, &t.TmuxWindow,
-			&t.Branch, &t.ContextUsed, &cache, &t.CacheRebuildUSD)
+			&t.Branch, &t.ContextUsed, &cache, &t.CacheRebuildUSD, &t.RecacheTokens)
 		if err != nil {
 			return nil, fail("open tickets", "", err)
 		}
