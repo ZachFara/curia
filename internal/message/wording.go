@@ -64,7 +64,33 @@ func noColons(s string) string {
 // and is followed by a digit gets a space for its hyphen, so text set into a
 // sentence never names a message ("Message M-9 " confirms M-9, see Names)
 // or reads as a second one.
-func noIDs(s string) string {
+func noIDs(s string) string { return breakIDs(s, "mM") }
+
+// notUserWords is what text from a sender other than the user loses
+// (Ruling 116): its decision ids as well as its message ids, so it cannot
+// quote "Decision D-4 answered", and the phrase "from the user" in any case,
+// which becomes "from the-user". The fixed words then hold the only "from
+// the user" of the line.
+func notUserWords(s string) string {
+	s = breakIDs(s, "mMdD")
+	lower := strings.ToLower(s)
+	const phrase = "from the user"
+	var b strings.Builder
+	for {
+		i := strings.Index(lower, phrase)
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		j := i + len("from the")
+		b.WriteString(s[:j] + "-")
+		s, lower = s[j+1:], lower[j+1:]
+	}
+}
+
+// breakIDs gives a space for the hyphen of every "<letter>-<digit>" in s
+// whose letter is one of letters and starts a word.
+func breakIDs(s, letters string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	prev := ' '
@@ -72,7 +98,7 @@ func noIDs(s string) string {
 		r, n := utf8.DecodeRuneInString(s[i:])
 		b.WriteRune(r)
 		i += n
-		if (r == 'm' || r == 'M') && !isWord(prev) && strings.HasPrefix(s[i:], "-") && i+1 < len(s) && isDigit(s[i+1]) {
+		if strings.ContainsRune(letters, r) && !isWord(prev) && strings.HasPrefix(s[i:], "-") && i+1 < len(s) && isDigit(s[i+1]) {
 			b.WriteByte(' ')
 			i++ // the hyphen
 			r = ' '
@@ -92,13 +118,17 @@ func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 // most MaxTyped runes. The text goes through sanitize.Keys cut to 400 runes,
 // so the line holds only letters, digits, spaces and ". , : - _ /" and no
 // line break; it also loses its colons and its message ids (noColons,
-// noIDs) and its trailing periods, and is set into the fixed words, which
-// always start the line (Ruling 51). When Keys dropped or cut anything, or
+// noIDs) and its trailing periods, and, when the user did not write it, its
+// decision ids and the phrase "from the user" (notUserWords); it is set into
+// the fixed words, which always start the line (Ruling 51). When Keys dropped or cut anything, or
 // the text lost a colon or an id, the line ends with " Wording simplified:
 // call check_messages.".
 func TypedLine(m model.Message) string {
 	keys, lossy := sanitize.Keys(m.Text, typedText)
 	text := noIDs(noColons(keys))
+	if m.Sender != model.SenderUser {
+		text = notUserWords(text)
+	}
 	lossy = lossy || text != keys
 	trimmed := strings.TrimRight(text, ". ")
 	// Periods alone leave nothing to type: point at the exact wording.
@@ -112,12 +142,12 @@ func TypedLine(m model.Message) string {
 
 // stopLine is m's line in a stop block: the full text flattened to one line
 // with sanitize.Line, with its message ids broken (noIDs), and, when the
-// user did not write it, its colons too (noColons), set into the fixed
-// words.
+// user did not write it, its colons, decision ids and "from the user" too
+// (noColons, notUserWords), set into the fixed words.
 func stopLine(m model.Message) string {
 	text := noIDs(sanitize.Line(m.Text, MaxText))
 	if m.Sender != model.SenderUser {
-		text = noColons(text)
+		text = notUserWords(noColons(text))
 	}
 	return sentence(m, text)
 }
