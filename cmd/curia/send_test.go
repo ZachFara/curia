@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -350,5 +351,30 @@ func TestSendOutcomeLine(t *testing.T) {
 		if got := sendOutcomeLine(c.o); got != c.want {
 			t.Errorf("sendOutcomeLine(%+v) = %q, want %q", c.o, got, c.want)
 		}
+	}
+}
+
+func TestSendRateLimitedCommand(t *testing.T) {
+	db, fake := sendHome(t, readSession("t3", model.StateWorking, "%3"))
+	fake.Panes = append(fake.Panes, tmux.Pane{ID: "%3", Session: "work", WindowID: "@3", ServerStart: at(8, 0)})
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("TMUX_PANE", "%2") // agent a2
+	for i := range store.SendQueuedLimit {
+		if _, err := readRun(t, "", "send", "%3", fmt.Sprintf("message %d", i+1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := readRun(t, "", "send", "%3", "one more")
+	if err == nil || err.Error() != "not sent: the target already has 5 queued messages from agents; send again once it has read them" {
+		t.Errorf("sixth send = %v, want the plain refusal", err)
+	}
+	if ms := sendMessages(t, db); len(ms) != store.SendQueuedLimit {
+		t.Errorf("stored %d messages, want %d", len(ms), store.SendQueuedLimit)
+	}
+	// The user is not limited.
+	t.Setenv("CLAUDECODE", "")
+	t.Setenv("TMUX_PANE", "")
+	if _, err = readRun(t, "", "send", "%3", "from the user"); err != nil {
+		t.Errorf("the user's send: %v", err)
 	}
 }

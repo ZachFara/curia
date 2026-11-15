@@ -29,6 +29,9 @@ type terminal struct {
 	srv *tmuxServer
 	dir string // where each run's stdout, stderr and exit code go
 	n   int
+	// tmuxVar is TMUX for a command that talks to the terminal server
+	// itself; its pane %0 only sleeps.
+	tmuxVar string
 }
 
 // startTerminal starts the terminal server: one session, "term", holding a
@@ -55,7 +58,8 @@ func startTerminal(t *testing.T) *terminal {
 	}
 	t.Cleanup(func() { _, _ = s.run("kill-server") })
 	s.mustRun(t, "new-session", "-d", "-s", "term", "-x", "200", "-y", "50", "--", "/bin/sh", "-c", "while :; do sleep 60; done")
-	return &terminal{srv: s, dir: t.TempDir()}
+	tmuxVar := strings.TrimSpace(s.mustRun(t, "display-message", "-p", "-t", "%0", "#{socket_path},#{pid},0"))
+	return &terminal{srv: s, dir: t.TempDir(), tmuxVar: tmuxVar}
 }
 
 // terminalScript runs "$0" "$@" with PATH set to E2E_PATH (tmux 3.8 gives

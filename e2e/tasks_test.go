@@ -403,9 +403,13 @@ func (r *tasksRun) agentSendAndRead(t *testing.T) {
 	if m := r.message(t, "M-6"); m.Sender != "agent" || m.SenderSession != tasksWeb || m.ConfirmedAt == nil {
 		t.Errorf("M-6 = %+v, want sent by agent %s and confirmed", m, tasksWeb)
 	}
-	// An agent writes no task (Ruling 113).
+	// An agent writes no task and spawns only what the user marked ready
+	// (Ruling 113): T-3 is backlog.
 	if stderr := r.fails(t, agent, "task", "add", "an agent's task", "--repo", r.repo); !strings.Contains(stderr, "only the user may") {
 		t.Errorf("curia task add from an agent: stderr %q, want the user-only refusal", stderr)
+	}
+	if stderr := r.fails(t, agent, "spawn", "T-3"); !strings.Contains(stderr, "an agent may spawn only a task the user marked ready") {
+		t.Errorf("curia spawn T-3 from an agent: stderr %q, want the refusal of a backlog task", stderr)
 	}
 	r.fails(t, agent, "send", "%99", "x")
 	r.fails(t, nil, "read", "%99")
@@ -989,7 +993,7 @@ func tasksStatSources(t *testing.T, root string) {
 const (
 	latencyTasks     = 200
 	latencyDelivered = 500
-	latencyPane      = "%5"
+	latencyPane      = "%0" // the terminal server's sleeping pane
 )
 
 // TestStopHookLatencyWithMessages is step 15: on a fresh store with no tmux,
@@ -1016,7 +1020,13 @@ func TestStopHookLatencyWithMessages(t *testing.T) {
 	if out := term.mustRun(t, h, "task", "import", "--backlog-md", repo); !strings.Contains(out, fmt.Sprint(latencyTasks)) {
 		t.Fatalf("curia task import printed %q, want %d tasks imported", out, latencyTasks)
 	}
-	send := term.userSender(t, h, latencyPane)
+	// The session is in the terminal server's pane %0, which only sleeps, so
+	// the user's sends can see that its agent's pane is live (Ruling 119)
+	// and nothing is ever typed into it; the timed hooks run with no TMUX,
+	// as before.
+	sender := *h
+	sender.env = append(slices.Clone(h.env), "TMUX="+term.tmuxVar)
+	send := term.userSender(t, &sender, latencyPane)
 	hookH := *h
 	hookH.env = append(slices.Clone(h.env), "TMUX_PANE="+latencyPane, "CURIA_TASK_ID=T-1")
 	start := hookPayload(t, map[string]any{

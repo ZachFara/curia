@@ -29,6 +29,9 @@ type spawnOptions struct {
 	Team   bool          // --team
 	Resume string        // a session id: curia resume
 	Wait   time.Duration // how long to wait for the agent's first hook; 0: do not wait
+	// ReadyOnly refuses a task whose stored status is not ready: the caller
+	// is an agent (Ruling 113).
+	ReadyOnly bool
 	// Out receives the lines saying what the spawn did, as it goes (the
 	// worktree, the setup script); nil discards them.
 	Out io.Writer
@@ -99,8 +102,10 @@ func runSpawn(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = st.Close() }()
 	out := cmd.OutOrStdout()
+	// An agent (anything but the user at a terminal) may spawn only what the
+	// user marked ready (Ruling 113).
 	r, err := spawnTask(cmd.Context(), st, newTmuxClient(), cfg, args[0],
-		spawnOptions{Model: spawnModel, Team: spawnTeam, Wait: spawnWait, Out: out})
+		spawnOptions{Model: spawnModel, Team: spawnTeam, Wait: spawnWait, Out: out, ReadyOnly: !userAtTerminal()})
 	if err != nil {
 		return err
 	}
@@ -163,6 +168,9 @@ func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 		return model.Task{}, fmt.Errorf("%s is dropped", id)
 	case !t.PausedAt.IsZero() && o.Resume == "":
 		return model.Task{}, fmt.Errorf("%s is paused: use curia resume", id)
+	case o.ReadyOnly && t.Status != model.TaskReady:
+		return model.Task{}, fmt.Errorf("%s is %s: an agent may spawn only a task the user marked ready (curia task ready %s)",
+			id, t.Status, id)
 	}
 	if o.Model == "" {
 		o.Model = t.AgentModel

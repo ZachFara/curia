@@ -22,7 +22,7 @@ var (
 // failMessage labels an SQL error with the operation and, when id is not
 // empty, the message it was on. The message errors are returned as they are.
 func failMessage(op, id string, err error) error {
-	if errors.Is(err, ErrNoMessage) || errors.Is(err, ErrNotHeld) || errors.Is(err, ErrNotQueued) {
+	if errors.Is(err, ErrNoMessage) || errors.Is(err, ErrNotHeld) || errors.Is(err, ErrNotQueued) || errors.Is(err, ErrTooMany) {
 		return err
 	}
 	return fail(op, id, err)
@@ -129,6 +129,78 @@ func confidence(m model.Message) any {
 // checkCreated refuses what CreateMessage may not store: a status other
 // than queued, held or canceled, or a held message with no hold_until (the
 // sweep would never cancel it).
+// The send limits (Ruling 113), counted per identity the sender cannot
+// choose: an agent's curia send is refused when its target already has
+// SendQueuedLimit queued messages from agents (whoever they claim to be),
+// when its sender, a live tracked session, made SendRateLimit in the last
+// SendRateWindow, or when it has no such session and senders Curia cannot
+// identify made SendUnknownLimit in that window, together.
+const (
+	SendQueuedLimit  = 5
+	SendRateLimit    = 20
+	SendUnknownLimit = 5
+	SendRateWindow   = 10 * time.Minute
+)
+
+// ErrTooMany is wrapped by CreateMessage's refusal of an agent's send over
+// a limit; its text says which, for the sender to read.
+var ErrTooMany = errors.New("too many messages")
+
+// sendQueued counts a target's queued agent messages. msgUndelivered, word
+// for word, lets SQLite read the partial index messages_undelivered.
+const sendQueued = `SELECT count(*) FROM messages
+WHERE target_session = ? AND ` + msgUndelivered + ` AND status = 'queued' AND sender = 'agent'`
+
+// sendRecent counts the agent sends of one sender session (” for the
+// senders Curia cannot identify) since a time, from the partial index
+// messages_agent_sends.
+const sendRecent = `SELECT count(*) FROM messages
+WHERE sender_session = ? AND created_at >= ? AND routed_by = 'send' AND sender = 'agent'`
+
+// sendSenderLive tells whether a claimed sender session is a live tracked
+// session row (by primary key).
+const sendSenderLive = `SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ? AND COALESCE(state, '') NOT IN ('ended', 'stale'))`
+
+// checkSendLimits verifies the sender of an agent's send m and refuses m
+// over a limit (ErrTooMany). A claimed sender session that is not a live
+// tracked row is dropped, so m is stored, counted and delivered as from an
+// unknown sender: never typed.
+func checkSendLimits(ctx context.Context, tx *sql.Tx, m *model.Message) error {
+	if m.RoutedBy != model.RoutedSend || m.Sender != model.SenderAgent {
+		return nil
+	}
+	if m.SenderSession != "" {
+		var live bool
+		if err := tx.QueryRowContext(ctx, sendSenderLive, m.SenderSession).Scan(&live); err != nil {
+			return err
+		}
+		if !live {
+			m.SenderSession = ""
+		}
+	}
+	var queued, recent int
+	if err := tx.QueryRowContext(ctx, sendQueued, m.TargetSession).Scan(&queued); err != nil {
+		return err
+	}
+	if queued >= SendQueuedLimit {
+		return fmt.Errorf("%w: the target already has %d queued messages from agents; send again once it has read them",
+			ErrTooMany, queued)
+	}
+	since := formatTime(m.CreatedAt.Add(-SendRateWindow))
+	if err := tx.QueryRowContext(ctx, sendRecent, m.SenderSession, since).Scan(&recent); err != nil {
+		return err
+	}
+	switch {
+	case m.SenderSession != "" && recent >= SendRateLimit:
+		return fmt.Errorf("%w: you sent %d messages in the last %s, the most an agent may; wait before sending more",
+			ErrTooMany, recent, SendRateWindow)
+	case m.SenderSession == "" && recent >= SendUnknownLimit:
+		return fmt.Errorf("%w: senders Curia cannot identify as a live agent session sent %d messages in the last %s, "+
+			"the most they may together; wait, or send from your own session", ErrTooMany, recent, SendRateWindow)
+	}
+	return nil
+}
+
 func checkCreated(m model.Message) error {
 	switch {
 	case m.Status != model.MsgQueued && m.Status != model.MsgHeld && m.Status != model.MsgCanceled:
@@ -144,7 +216,10 @@ func checkCreated(m model.Message) error {
 // must be queued, held (with HoldUntil) or canceled; anything else is an
 // error and stores nothing. m's N, ID and delivery columns (DeliveredVia,
 // ResultRef, DeliveredAt, ConfirmedAt) are ignored: only a transition sets
-// them. Confidence is stored only when HasConfidence is set.
+// them. Confidence is stored only when HasConfidence is set. An agent's
+// send over a limit is refused with ErrTooMany (checkSendLimits), counted
+// at m.CreatedAt in the same transaction, after its claimed sender session
+// is verified.
 func (s *Store) CreateMessage(ctx context.Context, m model.Message) (model.Message, error) {
 	if err := checkCreated(m); err != nil {
 		return model.Message{}, failMessage("create message", "", err)
@@ -154,6 +229,9 @@ func (s *Store) CreateMessage(ctx context.Context, m model.Message) (model.Messa
 		return model.Message{}, failMessage("create message", "", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err = checkSendLimits(ctx, tx, &m); err != nil {
+		return model.Message{}, failMessage("create message", "", err)
+	}
 	// The write lock makes the subselect agree with the rowid n the row
 	// receives; rows are never deleted, so an id is never reused.
 	stored, err := scanMessage(tx.QueryRowContext(ctx, `

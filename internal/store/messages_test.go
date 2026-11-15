@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -873,5 +874,105 @@ func TestListMessagesFilters(t *testing.T) {
 	}
 	if _, ok, err := s.GetMessage(ctx, "M-9"); err != nil || ok {
 		t.Errorf("GetMessage(missing) = %v, %v; want false, nil", ok, err)
+	}
+}
+
+// agentSend is an agent's curia send from sender to target at at.
+func agentSend(sender, target string, at time.Time) model.Message {
+	return model.Message{
+		Text: "from " + sender, Kind: model.KindInstruction, Sender: model.SenderAgent, SenderSession: sender,
+		TargetSession: target, RoutedBy: model.RoutedSend, Status: model.MsgQueued, CreatedAt: at,
+	}
+}
+
+func TestSendRateLimited(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	for _, id := range []string{"real-a", "real-b", "chatty"} {
+		liveSession(t, s, id, "", model.StateIdle)
+	}
+	liveSession(t, s, "gone", "", model.StateEnded)
+	t.Run("queued per target, whoever sends", func(t *testing.T) { sendLimitQueued(t, s) })
+	t.Run("per verified session in ten minutes", func(t *testing.T) { sendLimitPerSession(t, s) })
+	t.Run("made-up, cleared and ended ids share one bucket", func(t *testing.T) { sendLimitUnknown(t, s) })
+	sendLimitPlans(t, path)
+}
+
+// sendLimitQueued: the per-target cap holds across claimed identities.
+func sendLimitQueued(t *testing.T, s *store.Store) {
+	ctx := context.Background()
+	for i, sender := range []string{"real-a", "real-b", "made-up-1", "", "gone"} {
+		createMessage(t, s, agentSend(sender, "busy", t0.Add(time.Duration(i)*time.Second)))
+	}
+	_, err := s.CreateMessage(ctx, agentSend("real-a", "busy", t0.Add(time.Minute)))
+	if !errors.Is(err, store.ErrTooMany) || !strings.Contains(err.Error(), "5 queued messages from agents") {
+		t.Fatalf("sixth queued agent message = %v, want ErrTooMany naming the queue", err)
+	}
+	// The user is never limited, nor is a target with room.
+	createMessage(t, s, instruction("from the user", "busy"))
+	createMessage(t, s, agentSend("real-a", "free", t0.Add(time.Minute)))
+	// Once they are delivered there is room again.
+	if _, err = s.CheckMessages(ctx, "busy", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	createMessage(t, s, agentSend("real-a", "busy", t0.Add(time.Minute)))
+}
+
+// sendLimitPerSession: a verified session has its own count.
+func sendLimitPerSession(t *testing.T, s *store.Store) {
+	ctx := context.Background()
+	start := t0.Add(time.Hour)
+	for i := range store.SendRateLimit {
+		createMessage(t, s, agentSend("chatty", fmt.Sprintf("t%d", i), start.Add(time.Duration(i)*time.Second)))
+	}
+	at := start.Add(store.SendRateWindow - time.Second)
+	_, err := s.CreateMessage(ctx, agentSend("chatty", "t-new", at))
+	if !errors.Is(err, store.ErrTooMany) || !strings.Contains(err.Error(), "20 messages in the last 10m0s") {
+		t.Fatalf("21st send in ten minutes = %v, want ErrTooMany naming the rate", err)
+	}
+	// Another real session is counted apart, and ten minutes after the
+	// first send there is room again.
+	createMessage(t, s, agentSend("real-b", "t-new", at))
+	createMessage(t, s, agentSend("chatty", "t-new", start.Add(store.SendRateWindow+time.Second)))
+}
+
+// sendLimitUnknown: senders that are not a live tracked session share one
+// tighter bucket, whatever id they claim.
+func sendLimitUnknown(t *testing.T, s *store.Store) {
+	ctx := context.Background()
+	start := t0.Add(2 * time.Hour)
+	claims := []string{"rot-1", "", "rot-2", "gone", "rot-3"}
+	for i, sender := range claims {
+		m := createMessage(t, s, agentSend(sender, fmt.Sprintf("u%d", i), start))
+		if m.SenderSession != "" {
+			t.Errorf("claimed sender %q stored as %q, want unknown", sender, m.SenderSession)
+		}
+	}
+	for _, sender := range []string{"rot-4", ""} {
+		_, err := s.CreateMessage(ctx, agentSend(sender, "u-new", start))
+		if !errors.Is(err, store.ErrTooMany) || !strings.Contains(err.Error(), "cannot identify") {
+			t.Errorf("sixth unknown send as %q = %v, want ErrTooMany for the shared bucket", sender, err)
+		}
+	}
+	// A verified session is not held back by the unknown senders.
+	createMessage(t, s, agentSend("real-b", "u-new", start))
+}
+
+// sendLimitPlans: every count reads an index.
+func sendLimitPlans(t *testing.T, path string) {
+	t.Helper()
+	db := rawDB(t, path)
+	for _, q := range []struct {
+		name, sql, index string
+		args             []any
+	}{
+		{"queued", store.SendQueuedQuery, "messages_undelivered", []any{"busy"}},
+		{"recent", store.SendRecentQuery, "messages_agent_sends", []any{"chatty", "2026"}},
+		{"recent unknown", store.SendRecentQuery, "messages_agent_sends", []any{"", "2026"}},
+		{"sender live", store.SendSenderLive, "SEARCH sessions USING", []any{"chatty"}},
+	} {
+		if plan := queryPlan(t, db, q.sql, q.args...); !strings.Contains(plan, q.index) {
+			t.Errorf("the %s count does not use %s:\n%s", q.name, q.index, plan)
+		}
 	}
 }

@@ -837,3 +837,28 @@ func TestSpawnIgnoresRecycledPaneID(t *testing.T) {
 		t.Fatalf("spawn with the task's own pane open = %v, want still open", err)
 	}
 }
+
+func TestAgentSpawnNeedsReady(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Backlog one", "")
+	f.task("Ready one", "")
+	f.update("T-2", func(tk *model.Task) { tk.Status = model.TaskReady })
+	userTerminalAs(t, false) // an agent's tool shell: no controlling terminal
+	out, err := spawnRun(t, "T-1")
+	if err == nil || !strings.Contains(err.Error(), "T-1 is backlog: an agent may spawn only a task the user marked ready") {
+		t.Fatalf("agent spawn of a backlog task = %v (%q), want the refusal", err, out)
+	}
+	f.wantNothingStarted("T-1")
+	if out, err = spawnRun(t, "T-2"); err != nil {
+		t.Fatalf("agent spawn of a ready task: %v\n%s", err, out)
+	}
+	// The user at a terminal spawns a backlog task, which becomes ready.
+	userTerminalAs(t, true)
+	f.task("Another", "")
+	if out, err = spawnRun(t, "T-3"); err != nil {
+		t.Fatalf("the user's spawn of a backlog task: %v\n%s", err, out)
+	}
+	if got := f.get("T-3").Status; got != model.TaskReady {
+		t.Errorf("T-3 status = %s, want ready", got)
+	}
+}

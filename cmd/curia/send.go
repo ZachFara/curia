@@ -199,6 +199,9 @@ func sendDeliver(ctx context.Context, w io.Writer, st *store.Store, tm tmux.Clie
 		Text: text, Kind: model.KindInstruction, Sender: sender, SenderSession: senderID,
 		TargetSession: target.ID, RoutedBy: model.RoutedSend, Status: model.MsgQueued, CreatedAt: clock(),
 	})
+	if errors.Is(err, store.ErrTooMany) { // Ruling 113: plain words for the sending agent
+		return errors.New("not sent: " + strings.TrimPrefix(err.Error(), store.ErrTooMany.Error()+": "))
+	}
 	if err != nil {
 		return err
 	}
