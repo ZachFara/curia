@@ -50,6 +50,7 @@ type ReviewDetail struct {
 	Task        model.Task
 	DiffStat    string           // "" when there is none to show
 	DiffNote    string           // a warning or the reason there is no diff; "" when none
+	Head        string           // the full commit id of the branch the diff was built from; "" when none
 	Assumptions []model.Decision // open assume tickets of the task
 	Blocking    []model.Decision // open blocking tickets of the task
 	Decided     []model.Decision
@@ -63,6 +64,9 @@ type ReviewDetail struct {
 
 // ReviewSource is where the view reads and acts. The command's implementation runs git.
 //
+// Approve is given the Head of the detail that was on screen when the
+// prompt opened, so it approves only what was shown: it refuses, leaving
+// the review pending, when the branch is no longer at that commit.
 // Approve, RequestChanges and Drop return the outcome line on success,
 // which means the review is no longer pending. An error means the review
 // is still pending (a refusal, or a failure that changed nothing the
@@ -71,9 +75,9 @@ type ReviewDetail struct {
 // exits: the command must not be bound to it with exec.CommandContext
 // unless it may live as long as the tool.
 type ReviewSource interface {
-	Queue(ctx context.Context) ([]ReviewRow, error)                        // pending reviews, oldest first; no git
-	Detail(ctx context.Context, reviewID string) (ReviewDetail, error)     // may take seconds
-	Approve(ctx context.Context, reviewID string) (line string, err error) // may take minutes
+	Queue(ctx context.Context) ([]ReviewRow, error)                              // pending reviews, oldest first; no git
+	Detail(ctx context.Context, reviewID string) (ReviewDetail, error)           // may take seconds
+	Approve(ctx context.Context, reviewID, head string) (line string, err error) // may take minutes
 	RequestChanges(ctx context.Context, reviewID, note string) (line string, err error)
 	Drop(ctx context.Context, reviewID string) (line string, err error)
 	DiffCmd(ctx context.Context, reviewID string) (*exec.Cmd, error) // the configured diff tool
@@ -147,6 +151,7 @@ type ReviewModel struct {
 	noticeErr bool
 	result    string // the last action's line or error, kept until the next action
 	resultErr bool
+	results   []string // every action's line or error, in order (Result)
 
 	width, height int // 0 until the first WindowSizeMsg
 	offset        int // first body line on screen
@@ -306,7 +311,7 @@ func detailFace(d ReviewDetail) string {
 		r.ID, r.TaskID, strconv.FormatInt(r.CreatedAt.UnixNano(), 10), strconv.FormatInt(r.UpdatedAt.UnixNano(), 10),
 		r.Summary, string(r.Tests), r.TestsDetail, string(r.Status),
 		t.ID, t.Title, t.Repo, t.BaseBranch, t.Branch,
-		d.DiffStat, d.DiffNote, string(d.Approve),
+		d.DiffStat, d.DiffNote, d.Head, string(d.Approve),
 		fmt.Sprintf("%d %d %d %g %t", d.Sessions, d.Teammates, d.Duration, d.CostUSD, d.CostKnown),
 	}
 	for _, list := range [][]model.Decision{d.Assumptions, d.Blocking, d.Decided} {
@@ -687,7 +692,7 @@ func (m ReviewModel) confirmKey(msg tea.KeyMsg, split bool) (ReviewModel, tea.Cm
 	if m.selectedID() != m.pendingID || m.face() != m.pendingFace {
 		return m.cancelChanged(), nil
 	}
-	mode, id := m.mode, m.pendingID
+	mode, id, head := m.mode, m.pendingID, m.pending.Head
 	m.mode, m.pending = reviewBrowse, ReviewDetail{}
 	src := m.src
 	if mode == reviewConfirmDrop {
@@ -697,7 +702,7 @@ func (m ReviewModel) confirmKey(msg tea.KeyMsg, split bool) (ReviewModel, tea.Cm
 		})
 	}
 	return m.act(func(ctx context.Context) reviewActedMsg {
-		line, err := src.Approve(ctx, id)
+		line, err := src.Approve(ctx, id, head)
 		return reviewActedMsg{verb: "approve", id: id, line: line, err: err}
 	})
 }
@@ -811,13 +816,15 @@ func (m ReviewModel) act(f func(context.Context) reviewActedMsg) (ReviewModel, t
 // applyActed shows an action's line or error and starts the quiet period
 // after it (Ruling 93). A review acted on leaves the queue at once; the
 // queue is read again, and reads started before the action returned are
-// out of date and dropped.
+// out of date and dropped. After an error the shown review's detail is
+// read again, so a refusal because the branch moved shows the new state.
 func (m ReviewModel) applyActed(msg reviewActedMsg) (ReviewModel, tea.Cmd) {
 	m.busy, m.closeAsked = false, false
 	m = m.quiet(answeredQuiet)
 	var cmd tea.Cmd
 	if msg.err != nil {
 		m.result, m.resultErr = msg.verb+" failed: "+msg.err.Error(), true
+		m, cmd = m.askDetail(true)
 	} else {
 		m.result = msg.line
 		if m.result == "" {
@@ -830,9 +837,17 @@ func (m ReviewModel) applyActed(msg reviewActedMsg) (ReviewModel, tea.Cmd) {
 		m.rows = slices.DeleteFunc(slices.Clone(m.rows), func(r ReviewRow) bool { return r.Review.ID == msg.id })
 		m, cmd = m.reselect().observe(before).askDetail(false)
 	}
+	m.results = append(slices.Clip(m.results), m.result)
 	m, read := m.refresh(false)
 	m.applied = m.issued
 	return m, tea.Batch(cmd, read)
+}
+
+// Result is the line or error of every action taken in the view, in order,
+// as the view showed them, so that the command can print them once the
+// view has quit. It is empty when nothing was acted on.
+func (m ReviewModel) Result() []string {
+	return slices.Clone(m.results)
 }
 
 // openDiff builds the configured diff tool's command for the shown review

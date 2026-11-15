@@ -46,6 +46,7 @@ type fakeReviews struct {
 	line                                 string
 	diff                                 *exec.Cmd
 	calls                                []string
+	heads                                []string // the head given to each Approve
 }
 
 func (f *fakeReviews) Queue(context.Context) ([]ReviewRow, error) {
@@ -87,8 +88,32 @@ func (f *fakeReviews) act(call, id string) (string, error) {
 	return f.line, nil
 }
 
-func (f *fakeReviews) Approve(_ context.Context, id string) (string, error) {
+// Approve refuses, as the command does, when the review's branch is no
+// longer at the head that was shown.
+func (f *fakeReviews) Approve(_ context.Context, id, head string) (string, error) {
+	f.mu.Lock()
+	f.heads = append(f.heads, head)
+	moved := false
+	for _, d := range f.details {
+		moved = moved || (d.Review.ID == id && d.Head != head)
+	}
+	if moved {
+		f.calls = append(f.calls, "Approve "+id)
+		f.mu.Unlock()
+		return "", errors.New(rvBranchChanged)
+	}
+	f.mu.Unlock()
 	return f.act("Approve "+id, id)
+}
+
+// rvBranchChanged is the command's refusal of an approval whose branch
+// moved after it was shown.
+const rvBranchChanged = "the branch changed since you looked; showing the new state"
+
+func (f *fakeReviews) approvedHeads() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.heads)
 }
 
 func (f *fakeReviews) RequestChanges(_ context.Context, id, note string) (string, error) {
@@ -1339,5 +1364,78 @@ func TestReviewRefreshSchedule(t *testing.T) {
 	want := []string{"Detail R-1", "Detail R-1", "Detail R-1"}
 	if got := src.recorded(); !slices.Equal(got, want) {
 		t.Errorf("calls = %q, want %q", got, want)
+	}
+}
+
+// rvHead1 and rvHead2 are the branch heads of the changed-branch test.
+const (
+	rvHead1 = "1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	rvHead2 = "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+func TestApproveRefusedWhenBranchChanged(t *testing.T) {
+	src := &fakeReviews{}
+	d := rvDetail(1)
+	d.Head = rvHead1
+	src.set(d)
+	r := openReview(t, src, ReviewOptions{})
+	r.wantIn("Diff against main, branch at 1111111:")
+
+	// A commit lands on the branch after the detail was read: the view
+	// still shows the old head when y confirms.
+	r.at(0, "a")
+	src.edit(func(d *ReviewDetail) { d.Head = rvHead2 })
+	r.at(reviewGap, "y")
+	if got := src.approvedHeads(); !slices.Equal(got, []string{rvHead1}) {
+		t.Errorf("Approve heads = %q, want the head on screen %q", got, rvHead1)
+	}
+	r.wantIn("approve failed: " + rvBranchChanged)
+	r.wantShown("R-1")
+	// The view read the detail again at once and shows the new state.
+	r.wantIn("Diff against main, branch at 2222222:")
+	r.wantNotIn("branch at 1111111")
+
+	// Approving again, now that the new head has been seen, approves it.
+	r.at(answeredQuiet+reviewGap, "a")
+	r.at(reviewGap, "y")
+	if got := src.approvedHeads(); !slices.Equal(got, []string{rvHead1, rvHead2}) {
+		t.Errorf("Approve heads = %q, want %q", got, []string{rvHead1, rvHead2})
+	}
+	wantActions(t, src, "Approve R-1", "Approve R-1")
+	if got := r.review().Result(); len(got) != 2 || got[0] != "approve failed: "+rvBranchChanged {
+		t.Errorf("Result() = %q, want the refusal then the approval", got)
+	}
+}
+
+func TestPromptCanceledWhenOnlyHeadChanges(t *testing.T) {
+	src := &fakeReviews{}
+	d := rvDetail(1)
+	d.Head = rvHead1
+	src.set(d)
+	r := openReview(t, src, ReviewOptions{})
+	r.at(0, "a")
+	r.wantPrompt(reviewConfirmApprove)
+	src.edit(func(d *ReviewDetail) { d.Head = rvHead2 }) // same diff stat, new commit
+	r.detailTick()
+	r.wantPrompt(reviewBrowse)
+	r.wantStatus(noticeReviewChanged)
+	r.at(reviewGap, "y")
+	wantActions(t, src)
+}
+
+func TestReviewResultListsEveryOutcome(t *testing.T) {
+	src := &fakeReviews{line: "done"}
+	src.set(rvDetail(1), rvDetail(2))
+	r := openReview(t, src, ReviewOptions{})
+	if got := r.review().Result(); len(got) != 0 {
+		t.Errorf("Result() before any action = %q, want none", got)
+	}
+	r.at(0, "x")
+	r.at(reviewGap, "y")
+	src.fail(nil, nil, errors.New("refused"))
+	r.at(answeredQuiet+reviewGap, "x")
+	r.at(reviewGap, "y")
+	if got, want := r.review().Result(), []string{"done", "drop failed: refused"}; !slices.Equal(got, want) {
+		t.Errorf("Result() = %q, want %q", got, want)
 	}
 }

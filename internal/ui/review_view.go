@@ -290,7 +290,11 @@ func testsWord(s model.TestsStatus) (string, lineKind) {
 // diffLines are the diff stat, each line cut to the width (its columns
 // line up), and the warning under it.
 func diffLines(d ReviewDetail, w int) []bodyLine {
-	out := kindLines(lineHead, "Diff against "+branchText(d.Task.BaseBranch, "(no base)")+":", w, 0)
+	head := "Diff against " + branchText(d.Task.BaseBranch, "(no base)")
+	if len(d.Head) >= 7 && strings.Trim(d.Head[:7], "0123456789abcdef") == "" { // a commit id, nothing else
+		head += ", branch at " + d.Head[:7]
+	}
+	out := kindLines(lineHead, head+":", w, 0)
 	stat := sanitize.Block(d.DiffStat, maxDiffBytes)
 	if stat != "" {
 		ls := strings.Split(stat, "\n")
