@@ -333,15 +333,15 @@ func hookEnv(ctx context.Context, client tmux.Client, logger *slog.Logger) hook.
 		Now:    time.Now,
 		TaskID: hookTaskID(os.Getenv("CURIA_TASK_ID")),
 		Git:    func(cwd string) (string, string, string) { return gitInfo(ctx, cwd, logger) },
-		PaneInfo: func(pane string) (string, string) {
+		PaneInfo: func(pane string) (string, string, string) {
 			pctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 			defer cancel()
 			p, err := client.PaneInfo(pctx, pane)
 			if err != nil {
 				logger.Warn("tmux pane info", "pane", pane, "err", err.Error())
-				return "", ""
+				return "", "", ""
 			}
-			return p.Session, p.WindowID
+			return p.Session, p.WindowID, p.Socket
 		},
 	}
 }

@@ -269,3 +269,47 @@ func TestApplyWithoutReviewsTableStillAppliesRed(t *testing.T) {
 		t.Errorf("calls = %q, want %q", fake.Calls, want)
 	}
 }
+
+// TestApplyWithoutTasksSkipsReviewRead: a window none of whose live
+// sessions has a task cannot be review-ready, so Apply does not read the
+// pending reviews (Task 13: the hook's marker change costs one store read,
+// as before Plan 4). With the reviews table gone, such a window gets its
+// marker and no error; a window with a tasked session still reads it.
+func TestApplyWithoutTasksSkipsReviewRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "curia.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	for _, s := range []model.Session{
+		{ID: "a", Pane: "%1", TmuxWindow: "@7", State: model.StateWaiting, UpdatedAt: t0},
+		{ID: "b", Pane: "%2", TmuxWindow: "@8", State: model.StateIdle, TaskID: "T-1", UpdatedAt: t0},
+		// An ended session's task does not count.
+		{ID: "c", Pane: "%3", TmuxWindow: "@7", State: model.StateEnded, TaskID: "T-2", UpdatedAt: t0},
+	} {
+		if err = st.UpsertSession(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err = raw.Exec("DROP TABLE reviews"); err != nil {
+		t.Fatal(err)
+	}
+	fake := &tmux.Fake{}
+	if err = Apply(ctx, fake, st, "@7"); err != nil {
+		t.Errorf("Apply on a window with no task = %v, want no reviews read and no error", err)
+	}
+	if err = Apply(ctx, fake, st, "@8"); err == nil || !strings.Contains(err.Error(), "pending reviews") {
+		t.Errorf("Apply on a window with a task = %v, want the pending reviews read's error", err)
+	}
+	want := []string{"SetWindowOption @7 @curia_marker red", "SetWindowOption @8 @curia_marker "}
+	if !slices.Equal(fake.Calls, want) {
+		t.Errorf("calls = %q, want %q", fake.Calls, want)
+	}
+}

@@ -79,4 +79,7 @@ type Event struct {
 	At                                                                                    time.Time
 	// TaskID is the task named by the hook's environment (CURIA_TASK_ID).
 	TaskID string
+	// EndReason is SessionEnd's reason (Ruling 117), untrusted and at most
+	// 64 bytes: "other" when tmux was killed or crashed.
+	EndReason string
 }

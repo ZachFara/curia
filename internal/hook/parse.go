@@ -17,6 +17,14 @@ import (
 // maxToolTargetRunes caps Event.ToolTarget.
 const maxToolTargetRunes = 60
 
+// maxEndReasonBytes caps Event.EndReason, as the store caps a stored end
+// reason (Ruling 117).
+const maxEndReasonBytes = 64
+
+// endReasonOther is the end reason Claude Code gives when tmux is killed or
+// crashes, which curia restore offers to bring back (Ruling 117).
+const endReasonOther = "other"
+
 // knownKinds are the events Parse accepts.
 var knownKinds = map[model.EventKind]bool{
 	model.SessionStart: true, model.UserPromptSubmit: true, model.PreToolUse: true,
@@ -28,8 +36,8 @@ var knownKinds = map[model.EventKind]bool{
 // now. It reads session_id, cwd, transcript_path, tool_name, message and
 // notification_type, on SessionStart model and source, on UserPromptSubmit
 // prompt, on Stop last_assistant_message and the running subagents of
-// background_tasks, and on SubagentStop whether agent_type is present and
-// empty;
+// background_tasks, on SubagentStop whether agent_type is present and
+// empty, and on SessionEnd reason (see endReason);
 // ToolTarget is the first present of tool_input.file_path,
 // tool_input.pattern or tool_input.command, cut to 60 runes. A field that is
 // missing or not a string reads as empty. Parse fails on an unknown kind, a
@@ -70,6 +78,8 @@ func Parse(kind model.EventKind, payload []byte, pane string, now time.Time) (mo
 		// Agent or Task tool's subagent names its type (Ruling 87).
 		raw, present := fields["agent_type"]
 		ev.HelperAgent = present && str(raw) == ""
+	case model.SessionEnd:
+		ev.EndReason = endReason(fields["reason"])
 	}
 	if ev.SessionID == "" {
 		return model.Event{}, fmt.Errorf("%s payload has no session_id", kind)
@@ -92,6 +102,17 @@ func runningSubagents(raw json.RawMessage) (int, bool) {
 		}
 	}
 	return n, true
+}
+
+// endReason returns SessionEnd's reason (Ruling 117), which is untrusted:
+// one longer than maxEndReasonBytes is not one Claude Code sends and reads
+// as endReasonOther, which is what the store would keep for it. The store
+// maps anything outside [a-z0-9_] to "other" in the same way.
+func endReason(raw json.RawMessage) string {
+	if r := str(raw); len(r) <= maxEndReasonBytes {
+		return r
+	}
+	return endReasonOther
 }
 
 // str returns raw as a string, or "" if it is absent or not a JSON string.

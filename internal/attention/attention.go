@@ -58,9 +58,11 @@ func WindowMarker(sessions []model.Session) string {
 // Apply sets the @curia_marker option of window (a tmux window id) to the
 // WindowMarker of the window's live sessions: those in the store with that
 // TmuxWindow whose state is neither ended nor stale, marked with the tasks
-// that have a pending review (store.PendingReviewTasks). When that read
-// fails the marker is applied without reviews and the read's error is
-// returned. An empty window does nothing.
+// that have a pending review (store.PendingReviewTasks). That read runs
+// only when one of those sessions has a task, since no other can be review
+// ready, so a window without one costs the single list, as before Plan 4.
+// When the read fails the marker is applied without reviews and the read's
+// error is returned. An empty window does nothing.
 func Apply(ctx context.Context, tm tmux.Client, st *store.Store, window string) error {
 	if window == "" {
 		return nil // a session outside tmux has no window
@@ -70,14 +72,19 @@ func Apply(ctx context.Context, tm tmux.Client, st *store.Store, window string) 
 		return fmt.Errorf("attention: list sessions: %w", err)
 	}
 	var live []model.Session
+	tasked := false
 	for _, s := range all {
 		if s.TmuxWindow == window && s.State != model.StateStale {
 			live = append(live, s)
+			tasked = tasked || s.TaskID != ""
 		}
 	}
-	pending, rerr := st.PendingReviewTasks(ctx)
-	if rerr == nil {
-		live = fleet.WithReviews(live, pending)
+	var rerr error
+	if tasked {
+		var pending map[string]string
+		if pending, rerr = st.PendingReviewTasks(ctx); rerr == nil {
+			live = fleet.WithReviews(live, pending)
+		}
 	}
 	if err := tm.SetWindowOption(ctx, window, markerOption, WindowMarker(live)); err != nil {
 		return errors.Join(fmt.Errorf("attention: set marker on %s: %w", window, err), readErr(rerr))

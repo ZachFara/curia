@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode"
@@ -66,7 +67,7 @@ func TestParseFixtures(t *testing.T) {
 		}),
 		// A subagent's closing text is not the session's answer.
 		with(model.SubagentStop, nil),
-		with(model.SessionEnd, nil),
+		with(model.SessionEnd, func(e *model.Event) { e.EndReason = "exit" }),
 	}
 	for _, want := range tests {
 		t.Run(string(want.Kind), func(t *testing.T) {
@@ -237,11 +238,13 @@ func TestParseRejects(t *testing.T) {
 	}
 }
 
-// fakeEnv records the calls Run makes to Git and PaneInfo.
+// fakeEnv records the calls Run makes to Git and PaneInfo. PaneInfo says
+// the pane is in tmux session "work", window "@7", on the server at socket.
 type fakeEnv struct {
 	mu        sync.Mutex
 	gitCalls  []string
 	paneCalls []string
+	socket    string
 }
 
 func (f *fakeEnv) env(pane string) hook.Env {
@@ -254,11 +257,11 @@ func (f *fakeEnv) env(pane string) hook.Env {
 			f.gitCalls = append(f.gitCalls, cwd)
 			return "/src/curia", "feat/hook", ""
 		},
-		PaneInfo: func(pane string) (string, string) {
+		PaneInfo: func(pane string) (string, string, string) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			f.paneCalls = append(f.paneCalls, pane)
-			return "work", "@7"
+			return "work", "@7", f.socket
 		},
 	}
 }
@@ -395,7 +398,7 @@ func TestFirstSeenKeepsWhatAConcurrentSessionStartFilled(t *testing.T) {
 	st := openStore(t)
 	starter := (&fakeEnv{}).env("%2")
 	starter.Git = func(string) (string, string, string) { return "/other", "main", "" }
-	starter.PaneInfo = func(string) (string, string) { return "other", "@9" }
+	starter.PaneInfo = func(string) (string, string, string) { return "other", "@9", "" }
 	env := (&fakeEnv{}).env("%2")
 	git := env.Git
 	env.Git = func(cwd string) (string, string, string) {
@@ -459,7 +462,7 @@ func TestHookWithoutTmuxPane(t *testing.T) {
 func TestPaneInfoPanicReachesCaller(t *testing.T) {
 	st := openStore(t)
 	env := (&fakeEnv{}).env("%3")
-	env.PaneInfo = func(string) (string, string) { panic("tmux exploded") }
+	env.PaneInfo = func(string) (string, string, string) { panic("tmux exploded") }
 	defer func() {
 		if r := recover(); r != "tmux exploded" {
 			t.Errorf("recovered %v, want the PaneInfo panic on the caller's goroutine", r)
@@ -2424,5 +2427,318 @@ func TestStopLatencyWithMessages(t *testing.T) {
 		if r.gate && p95 >= 20*time.Millisecond {
 			t.Errorf("%s: p95 = %v, want < 20ms (p50 %v, max %v, load average %s)", r.name, p95, p50, worst, loadAverage())
 		}
+	}
+}
+
+// Plan 4, Task 13: the tmux server a session's pane is on (section 4.9).
+
+const (
+	socketA = "/tmp/tmux-1/default"
+	socketB = "/tmp/tmux-1/other"
+)
+
+// paneOn makes env's PaneInfo say tmuxSession, window and socket, counting
+// its calls in calls (PaneInfo runs beside Git, which may run another hook).
+func paneOn(env hook.Env, tmuxSession, window, socket string, calls *atomic.Int32) hook.Env {
+	env.PaneInfo = func(string) (string, string, string) {
+		calls.Add(1)
+		return tmuxSession, window, socket
+	}
+	return env
+}
+
+func TestSessionStartStoresSocket(t *testing.T) {
+	st := openStore(t)
+	var calls atomic.Int32
+	env := paneOn((&fakeEnv{}).env("%3"), "api", "@7", socketA, &calls)
+	got := run(t, st, env, model.SessionStart, payload("A", "/p/a.jsonl", `,"source":"startup"`))
+	stored := get(t, st, "A")
+	if got != stored {
+		t.Errorf("Run returned %+v, store has %+v", got, stored)
+	}
+	if stored.TmuxSession != "api" || stored.TmuxWindow != "@7" || stored.Socket != socketA {
+		t.Errorf("stored tmux %q/%q on %q, want api/@7 on %q", stored.TmuxSession, stored.TmuxWindow, stored.Socket, socketA)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("PaneInfo called %d times, want once", calls.Load())
+	}
+}
+
+func TestSessionStartOutsideTmuxHasNoSocket(t *testing.T) {
+	st := openStore(t)
+	var calls atomic.Int32
+	run(t, st, paneOn((&fakeEnv{}).env(""), "api", "@7", socketA, &calls), model.SessionStart, payload("A", "", ""))
+	if s := get(t, st, "A"); s.Socket != "" {
+		t.Errorf("Socket = %q outside tmux, want none", s.Socket)
+	}
+	if calls.Load() != 0 {
+		t.Errorf("PaneInfo called %d times without a pane, want never", calls.Load())
+	}
+
+	// A session that was in tmux and is restarted outside it has none.
+	run(t, st, paneOn((&fakeEnv{}).env("%3"), "api", "@7", socketA, &calls), model.SessionStart, payload("B", "", ""))
+	run(t, st, paneOn((&fakeEnv{}).env(""), "api", "@7", socketA, &calls), model.SessionStart, payload("B", "", `,"source":"resume"`))
+	if s := get(t, st, "B"); s.Socket != "" || s.Pane != "" || s.TmuxWindow != "" {
+		t.Errorf("B restarted outside tmux: pane %q window %q socket %q, want none", s.Pane, s.TmuxWindow, s.Socket)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("PaneInfo called %d times, want once (the start in tmux)", calls.Load())
+	}
+}
+
+func TestResumeInNewServerReplacesSocket(t *testing.T) {
+	st := openStore(t)
+	old := model.Session{
+		ID: "A", Agent: "claude", Pane: "%3", TmuxSession: "api", TmuxWindow: "@1", Socket: socketA,
+		State: model.StateStale, StartedAt: t0, UpdatedAt: t0,
+	}
+	if err := st.UpsertSession(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	env := paneOn((&fakeEnv{}).env("%9"), "work", "@7", socketB, &calls)
+	env.Now = func() time.Time { return t0.Add(time.Hour) }
+	got := run(t, st, env, model.SessionStart, payload("A", "/p/a.jsonl", `,"source":"resume"`))
+	if s := get(t, st, "A"); s != got || s.Pane != "%9" || s.Socket != socketB || s.TmuxWindow != "@7" || s.State != model.StateIdle {
+		t.Errorf("A after resume on a new server: %+v, want pane %%9, window @7, socket %q, idle", s, socketB)
+	}
+}
+
+func TestSocketFilledMidRunOnlyWhenEmpty(t *testing.T) {
+	st := openStore(t)
+	var calls atomic.Int32
+	// First seen mid-run: the socket is filled like the other start fields.
+	got := run(t, st, paneOn((&fakeEnv{}).env("%2"), "work", "@7", socketB, &calls), model.Notification,
+		payload("M", "", `,"message":"needs you"`))
+	if got.Socket != socketB || get(t, st, "M").Socket != socketB {
+		t.Errorf("first seen mid-run: Socket = %q, want %q", got.Socket, socketB)
+	}
+
+	// A SessionStart that wrote the row while the mid-run event was asking
+	// git keeps its socket.
+	starter := paneOn((&fakeEnv{}).env("%4"), "other", "@9", socketA, &calls)
+	env := paneOn((&fakeEnv{}).env("%4"), "work", "@7", socketB, &calls)
+	git := env.Git
+	env.Git = func(cwd string) (string, string, string) {
+		run(t, st, starter, model.SessionStart, payload("N", "", ""))
+		return git(cwd)
+	}
+	got = run(t, st, env, model.Notification, payload("N", "", `,"message":"needs you"`))
+	if got.Socket != socketA || get(t, st, "N").Socket != socketA {
+		t.Errorf("after a concurrent SessionStart: Socket = %q, want its %q", got.Socket, socketA)
+	}
+
+	// Later events ask tmux nothing and keep the socket.
+	before := calls.Load()
+	for _, kind := range []model.EventKind{model.UserPromptSubmit, model.PostToolUse, model.Stop} {
+		run(t, st, paneOn((&fakeEnv{}).env("%2"), "work", "@7", "/tmp/never", &calls), kind, payload("M", "", ""))
+	}
+	if s := get(t, st, "M"); s.Socket != socketB || calls.Load() != before {
+		t.Errorf("after later events: Socket %q, PaneInfo calls %d, want %q and none", s.Socket, calls.Load()-before, socketB)
+	}
+}
+
+func TestCompactionKeepsSocket(t *testing.T) {
+	st := openStore(t)
+	var calls atomic.Int32
+	run(t, st, paneOn((&fakeEnv{}).env("%3"), "work", "@7", socketA, &calls), model.SessionStart, payload("A", "/p/t.jsonl", ""))
+	run(t, st, paneOn((&fakeEnv{}).env("%3"), "work", "@7", socketA, &calls), model.UserPromptSubmit, payload("A", "/p/t.jsonl", ""))
+	got := run(t, st, paneOn((&fakeEnv{}).env("%3"), "work", "@8", socketB, &calls), model.SessionStart,
+		payload("A", "/p/t.jsonl", `,"source":"compact"`))
+	if got.Socket != socketA || get(t, st, "A").Socket != socketA || got.TmuxWindow != "@7" {
+		t.Errorf("after a compaction: socket %q window %q, want %q @7", got.Socket, got.TmuxWindow, socketA)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("PaneInfo called %d times, want once (the first SessionStart)", calls.Load())
+	}
+
+	// Ruling 74a: a compaction's SessionStart for an ended session is a start.
+	run(t, st, paneOn((&fakeEnv{}).env("%3"), "work", "@7", socketA, &calls), model.SessionEnd, payload("A", "/p/t.jsonl", ""))
+	got = run(t, st, paneOn((&fakeEnv{}).env("%3"), "work", "@8", socketB, &calls), model.SessionStart,
+		payload("A", "/p/t.jsonl", `,"source":"compact"`))
+	if got.Socket != socketB || get(t, st, "A").Socket != socketB {
+		t.Errorf("compaction of an ended session: socket %q, want %q", got.Socket, socketB)
+	}
+}
+
+// countingEnv counts the calls Run makes to git and tmux.
+type countingEnv struct {
+	mu        sync.Mutex
+	git, pane int
+}
+
+func (c *countingEnv) env(pane string) hook.Env {
+	env := (&fakeEnv{}).env(pane)
+	git := env.Git
+	env.Git = func(cwd string) (string, string, string) {
+		c.mu.Lock()
+		c.git++
+		c.mu.Unlock()
+		return git(cwd)
+	}
+	env.PaneInfo = func(string) (string, string, string) {
+		c.mu.Lock()
+		c.pane++
+		c.mu.Unlock()
+		return "work", "@7", socketA
+	}
+	return env
+}
+
+func TestSessionStartStillOneTmuxCall(t *testing.T) {
+	st := openStore(t)
+	c := &countingEnv{}
+	env := c.env("%3")
+	run(t, st, env, model.SessionStart, payload("A", "", `,"source":"startup"`))
+	if c.git != 1 || c.pane != 1 {
+		t.Errorf("SessionStart: Git %d, PaneInfo %d, want one each", c.git, c.pane)
+	}
+	for _, kind := range []model.EventKind{
+		model.UserPromptSubmit, model.PreToolUse, model.PostToolUse, model.Notification, model.Stop,
+	} {
+		run(t, st, env, kind, payload("A", "", `,"tool_name":"Edit","message":"needs you"`))
+	}
+	if c.git != 1 || c.pane != 1 {
+		t.Errorf("after five more events: Git %d, PaneInfo %d, want still one each", c.git, c.pane)
+	}
+	if s := get(t, st, "A"); s.Socket != socketA {
+		t.Errorf("Socket = %q, want %q", s.Socket, socketA)
+	}
+}
+
+// Ruling 117: why a session ended. A tmux kill or crash ends Claude Code
+// with SessionEnd reason "other" (live probe, real payloads under
+// testdata/, paths replaced); a user's /exit says "prompt_input_exit".
+
+func TestParseSessionEndReason(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{"tmux killed", fixtureFile(t, "SessionEndOther"), "other"},
+		{"user exit", fixtureFile(t, "SessionEndPromptInputExit"), "prompt_input_exit"},
+		{"absent", []byte(`{"session_id":"s"}`), ""},
+		{"null", []byte(`{"session_id":"s","reason":null}`), ""},
+		{"not a string", []byte(`{"session_id":"s","reason":{"why":"other"}}`), ""},
+		{"64 bytes", fmt.Appendf(nil, `{"session_id":"s","reason":%q}`, strings.Repeat("a", 64)), strings.Repeat("a", 64)},
+		{"65 bytes", fmt.Appendf(nil, `{"session_id":"s","reason":%q}`, strings.Repeat("a", 65)), "other"},
+		{"a megabyte", fmt.Appendf(nil, `{"session_id":"s","reason":%q}`, strings.Repeat("x", 1<<20-64)), "other"},
+	} {
+		ev, err := hook.Parse(model.SessionEnd, tc.body, "", t0)
+		if err != nil || ev.EndReason != tc.want {
+			t.Errorf("%s: EndReason = %.70q, %v, want %q", tc.name, ev.EndReason, err, tc.want)
+		}
+	}
+	for _, kind := range []model.EventKind{model.SessionStart, model.Stop, model.SubagentStop, model.Notification} {
+		if ev, err := hook.Parse(kind, []byte(`{"session_id":"s","reason":"other"}`), "", t0); err != nil || ev.EndReason != "" {
+			t.Errorf("Parse(%s).EndReason = %q, %v, want empty: only SessionEnd has a reason", kind, ev.EndReason, err)
+		}
+	}
+}
+
+// endWith starts session sess-1 (the fixtures' id), ends it with body and
+// returns what Run gave and what the store holds.
+func endWith(t *testing.T, body []byte) (got, stored model.Session) {
+	t.Helper()
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	run(t, st, env, model.SessionStart, payload("sess-1", "/p/t.jsonl", ""))
+	got = run(t, st, env, model.SessionEnd, body)
+	return got, get(t, st, "sess-1")
+}
+
+func TestSessionEndStoresReason(t *testing.T) {
+	for name, want := range map[string]string{"SessionEndOther": "other", "SessionEndPromptInputExit": "prompt_input_exit"} {
+		got, stored := endWith(t, fixtureFile(t, name))
+		if stored.State != model.StateEnded || stored.EndReason != want || got.EndReason != want {
+			t.Errorf("%s: stored %s (%q), Run gave %q, want ended (%q)", name, stored.State, stored.EndReason, got.EndReason, want)
+		}
+	}
+}
+
+// An older Claude Code that sends no reason must still be restorable.
+func TestSessionEndWithoutReasonStoresOther(t *testing.T) {
+	for _, extra := range []string{"", `,"reason":""`, `,"reason":null`, `,"reason":7`} {
+		got, stored := endWith(t, payload("sess-1", "/p/t.jsonl", extra))
+		if stored.State != model.StateEnded || stored.EndReason != "other" || got.EndReason != "other" {
+			t.Errorf("reason field %q: stored %s (%q), Run gave %q, want ended (other)", extra, stored.State, stored.EndReason, got.EndReason)
+		}
+	}
+	// A SessionEnd for a session with no row yet (first seen at its end).
+	st := openStore(t)
+	run(t, st, (&fakeEnv{}).env("%3"), model.SessionEnd, payload("X", "", ""))
+	if s := get(t, st, "X"); s.State != model.StateEnded || s.EndReason != "other" {
+		t.Errorf("first seen at SessionEnd: %s (%q), want ended (other)", s.State, s.EndReason)
+	}
+}
+
+func TestSessionEndHostileReasonNormalized(t *testing.T) {
+	for _, tc := range []struct{ reason, want string }{
+		{"clear", "clear"},
+		{"logout", "logout"},
+		{"resume_2", "resume_2"},
+		{strings.Repeat("a", 64), strings.Repeat("a", 64)},
+		{strings.Repeat("a", 65), "other"},
+		{strings.Repeat("z", 100000), "other"},
+		{"Other", "other"},
+		{"prompt_input_exit\n", "other"},
+		{"x'; DROP TABLE sessions; --", "other"},
+		{"\x1b[31mred\x1b[0m", "other"},
+		{"exit\u202e", "other"},
+		{"\u00e9", "other"},
+		{"a b", "other"},
+		{"../../etc", "other"},
+	} {
+		body, err := json.Marshal(map[string]string{"session_id": "sess-1", "reason": tc.reason})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, stored := endWith(t, body)
+		if stored.State != model.StateEnded || stored.EndReason != tc.want {
+			t.Errorf("reason %.40q: stored %s (%.70q), want ended (%q)", tc.reason, stored.State, stored.EndReason, tc.want)
+		}
+	}
+}
+
+func TestResumedSessionClearsEndReason(t *testing.T) {
+	for _, step := range []struct {
+		kind  model.EventKind
+		extra string
+		want  model.State
+	}{
+		{model.UserPromptSubmit, `,"prompt":"go on"`, model.StateWorking},
+		{model.SessionStart, `,"source":"resume"`, model.StateIdle},
+		{model.SessionStart, `,"source":"compact"`, model.StateIdle},
+		{model.Stop, "", model.StateIdle},
+	} {
+		st := openStore(t)
+		env := (&fakeEnv{}).env("%3")
+		run(t, st, env, model.SessionStart, payload("A", "", ""))
+		run(t, st, env, model.SessionEnd, payload("A", "", `,"reason":"other"`))
+		got := run(t, st, env, step.kind, payload("A", "", step.extra))
+		stored := get(t, st, "A")
+		if stored.State != step.want || stored.EndReason != "" || got.EndReason != "" {
+			t.Errorf("%s%s after an end: stored %s (%q), Run gave %q, want %s with no reason",
+				step.kind, step.extra, stored.State, stored.EndReason, got.EndReason, step.want)
+		}
+		// It ends again with the new reason.
+		run(t, st, env, model.SessionEnd, payload("A", "", `,"reason":"prompt_input_exit"`))
+		if s := get(t, st, "A"); s.State != model.StateEnded || s.EndReason != "prompt_input_exit" {
+			t.Errorf("%s then SessionEnd: %s (%q), want ended (prompt_input_exit)", step.kind, s.State, s.EndReason)
+		}
+	}
+}
+
+// A second SessionEnd for an ended session is ignored (state.Ignores), so
+// the first reason stands.
+func TestSecondSessionEndKeepsFirstReason(t *testing.T) {
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	run(t, st, env, model.SessionStart, payload("sess-1", "/p/t.jsonl", ""))
+	run(t, st, env, model.SessionEnd, fixtureFile(t, "SessionEndPromptInputExit"))
+	run(t, st, env, model.SessionEnd, fixtureFile(t, "SessionEndOther"))
+	if s := get(t, st, "sess-1"); s.EndReason != "prompt_input_exit" {
+		t.Errorf("EndReason = %q after a second SessionEnd, want the first, prompt_input_exit", s.EndReason)
 	}
 }
