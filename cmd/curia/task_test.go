@@ -19,6 +19,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/tmux"
 )
 
 // taskUnexpectedEditor is taskEditor under test: no test may start a real
@@ -449,6 +450,26 @@ func TestTaskLsTableIsSanitised(t *testing.T) {
 	if out := taskMust(t, "task", "ls"); !strings.HasPrefix(out, "ID") || !strings.Contains(out, "STATUS") ||
 		!strings.Contains(out, "AGENT") {
 		t.Errorf("table header missing: %q", out)
+	}
+}
+
+func TestTaskLsReconcilesFirst(t *testing.T) {
+	db := taskHome(t)
+	repo := taskRepo(t, "main")
+	taskMust(t, "task", "add", "Dies", "--repo", repo)
+	taskPutSession(t, db, "s1", "T-1", "%1", model.StateIdle)
+	fake := useFakeTmux(t)
+	fake.Panes = []tmux.Pane{{ID: "%1", Session: "api", WindowID: "@1"}}
+	if out := taskMust(t, "task", "ls"); !strings.Contains(out, "running") || !strings.Contains(out, "%1") {
+		t.Fatalf("with the agent's pane open:\n%s", out)
+	}
+	fake.Panes = nil // the agent's pane was killed
+	out := taskMust(t, "task", "ls")
+	if strings.Contains(out, "running") || strings.Contains(out, "%1") {
+		t.Errorf("after the pane died, task ls still shows the agent:\n%s", out)
+	}
+	if s := getSession(t, db, "s1"); s.State != model.StateStale {
+		t.Errorf("s1 state = %s, want stale", s.State)
 	}
 }
 

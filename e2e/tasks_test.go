@@ -254,17 +254,11 @@ func (r *tasksRun) approveSetup(t *testing.T) {
 		t.Errorf("curia setup approve T-2 printed:\n%s\nwant the script's hash shown and the approval", got)
 	}
 
-	// End of input in the stub's prompt: it sends SessionEnd and exits.
-	//
-	// DEFECT: T-2's agent is ended here, not left stale by killing its pane,
-	// because route.Candidates (internal/route/candidates.go) offers stale
-	// sessions as targets although section 4.10 says "every live session":
-	// with T-2's session stale, "@api-server" in step 5 names two targets
-	// (T-1's working session and T-2's stale one) and curia say refuses. The
-	// fix wave adds a step here that kills T-2's pane instead.
-	r.srv.mustRun(t, "send-keys", "-t", pane, "C-d")
+	// T-2's agent goes away with its pane: its session is left stale, and
+	// from now on no message may be routed to it (I1).
+	r.srv.mustRun(t, "kill-pane", "-t", pane)
 	r.waitPaneGone(t, pane)
-	r.wantStates(t, map[string]string{tasksSecond: "ended"})
+	r.wantStates(t, map[string]string{tasksSecond: "stale"})
 	r.wantTasks(t, map[string]string{"T-1": "ready", "T-2": "ready"})
 }
 

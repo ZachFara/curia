@@ -324,6 +324,12 @@ func runTaskLs(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	// A session whose pane is gone must not show its task running: mark it
+	// stale first, as the board does (skipped, and logged, when tmux cannot
+	// list its panes).
+	if err = reconcile(cmd.Context(), st, newTmuxClient(), cfg.LogPath, clock()); err != nil {
+		return err
+	}
 	cards, err := taskCards(cmd.Context(), st, clock())
 	if err != nil {
 		return err
