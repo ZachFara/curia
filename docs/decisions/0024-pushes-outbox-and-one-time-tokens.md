@@ -1,4 +1,4 @@
-# 0022. Pushes, the outbox and one-time tokens
+# 0024. Pushes, the outbox and one-time tokens
 
 Status: accepted (Plan 4 setup). Probes N1 and N2 can amend the request shape; they have not run yet.
 

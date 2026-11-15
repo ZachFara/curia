@@ -1,4 +1,4 @@
-# 0024. Restore by resume
+# 0026. Restore by resume
 
 Status: accepted (Plan 4 setup). Probes R1 to R3 have not run; their results can amend this record and Task 18.
 

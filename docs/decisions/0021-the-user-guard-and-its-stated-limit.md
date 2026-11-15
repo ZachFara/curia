@@ -1,0 +1,23 @@
+# 0021. The user guard and its stated limit
+
+Status: accepted (Plan 3 final records; Rulings 112, 119, 120 and 123)
+
+## Context
+
+Curia's commands split into what an agent may do and what only the user may: answering a decision, sending a message as the user, storing a rule, approving a setup script, pausing, resuming or cleaning a task, writing tasks. Plan 2 refused these inside an agent session by one check, `CLAUDECODE` being set. Plan 3's final review found that the label "from the user" rested on that unset variable, and live check B confirmed it with real agents: an agent that cleared `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID` and `TMUX_PANE`, or ran `env -i`, made `curia send` and `curia say` store and deliver as the user's, and the receiving agent obeyed. The fix wave then met two automated findings (a pty allocated with `script` gets past a terminal check; the first ancestry check locked the user out when tmux was down) and a re-review found the dashboard board unguarded.
+
+## Decision
+
+- **One function, `userOnly` (`cmd/curia/decisions.go`), decides who is the user,** for every user-only command and for `curia send`'s label. It passes only when all three conditions hold: no agent variable (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, or a `TMUX_PANE` that is the pane of a live agent session); a controlling terminal (`/dev/tty` opens); and no ancestor process that is Claude Code (native `claude`, or node or bun running its script) or the first process of a live agent's pane, read from one `ps` snapshot under one deadline. It reads and never writes.
+- **It fails closed when the process table or the store cannot be read.** When tmux cannot list its panes, or the server the caller's environment reaches shows none of the live agents' panes, it skips the pane-process check, logs one INFO line and relies on the process ancestry, the terminal and the variables (Ruling 123, which reverses the fail-closed part of Ruling 120): refusing there locked the user out of every user-only command whenever tmux was down or restarted.
+- **Every command is classified.** A user-only command carries the cobra annotation `curia-user-only` and calls `userOnly` first; `TestEveryCommandIsClassified` walks the whole command tree and fails on a command that is neither marked (and refusing, without a terminal and with `CLAUDECODE` set, before it opens the store or calls tmux) nor listed with a reason as not user-only. The dashboard's state-changing keys go through the same guard once, when `curia ui` starts.
+- **Sender identity for `curia send` is read from the process ancestry,** not from variables the sender controls; an unverified sender's message is stored with no sender session, never typed, and shares one rate bucket (Ruling 113).
+- **Not implemented, by decision (Ruling 120):** requiring a recognised terminal ancestor. An allow-list of terminals would refuse legitimate ones and still not close `tmux run-shell` with a pty.
+- **The limit is stated, in the README and here: this is not a security boundary.** Curia and the agents run as the same operating-system user. A determined agent can detach from its parent with a double fork and open a pty, start a job through tmux (`run-shell`, `new-window`, `display-popup`, which has the same ancestry as the user's own popup), type into the user's panes with `send-keys`, write the SQLite store directly, or point `curia ls` at another tmux server so reconcile marks real sessions stale. The guard stops mistakes, instructions an agent follows naively, and one-command evasions. Real separation needs a different OS user for the agents, or a secret they cannot read; that is out of scope for V1 and is Plan 3 Open Question 11.
+
+## Consequences
+
+- A person using `!cmd` inside their own Claude Code session is refused, as is anyone whose process table cannot be read, and a script or cron job cannot send as the user or store a rule. These are the costs the rulings accepted.
+- A tmux popup has a controlling terminal and no `TMUX_PANE` and is the user's; so is a job `tmux run-shell` starts, which is why the guard cannot tell it from an agent that uses it.
+- Known gaps, listed in PROGRESS.md under Plan 3 deferred minors: `tmux new-window 'curia …'` passes without a pty wrapper; recognising Claude Code depends on argv[0] (macOS) or the executed file's name (Linux); Claude Code as pid 1 or in another pid namespace is not seen; `nodejs` and interpreter flags with a separate value hide the script; two tmux servers with colliding pane ids are told apart only by refusing on the safe side.
+- A later hardening, not built: `curia hook` could record the Claude Code process id per session at SessionStart (its parent process), and the ancestry walk could compare against recorded ids.
