@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,7 @@ type fixture struct {
 	now      time.Time
 	caller   Caller
 	notified []notified
+	reviewed []reviewed
 	log      bytes.Buffer
 	tools    []Tool
 }
@@ -57,6 +59,9 @@ func newFixture(t *testing.T) *fixture {
 		Caller: func(context.Context) Caller { return f.caller },
 		Notify: func(_ context.Context, d model.Decision, pane string) {
 			f.notified = append(f.notified, notified{d, pane})
+		},
+		Reviewed: func(_ context.Context, r model.Review, pane string) {
+			f.reviewed = append(f.reviewed, reviewed{r, pane})
 		},
 		Log: slog.New(slog.NewTextHandler(&f.log, nil)),
 	})
@@ -212,12 +217,15 @@ func precedentIDs(t *testing.T, m map[string]any) []string {
 	return ids
 }
 
-func TestToolSurfaceIsExactlyFive(t *testing.T) {
+func TestToolSurfaceIsExactlySix(t *testing.T) {
 	f := newFixture(t)
 	var names []string
 	for _, tool := range f.tools {
 		names = append(names, tool.Name)
-		for _, bad := range []string{"answer", "confirm", "approve", "override", "edit", "say", "send", "spawn", "rule"} {
+		for _, bad := range []string{
+			"answer", "confirm", "approve", "override", "edit", "say", "send", "spawn", "rule",
+			"merge", "review_", "drop", "restore", "close", "push", "pause",
+		} {
 			if strings.Contains(tool.Name, bad) {
 				t.Errorf("tool %q contains %q", tool.Name, bad)
 			}
@@ -232,7 +240,7 @@ func TestToolSurfaceIsExactlyFive(t *testing.T) {
 			t.Errorf("%s has no Call", tool.Name)
 		}
 	}
-	want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision", "check_messages"}
+	want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision", "check_messages", "complete_task"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("names = %v, want %v", names, want)
 	}
@@ -242,6 +250,7 @@ func TestToolSurfaceIsExactlyFive(t *testing.T) {
 		"check_decision":    "Read a ticket's status and, once decided, the answer.",
 		"withdraw_decision": "Withdraw your own open ticket, giving the reason or the past decision that settles it.",
 		"check_messages":    "Read the messages the user sent to this session. Call it when a message says its wording was simplified, or to see whether anything is waiting. New messages come under messages; the last 5 messages already typed into your prompt come again under typed_earlier, newest first, with their full wording.",
+		"complete_task":     "Tell the user the task is finished and ready for review. Call it once everything is committed, with a short summary and the state of the tests.",
 	}
 	for _, tool := range f.tools {
 		if tool.Description != descs[tool.Name] {
@@ -255,8 +264,11 @@ func TestToolSurfaceIsExactlyFive(t *testing.T) {
 func TestUnknownToolNameIsAnError(t *testing.T) {
 	f := newFixture(t)
 	h := newHarness(t, f.tools...)
-	for i, name := range []string{"answer_decision", "confirm_decision", "approve", "edit_decision", "Request_Decision", "send_message", "say"} {
-		h.send(`{"jsonrpc":"2.0","id":` + string(rune('1'+i)) + `,"method":"tools/call","params":{"name":"` + name + `","arguments":{"id":"D-1"}}}`)
+	for i, name := range []string{
+		"answer_decision", "confirm_decision", "approve", "edit_decision", "Request_Decision", "send_message", "say",
+		"approve_review", "merge", "close_review", "drop_task", "Complete_Task",
+	} {
+		h.send(`{"jsonrpc":"2.0","id":` + strconv.Itoa(i+1) + `,"method":"tools/call","params":{"name":"` + name + `","arguments":{"id":"D-1"}}}`)
 		if code := errCode(t, h.recv()); code != codeInvalidParams {
 			t.Errorf("tools/call %s: code %v, want %d", name, code, codeInvalidParams)
 		}
@@ -277,6 +289,7 @@ func TestSchemasAreExact(t *testing.T) {
   "reason":{"type":"string","maxLength":300},
   "precedent_id":{"type":"string","description":"The past decision that settles this, if one does."}}}`,
 		"check_messages": `{"type":"object","properties":{}}`,
+		"complete_task":  `{"type":"object","required":["summary","tests_status"],"properties":{"summary":{"type":"string"},"tests_status":{"type":"string","enum":["passed","failed","not_run"]},"tests_detail":{"type":"string"}}}`,
 	}
 	if len(want) != len(f.tools)-1 {
 		t.Fatalf("schemas checked for %d tools, want all but request_decision", len(want))

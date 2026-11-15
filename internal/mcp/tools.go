@@ -36,7 +36,10 @@ type Deps struct {
 	Now    func() time.Time
 	Caller func(ctx context.Context) Caller                         // asked on every tool call
 	Notify func(ctx context.Context, d model.Decision, pane string) // a new blocking ticket; may be nil
-	Log    *slog.Logger
+	// Reviewed is called after a new review was opened (not when a pending
+	// one was updated); may be nil.
+	Reviewed func(ctx context.Context, r model.Review, pane string)
+	Log      *slog.Logger
 }
 
 // The tools' fixed texts.
@@ -101,10 +104,12 @@ const withdrawSchema = `{"type":"object","required":["id","reason"],"properties"
   "reason":{"type":"string","maxLength":300},
   "precedent_id":{"type":"string","description":"The past decision that settles this, if one does."}}}`
 
-// Tools returns the tools, exactly five, in this order: search_decisions,
-// request_decision, check_decision, withdraw_decision, check_messages.
-// None of them answers, confirms, overrides, rescopes or supersedes a
-// ticket, sends a message, or changes another session. Each decision tool
+// Tools returns the tools, exactly six, in this order: search_decisions,
+// request_decision, check_decision, withdraw_decision, check_messages,
+// complete_task. None of them answers, confirms, overrides, rescopes or
+// supersedes a ticket, sends a message, changes another session, or
+// approves, merges or closes a review (complete_task only opens or updates
+// the caller's own task's pending review). Each decision tool
 // first expires the assume tickets that are due; every tool asks d.Caller
 // who is calling. Every argument is untrusted and checked here, whatever
 // the schemas say; check_messages takes none and ignores what it is given.
@@ -136,6 +141,7 @@ func Tools(d Deps) []Tool {
 				"New messages come under messages; the last 5 messages already typed into your prompt come again under typed_earlier, newest first, with their full wording.",
 			InputSchema: json.RawMessage(messagesSchema), Call: t.messages,
 		},
+		t.completeTool(),
 	}
 }
 

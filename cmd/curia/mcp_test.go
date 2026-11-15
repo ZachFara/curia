@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -264,7 +265,7 @@ func mcpHandshake(t *testing.T, p *mcpProc) {
 	for _, tool := range mcpAs[[]any](t, mcpAs[map[string]any](t, list["result"])["tools"]) {
 		names = append(names, mcpAs[string](t, mcpAs[map[string]any](t, tool)["name"]))
 	}
-	if want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision", "check_messages"}; !slices.Equal(names, want) {
+	if want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision", "check_messages", "complete_task"}; !slices.Equal(names, want) {
 		t.Errorf("tools = %v, want %v", names, want)
 	}
 }
@@ -673,7 +674,7 @@ func TestNotifyWithoutPaneLeavesSlot(t *testing.T) {
 	}
 }
 
-func TestMCPOverPipesListsFiveTools(t *testing.T) {
+func TestMCPOverPipesListsSixTools(t *testing.T) {
 	db := mcpEnv(t)
 	st := mcpOpenStore(t, db)
 	t.Setenv("CURIA_SESSION_ID", "S1")
@@ -836,4 +837,87 @@ func TestCallerTeamClearedWhenTeamsDirGone(t *testing.T) {
 		t.Errorf("caller = %+v, want alpha-s with no team", c)
 	}
 	teamsAssert(t, st, "alpha-s", [3]string{})
+}
+
+// mcpTask stores a local backlog task and returns its id (T-1 first).
+func mcpTask(t *testing.T, st *store.Store, title string) string {
+	t.Helper()
+	tk, err := st.CreateTask(context.Background(), model.Task{
+		Title: title, Repo: "/repo/r", Status: model.TaskBacklog, Source: model.SourceLocal, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tk.ID
+}
+
+func TestCompleteTaskOverPipes(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	id := mcpTask(t, st, "Retry webhooks")
+	mcpPutSession(t, st, "S1", "%3", model.StateWorking, time.Now(), func(s *model.Session) { s.TaskID = id })
+	t.Setenv("TMUX_PANE", "%3")
+	p := mcpStart(t)
+	mcpHandshake(t, p)
+	out, isErr := p.tool("complete_task", map[string]any{
+		"summary": "Added retries.", "tests_status": "passed", "tests_detail": "go test ./... ok", "task": "T-9",
+	})
+	want := map[string]any{
+		"review": "R-1", "task": "T-1", "updated": false,
+		"instruction": "The review is waiting for the user. Make sure everything is committed, then end your turn. Do not merge or push. If the user asks for changes, their note arrives as a message.",
+	}
+	if isErr || !reflect.DeepEqual(out, want) {
+		t.Errorf("complete_task = %v (isError %v), want %v", out, isErr, want)
+	}
+	out, isErr = p.tool("complete_task", map[string]any{"summary": "Again.", "tests_status": "failed"})
+	want["updated"] = true
+	if isErr || !reflect.DeepEqual(out, want) {
+		t.Errorf("second complete_task = %v (isError %v), want %v", out, isErr, want)
+	}
+	mcpQuietEnd(t, p)
+	r, found, err := st.GetReview(context.Background(), "R-1")
+	if err != nil || !found || r.TaskID != "T-1" || r.SessionID != "S1" || r.Status != model.ReviewPending ||
+		r.Summary != "Again." || r.Tests != model.TestsFailed {
+		t.Errorf("R-1 = %+v (found %v, err %v)", r, found, err)
+	}
+	if tk, _, _ := st.GetTask(context.Background(), "T-1"); tk.Status != model.TaskBacklog {
+		t.Errorf("T-1 stored status = %s, want backlog", tk.Status)
+	}
+}
+
+// TestMCPCompleteTaskRefusals: a teammate (known from the team refresh,
+// before any view ran), a session with no task and an unknown caller are
+// each refused, and nothing is stored.
+func TestMCPCompleteTaskRefusals(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	mcpCapturedTeam(t, st) // the lead and alpha-s work on T-5
+	for range 5 {
+		mcpTask(t, st, "A task")
+	}
+	mcpPutSession(t, st, "S1", "%3", model.StateWorking, time.Now())
+	for _, c := range []struct{ pane, code, message string }{
+		{"%17", "ask_lead", "You are a teammate in an agent team. Tell your team lead you are done; only the lead completes the task."},
+		{"%3", "no_task", "This session is not linked to a Curia task, so there is nothing to complete. End your turn with a summary instead."},
+		{"%99", "no_task", "This session is not linked to a Curia task, so there is nothing to complete. End your turn with a summary instead."},
+	} {
+		t.Setenv("TMUX_PANE", c.pane)
+		p := mcpStart(t)
+		out, isErr := p.tool("complete_task", map[string]any{"summary": "Done.", "tests_status": "passed"})
+		e, _ := out["error"].(map[string]any)
+		if !isErr || e["code"] != c.code || e["message"] != c.message {
+			t.Errorf("pane %s: complete_task = %v (isError %v), want %s", c.pane, out, isErr, c.code)
+		}
+		mcpQuietEnd(t, p)
+	}
+	if rs, err := st.ListReviews(context.Background(), store.ReviewFilter{}); err != nil || len(rs) != 0 {
+		t.Errorf("reviews = %+v (err %v), want none", rs, err)
+	}
+	// The lead of the same team may complete T-5.
+	t.Setenv("TMUX_PANE", "%16")
+	p := mcpStart(t)
+	if out, isErr := p.tool("complete_task", map[string]any{"summary": "Done.", "tests_status": "passed"}); isErr || out["task"] != "T-5" {
+		t.Errorf("lead complete_task = %v (isError %v)", out, isErr)
+	}
+	mcpQuietEnd(t, p)
 }
