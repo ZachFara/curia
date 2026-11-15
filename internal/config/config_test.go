@@ -46,6 +46,7 @@ func TestDefaults(t *testing.T) {
 		t.Errorf("routing defaults = %+v", c.Routing)
 	}
 	assertPlan4Defaults(t, c)
+	assertPlan5Defaults(t, c)
 }
 
 func TestLoadMissingFileReturnsDefaults(t *testing.T) {
@@ -512,4 +513,110 @@ func TestNtfyEnabledAndDeviceNames(t *testing.T) {
 	if got := n.DeviceNames(); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
 		t.Errorf("DeviceNames = %v", got)
 	}
+}
+
+func assertPlan5Defaults(t *testing.T, c config.Config) {
+	t.Helper()
+	if c.Usage.CheaperModel != "sonnet" {
+		t.Errorf("usage defaults = %+v", c.Usage)
+	}
+	if c.Obsidian.Dir != "" {
+		t.Errorf("obsidian defaults = %+v", c.Obsidian)
+	}
+	if c.Linear.URL != config.DefaultLinearURL || c.Linear.Team != "" || config.DefaultLinearURL != "https://api.linear.app/graphql" {
+		t.Errorf("linear defaults = %+v", c.Linear)
+	}
+	if c.CostLens.Analyzer != "" {
+		t.Errorf("costlens defaults = %+v", c.CostLens)
+	}
+}
+
+func TestPlan5Defaults(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	assertPlan5Defaults(t, config.Default())
+}
+
+func TestLoadPlan5Overrides(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	c, err := config.Load(writeConfig(t, `
+[usage]
+cheaper_model = "haiku[1m]"
+[obsidian]
+dir = "~/Vault/Decisions"
+[linear]
+url = "https://linear.example.com/graphql"
+team = "ENG"
+[costlens]
+analyzer = "~/x/cli.js"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Usage.CheaperModel != "haiku[1m]" {
+		t.Errorf("usage = %+v", c.Usage)
+	}
+	if c.Obsidian.Dir != filepath.Join(home, "Vault/Decisions") {
+		t.Errorf("obsidian dir = %q", c.Obsidian.Dir)
+	}
+	if c.Linear.URL != "https://linear.example.com/graphql" || c.Linear.Team != "ENG" {
+		t.Errorf("linear = %+v", c.Linear)
+	}
+	if c.CostLens.Analyzer != filepath.Join(home, "x/cli.js") {
+		t.Errorf("analyzer = %q", c.CostLens.Analyzer)
+	}
+}
+
+func TestCheaperModelEmptyTurnsItOff(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	c, err := config.Load(writeConfig(t, "[usage]\ncheaper_model = \"\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Usage.CheaperModel != "" {
+		t.Errorf("cheaper_model = %q, want empty", c.Usage.CheaperModel)
+	}
+}
+
+func TestBadUsageConfigRejected(t *testing.T) {
+	for _, v := range []string{"son net", "a;b", strings.Repeat("a", 65), "a\\nb"} {
+		wantErrNaming(t, "[usage]\ncheaper_model = \""+v+"\"\n", "usage.cheaper_model")
+	}
+	wantAccepted(t, "[usage]\ncheaper_model = \""+strings.Repeat("a", 64)+"\"\n")
+}
+
+func TestBadObsidianDirRejected(t *testing.T) {
+	for _, v := range []string{"Vault/Decisions", "/" + strings.Repeat("a", 1024), "/v/a\\nb", "/v/a\\u001bb"} {
+		wantErrNaming(t, "[obsidian]\ndir = \""+v+"\"\n", "obsidian.dir")
+	}
+	wantAccepted(t, "[obsidian]\ndir = \"/v/Decisions\"\n")
+	wantAccepted(t, "[obsidian]\ndir = \"/"+strings.Repeat("a", 1023)+"\"\n")
+}
+
+func TestBadLinearConfigRejected(t *testing.T) {
+	for _, v := range []string{
+		"ftp://x", "https://", "https://u:p@api.linear.app/graphql",
+		"https://api.linear.app/graphql?x=1", "https://api.linear.app/graphql#f",
+		"http://example.com/graphql", "https://a.example/" + strings.Repeat("a", 190),
+		"not a url",
+	} {
+		wantErrNaming(t, "[linear]\nurl = \""+v+"\"\n", "linear.url")
+	}
+	for _, v := range []string{"eng", "ENG-1", "1ENG", "ABCDEFGHIJK"} {
+		wantErrNaming(t, "[linear]\nteam = \""+v+"\"\n", "linear.team")
+	}
+	for _, v := range []string{"http://127.0.0.1:9000/graphql", "http://localhost:9000/graphql", "http://[::1]:9000/graphql", "https://api.linear.app/graphql"} {
+		wantAccepted(t, "[linear]\nurl = \""+v+"\"\n")
+	}
+	wantAccepted(t, "[linear]\nteam = \"E\"\n")
+	wantAccepted(t, "[linear]\nteam = \"ABCDEFGHI1\"\n")
+}
+
+func TestBadAnalyzerRejected(t *testing.T) {
+	for _, v := range []string{"cli.js", "/x/cli.sh", "/x/cli.js\\u001b", "/x/cli.js\\n", "/" + strings.Repeat("a", 1022) + ".js"} {
+		wantErrNaming(t, "[costlens]\nanalyzer = \""+v+"\"\n", "costlens.analyzer")
+	}
+	wantAccepted(t, "[costlens]\nanalyzer = \"/x/cli.js\"\n")
+	wantAccepted(t, "[costlens]\nanalyzer = \"/x/cli.ts\"\n")
 }

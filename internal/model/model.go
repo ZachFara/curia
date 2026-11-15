@@ -50,6 +50,12 @@ type Session struct {
 	// 117): "other" when tmux was killed or crashed, a user's own exit
 	// otherwise.
 	EndReason string
+	// Plan 5 cost columns, written only by store.Ingest. CostKnown false:
+	// cost_usd is NULL. A zero CacheExpiresAt means unknown.
+	CostUSD         float64
+	CostKnown       bool
+	CacheExpiresAt  time.Time
+	CacheRebuildUSD float64
 }
 
 // Team roles.
@@ -82,4 +88,6 @@ type Event struct {
 	// EndReason is SessionEnd's reason (Ruling 117), untrusted and at most
 	// 64 bytes: "other" when tmux was killed or crashed.
 	EndReason string
+	// Agent is the agent that sent the event; empty means Claude Code.
+	Agent string
 }
