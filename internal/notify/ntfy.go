@@ -32,6 +32,7 @@ const (
 	MaxPushText  = 1200 // runes of a message
 	MaxPushTitle = 80   // runes of a title
 	MaxPushLabel = 30   // runes of a button label
+	MaxStakes    = 120  // runes of the stakes line of a decision push
 	PublishLimit = 5 * time.Second
 	// MaxRetryAfter bounds the wait a 429's Retry-After may ask for.
 	MaxRetryAfter = time.Hour
@@ -99,10 +100,14 @@ func NotBefore(now time.Time, quiet string) time.Time {
 }
 
 // DecisionPush is the push for blocking ticket d. answerURL and token are "" for a push without buttons.
-// Only the id, repo base, question, option keys and labels and the
-// recommendation are pushed; each is cleaned, and each option is its own
+// Only the id, repo base, question, option keys and labels, the
+// recommendation and stakes are pushed; each is cleaned, and each option is its own
 // line, so ticket text cannot forge a line of the message.
-func DecisionPush(d model.Decision, topic, answerURL, token string) Notification {
+// stakes, when it is not empty, is the message's last line (cleaned to one
+// line of at most MaxStakes runes); it is never cut: when the message is too
+// long, the question is shortened first. An irreversible ticket's push
+// takes no stakes line.
+func DecisionPush(d model.Decision, topic, answerURL, token, stakes string) Notification {
 	lines := []string{sanitize.Line(d.Question, MaxPushText)}
 	for _, o := range d.Options {
 		lines = append(lines, sanitize.Line(o.Key+": "+o.Label, MaxPushText))
@@ -117,16 +122,62 @@ func DecisionPush(d model.Decision, topic, answerURL, token string) Notification
 	case len(d.Options) > MaxActions:
 		lines = append(lines, "More options: curia decide "+d.ID+".")
 	}
+	tail := ""
+	if line := sanitize.Line(stakes, MaxStakes); line != "" && !irreversible {
+		tail = "\n" + line
+	}
 	n := Notification{
 		Topic:    topic,
 		Title:    sanitize.Line(d.ID+repoPart(d.Repo)+": decision needed", MaxPushTitle),
-		Message:  fitMessage(sanitize.Text(strings.Join(lines, "\n"), MaxPushText)),
+		Message:  decisionMessage(lines, tail),
 		Priority: priorityTicket,
 	}
 	if answerURL != "" && token != "" && !irreversible {
 		n.Actions = buttons(d, answerURL, token)
 	}
 	return n
+}
+
+// decisionMessage joins a decision push's lines, question first, then adds
+// tail ("" or "\n" and the stakes line). Without a tail it is exactly the
+// message Plan 4 built. With one, the tail is kept whole: the question is
+// shortened to leave room for it within MaxPushText runes and
+// maxMessageBytes, and only when the other lines alone are too long are
+// they cut from their end.
+func decisionMessage(lines []string, tail string) string {
+	if tail == "" {
+		return fitMessage(sanitize.Text(strings.Join(lines, "\n"), MaxPushText))
+	}
+	rest := ""
+	for _, l := range lines[1:] {
+		rest += "\n" + l
+	}
+	question := cutTo(lines[0],
+		MaxPushText-utf8.RuneCountInString(rest)-utf8.RuneCountInString(tail),
+		maxMessageBytes-jsonLen(rest)-jsonLen(tail))
+	body := sanitize.Text(question+rest, MaxPushText-utf8.RuneCountInString(tail))
+	return fitMessageBefore(body, tail)
+}
+
+// cutTo shortens s to at most maxRunes runes and maxBytes JSON bytes, the
+// last rune an ellipsis; s itself when it fits.
+func cutTo(s string, maxRunes, maxBytes int) string {
+	if utf8.RuneCountInString(s) <= maxRunes && jsonLen(s) <= maxBytes {
+		return s
+	}
+	runes, bytes := maxRunes-1, maxBytes-jsonLen(ellipsis)
+	if runes < 0 || bytes < 0 {
+		return ellipsis
+	}
+	n := 0
+	for i, r := range s {
+		n += runeJSONLen(r)
+		if n > bytes || runes == 0 {
+			return s[:i] + ellipsis
+		}
+		runes--
+	}
+	return s // unreachable: s did not fit
 }
 
 // buttons are at most MaxActions answers to d, the recommended option first
@@ -530,18 +581,23 @@ func textLines(s string) bool {
 // fitMessage cuts a cleaned message on a rune boundary so that, JSON-encoded,
 // it is at most maxMessageBytes, the last rune an ellipsis. A message that
 // fits is returned as it is.
-func fitMessage(s string) string {
-	if jsonLen(s) <= maxMessageBytes {
-		return s
+func fitMessage(s string) string { return fitMessageBefore(s, "") }
+
+// fitMessageBefore is fitMessage for s followed by tail: s is cut so that
+// both together fit, and tail is never cut.
+func fitMessageBefore(s, tail string) string {
+	limit := maxMessageBytes - jsonLen(tail)
+	if jsonLen(s) <= limit {
+		return s + tail
 	}
-	budget, n := maxMessageBytes-len(ellipsis), 0
+	budget, n := limit-len(ellipsis), 0
 	for i, r := range s {
 		n += runeJSONLen(r)
 		if n > budget {
-			return s[:i] + ellipsis
+			return s[:i] + ellipsis + tail
 		}
 	}
-	return s // unreachable: s did not fit
+	return s + tail // unreachable: s did not fit
 }
 
 // jsonLen is the length of s inside a JSON string as encoding/json writes it
