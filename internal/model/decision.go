@@ -106,6 +106,9 @@ type Decision struct {
 	DeliveredVia                               DeliveryVia
 	CreatedAt, ExpiresAt, AnsweredAt, ClosedAt time.Time
 	SupersededAt, DeliveredAt, ConfirmedAt     time.Time
+	// ExportedAt is when the decision was last written to the Obsidian
+	// folder; zero means never.
+	ExportedAt time.Time
 }
 
 // Ticket is an open decision with what the queue shows about its session.
