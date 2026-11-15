@@ -29,6 +29,7 @@ import (
 // Flags of `curia task`; tests reset them.
 var (
 	taskAddRepo, taskAddBody, taskAddBase string
+	taskAddPriority, taskEditPriority     string
 	taskAddTags                           []string
 	taskLsStatus, taskLsRepo              string
 	taskLsJSON                            bool
@@ -67,6 +68,7 @@ func init() {
 	add.Flags().StringVar(&taskAddBody, "body", "", "a file holding the brief, or - for stdin")
 	add.Flags().StringVar(&taskAddBase, "base", "", "the branch the task starts from (default: the checked-out branch)")
 	add.Flags().StringArrayVar(&taskAddTags, "tag", nil, "a tag (repeatable)")
+	add.Flags().StringVar(&taskAddPriority, "priority", "P2", "P1, P2 or P3 (also 1, 2, 3)")
 	ls := &cobra.Command{
 		Use:   "ls",
 		Short: "List tasks with their derived status",
@@ -95,6 +97,7 @@ func init() {
 	edit.Flags().StringVar(&taskEditBase, "base", "", "the new base branch")
 	edit.Flags().StringArrayVar(&taskEditTags, "tag", nil, "a tag (repeatable; replaces the tags)")
 	edit.Flags().StringVar(&taskEditStatus, "status", "", "backlog, ready or dropped")
+	edit.Flags().StringVar(&taskEditPriority, "priority", "", "P1, P2 or P3 (also 1, 2, 3)")
 	ready := &cobra.Command{
 		Use:         "ready <id>",
 		Short:       "Mark a task ready to spawn",
@@ -234,6 +237,10 @@ func runTaskAdd(cmd *cobra.Command, args []string) error {
 	if err := userOnly("task add", "add a task"); err != nil {
 		return err
 	}
+	priority, err := taskPriorityOf(taskAddPriority)
+	if err != nil {
+		return err
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -241,7 +248,7 @@ func runTaskAdd(cmd *cobra.Command, args []string) error {
 	logger, closeLog := taskLogger(cfg)
 	defer closeLog()
 	t := model.Task{
-		Title: args[0], BaseBranch: taskAddBase, Tags: taskAddTags,
+		Title: args[0], BaseBranch: taskAddBase, Tags: taskAddTags, Priority: priority,
 		Status: model.TaskBacklog, Source: model.SourceLocal, CreatedAt: clock(),
 	}
 	var early []task.Problem
@@ -273,6 +280,15 @@ func runTaskAdd(cmd *cobra.Command, args []string) error {
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s added (%s)\n", stored.ID, stored.Status)
 	return err
+}
+
+// taskPriorityOf checks a --priority value.
+func taskPriorityOf(s string) (int, error) {
+	p, ok := task.ParsePriority(s)
+	if !ok {
+		return 0, fmt.Errorf("invalid --priority %q: want P1, P2 or P3", sanitize.Line(s, 40))
+	}
+	return p, nil
 }
 
 // taskCards lists every task, the sessions and the open blocking tickets
@@ -369,6 +385,8 @@ type taskRow struct {
 	BaseBranch    string           `json:"base_branch"`
 	Status        model.TaskStatus `json:"status"`
 	StoredStatus  model.TaskStatus `json:"stored_status"`
+	Priority      int              `json:"priority"`
+	Agent         string           `json:"agent"`
 	Source        model.TaskSource `json:"source"`
 	SourceRef     string           `json:"source_ref"`
 	Tags          []string         `json:"tags"`
@@ -397,7 +415,7 @@ func taskToRow(c task.Card) taskRow {
 	}
 	return taskRow{
 		ID: t.ID, Title: t.Title, Body: t.Body, Repo: t.Repo, BaseBranch: t.BaseBranch,
-		Status: c.Status, StoredStatus: t.Status, Source: t.Source, SourceRef: t.SourceRef, Tags: tags,
+		Status: c.Status, StoredStatus: t.Status, Priority: t.Priority, Agent: t.Agent, Source: t.Source, SourceRef: t.SourceRef, Tags: tags,
 		Branch: t.Branch, Worktree: t.Worktree, Team: t.Team, AgentModel: t.AgentModel, Pane: t.Pane,
 		ResumeSession: t.ResumeSession, Sessions: sessions,
 		CreatedAt: jsonTime(t.CreatedAt), UpdatedAt: jsonTime(t.UpdatedAt), LaunchedAt: jsonTime(t.LaunchedAt),
@@ -466,9 +484,9 @@ func taskAgentText(c task.Card) string {
 // taskPrintTable prints one row per task, the repo as its basename.
 func taskPrintTable(w io.Writer, cards []task.Card) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "ID\tSTATUS\tREPO\tTITLE\tAGENT")
+	_, _ = fmt.Fprintln(tw, "ID\tPRI\tSTATUS\tREPO\tTITLE\tAGENT")
 	for _, c := range cards {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", taskCell(c.Task.ID), taskCell(taskStatusText(c)),
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", taskCell(c.Task.ID), task.PriorityLabel(c.Task.Priority), taskCell(taskStatusText(c)),
 			taskCell(ui.RepoName(c.Task.Repo)), taskCell(c.Task.Title), taskCell(taskAgentText(c)))
 	}
 	return tw.Flush()
@@ -529,12 +547,12 @@ func runTaskEdit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	f := cmd.Flags()
-	if !f.Changed("title") && !f.Changed("body") && !f.Changed("base") && !f.Changed("tag") && !f.Changed("status") {
+	if !taskEditAnyFlag(f.Changed) {
 		if len(cfg.EditorArgs()) == 0 {
 			return taskNoEditorError()
 		}
 		if !taskIsTerminal(cmd.InOrStdin()) {
-			return errors.New("nothing to change: give --title, --body, --base, --tag or --status, or run on a terminal to open the editor")
+			return errors.New("nothing to change: give --title, --body, --base, --tag, --status or --priority, or run on a terminal to open the editor")
 		}
 		return taskEditInEditor(cmd, cfg, id)
 	}
@@ -544,20 +562,42 @@ func runTaskEdit(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	priority, err := taskEditPriorityOf(f.Changed)
+	if err != nil {
+		return err
+	}
 	var body string
 	var early []task.Problem
 	if f.Changed("body") {
 		early = taskBodyProblem(cmd.InOrStdin(), taskEditBody, &body)
 	}
-	if err = taskUpdate(cmd.Context(), cfg, id, early, taskEditChange(f.Changed, body, status)); err != nil {
+	if err = taskUpdate(cmd.Context(), cfg, id, early, taskEditChange(f.Changed, body, status, priority)); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s updated\n", id)
 	return err
 }
 
+// taskEditAnyFlag reports whether any flag that changes a task was given.
+func taskEditAnyFlag(changed func(name string) bool) bool {
+	for _, n := range []string{"title", "body", "base", "tag", "status", "priority"} {
+		if changed(n) {
+			return true
+		}
+	}
+	return false
+}
+
+// taskEditPriorityOf checks --priority when given; 0 means not given.
+func taskEditPriorityOf(changed func(name string) bool) (int, error) {
+	if !changed("priority") {
+		return 0, nil
+	}
+	return taskPriorityOf(taskEditPriority)
+}
+
 // taskEditChange applies the edit flags that were given.
-func taskEditChange(changed func(name string) bool, body string, status model.TaskStatus) func(*model.Task) {
+func taskEditChange(changed func(name string) bool, body string, status model.TaskStatus, priority int) func(*model.Task) {
 	return func(t *model.Task) {
 		if changed("title") {
 			t.Title = taskEditTitle
@@ -574,6 +614,9 @@ func taskEditChange(changed func(name string) bool, body string, status model.Ta
 		if status != "" {
 			t.Status = status
 		}
+		if priority != 0 {
+			t.Priority = priority
+		}
 	}
 }
 
@@ -583,7 +626,7 @@ func taskNoEditorError() error {
 	if home, err := os.UserHomeDir(); err == nil {
 		where = configFile(home)
 	}
-	return fmt.Errorf("no editor set: add editor = \"/path/to/editor\" to %s, or give --title, --body <file>|-, --base, --tag or --status",
+	return fmt.Errorf("no editor set: add editor = \"/path/to/editor\" to %s, or give --title, --body <file>|-, --base, --tag, --status or --priority",
 		sanitize.Line(where, 200))
 }
 
