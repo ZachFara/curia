@@ -23,7 +23,7 @@ func TestValidID(t *testing.T) {
 }
 
 func good() model.Task {
-	return model.Task{Title: "Fix auth", Repo: "/src/api", BaseBranch: "main", AgentModel: "opus[1m]", Tags: []string{"a", "b"}}
+	return model.Task{Title: "Fix auth", Repo: "/src/api", BaseBranch: "main", AgentModel: "opus[1m]", Tags: []string{"a", "b"}, Priority: 2, Agent: "claude"}
 }
 
 func TestValidateReportsEveryProblem(t *testing.T) {
@@ -85,7 +85,7 @@ func TestNormalizeKeepsBodyLayout(t *testing.T) {
 		t.Errorf("tags = %v", got.Tags)
 	}
 	long := Normalize(model.Task{Title: strings.Repeat("a", 500)})
-	if ps := Validate(model.Task{Title: long.Title, Repo: "/r"}); len(ps) != 1 || ps[0].Field != "title" {
+	if ps := Validate(model.Task{Title: long.Title, Repo: "/r", Priority: 2, Agent: "claude"}); len(ps) != 1 || ps[0].Field != "title" {
 		t.Errorf("overlong title not reported after Normalize: %v", ps)
 	}
 }
@@ -130,5 +130,77 @@ func TestSessionName(t *testing.T) {
 		if got := SessionName(in); !re.MatchString(got) {
 			t.Errorf("SessionName(%q) = %q", in, got)
 		}
+	}
+}
+
+func TestParsePriority(t *testing.T) {
+	for in, want := range map[string]int{"P1": 1, "p1": 1, "P2": 2, "p3": 3, "2": 2, "1": 1, "3": 3} {
+		if got, ok := ParsePriority(in); !ok || got != want {
+			t.Errorf("ParsePriority(%q) = %d, %v, want %d, true", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{"", "P0", "0", "P4", "4", "high", "P 1", " P1", "P1 ", "PP1", "P", "-1", "P-1", "\uff11", "P\uff11", "P01", "P1\n"} {
+		if got, ok := ParsePriority(in); ok || got != 0 {
+			t.Errorf("ParsePriority(%q) = %d, %v, want 0, false", in, got, ok)
+		}
+	}
+}
+
+func TestPriorityLabel(t *testing.T) {
+	for in, want := range map[int]string{1: "P1", 2: "P2", 3: "P3", 0: "P2", 9: "P2", -1: "P2"} {
+		if got := PriorityLabel(in); got != want {
+			t.Errorf("PriorityLabel(%d) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestNormalizeDefaultsPriorityAndAgent(t *testing.T) {
+	got := Normalize(model.Task{Title: "x"})
+	if got.Priority != 2 || got.Agent != "claude" {
+		t.Errorf("zero values: priority %d, agent %q, want 2 and claude", got.Priority, got.Agent)
+	}
+	got = Normalize(model.Task{Title: "x", Priority: 3, Agent: "codex"})
+	if got.Priority != 3 || got.Agent != "codex" {
+		t.Errorf("set values: priority %d, agent %q, want them kept", got.Priority, got.Agent)
+	}
+	// An invalid value is kept for Validate to report, not repaired.
+	got = Normalize(model.Task{Title: "x", Priority: 4, Agent: "gemini"})
+	if got.Priority != 4 || got.Agent != "gemini" {
+		t.Errorf("invalid values: priority %d, agent %q, want them kept", got.Priority, got.Agent)
+	}
+}
+
+func TestValidateReportsPriorityAndAgent(t *testing.T) {
+	x := Normalize(good())
+	if ps := Validate(x); len(ps) != 0 {
+		t.Fatalf("normalized good task: %v", ps)
+	}
+	x.Title, x.Priority, x.Agent = "", 4, "gemini"
+	want := []Problem{
+		{"title", "is required"},
+		{"priority", "must be P1, P2 or P3"},
+		{"agent", "must be claude or codex"},
+	}
+	if ps := Validate(x); !reflect.DeepEqual(ps, want) {
+		t.Errorf("problems = %v, want %v", ps, want)
+	}
+	for _, p := range []int{-1, 0, 4} {
+		y := Normalize(good())
+		y.Priority = p
+		if ps := Validate(y); len(ps) != 1 || ps[0].Field != "priority" {
+			t.Errorf("priority %d: %v", p, ps)
+		}
+	}
+	for _, a := range []string{"", "Claude", "codex "} {
+		y := Normalize(good())
+		y.Agent = a
+		if ps := Validate(y); len(ps) != 1 || ps[0].Field != "agent" {
+			t.Errorf("agent %q: %v", a, ps)
+		}
+	}
+	y := Normalize(good())
+	y.Agent = "codex"
+	if ps := Validate(y); len(ps) != 0 {
+		t.Errorf("codex: %v", ps)
 	}
 }
