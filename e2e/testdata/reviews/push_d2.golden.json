@@ -1,0 +1,35 @@
+{
+  "topic": "curia-e2e",
+  "title": "D-2 api-server: decision needed",
+  "message": "Where should the rotated refresh tokens be recorded?\nA: Postgres table\nB: Redis stream\nC: In memory\nRecommended: B",
+  "priority": 4,
+  "actions": [
+    {
+      "action": "http",
+      "label": "B: Redis stream",
+      "url": "http://localhost:8787/v1/answer",
+      "method": "POST",
+      "headers": {"Authorization": "Bearer TOKEN", "Content-Type": "application/json"},
+      "body": "{\"decision\":\"D-2\",\"key\":\"B\"}",
+      "clear": true
+    },
+    {
+      "action": "http",
+      "label": "A: Postgres table",
+      "url": "http://localhost:8787/v1/answer",
+      "method": "POST",
+      "headers": {"Authorization": "Bearer TOKEN", "Content-Type": "application/json"},
+      "body": "{\"decision\":\"D-2\",\"key\":\"A\"}",
+      "clear": true
+    },
+    {
+      "action": "http",
+      "label": "C: In memory",
+      "url": "http://localhost:8787/v1/answer",
+      "method": "POST",
+      "headers": {"Authorization": "Bearer TOKEN", "Content-Type": "application/json"},
+      "body": "{\"decision\":\"D-2\",\"key\":\"C\"}",
+      "clear": true
+    }
+  ]
+}

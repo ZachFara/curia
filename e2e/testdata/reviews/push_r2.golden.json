@@ -1,0 +1,6 @@
+{
+  "topic": "curia-e2e",
+  "title": "R-2 T-1: ready for review",
+  "message": "Fix the auth refresh\nTests (the agent's report): passed\nHandled the empty token list as the review asked.",
+  "priority": 3
+}
