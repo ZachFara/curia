@@ -1050,6 +1050,7 @@ var userOnlyCommands = map[string][]string{
 var userNotOnlyCommands = map[string]string{
 	"curia decisions ls":          "reads the tickets only",
 	"curia hook":                  "run by Claude Code's hooks; records the calling session's own event",
+	"curia ingest":                "run by cost-lens and status lines inside agent sessions; writes only cost, cache and usage readings, which nothing automatic depends on",
 	"curia launch":                "runs the agent in the caller's own process; spawn decides what is started",
 	"curia ls":                    "reads the sessions only",
 	"curia mcp":                   "run by Claude Code; its tools cannot decide, send, spawn or pause; complete_task only files the caller's own task for review",
@@ -1060,6 +1061,7 @@ var userNotOnlyCommands = map[string]string{
 	"curia routing stats":         "reads the routing counts only",
 	"curia seen":                  "attention bookkeeping, run by tmux on pane focus",
 	"curia send":                  "agents may send; labeled, limited and never from the user (Rulings 112, 113)",
+	"curia statusline":            "run by Claude Code as the status line inside agent sessions; prints numbers and writes only cost, cache and usage readings",
 	"curia sidebar":               "a view; its user actions go through the guard (uiUserActions)",
 	"curia spawn":                 "agents may spawn ready tasks only (Ruling 113)",
 	"curia status":                "prints the badge",
