@@ -465,9 +465,27 @@ func TestDecideSourceAnswerIsNotRedelivered(t *testing.T) {
 
 // A delivery that fails is not a command failure: the answer is stored and
 // the line says what happened, with a WARN in the log and no ERROR.
+// decideDownAfterGuard is a tmux server that answers the user-only guard's
+// pane list (Ruling 119) with s1's pane and is gone for every call after.
+type decideDownAfterGuard struct {
+	downTmux
+	listed bool
+}
+
+func (d *decideDownAfterGuard) ListPanes(context.Context) ([]tmux.Pane, error) {
+	if d.listed {
+		return nil, errNoServer
+	}
+	d.listed = true
+	return []tmux.Pane{{ID: "%1", Session: "work", WindowID: "@1", ServerStart: at(8, 0)}}, nil
+}
+
 func TestDecideDeliveryFailureIsReportedNotFailed(t *testing.T) {
 	db, _ := decideHome(t, decideOpenSpecs()...)
-	useDownTmux(t)
+	down := &decideDownAfterGuard{}
+	prev := newTmuxClient
+	newTmuxClient = func() tmux.Client { return down }
+	t.Cleanup(func() { newTmuxClient = prev })
 	out, _, err := decideRun(t, strings.NewReader(""), "D-1", "--option", "A", "--reason", "r")
 	if err != nil {
 		t.Fatalf("decide = %v, want success", err)

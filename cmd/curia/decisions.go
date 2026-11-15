@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -104,96 +105,173 @@ func userOnly(command, what string) error {
 // userAncestryLimit bounds the walk up the parent processes.
 const userAncestryLimit = 64
 
-// userProcess reads one process's parent pid and command name (ps's comm:
-// the executable, as a path or a base name). Tests replace it with a
-// process table; the test default fails a test that has not set one.
+// userProc is what the ancestry walk reads of one process: its parent pid,
+// its command name (ps's comm: the executable, as a path or a base name)
+// and, for an interpreter, its arguments.
+type userProc struct {
+	PPID int
+	Comm string
+	Args string // read only when Comm is an interpreter (claudeInterpreters)
+}
+
+// userProcess reads one process; tests replace it with a process table, and
+// the test default fails a test that has not set one.
 var userProcess = psProcess
 
-// psProcess is userProcess from `ps -o ppid=,comm= -p <pid>`, run by
-// absolute path, with fixed arguments and a short timeout.
-func psProcess(pid int) (int, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), subprocessTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "/bin/ps", "-o", "ppid=,comm=", "-p", strconv.Itoa(pid)).Output()
+// psProcess is userProcess from ps, run by absolute path with fixed
+// arguments and a short timeout: `ps -o ppid=,comm= -p <pid>`, and
+// `ps -o args= -p <pid>` for an interpreter.
+func psProcess(pid int) (userProc, error) {
+	out, err := psField(pid, "ppid=,comm=")
 	if err != nil {
-		return 0, "", fmt.Errorf("ps -p %d: %w", pid, err)
+		return userProc{}, err
 	}
-	ppid, comm, ok := strings.Cut(strings.TrimSpace(string(out)), " ")
+	ppid, comm, ok := strings.Cut(out, " ")
 	n, err := strconv.Atoi(ppid)
 	if !ok || err != nil || n < 0 {
-		return 0, "", fmt.Errorf("ps -p %d printed %q", pid, sanitize.Line(string(out), 80))
+		return userProc{}, fmt.Errorf("ps -p %d printed %q", pid, sanitize.Line(out, 80))
 	}
-	return n, strings.TrimSpace(comm), nil
+	p := userProc{PPID: n, Comm: strings.TrimSpace(comm)}
+	if slices.Contains(claudeInterpreters, filepath.Base(p.Comm)) {
+		if p.Args, err = psField(pid, "args="); err != nil {
+			return userProc{}, err
+		}
+	}
+	return p, nil
+}
+
+// psField is one `ps -o <format> -p <pid>` answer, trimmed.
+func psField(pid int, format string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), subprocessTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/bin/ps", "-o", format, "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return "", fmt.Errorf("ps -p %d: %w", pid, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// claudeInterpreters are the programs that run Claude Code's JavaScript
+// CLI when it is installed from npm.
+var claudeInterpreters = []string{"node", "bun"}
+
+// isClaudeCode reports whether p is Claude Code. Seen on the dev Mac (Claude
+// Code 2.1.325, native install): comm "claude" or ".../.local/bin/claude",
+// args "claude --continue ...". An npm install runs as node (or bun) with
+// the script as its first argument: ".../bin/claude" through npm's link, or
+// ".../@anthropic-ai/claude-code/cli.js". The match is on those base names
+// only, never on any argument that merely holds the word.
+func isClaudeCode(p userProc) bool {
+	if filepath.Base(p.Comm) == "claude" {
+		return true
+	}
+	if !slices.Contains(claudeInterpreters, filepath.Base(p.Comm)) {
+		return false
+	}
+	for _, a := range strings.Fields(p.Args)[min(1, len(strings.Fields(p.Args))):] {
+		if strings.HasPrefix(a, "-") {
+			continue // the interpreter's own flags
+		}
+		dir, base := filepath.Base(filepath.Dir(a)), filepath.Base(a)
+		return base == "claude" || (dir == "claude-code" && (base == "cli.js" || base == "cli.mjs"))
+	}
+	return false
 }
 
 // agentAncestor says why the caller descends from an agent, or "" when it
 // does not (Ruling 119): walking from the parent to pid 1, a process is
-// Claude Code (an executable named claude) or the first process of the
-// pane of a live tracked session (agentPanePIDs). It fails closed: an
-// ancestry it cannot read, or one deeper than userAncestryLimit, is an
-// agent's. Curia records no process id for a session, so only these two
-// are checked.
+// Claude Code (isClaudeCode) or the first process of the pane of a live
+// tracked session (agentPanePIDs). It fails closed: an ancestry it cannot
+// read, one deeper than userAncestryLimit, or live agents' panes it cannot
+// see are an agent's. Curia records no process id for a session, so only
+// these are checked.
 func agentAncestor() string {
-	panes := agentPanePIDs()
+	panes, why := agentPanePIDs()
+	if why != "" {
+		return why
+	}
 	pid := os.Getppid()
 	for range userAncestryLimit {
 		if pid <= 1 {
+			// Reaching pid 1 with no agent on the way is the user's: a
+			// terminal, a tmux popup or run-shell job (through the tmux
+			// server), or an orphan. Requiring a known terminal program
+			// would refuse users of any other one and still let a run-shell
+			// job through, which has the ancestry of the user's own popup:
+			// a process of the same operating-system user can always detach
+			// itself this way (the stated limit of these guards).
 			return ""
 		}
-		ppid, comm, err := userProcess(pid)
+		p, err := userProcess(pid)
 		if err != nil {
 			return "its parent processes cannot be read: " + sanitize.Line(err.Error(), 120)
 		}
 		switch {
-		case filepath.Base(comm) == "claude":
+		case isClaudeCode(p):
 			return fmt.Sprintf("it runs under Claude Code (process %d)", pid)
 		case panes[pid] != "":
 			return fmt.Sprintf("it runs under the pane of agent session %s (process %d)", panes[pid], pid)
 		}
-		pid = ppid
+		pid = p.PPID
 	}
 	return fmt.Sprintf("its parent processes are more than %d deep", userAncestryLimit)
 }
 
 // agentPanePIDs maps the pid of the first process of each pane holding a
 // live tracked session (neither ended nor stale) to that session's short
-// id. With no store yet, or tmux unreachable, it is empty: the Claude Code
-// check still applies.
-func agentPanePIDs() map[int]string {
+// id, or says why it cannot, and then the caller is refused: the store
+// cannot be read, or it has live sessions with panes and the tmux server
+// cannot list its panes or shows none of them (the caller's TMUX or
+// TMUX_TMPDIR may name another server). With no store yet, or no live
+// session in a pane, the map is empty.
+func agentPanePIDs() (map[int]string, string) {
 	out := map[int]string{}
 	cfg, err := loadConfig()
 	if err != nil {
-		return out
+		return nil, "the config cannot be read to check for agents: " + sanitize.Line(err.Error(), 120)
 	}
-	if _, err = os.Stat(cfg.DBPath); err != nil {
-		return out
+	if _, err = os.Stat(cfg.DBPath); errors.Is(err, fs.ErrNotExist) {
+		return out, ""
 	}
 	st, err := openStore(cfg)
 	if err != nil {
-		return out
+		return nil, "the store cannot be read to check for agents"
 	}
 	defer func() { _ = st.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*subprocessTimeout)
 	defer cancel()
 	sessions, err := st.ListSessions(ctx, store.ListFilter{})
 	if err != nil {
-		return out
+		return nil, "the store cannot be read to check for agents"
+	}
+	sessions = slices.DeleteFunc(sessions, func(s model.Session) bool {
+		return s.Pane == "" || s.State == model.StateEnded || s.State == model.StateStale
+	})
+	if len(sessions) == 0 {
+		return out, ""
 	}
 	panes, err := newTmuxClient().ListPanes(ctx)
 	if err != nil {
-		return out
+		return nil, "tmux cannot list the panes of the live agents, so Curia cannot tell whether this runs in one " +
+			"(curia ls marks the sessions whose panes are gone)"
 	}
+	shown := false
 	for _, s := range sessions {
-		if s.Pane == "" || s.State == model.StateEnded || s.State == model.StateStale {
-			continue
-		}
 		for _, p := range panes {
-			if p.ID == s.Pane && p.PID > 1 {
+			if p.ID != s.Pane {
+				continue
+			}
+			shown = true
+			if p.PID > 1 {
 				out[p.PID] = spawnShortID(s.ID)
 			}
 		}
 	}
-	return out
+	if !shown {
+		return nil, "the tmux server reached shows none of the live agents' panes, so Curia cannot tell whether this " +
+			"runs in one (curia ls marks the sessions whose panes are gone)"
+	}
+	return out, ""
 }
 
 // userOnlyRunE is run behind userOnly, as a cobra RunE.

@@ -335,6 +335,7 @@ func TestEditRescope(t *testing.T) {
 func TestEditSupersedeSetsSupersededAt(t *testing.T) {
 	db := decisionsHome(t, decisionsSpecs()...)
 	seedSessions(t, db, decideSessionS1()) // a live session, which can collect a retraction
+	useFakeTmux(t).Panes = []tmux.Pane{{ID: "%1", Session: "work", WindowID: "@1", ServerStart: at(8, 0)}}
 	out, err := runRoot(t, "decisions", "edit", "D-4", "--supersede")
 	if err != nil || out != "D-4 superseded\nD-4 retraction queued for the agent's Stop hook, or tell the agent to call check_decision D-4\n" {
 		t.Fatalf("edit = %q, %v", out, err)
@@ -501,7 +502,7 @@ func userTerminalUnset() error {
 // userProcessUnset is userProcess under test: a test that reaches the
 // ancestry walk without a process table of its own fails (the real one
 // would read the test's own parents, which may be an agent's).
-func userProcessUnset(int) (int, string, error) {
+func userProcessUnset(int) (userProc, error) {
 	panic("userProcess called in a test that did not set a process table (userTerminalAs or userProcessesAs)")
 }
 
@@ -525,28 +526,22 @@ func userTerminalAs(t *testing.T, at bool) {
 	t.Cleanup(func() { userTerminalOpen = userTerminalUnset })
 }
 
-// userProc is one row of a test's process table.
-type userProc struct {
-	ppid int
-	comm string
-}
-
 // userShellTable is the user's own terminal: curia's parent is a login
 // shell under a terminal application under launchd.
 func userShellTable() map[int]userProc {
-	return map[int]userProc{os.Getppid(): {9001, "-zsh"}, 9001: {9002, "login"}, 9002: {1, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"}}
+	return map[int]userProc{os.Getppid(): {9001, "-zsh", ""}, 9001: {9002, "login", ""}, 9002: {1, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal", ""}}
 }
 
 // userProcessesAs makes table the process table for the test: a pid not
 // in it cannot be read.
 func userProcessesAs(t *testing.T, table map[int]userProc) {
 	t.Helper()
-	userProcess = func(pid int) (int, string, error) {
+	userProcess = func(pid int) (userProc, error) {
 		p, ok := table[pid]
 		if !ok {
-			return 0, "", fmt.Errorf("ps -p %d: exit status 1", pid)
+			return userProc{}, fmt.Errorf("ps -p %d: exit status 1", pid)
 		}
-		return p.ppid, p.comm, nil
+		return p, nil
 	}
 	t.Cleanup(func() { userProcess = userProcessUnset })
 }
@@ -754,17 +749,26 @@ func TestUserAncestry(t *testing.T) {
 		table map[int]userProc
 		want  string // "" is the user
 	}{
-		{"direct child of claude", map[int]userProc{me: {1, claude}}, "runs under Claude Code"},
-		{"claude by base name", map[int]userProc{me: {1, "claude"}}, "runs under Claude Code"},
+		{"direct child of claude", map[int]userProc{me: {1, claude, ""}}, "runs under Claude Code"},
+		{"claude by base name", map[int]userProc{me: {1, "claude", ""}}, "runs under Claude Code"},
 		{"through sh, env and script", map[int]userProc{
-			me: {10, "env"}, 10: {11, "script"}, 11: {12, "/bin/zsh"}, 12: {13, "claude"}, 13: {1, "/sbin/launchd"},
+			me: {10, "env", ""}, 10: {11, "script", ""}, 11: {12, "/bin/zsh", ""}, 12: {13, "claude", ""}, 13: {1, "/sbin/launchd", ""},
 		}, "runs under Claude Code (process 12)"},
 		{"the user's terminal", userShellTable(), ""},
-		{"a tmux popup or run-shell job", map[int]userProc{me: {40, "sh"}, 40: {1, "tmux"}}, ""},
-		{"the Claude desktop app is not Claude Code", map[int]userProc{me: {50, "-zsh"}, 50: {1, "/Applications/Claude.app/Contents/MacOS/Claude"}}, ""},
-		{"a name that only holds claude", map[int]userProc{me: {60, "claude-wrapper"}, 60: {1, "launchd"}}, ""},
-		{"unreadable", map[int]userProc{me: {70, "sh"}}, "cannot be read"},
-		{"a loop", map[int]userProc{me: {80, "sh"}, 80: {me, "sh"}}, "more than 64 deep"},
+		{"a tmux popup or run-shell job", map[int]userProc{me: {40, "sh", ""}, 40: {1, "tmux", ""}}, ""},
+		{"the Claude desktop app is not Claude Code", map[int]userProc{me: {50, "-zsh", ""}, 50: {1, "/Applications/Claude.app/Contents/MacOS/Claude", ""}}, ""},
+		{"a name that only holds claude", map[int]userProc{me: {60, "claude-wrapper", ""}, 60: {1, "launchd", ""}}, ""},
+		// Claude Code from npm runs as node or bun with its script.
+		{"node through npm's link", map[int]userProc{me: {1, "node", "node /usr/local/bin/claude --continue"}}, "runs under Claude Code"},
+		{"node on the cli script", map[int]userProc{me: {
+			1, "/opt/homebrew/bin/node",
+			"node --no-warnings /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+		}}, "runs under Claude Code"},
+		{"bun on the cli script", map[int]userProc{me: {1, "bun", "bun /x/node_modules/@anthropic-ai/claude-code/cli.mjs"}}, "runs under Claude Code"},
+		{"node running something else", map[int]userProc{me: {1, "node", "node /srv/claude-notes/server.js --name claude"}}, ""},
+		{"node with another cli.js", map[int]userProc{me: {1, "node", "node /x/tools/cli.js claude"}}, ""},
+		{"unreadable", map[int]userProc{me: {70, "sh", ""}}, "cannot be read"},
+		{"a loop", map[int]userProc{me: {80, "sh", ""}, 80: {me, "sh", ""}}, "more than 64 deep"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			hookHome(t)
@@ -778,7 +782,7 @@ func TestUserAncestry(t *testing.T) {
 	t.Run("the pane of a live agent", func(t *testing.T) {
 		_, fake := readHome(t, []string{"%1", "%2"}, readSession("agent-1", model.StateIdle, "%1"))
 		fake.Panes[0].PID = 4242 // %1's shell, in which the agent runs
-		userProcessesAs(t, map[int]userProc{me: {4242, "bash"}, 4242: {1, "tmux"}})
+		userProcessesAs(t, map[int]userProc{me: {4242, "bash", ""}, 4242: {1, "tmux", ""}})
 		if got := agentAncestor(); !strings.Contains(got, "pane of agent session agent-1 (process 4242)") {
 			t.Errorf("agentAncestor = %q, want the agent's pane", got)
 		}
@@ -786,6 +790,49 @@ func TestUserAncestry(t *testing.T) {
 		fake.Panes[0].PID, fake.Panes[1].PID = 1111, 4242
 		if got := agentAncestor(); got != "" {
 			t.Errorf("agentAncestor = %q, want none for another pane", got)
+		}
+	})
+}
+
+// The pane check fails closed (Ruling 119): with live agents in panes, a
+// tmux server that cannot list its panes, or one showing none of theirs
+// (the caller's TMUX may name another), or a store that cannot be read,
+// refuses; with no live agent in a pane there is nothing to check.
+func TestUserAncestryPaneCheckFailsClosed(t *testing.T) {
+	me := os.Getppid()
+	shell := map[int]userProc{me: {1, "-zsh", ""}}
+	t.Run("tmux unreachable", func(t *testing.T) {
+		db := hookHome(t) // the guard's tmux: unreachable
+		seedSessions(t, db, readSession("agent-1", model.StateIdle, "%1"))
+		userProcessesAs(t, shell)
+		if got := agentAncestor(); !strings.Contains(got, "tmux cannot list the panes of the live agents") {
+			t.Errorf("agentAncestor = %q, want the refusal", got)
+		}
+	})
+	t.Run("another server", func(t *testing.T) {
+		_, fake := readHome(t, []string{"%1"}, readSession("agent-1", model.StateIdle, "%1"))
+		fake.Panes = []tmux.Pane{{ID: "%7", PID: 700, ServerStart: at(8, 0)}} // not the agent's pane
+		userProcessesAs(t, shell)
+		if got := agentAncestor(); !strings.Contains(got, "shows none of the live agents' panes") {
+			t.Errorf("agentAncestor = %q, want the refusal", got)
+		}
+	})
+	t.Run("store unreadable", func(t *testing.T) {
+		db := hookHome(t)
+		if err := os.MkdirAll(db, 0o700); err != nil { // a directory where the database file should be
+			t.Fatal(err)
+		}
+		userProcessesAs(t, shell)
+		if got := agentAncestor(); !strings.Contains(got, "store cannot be read") {
+			t.Errorf("agentAncestor = %q, want the refusal", got)
+		}
+	})
+	t.Run("no live agent in a pane", func(t *testing.T) {
+		db := hookHome(t)
+		seedSessions(t, db, readSession("old", model.StateEnded, "%1"), readSession("outside", model.StateIdle, ""))
+		userProcessesAs(t, shell)
+		if got := agentAncestor(); got != "" {
+			t.Errorf("agentAncestor = %q, want none", got)
 		}
 	})
 }
@@ -800,7 +847,7 @@ func TestScriptWrappedSendIsNeverFromUser(t *testing.T) {
 	userTerminalAs(t, true) // script's pty: /dev/tty opens
 	me := os.Getppid()      // curia's parent, env
 	userProcessesAs(t, map[int]userProc{
-		me: {500, "env"}, 500: {501, "script"}, 501: {502, "/bin/zsh"}, 502: {503, "claude"}, 503: {1, "launchd"},
+		me: {500, "env", ""}, 500: {501, "script", ""}, 501: {502, "/bin/zsh", ""}, 502: {503, "claude", ""}, 503: {1, "launchd", ""},
 	})
 	if _, err := readRun(t, "", "send", "%1", "reply with only LABEL-TWO"); err != nil {
 		t.Fatal(err)
