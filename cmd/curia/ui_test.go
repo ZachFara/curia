@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -455,5 +456,115 @@ func TestUIGroupsTeamFromConfig(t *testing.T) {
 		if !strings.Contains(run.view, want) {
 			t.Errorf("expanded view lacks %q:\n%s", want, run.view)
 		}
+	}
+}
+
+// uiUserActions are the dashboard's actions with a user's effect (re-review
+// A, C1): each must do nothing, and say why, unless the user-only guard
+// lets the dashboard's caller through. A new such action belongs here.
+var uiUserActions = []struct {
+	name string
+	keys []string
+	done func(f *spawnFixture) bool // whether the action took effect
+}{
+	{"board: r marks a backlog task ready", []string{"t", "r"}, func(f *spawnFixture) bool {
+		return f.get("T-1").Status == model.TaskReady
+	}},
+	{"board: n then y spawns a backlog task", []string{"t", "n", "y"}, func(f *spawnFixture) bool {
+		return len(f.windows()) > 0
+	}},
+	{"x then y kills an agent's pane", []string{"x", "y"}, func(f *spawnFixture) bool {
+		return slices.Contains(f.fake.Calls, "KillPane %5")
+	}},
+}
+
+// uiRunActions runs curia ui on f and presses keys, two seconds apart (past
+// the board's dwell and quiet periods), and returns the view after each key.
+func uiRunActions(t *testing.T, f *spawnFixture, keys []string) string {
+	t.Helper()
+	var view string
+	prev := runProgram
+	runProgram = func(m tea.Model, _ ...tea.ProgramOption) error {
+		m, _ = m.Update(m.Init()())
+		for _, k := range keys {
+			f.now = f.now.Add(2 * time.Second)
+			m = uiPress(m, k)
+			view += m.View() + "\n"
+		}
+		return nil
+	}
+	t.Cleanup(func() { runProgram = prev })
+	if _, err := runRoot(t, "ui"); err != nil {
+		t.Fatal(err)
+	}
+	return view
+}
+
+// uiActionWorld is a spawn fixture with two backlog tasks and an idle
+// agent session in pane %5.
+func uiActionWorld(t *testing.T) *spawnFixture {
+	t.Helper()
+	f := spawnNewFixture(t)
+	f.task("Backlog one", "")
+	f.task("Backlog two", "")
+	f.fake.Panes = []tmux.Pane{{ID: "%5", Session: "work", WindowID: "@5", ServerStart: f.now.Add(-time.Hour)}}
+	if err := f.st.UpsertSession(context.Background(), model.Session{
+		ID: "agent-x", Agent: "claude", State: model.StateIdle, Pane: "%5", TmuxSession: "work", TmuxWindow: "@5",
+		StartedAt: f.now.Add(-time.Minute), UpdatedAt: f.now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// TestDashboardActionsNeedTheUser: with an agent marker set, and with no
+// controlling terminal, every user action of the dashboard changes nothing
+// and shows the guard's reason; as the user each one acts.
+func TestDashboardActionsNeedTheUser(t *testing.T) {
+	for _, a := range uiUserActions {
+		for _, c := range []struct {
+			name, why string
+			set       func(t *testing.T)
+		}{
+			{"agent marker", "CLAUDECODE is set", func(t *testing.T) { t.Setenv("CLAUDECODE", "1") }},
+			{"no terminal", "cannot run without a terminal", func(t *testing.T) { userTerminalAs(t, false) }},
+		} {
+			t.Run(a.name+"/"+c.name, func(t *testing.T) {
+				f := uiActionWorld(t)
+				c.set(t)
+				view := uiRunActions(t, f, a.keys)
+				if a.done(f) {
+					t.Errorf("%s took effect for a caller the guard refuses", a.name)
+				}
+				if !strings.Contains(view, c.why) {
+					t.Errorf("view does not give the guard's reason %q:\n%s", c.why, view)
+				}
+				if got := f.get("T-1").Status; got != model.TaskBacklog {
+					t.Errorf("T-1 = %s, want backlog", got)
+				}
+			})
+		}
+		t.Run(a.name+"/the user", func(t *testing.T) {
+			f := uiActionWorld(t)
+			view := uiRunActions(t, f, a.keys)
+			if !a.done(f) {
+				t.Errorf("%s did not take effect for the user:\n%s", a.name, view)
+			}
+		})
+	}
+}
+
+// The board's source refuses by itself too: a spawn for a refused caller
+// is not made, and would be ReadyOnly if it were (Ruling 113).
+func TestBoardSourceRefusesForANonUser(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Backlog", "")
+	b := uiBoardSource(f)
+	b.refused = errors.New("curia ui cannot run inside an agent session (CLAUDECODE is set)")
+	if _, err := b.Spawn(context.Background(), "T-1"); err == nil || len(f.windows()) != 0 {
+		t.Errorf("Spawn = %v, windows %q: want the refusal and nothing spawned", err, f.windows())
+	}
+	if err := b.SetStatus(context.Background(), "T-1", model.TaskReady); err == nil || f.get("T-1").Status != model.TaskBacklog {
+		t.Errorf("SetStatus = %v, T-1 %s: want the refusal and backlog", err, f.get("T-1").Status)
 	}
 }
