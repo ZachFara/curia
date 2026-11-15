@@ -366,7 +366,7 @@ func scanSession(sc scanner) (model.Session, error) {
 		&sess.Repo, &sess.Branch, &sess.State, &sess.Model, &sess.ContextUsed, &sess.ContextMax,
 		&sess.SubagentsActive, &sess.LastUpdate, &seen, &sess.TranscriptPath, &started, &updated,
 		&sess.TranscriptOffset, &sess.TaskID, &sess.Worktree, &sess.TeamID, &sess.TeamRole, &sess.TeamMember,
-		&sess.Socket, &sess.EndReason, &cost, &cache, &sess.CacheRebuildUSD, &sess.RecacheTokens)
+		&sess.Socket, &sess.EndReason, &cost, &cache, &sess.CacheRebuildUSD, &sess.CacheRecacheTokens)
 	if err != nil {
 		return model.Session{}, err
 	}

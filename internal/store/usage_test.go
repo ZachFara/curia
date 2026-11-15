@@ -41,12 +41,12 @@ func usageIngest(t *testing.T, s *store.Store, r store.Reading, now time.Time) s
 // usageFull is a reading that carries every value, taken at at.
 func usageFull(id string, at time.Time) store.Reading {
 	return store.Reading{
-		SessionID:       id,
-		At:              at,
-		CostUSD:         usageF(4.12),
-		CacheExpiresAt:  at.Add(5 * time.Minute),
-		CacheRebuildUSD: usageF(1.68),
-		RecacheTokens:   usageI(120_000),
+		SessionID:          id,
+		At:                 at,
+		CostUSD:            usageF(4.12),
+		CacheExpiresAt:     at.Add(5 * time.Minute),
+		CacheRebuildUSD:    usageF(1.68),
+		CacheRecacheTokens: usageI(120_000),
 		Limits: []model.UsageSample{
 			{Window: model.WindowFiveHour, UsedPct: 62, ResetsAt: at.Add(2 * time.Hour)},
 			{Window: model.WindowSevenDay, UsedPct: 30.5, ResetsAt: at.Add(72 * time.Hour)},
@@ -466,7 +466,7 @@ type usageCost struct {
 
 func usageAssertCost(t *testing.T, got model.Session, want usageCost) {
 	t.Helper()
-	g := usageCost{got.CostUSD, got.CostKnown, got.CacheExpiresAt, got.CacheRebuildUSD, got.RecacheTokens}
+	g := usageCost{got.CostUSD, got.CostKnown, got.CacheExpiresAt, got.CacheRebuildUSD, got.CacheRecacheTokens}
 	if g.cost != want.cost || g.known != want.known || !g.cache.Equal(want.cache) || g.rebuild != want.rebuild || g.recache != want.recache {
 		t.Errorf("%s cost values = %+v, want %+v", got.ID, g, want)
 	}
@@ -485,7 +485,7 @@ func TestOldUpsertKeepsCostColumns(t *testing.T) {
 
 	// A hook's snapshot, even one that carries other cost values, never
 	// writes the four columns.
-	sess.State, sess.CostUSD, sess.CostKnown, sess.CacheRebuildUSD, sess.RecacheTokens = model.StateIdle, 99, true, 9, 9
+	sess.State, sess.CostUSD, sess.CostKnown, sess.CacheRebuildUSD, sess.CacheRecacheTokens = model.StateIdle, 99, true, 9, 9
 	sess.CacheExpiresAt = usageNow.Add(time.Hour)
 	upsert(t, s, sess)
 	if got := usageCostColumns(t, path, "s1"); got != want {
@@ -493,7 +493,7 @@ func TestOldUpsertKeepsCostColumns(t *testing.T) {
 	}
 	err := s.UpdateSession(ctx, "s1", func(cur model.Session, _ bool) model.Session {
 		cur.State, cur.LastUpdate = model.StateWaiting, "Bash: go test"
-		cur.CostUSD, cur.CostKnown, cur.CacheExpiresAt, cur.CacheRebuildUSD, cur.RecacheTokens = 0, false, time.Time{}, 0, 0
+		cur.CostUSD, cur.CostKnown, cur.CacheExpiresAt, cur.CacheRebuildUSD, cur.CacheRecacheTokens = 0, false, time.Time{}, 0, 0
 		return cur
 	})
 	if err != nil {
@@ -502,8 +502,8 @@ func TestOldUpsertKeepsCostColumns(t *testing.T) {
 	if got := usageCostColumns(t, path, "s1"); got != want {
 		t.Errorf("after UpdateSession: %s, want %s", got, want)
 	}
-	if got := get(t, s, "s1"); got.State != model.StateWaiting || got.CostUSD != 4.12 || got.RecacheTokens != 120_000 {
-		t.Errorf("after both: state %s cost %v recache %d", got.State, got.CostUSD, got.RecacheTokens)
+	if got := get(t, s, "s1"); got.State != model.StateWaiting || got.CostUSD != 4.12 || got.CacheRecacheTokens != 120_000 {
+		t.Errorf("after both: state %s cost %v recache %d", got.State, got.CostUSD, got.CacheRecacheTokens)
 	}
 	// Plan 1's upsert too.
 	plan1Session(t, rawDB(t, path), "s1", "%7", model.StateIdle, "2026-11-15T12:00:00.000000000Z")
@@ -577,7 +577,7 @@ func TestIngestAbsentFieldsChangeNothing(t *testing.T) {
 		t.Errorf("cost-only result = %+v, want %+v", res, want)
 	}
 	got := get(t, s, "s1")
-	if got.CostUSD != 5 || !got.CacheExpiresAt.Equal(first.CacheExpiresAt) || got.CacheRebuildUSD != 1.68 || got.RecacheTokens != 120_000 {
+	if got.CostUSD != 5 || !got.CacheExpiresAt.Equal(first.CacheExpiresAt) || got.CacheRebuildUSD != 1.68 || got.CacheRecacheTokens != 120_000 {
 		t.Errorf("after a cost-only reading: %+v", got)
 	}
 
@@ -594,8 +594,8 @@ func TestIngestAbsentFieldsChangeNothing(t *testing.T) {
 		t.Error("an empty reading added a sample")
 	}
 	// A reading with only the cache keeps the cost.
-	usageIngest(t, s, store.Reading{SessionID: "s1", At: usageNow.Add(3 * time.Second), RecacheTokens: usageI(7)}, usageNow.Add(3*time.Second))
-	if got := get(t, s, "s1"); got.CostUSD != 5 || got.RecacheTokens != 7 || got.CacheRebuildUSD != 1.68 {
+	usageIngest(t, s, store.Reading{SessionID: "s1", At: usageNow.Add(3 * time.Second), CacheRecacheTokens: usageI(7)}, usageNow.Add(3*time.Second))
+	if got := get(t, s, "s1"); got.CostUSD != 5 || got.CacheRecacheTokens != 7 || got.CacheRebuildUSD != 1.68 {
 		t.Errorf("after a recache-only reading: %+v", got)
 	}
 }
@@ -1205,17 +1205,17 @@ func TestTicketsSeeIngestedCache(t *testing.T) {
 	expires := now.Add(5 * time.Minute)
 	usageIngest(t, s, store.Reading{
 		SessionID: "b", At: now, CacheExpiresAt: expires,
-		CacheRebuildUSD: usageF(0.42), RecacheTokens: usageI(90_000),
+		CacheRebuildUSD: usageF(0.42), CacheRecacheTokens: usageI(90_000),
 	}, now)
 	got := order()
 	if len(got) != 2 || got[0].ID != newer.ID {
 		t.Fatalf("after the ingest: %v, want the warm ticket %s first", got, newer.ID)
 	}
-	if !got[0].CacheExpiresAt.Equal(expires) || got[0].CacheRebuildUSD != 0.42 || got[0].RecacheTokens != 90_000 {
-		t.Errorf("warm ticket = cache %v rebuild %v recache %d", got[0].CacheExpiresAt, got[0].CacheRebuildUSD, got[0].RecacheTokens)
+	if !got[0].CacheExpiresAt.Equal(expires) || got[0].CacheRebuildUSD != 0.42 || got[0].CacheRecacheTokens != 90_000 {
+		t.Errorf("warm ticket = cache %v rebuild %v recache %d", got[0].CacheExpiresAt, got[0].CacheRebuildUSD, got[0].CacheRecacheTokens)
 	}
-	if !got[1].CacheExpiresAt.IsZero() || got[1].RecacheTokens != 0 {
-		t.Errorf("cold ticket = cache %v recache %d, want unknown", got[1].CacheExpiresAt, got[1].RecacheTokens)
+	if !got[1].CacheExpiresAt.IsZero() || got[1].CacheRecacheTokens != 0 {
+		t.Errorf("cold ticket = cache %v recache %d, want unknown", got[1].CacheExpiresAt, got[1].CacheRecacheTokens)
 	}
 }
 
@@ -1263,8 +1263,8 @@ func TestIngestValidatesAtTheStore(t *testing.T) {
 		"negative rebuild":     with(func(r *store.Reading) { r.CacheRebuildUSD = usageF(-1) }),
 		"rebuild over 1000":    with(func(r *store.Reading) { r.CacheRebuildUSD = usageF(1000.5) }),
 		"NaN rebuild":          with(func(r *store.Reading) { r.CacheRebuildUSD = usageF(math.NaN()) }),
-		"negative recache":     with(func(r *store.Reading) { r.RecacheTokens = usageI(-1) }),
-		"huge recache":         with(func(r *store.Reading) { r.RecacheTokens = usageI(store.MaxRecacheTokens + 1) }),
+		"negative recache":     with(func(r *store.Reading) { r.CacheRecacheTokens = usageI(-1) }),
+		"huge recache":         with(func(r *store.Reading) { r.CacheRecacheTokens = usageI(store.MaxRecacheTokens + 1) }),
 		"at a day ago":         with(func(r *store.Reading) { r.At = now.Add(-24*time.Hour - time.Nanosecond) }),
 		"at in the future":     with(func(r *store.Reading) { r.At = now.Add(time.Minute + time.Nanosecond) }),
 		"cache a week ago":     with(func(r *store.Reading) { r.CacheExpiresAt = now.Add(-7*24*time.Hour - time.Nanosecond) }),
@@ -1308,8 +1308,8 @@ func TestIngestValidatesAtTheStore(t *testing.T) {
 		}),
 		"rebuild 0, cache a week ago":    with(func(r *store.Reading) { r.CacheRebuildUSD, r.CacheExpiresAt = usageF(0), now.Add(-7*24*time.Hour) }),
 		"rebuild 1000, cache in 2h":      with(func(r *store.Reading) { r.CacheRebuildUSD, r.CacheExpiresAt = usageF(1000), now.Add(2*time.Hour) }),
-		"recache 0":                      with(func(r *store.Reading) { r.RecacheTokens = usageI(0) }),
-		"recache at the bound":           with(func(r *store.Reading) { r.RecacheTokens = usageI(store.MaxRecacheTokens) }),
+		"recache 0":                      with(func(r *store.Reading) { r.CacheRecacheTokens = usageI(0) }),
+		"recache at the bound":           with(func(r *store.Reading) { r.CacheRecacheTokens = usageI(store.MaxRecacheTokens) }),
 		"used_pct 0, resets an hour ago": limit(model.WindowFiveHour, 0, now.Add(-time.Hour)),
 		"used_pct 100, resets in 8 days": limit(model.WindowSevenDay, 100, now.Add(8*24*time.Hour)),
 		"a 64-byte session id":           {SessionID: strings.Repeat("A-z_9", 12) + "abcd", At: now},

@@ -321,7 +321,7 @@ ORDER BY d.n`, formatTime(now))
 		var t model.Ticket
 		var cache sql.NullString
 		t.Decision, err = scanDecision(rows, &t.SessionState, &t.Pane, &t.TmuxSession, &t.TmuxWindow,
-			&t.Branch, &t.ContextUsed, &cache, &t.CacheRebuildUSD, &t.RecacheTokens)
+			&t.Branch, &t.ContextUsed, &cache, &t.CacheRebuildUSD, &t.CacheRecacheTokens)
 		if err != nil {
 			return nil, fail("open tickets", "", err)
 		}

@@ -30,9 +30,10 @@ const (
 const (
 	maxCostUSD    = 100_000
 	maxRebuildUSD = 1000
-	// MaxRecacheTokens bounds RecacheTokens (Ruling P5-R2): a hundred times
-	// the largest context window Claude Code reports today (1M tokens).
-	MaxRecacheTokens = 100_000_000
+	// MaxRecacheTokens bounds CacheRecacheTokens (Ruling P5-R2): the
+	// parser's own bound on a token count (internal/usage), so the store
+	// never refuses a reading the parser kept.
+	MaxRecacheTokens = 10_000_000_000
 	maxSessionID     = 64
 	atPast           = 24 * time.Hour
 	atFuture         = time.Minute
@@ -53,10 +54,10 @@ type Reading struct {
 	CostUSD         *float64
 	CacheExpiresAt  time.Time
 	CacheRebuildUSD *float64
-	// RecacheTokens is how many tokens a rebuild of the cold cache would
+	// CacheRecacheTokens is how many tokens a rebuild of the cold cache would
 	// write (Ruling P5-R2: the status line's prompt_cache.recache_tokens_if_cold).
-	RecacheTokens *int64
-	Limits        []model.UsageSample // Window, UsedPct and ResetsAt set; At and SessionID are filled from the Reading
+	CacheRecacheTokens *int64
+	Limits             []model.UsageSample // Window, UsedPct and ResetsAt set; At and SessionID are filled from the Reading
 }
 
 // IngestResult says what an ingest changed.
@@ -195,14 +196,14 @@ func ingest(ctx context.Context, tx *sql.Tx, r Reading, now time.Time) (IngestRe
 // ingestSessionRow writes r's session values and reports whether the
 // session exists. A reading that carries none only looks.
 func ingestSessionRow(ctx context.Context, tx *sql.Tx, r Reading) (bool, error) {
-	if r.CostUSD == nil && r.CacheExpiresAt.IsZero() && r.CacheRebuildUSD == nil && r.RecacheTokens == nil {
+	if r.CostUSD == nil && r.CacheExpiresAt.IsZero() && r.CacheRebuildUSD == nil && r.CacheRecacheTokens == nil {
 		var found bool
 		err := tx.QueryRowContext(ctx, ingestSessionExists, r.SessionID).Scan(&found)
 		return found, err
 	}
 	var recache any
-	if r.RecacheTokens != nil {
-		recache = *r.RecacheTokens
+	if r.CacheRecacheTokens != nil {
+		recache = *r.CacheRecacheTokens
 	}
 	out, err := tx.ExecContext(ctx, ingestSession, floatOrNull(r.CostUSD), formatTime(r.CacheExpiresAt),
 		floatOrNull(r.CacheRebuildUSD), recache, r.SessionID)
@@ -362,7 +363,7 @@ func checkReading(r Reading, now time.Time) error {
 	if !inRange(r.CacheRebuildUSD, maxRebuildUSD) {
 		return bad("cache_rebuild_usd")
 	}
-	if r.RecacheTokens != nil && (*r.RecacheTokens < 0 || *r.RecacheTokens > MaxRecacheTokens) {
+	if r.CacheRecacheTokens != nil && (*r.CacheRecacheTokens < 0 || *r.CacheRecacheTokens > MaxRecacheTokens) {
 		return bad("recache_tokens")
 	}
 	return checkLimits(r.Limits, now)

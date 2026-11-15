@@ -119,7 +119,7 @@ type Ticket struct {
 	ContextUsed                           int
 	CacheExpiresAt                        time.Time // zero: unknown
 	CacheRebuildUSD                       float64
-	RecacheTokens                         int64 // tokens a cold-cache rebuild writes; 0: unknown
+	CacheRecacheTokens                    int64 // tokens a cold-cache rebuild writes; 0: unknown
 }
 
 // Answer is what curia decide writes. Exactly one of Key and Text is set.

@@ -1,0 +1,11 @@
+{
+  "session_id": "built-session-1",
+  "model": {"id": "claude-opus-5-5", "display_name": "Opus 5.5"},
+  "cost": {"total_cost_usd": 4.12},
+  "context_window": {"used_percentage": 71},
+  "rate_limits": {
+    "five_hour": {"used_percentage": 62, "resets_at": 1794784200},
+    "seven_day": {"used_percentage": 31, "resets_at": "2026-11-18T09:00:00Z"}
+  },
+  "prompt_cache": {"warm": true, "ttl": "1h", "expires_at": 1794771246, "recache_tokens_if_cold": 42211}
+}
