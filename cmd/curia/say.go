@@ -366,7 +366,7 @@ func (s *saySource) lastPlan() (sayPlan, bool) {
 	return s.plan, s.planned
 }
 
-// Propose builds the proposal for text (sayPropose).
+// Propose builds the proposal for text (sayPlanFor).
 func (s *saySource) Propose(ctx context.Context, text string) (ui.Proposal, error) {
 	plan, err := s.propose(ctx, text)
 	return plan.p, err

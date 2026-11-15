@@ -20,11 +20,8 @@ import (
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
-// Limits of `curia send`.
-const (
-	sendStdinMax  = 64 << 10 // bytes of text read from stdin
-	sendNoteLimit = 300      // runes of a printed delivery note
-)
+// sendStdinMax is how many bytes of text `curia send -` reads from stdin.
+const sendStdinMax = 64 << 10
 
 // sendPanePattern is the only form of pane `curia send` and `curia read`
 // accept (plan section 4.8).
@@ -93,20 +90,6 @@ func sendPaneSession(ctx context.Context, st *store.Store, pane string) (model.S
 		return live[0], nil
 	}
 	return model.Session{}, sendPaneError{msg: "pane " + pane + " is shared by more than one live session", shared: true}
-}
-
-// sendOutcomeLine is the one line printed for o, such as "M-12 delivered
-// (send_keys)" or "M-12 queued: <note>".
-func sendOutcomeLine(o model.MessageOutcome) string {
-	m := o.Message
-	s := sanitize.Line(m.ID, 20) + " " + sanitize.Line(string(m.Status), 20)
-	if m.Status == model.MsgDelivered && m.DeliveredVia != "" {
-		s += " (" + sanitize.Line(string(m.DeliveredVia), 20) + ")"
-	}
-	if o.Note != "" {
-		s += ": " + sanitize.Line(o.Note, sendNoteLimit)
-	}
-	return s
 }
 
 // sendText is the message text: the arguments after the pane joined by
@@ -226,7 +209,7 @@ func sendDeliver(ctx context.Context, w io.Writer, st *store.Store, tm tmux.Clie
 	if err != nil {
 		return err
 	}
-	lines := sendOutcomeLine(out)
+	lines := sayOutcomeLine(out) // the one outcome line of say and send
 	if sender == model.SenderAgent && senderSess.ID == "" {
 		lines += "\n" + sanitize.Line(m.ID, 20) + ": Curia cannot identify the sending agent session, so this " +
 			"message is never typed; the target gets it at its next stop or with check_messages."

@@ -308,7 +308,7 @@ func TestResumeReusesKeptWorktree(t *testing.T) {
 		t.Errorf("the approved setup script did not run on resume:\n%s", out)
 	}
 	w := f.windows()
-	want := "NewWindow api-server T-1 " + wt + " CURIA_TASK_ID=T-1 " + spawnTestBin + " launch T-1 --resume " + lifecycleLead
+	want := "NewWindow api-server T-1 " + wt + " CURIA_TASK_ID=T-1 " + spawnTestBin + " launch T-1 --resume " + lifecycleLead + " --after-pause"
 	if len(w) != 2 || w[1] != want {
 		t.Errorf("windows = %q, want the second %q", w, want)
 	}
@@ -708,7 +708,7 @@ func TestResumeRecreatesWorktreeAndResumes(t *testing.T) {
 		t.Errorf("README = %q", got)
 	}
 	w := f.windows()
-	want := "NewWindow api-server T-1 " + wt + " CURIA_TASK_ID=T-1 " + spawnTestBin + " launch T-1 --resume " + lifecycleLead
+	want := "NewWindow api-server T-1 " + wt + " CURIA_TASK_ID=T-1 " + spawnTestBin + " launch T-1 --resume " + lifecycleLead + " --after-pause"
 	if len(w) != 2 || w[1] != want {
 		t.Errorf("windows = %q, want the second %q", w, want)
 	}
@@ -716,7 +716,8 @@ func TestResumeRecreatesWorktreeAndResumes(t *testing.T) {
 	if !tk.PausedAt.IsZero() || tk.Pane != "%101" || tk.LaunchedAt.IsZero() {
 		t.Errorf("task = %+v, want not paused, pane %%101, launched", tk)
 	}
-	lifecycleWantOrder(t, out, "session 1a2b3c4d", "Worktree: created", "T-1 launched in api-server:T-1 (%101)")
+	lifecycleWantOrder(t, out, "session 1a2b3c4d", "Worktree: added "+wt+" on branch "+lifecycleBranch+" again (the branch exists, with its commits)",
+		"T-1 launched in api-server:T-1 (%101)")
 }
 
 func TestResumeWithoutSessionStartsFresh(t *testing.T) {
@@ -729,7 +730,7 @@ func TestResumeWithoutSessionStartsFresh(t *testing.T) {
 		t.Fatalf("resume: %v\n%s", err, out)
 	}
 	w := f.windows()
-	want := "NewWindow api-server T-1 " + f.worktree("T-1") + " CURIA_TASK_ID=T-1 " + spawnTestBin + " launch T-1"
+	want := "NewWindow api-server T-1 " + f.worktree("T-1") + " CURIA_TASK_ID=T-1 " + spawnTestBin + " launch T-1 --after-pause"
 	if len(w) != 2 || w[1] != want {
 		t.Errorf("windows = %q, want the second %q", w, want)
 	}
@@ -748,7 +749,7 @@ func TestResumeKeepsModelAndTeam(t *testing.T) {
 	}
 	w := f.windows()
 	want := "NewWindow api-server T-1 " + f.worktree("T-1") + " CURIA_TASK_ID=T-1 " + spawnTestBin +
-		" launch T-1 --model opus --team --resume " + lifecycleLead
+		" launch T-1 --model opus --team --resume " + lifecycleLead + " --after-pause"
 	if len(w) != 2 || w[1] != want {
 		t.Errorf("windows = %q, want the second %q", w, want)
 	}
@@ -845,8 +846,8 @@ func TestCleanRemovesMergedBranchAndWorktree(t *testing.T) {
 	}
 	tk := f.get("T-1")
 	if !tk.CleanedAt.Equal(f.now) || tk.Branch != "" || tk.Worktree != "" || tk.Pane != "" ||
-		tk.ResumeSession != "" || !tk.PausedAt.IsZero() || tk.Status != model.TaskReady {
-		t.Errorf("task = %+v, want cleaned, fields cleared, status ready", tk)
+		tk.ResumeSession != "" || !tk.PausedAt.IsZero() || tk.Status != model.TaskDropped {
+		t.Errorf("task = %+v, want cleaned, fields cleared, status dropped", tk)
 	}
 	lifecycleWantOrder(t, out, "merged into main", "Removed worktree", "1 ignored", "node_modules/",
 		"Deleted branch "+lifecycleBranch, "Cleaned T-1")
@@ -971,6 +972,11 @@ func TestSpawnAfterCleanStartsOver(t *testing.T) {
 	if out, err := lifecycleRun(t, "clean", "T-1"); err != nil {
 		t.Fatalf("clean: %v\n%s", err, out)
 	}
+	// Clean marks the task dropped: nothing spawns it again by accident.
+	if _, _, err := f.spawn("T-1", spawnOptions{}); err == nil || !strings.Contains(err.Error(), "T-1 is dropped") {
+		t.Fatalf("spawn right after clean = %v, want T-1 is dropped", err)
+	}
+	f.update("T-1", func(tk *model.Task) { tk.Status = model.TaskReady }) // the user brings it back
 	if _, out, err := f.spawn("T-1", spawnOptions{}); err != nil {
 		t.Fatalf("spawn after clean: %v\n%s", err, out)
 	}

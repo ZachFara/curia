@@ -32,6 +32,9 @@ type spawnOptions struct {
 	// ReadyOnly refuses a task whose stored status is not ready: the caller
 	// is an agent (Ruling 113).
 	ReadyOnly bool
+	// AfterPause tells the agent that its branch ends in the pause's WIP
+	// commit (curia resume).
+	AfterPause bool
 	// Out receives the lines saying what the spawn did, as it goes (the
 	// worktree, the setup script); nil discards them.
 	Out io.Writer
@@ -338,16 +341,32 @@ func spawnWorktree(ctx context.Context, st *store.Store, t model.Task, out io.Wr
 	shown := sanitize.Line(path, 300) + " on branch " + branch
 	if ours {
 		_, _ = fmt.Fprintf(out, "Worktree: reusing %s\n", shown)
-	} else {
-		if err = spawnAddWorktree(ctx, t, path, branch); err != nil {
-			return t, err
-		}
-		_, _ = fmt.Fprintf(out, "Worktree: created %s (from %s)\n", shown, t.BaseBranch)
+	} else if err = spawnNewWorktree(ctx, t, path, branch, shown, out); err != nil {
+		return t, err
 	}
 	return st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
 		cur.Branch, cur.Worktree, cur.UpdatedAt = branch, path, clock()
 		return cur, nil
 	})
+}
+
+// spawnNewWorktree adds the worktree at path on branch and says which: on a
+// new branch from the base, or again on the branch that exists (after a
+// pause or a clean of the worktree), with its commits.
+func spawnNewWorktree(ctx context.Context, t model.Task, path, branch, shown string, out io.Writer) error {
+	existed, err := refExists(ctx, t.Repo, "refs/heads/"+branch)
+	if err == nil {
+		err = spawnAddWorktree(ctx, t, path, branch)
+	}
+	if err != nil {
+		return err
+	}
+	if existed {
+		_, _ = fmt.Fprintf(out, "Worktree: added %s again (the branch exists, with its commits)\n", shown)
+	} else {
+		_, _ = fmt.Fprintf(out, "Worktree: created %s (from %s)\n", shown, t.BaseBranch)
+	}
+	return nil
 }
 
 // spawnAddWorktree adds the worktree at path, which must not exist: a
@@ -374,6 +393,9 @@ func spawnCommand(bin, id string, o spawnOptions) []string {
 	}
 	if o.Resume != "" {
 		c = append(c, "--resume", o.Resume)
+	}
+	if o.AfterPause {
+		c = append(c, "--after-pause")
 	}
 	return c
 }

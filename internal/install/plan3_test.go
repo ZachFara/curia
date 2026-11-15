@@ -89,3 +89,29 @@ func TestWriteSkillUpgradesPlan2File(t *testing.T) {
 		t.Errorf("Plan 2 skill not replaced: %q", got)
 	}
 }
+
+// A configuration line that binds m to tmux's own default, select-pane -m,
+// is what the snippet takes over, so install does not report m as taken; a
+// binding of m to anything else is the user's (ledger, Task 21).
+func TestWriteTmuxDefaultMIsNotTaken(t *testing.T) {
+	for conf, taken := range map[string]bool{
+		"bind m select-pane -m\n":               false,
+		"bind-key -T prefix m select-pane -m\n": false,
+		"bind m select-pane -M\n":               true,
+		"bind m select-pane -m -t 1\n":          true,
+		"bind m display-message mine\n":         true,
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".tmux.conf")
+		if err := os.WriteFile(path, []byte(conf), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		res, err := WriteTmux(filepath.Join(dir, "curia.tmux"), path, testBin, defaultKeys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := res.Keys[3].Taken; res.Keys[3].Name != "message" || got != taken {
+			t.Errorf("%q: message key %+v, want taken %v", conf, res.Keys[3], taken)
+		}
+	}
+}

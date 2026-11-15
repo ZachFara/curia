@@ -197,7 +197,10 @@ func WriteTmux(snippetPath, tmuxConfPath, bin string, keys TmuxKeys) (TmuxResult
 	res := TmuxResult{Keys: states, OldSnippet: strings.Contains("\n"+old, oldSnippetLine)}
 	bound := boundKeys(conf)
 	for i, k := range res.Keys {
-		res.Keys[i].Taken = k.Key != "" && bound[k.Key]
+		cmd, ok := bound[k.Key]
+		// A line binding the key to tmux's own default (such as
+		// "bind m select-pane -m") is what the snippet may replace.
+		res.Keys[i].Taken = k.Key != "" && ok && (k.Default == "" || cmd != k.Default)
 	}
 	if err := writeAtomic(snippetPath, []byte(snippet(bin, states))); err != nil {
 		return TmuxResult{}, err
@@ -212,12 +215,13 @@ func WriteTmux(snippetPath, tmuxConfPath, bin string, keys TmuxKeys) (TmuxResult
 	return res, writeAtomic(tmuxConfPath, []byte(conf))
 }
 
-// boundKeys returns the keys that bind or bind-key lines in conf, outside
+// boundKeys returns the keys that bind or bind-key lines in conf, with the
+// command each runs (its words after the key, joined by spaces), outside
 // the curia block, put in the prefix table for something that is not
 // Curia's (the rest of the line does not mention curia). Commands chained
 // with \; and files the configuration sources are not followed.
-func boundKeys(conf string) map[string]bool {
-	keys := map[string]bool{}
+func boundKeys(conf string) map[string]string {
+	keys := map[string]string{}
 	inFence := false
 	for _, line := range strings.Split(conf, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -227,8 +231,9 @@ func boundKeys(conf string) map[string]bool {
 		case trimmed == fenceEnd:
 			inFence = false
 		case !inFence && !strings.Contains(trimmed, "curia"):
-			if key, ok := prefixBinding(confWords(trimmed)); ok {
-				keys[key] = true
+			words := confWords(trimmed)
+			if key, at, ok := prefixBinding(words); ok {
+				keys[key] = strings.Join(words[at+1:], " ")
 			}
 		}
 	}
@@ -236,20 +241,20 @@ func boundKeys(conf string) map[string]bool {
 }
 
 // prefixBinding returns the key of a bind or bind-key command, given as
-// words, when it binds in the prefix table.
-func prefixBinding(words []string) (string, bool) {
+// words, and the index of the key's word, when it binds in the prefix table.
+func prefixBinding(words []string) (string, int, bool) {
 	if len(words) < 2 || (words[0] != "bind" && words[0] != "bind-key") {
-		return "", false
+		return "", 0, false
 	}
 	table := "prefix"
 	for i := 1; i < len(words); i++ {
 		w := words[i]
 		if w == "--" {
 			w = wordAt(words, i+1)
-			return w, w != "" && table == "prefix"
+			return w, i + 1, w != "" && table == "prefix"
 		}
 		if !strings.HasPrefix(w, "-") || w == "-" {
-			return w, table == "prefix"
+			return w, i, table == "prefix"
 		}
 		// -T and -N take a value: the rest of the word, or the next word.
 		flags, value := w[1:], ""
@@ -267,7 +272,7 @@ func prefixBinding(words []string) (string, bool) {
 			table = value
 		}
 	}
-	return "", false
+	return "", 0, false
 }
 
 // wordAt returns words[i], or "" past the end.

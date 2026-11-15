@@ -402,7 +402,6 @@ func (r *tasksRun) agentSendAndRead(t *testing.T) {
 		t.Errorf("curia send %s from %%1: stdout %q, stderr %q, exit %d, want %q", r.leadPane, stdout, stderr, code,
 			"M-6 delivered (send_keys)\n")
 	}
-
 	r.waitInput(t, r.goldenInputLines(t, 2))
 	if m := r.message(t, "M-6"); m.Sender != "agent" || m.SenderSession != tasksWeb || m.ConfirmedAt == nil {
 		t.Errorf("M-6 = %+v, want sent by agent %s and confirmed", m, tasksWeb)
@@ -588,7 +587,7 @@ func (r *tasksRun) clean(t *testing.T) {
 		"Branch " + tasksBranch + " is merged into main\n",
 		"Removed worktree " + r.worktree + "\n",
 		"Deleted branch " + tasksBranch + " (was ",
-		"Cleaned T-1 (its status stays ready)\n",
+		"Cleaned T-1 (marked dropped, so the board no longer offers it; curia task edit T-1 --status ready brings it back)\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("curia clean T-1 printed:\n%s\nwant it to hold %q", out, want)

@@ -370,8 +370,8 @@ func TestSendOutcomeLine(t *testing.T) {
 			Note:    "typing may not have finished",
 		}, "M-4 delivered (send_keys): typing may not have finished"},
 	} {
-		if got := sendOutcomeLine(c.o); got != c.want {
-			t.Errorf("sendOutcomeLine(%+v) = %q, want %q", c.o, got, c.want)
+		if got := sayOutcomeLine(c.o); got != c.want {
+			t.Errorf("sayOutcomeLine(%+v) = %q, want %q", c.o, got, c.want)
 		}
 	}
 }
@@ -401,6 +401,8 @@ func TestSendRateLimitedCommand(t *testing.T) {
 	}
 }
 
+// Ruling 113: the sender of curia send is read from its processes; a
+// claimed session counts only when it is the one the ancestry finds.
 // sendAncestryHome is sendHome with two more live agents, t3 in %3 and t4
 // in %4.
 func sendAncestryHome(t *testing.T) (string, *tmux.Fake) {

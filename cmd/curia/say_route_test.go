@@ -28,6 +28,7 @@ const (
 	sayStubReply  = "say-stub-reply"       // what it prints on stdout
 	sayStubSleep  = "say-stub-sleep"       // when present, it sleeps first
 	sayStubFlood  = "say-stub-flood"       // when present, it prints 1 MiB
+	sayStubFail   = "say-stub-fail"        // when present, its content goes to stderr and the stub exits 1
 )
 
 // sayStubRun is one run of the stub, as it recorded it.
@@ -69,6 +70,10 @@ func sayStubMain() int {
 	}
 	reply, _ := os.ReadFile(filepath.Clean(filepath.Join(home, sayStubReply)))
 	_, _ = os.Stdout.Write(reply)
+	if fail, err := os.ReadFile(filepath.Clean(filepath.Join(home, sayStubFail))); err == nil {
+		_, _ = os.Stderr.Write(fail)
+		return 1
+	}
 	return 0
 }
 
@@ -117,7 +122,7 @@ func sayStubRecorded(t *testing.T, home string) sayStubRun {
 }
 
 // sayProposeNow plans text over the test's store and config, as
-// sayPropose does.
+// sayPlanFor does.
 func sayProposeNow(t *testing.T, db, text string) sayPlan {
 	t.Helper()
 	cfg, err := loadConfig()
@@ -300,6 +305,38 @@ func TestRouterGarbageFallsBackToManual(t *testing.T) {
 	}
 }
 
+// Live check B, defect 4: a failed router call says why, from the JSON
+// error the CLI prints and from the end of its stderr, cut and cleaned,
+// and never with the user's message in it.
+func TestRouterFailureSaysWhy(t *testing.T) {
+	t.Run("json error", func(t *testing.T) {
+		db, _, _ := sayWorld(t)
+		home := sayUseStubClaude(t)
+		sayStubWrite(t, home, sayStubReply, []byte(`{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached|1794700000"}`))
+		sayStubWrite(t, home, sayStubFail, nil)
+		sayWantManual(t, sayProposeNow(t, db, "use pnpm"), "the router model failed (Claude AI usage limit reached|1794700000)")
+		if log := strings.Join(readLog(t), "\n"); !strings.Contains(log, "usage limit reached") {
+			t.Errorf("log = %q, want the reason", log)
+		}
+	})
+	t.Run("stderr tail", func(t *testing.T) {
+		db, _, _ := sayWorld(t)
+		home := sayUseStubClaude(t)
+		sayStubWrite(t, home, sayStubFail, []byte(strings.Repeat("noise ", 200)+"\x1b[31mError: Invalid API key\x1b[0m · use pnpm\n"))
+		plan := sayProposeNow(t, db, "use pnpm")
+		note := plan.p.Note
+		if !strings.Contains(note, "Error: Invalid API key") || strings.ContainsAny(note, "\x1b\n") {
+			t.Errorf("note = %q, want the end of stderr, cleaned", note)
+		}
+		if strings.Contains(note, "use pnpm") {
+			t.Errorf("note = %q holds the user's message", note)
+		}
+		if n := len([]rune(note)); n > 400 {
+			t.Errorf("note is %d runes, want it bounded", n)
+		}
+	})
+}
+
 func TestRouterMissingClaudeFallsBackToManual(t *testing.T) {
 	db, _, _ := sayWorld(t)
 	t.Setenv("PATH", t.TempDir())
@@ -355,10 +392,11 @@ func TestProposalOrderPutsRunnerUpSecond(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := sayPropose(context.Background(), sayOpen(t, db), cfg, "use pnpm", sayNow)
+	plan, err := sayPlanFor(context.Background(), sayOpen(t, db), cfg, "use pnpm", sayNow)
 	if err != nil {
 		t.Fatal(err)
 	}
+	p := plan.p
 	var keys []string
 	for _, c := range p.Candidates {
 		keys = append(keys, c.Key)

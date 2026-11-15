@@ -60,12 +60,20 @@ func resumeTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 	}); err != nil {
 		return err
 	}
-	r, err := spawnTask(ctx, st, tm, cfg, id, spawnOptions{Team: t.Team, Resume: t.ResumeSession, Wait: spawnWait, Out: out})
+	o := spawnOptions{Team: t.Team, Resume: t.ResumeSession, Wait: spawnWait, Out: out, AfterPause: resumeAfterWIP(ctx, t)}
+	r, err := spawnTask(ctx, st, tm, cfg, id, o)
 	if err != nil {
 		return resumeRepause(ctx, st, t, err)
 	}
 	_, err = fmt.Fprintln(out, spawnLine(r))
 	return err
+}
+
+// resumeAfterWIP reports whether t's branch ends in the WIP commit its
+// pause made, which the resumed agent is then told about.
+func resumeAfterWIP(ctx context.Context, t model.Task) bool {
+	subject, err := worktreeRun(ctx, worktreeGitLimit, t.Repo, "log", "-1", "--no-show-signature", "--format=%s", "refs/heads/"+t.Branch, "--")
+	return err == nil && subject == "curia: WIP "+t.ID+" (paused)"
 }
 
 // resumeCheck is resume's first rule: the task is paused, its branch still

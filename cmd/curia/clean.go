@@ -34,9 +34,9 @@ func init() {
 			"merge looks unmerged to git, and then --force deletes it with -D after\n" +
 			"naming every commit that is in neither the base nor any remote. A worktree\n" +
 			"holding ignored files (dependencies, .env) is removed with them only under\n" +
-			"--force, after they are named. The task\n" +
-			"keeps its status. Refuses while an agent of the task runs, and inside an\n" +
-			"agent session.",
+			"--force, after they are named. The task is marked dropped, so the board\n" +
+			"no longer offers it (curia task edit <id> --status ready brings it back).\n" +
+			"Refuses while an agent of the task runs, and inside an agent session.",
 		Args: cobra.ExactArgs(1),
 		RunE: runClean,
 	}
@@ -258,18 +258,22 @@ func cleanDeleteBranch(ctx context.Context, t model.Task, force bool, out io.Wri
 }
 
 // cleanRecord clears the task's branch, worktree, pane, pause and launch
-// claim and sets cleaned_at; its stored status is not changed.
+// claim, sets cleaned_at and marks the task dropped (live check B, defect
+// 7): its work is merged or deleted, and dropped is the one stored status
+// the board neither shows nor spawns.
 func cleanRecord(ctx context.Context, st *store.Store, t model.Task, out io.Writer) error {
 	now := clock()
-	stored, err := st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
+	_, err := st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
 		cur.Branch, cur.Worktree, cur.Pane, cur.ResumeSession = "", "", "", ""
 		cur.PausedAt, cur.LaunchedAt, cur.CleanedAt, cur.UpdatedAt = time.Time{}, time.Time{}, now, now
+		cur.Status = model.TaskDropped // off the board: nothing spawns it again by accident
 		return cur, nil
 	})
 	if err != nil {
 		return fmt.Errorf("%s: the worktree and branch are gone, but recording it failed: %w. To finish: run curia clean %s again",
 			t.ID, err, t.ID)
 	}
-	_, _ = fmt.Fprintf(out, "Cleaned %s (its status stays %s)\n", t.ID, stored.Status)
+	_, _ = fmt.Fprintf(out, "Cleaned %s (marked dropped, so the board no longer offers it; curia task edit %s --status ready brings it back)\n",
+		t.ID, t.ID)
 	return nil
 }

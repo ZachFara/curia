@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -83,11 +84,27 @@ func (w *sayCapped) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// sayStderrMax bounds what is kept of the router child's stderr: its first
+// bytes (the reason a failing CLI prints is short and comes last, so the
+// tail of what is kept is read).
+const sayStderrMax = 8 << 10
+
+// sayRouterFailure is a router run that exited with an error: the end of
+// its stderr, for saying why.
+type sayRouterFailure struct {
+	err    error
+	stderr []byte
+}
+
+func (f *sayRouterFailure) Error() string { return f.err.Error() }
+func (f *sayRouterFailure) Unwrap() error { return f.err }
+
 // sayRunClaude runs `claude` (found on PATH) with sayRouterArgs in dir, with
-// sayRouterEnv, the prompt on stdin and stderr discarded, and returns its
-// stdout. The child runs in its own process group, which is killed at
-// sayRouterLimit or when ctx ends; stdout over route.MaxRouterOutput is an
-// error. It is never retried.
+// sayRouterEnv and the prompt on stdin, and returns its stdout. The child
+// runs in its own process group, which is killed at sayRouterLimit or when
+// ctx ends; stdout over route.MaxRouterOutput is an error. When it exits
+// with an error its stdout comes back too, and the error is a
+// sayRouterFailure holding its stderr. It is never retried.
 func sayRunClaude(ctx context.Context, dir string, prompt []byte) ([]byte, error) {
 	path, err := exec.LookPath("claude")
 	if err != nil {
@@ -96,8 +113,9 @@ func sayRunClaude(ctx context.Context, dir string, prompt []byte) ([]byte, error
 	ctx, cancel := context.WithTimeout(ctx, sayRouterLimit)
 	defer cancel()
 	out := &sayCapped{max: route.MaxRouterOutput}
+	errOut := &sayCapped{max: sayStderrMax}
 	cmd := exec.CommandContext(ctx, path, sayRouterArgs...)
-	cmd.Dir, cmd.Env, cmd.Stdin, cmd.Stdout = dir, sayRouterEnv(), bytes.NewReader(prompt), out
+	cmd.Dir, cmd.Env, cmd.Stdin, cmd.Stdout, cmd.Stderr = dir, sayRouterEnv(), bytes.NewReader(prompt), out, errOut
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = sayRouterWaitDelay
@@ -105,6 +123,8 @@ func sayRunClaude(ctx context.Context, dir string, prompt []byte) ([]byte, error
 	switch {
 	case ctx.Err() != nil:
 		return nil, ctx.Err()
+	case err != nil && !out.over:
+		return out.buf, &sayRouterFailure{err: err, stderr: errOut.buf}
 	case err != nil:
 		return nil, err
 	case out.over:
@@ -147,15 +167,8 @@ type sayPlan struct {
 	why      string // why auto-send did not apply, for a suggestion
 }
 
-// sayPropose builds the proposal for text: an address that resolves, else
-// the model, else a manual pick.
-func sayPropose(ctx context.Context, st *store.Store, cfg config.Config, text string, now time.Time) (ui.Proposal, error) {
-	plan, err := sayPlanFor(ctx, st, cfg, text, now)
-	return plan.p, err
-}
-
-// sayPlanFor is sayPropose with what the say source stores beside the
-// proposal.
+// sayPlanFor builds the proposal for text (an address that resolves, else
+// the model, else a manual pick) with what the say source stores beside it.
 func sayPlanFor(ctx context.Context, st *store.Store, cfg config.Config, text string, now time.Time) (sayPlan, error) {
 	norm, err := message.Normalize(text)
 	if err != nil {
@@ -312,7 +325,12 @@ func sayAskModel(ctx context.Context, logPath, rest string, cands []route.Candid
 	case rctx.Err() != nil:
 		note = fmt.Sprintf("the router model did not answer in time (%v); pick a target", sayRouterLimit)
 	case err != nil:
+		why := sayRouterWhy(out, err, rest)
 		note = "the router model failed; pick a target"
+		if why != "" {
+			note = "the router model failed (" + why + "); pick a target"
+			err = fmt.Errorf("%w: %s", err, why)
+		}
 	}
 	if note == "" {
 		s, perr := route.ParseSuggestion(out, offered)
@@ -326,6 +344,40 @@ func sayAskModel(ctx context.Context, logPath, rest string, cands []route.Candid
 	}
 	logWarn(logPath, "say: no route suggested", "err", sanitize.Line(fmt.Sprint(err), 300))
 	return route.Suggestion{}, note
+}
+
+// sayWhyLimit bounds the reason a failed router call gives, in runes.
+const sayWhyLimit = 200
+
+// sayRouterWhy is why a router call that failed with err did: the error of
+// the JSON envelope it printed on stdout, else the last line of its stderr
+// (sayRouterFailure), cleaned and cut to sayWhyLimit runes, and never
+// holding the user's message text; "" when there is neither.
+func sayRouterWhy(stdout []byte, err error, text string) string {
+	var env struct {
+		IsError bool   `json:"is_error"`
+		Result  string `json:"result"`
+	}
+	why := ""
+	if json.Unmarshal(stdout, &env) == nil && env.IsError {
+		why = env.Result
+	}
+	var f *sayRouterFailure
+	if why == "" && errors.As(err, &f) {
+		lines := strings.Split(strings.TrimRight(string(f.stderr), "\n"), "\n")
+		why = lines[len(lines)-1]
+	}
+	if r := []rune(why); len(r) > 4*sayWhyLimit { // the reason comes last
+		why = string(r[len(r)-4*sayWhyLimit:])
+	}
+	why = strings.TrimSpace(sanitize.Line(why, 4*sayWhyLimit))
+	if text != "" {
+		why = strings.ReplaceAll(why, text, "(the message)")
+	}
+	if r := []rune(why); len(r) > sayWhyLimit {
+		why = "…" + string(r[len(r)-sayWhyLimit:])
+	}
+	return why
 }
 
 // sayOffered bounds the targets put into the prompt at
