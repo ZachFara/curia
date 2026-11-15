@@ -71,8 +71,8 @@ func TestUICommandShowsReconciledRankedSessions(t *testing.T) {
 	if out, err := runRoot(t, "ui"); err != nil || out != "" {
 		t.Fatalf("ui = %q, %v", out, err)
 	}
-	if run.opts != 2 {
-		t.Errorf("popup ran with %d program options, want 2 (alternate screen, mouse)", run.opts)
+	if run.opts != 3 {
+		t.Errorf("popup ran with %d program options, want 3 (alternate screen, mouse, the signal context)", run.opts)
 	}
 	lines := strings.Split(run.view, "\n")
 	if !strings.Contains(lines[0], "SESSION:WINDOW") {
@@ -102,8 +102,8 @@ func TestSidebarCommandShowsNarrowColumns(t *testing.T) {
 	if out, err := runRoot(t, "sidebar"); err != nil || out != "" {
 		t.Fatalf("sidebar = %q, %v", out, err)
 	}
-	if run.opts != 1 {
-		t.Errorf("sidebar ran with %d program options, want 1 (mouse)", run.opts)
+	if run.opts != 2 {
+		t.Errorf("sidebar ran with %d program options, want 2 (mouse, the signal context)", run.opts)
 	}
 	if !strings.Contains(run.view, "work:@1") || strings.Contains(run.view, "model-waiting") {
 		t.Errorf("sidebar view is not the narrow layout:\n%s", run.view)

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 
 	"github.com/ZachFara/curia/internal/model"
@@ -91,9 +92,17 @@ func (f *reviewFixture) wantPending() {
 	}
 }
 
-// approve runs reviewApprove on R-1 as the flag form does.
+// approve runs reviewApprove on R-1 as the flag form does. seen "" is the
+// branch's head now, as for a user who has just looked at it (a branch that
+// does not resolve gives a commit id no branch is at).
 func (f *reviewFixture) approve(how model.ApproveHow, seen string) (string, error) {
 	f.t.Helper()
+	if seen == "" {
+		seen = strings.Repeat("0", 40)
+		if res := runGit(context.Background(), f.repo, "rev-parse", "--verify", "-q", "refs/heads/"+reviewBranch); res.err == nil {
+			seen = res.out
+		}
+	}
 	return reviewApprove(context.Background(), f.st, f.cfg, "R-1", how, seen, model.AnsweredCLI, f.now)
 }
 
@@ -862,4 +871,109 @@ func init() {
 	reviewDiffLookPath = func(name string) (string, error) {
 		panic("reviewDiffLookPath called without a stub: " + name)
 	}
+}
+
+// reviewGitCalls are the recorded git calls whose subcommand (after -C dir)
+// is sub.
+func reviewGitCalls(calls [][]string, sub string) [][]string {
+	var out [][]string
+	for _, c := range calls {
+		if len(c) > 2 && c[0] == "-C" && c[2] == sub {
+			out = append(out, c[2:])
+		}
+	}
+	return out
+}
+
+// TestMergeCutShortRestoresCheckout: the approval's limit runs out while a
+// pre-merge-commit hook runs, before git writes MERGE_HEAD. Curia stops git
+// (SIGTERM, to its own process group), undoes what the merge staged with
+// git reset --merge, the only reset it runs, and the checkout is as before:
+// HEAD, git status with the user's own unstaged and untracked work, no
+// MERGE_HEAD, no index.lock; the review stays pending.
+func TestMergeCutShortRestoresCheckout(t *testing.T) {
+	for _, hook := range []string{"#!/bin/sh\nsleep 4\nexit 0\n", "#!/bin/sh\ntrap '' TERM\nsleep 4\nexit 0\n"} {
+		t.Run(strings.Split(hook, "\n")[1], func(t *testing.T) { reviewCutShortCase(t, hook) })
+	}
+}
+
+// reviewCutShortCase is one case of TestMergeCutShortRestoresCheckout, with
+// hook as the pre-merge-commit hook.
+func reviewCutShortCase(t *testing.T, hook string) {
+	f := reviewNew(t)
+	f.commitOnMain("notes.txt", "a\n", "notes")
+	worktreeWrite(t, filepath.Join(f.repo, "notes.txt"), "my edit\n")
+	worktreeWrite(t, filepath.Join(f.repo, "mine.txt"), "my own uncommitted work\n")
+	lifecycleHooks(f.spawnFixture, "pre-merge-commit", hook)
+	before, status, head := f.head(f.repo, "HEAD"), f.status(), f.head(f.wt, "HEAD")
+	calls := reviewRecordGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	_, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.now)
+	if err == nil || !strings.Contains(err.Error(), "cut short before it recorded the merge") ||
+		!strings.Contains(err.Error(), "Curia undid what it had staged (git reset --merge)") ||
+		!strings.HasSuffix(err.Error(), "Nothing was merged") {
+		t.Fatalf("approve error = %v, want the cut-short merge undone", err)
+	}
+	f.wantAsBefore(before, status)
+	if _, err := os.Stat(filepath.Join(f.repo, "auth.go")); err == nil {
+		t.Error("auth.go, which the merge brought, is left")
+	}
+	for file, want := range map[string]string{"notes.txt": "my edit\n", "mine.txt": "my own uncommitted work\n"} {
+		if got := lifecycleRead(t, filepath.Join(f.repo, file)); got != want {
+			t.Errorf("%s = %q, want %q kept", file, got, want)
+		}
+	}
+	f.wantPending()
+	recorded := calls()
+	if resets := reviewGitCalls(recorded, "reset"); len(resets) != 1 || !slices.Equal(resets[0], []string{"reset", "--merge"}) {
+		t.Errorf("reset calls = %q, want exactly one git reset --merge", resets)
+	}
+	reviewCheckArgv(t, "cut short", slices.DeleteFunc(recorded, func(c []string) bool {
+		return slices.Equal(c[2:], []string{"reset", "--merge"})
+	}), true)
+}
+
+// wantAsBefore checks that the main checkout is at HEAD before with git
+// status status, no merge under way and no index.lock.
+func (f *reviewFixture) wantAsBefore(before, status string) {
+	f.t.Helper()
+	if got := f.head(f.repo, "HEAD"); got != before {
+		f.t.Errorf("HEAD moved to %s", got)
+	}
+	if got := f.status(); got != status {
+		f.t.Errorf("status = %q, want %q as before", got, status)
+	}
+	if f.hasMergeHead() {
+		f.t.Error("MERGE_HEAD is left")
+	}
+	if _, err := os.Stat(filepath.Join(f.repo, ".git", "index.lock")); err == nil {
+		f.t.Error("index.lock is left")
+	}
+}
+
+// TestMergeRefusesStagedIndex: with staged changes in the user's checkout,
+// nothing is merged and nothing is touched.
+func TestMergeRefusesStagedIndex(t *testing.T) {
+	f := reviewNew(t)
+	f.commitOnMain("notes.txt", "a\n", "notes")
+	worktreeWrite(t, filepath.Join(f.repo, "notes.txt"), "staged edit\n")
+	gitRun(t, f.repo, "add", "notes.txt")
+	before, status := f.head(f.repo, "HEAD"), f.status()
+	calls := reviewRecordGit(t)
+	_, err := f.approve(model.ApproveMerge, "")
+	if err == nil || !strings.Contains(err.Error(), "staged changes in "+f.repo+": commit or unstage them first. Nothing was merged") {
+		t.Fatalf("approve error = %v, want the staged-index refusal", err)
+	}
+	if f.head(f.repo, "HEAD") != before || f.status() != status {
+		t.Error("HEAD or status changed")
+	}
+	recorded := calls()
+	if m := reviewGitCalls(recorded, "merge"); len(m) != 0 {
+		t.Errorf("git merge ran: %q", m)
+	}
+	if r := reviewGitCalls(recorded, "reset"); len(r) != 0 {
+		t.Errorf("git reset ran: %q", r)
+	}
+	f.wantPending()
 }

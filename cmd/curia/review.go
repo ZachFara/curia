@@ -10,8 +10,11 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"slices"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -42,6 +45,91 @@ const reviewWhat = "review work"
 
 // reviewLineMax bounds a printed outcome line, in runes.
 const reviewLineMax = 600
+
+// reviewFlightWait bounds how long a command waits, before it exits, for
+// the review actions still in flight: each is bounded by its own limits (the
+// view's six minutes at most).
+const reviewFlightWait = 7 * time.Minute
+
+// reviewFlight counts the review actions (approve, request changes, drop)
+// in flight in this process, so that curia review and curia ui wait for
+// them to finish and be recorded before they exit, whatever ended the view.
+var reviewFlight = &reviewInFlight{}
+
+// reviewInFlight is a count of actions in flight that can be waited on.
+type reviewInFlight struct {
+	mu   sync.Mutex
+	n    int
+	idle chan struct{} // closed when n drops to 0; nil while nobody waits
+}
+
+// begin counts one more action in flight; the func it returns ends it.
+func (f *reviewInFlight) begin() (end func()) {
+	f.mu.Lock()
+	f.n++
+	f.mu.Unlock()
+	return func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.n--; f.n == 0 && f.idle != nil {
+			close(f.idle)
+			f.idle = nil
+		}
+	}
+}
+
+// wait waits until no action is in flight, at most limit, and reports
+// whether none is.
+func (f *reviewInFlight) wait(limit time.Duration) bool {
+	f.mu.Lock()
+	if f.n == 0 {
+		f.mu.Unlock()
+		return true
+	}
+	if f.idle == nil {
+		f.idle = make(chan struct{})
+	}
+	idle := f.idle
+	f.mu.Unlock()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-idle:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// reviewWaitFlight waits for the review actions in flight (reviewFlight)
+// once a view has ended, whatever ended it.
+func reviewWaitFlight() error {
+	if !reviewFlight.wait(reviewFlightWait) {
+		return fmt.Errorf("a review action was still running after %s; check it with curia reviews ls", reviewFlightWait)
+	}
+	return nil
+}
+
+// reviewHoldSignals makes a hang-up and SIGTERM (and, with interrupt, SIGINT)
+// no longer end the process: an approval in flight runs to its end and is
+// recorded first (C1). The context is canceled when one arrives, so a view
+// can quit; stop restores the default behavior.
+func reviewHoldSignals(interrupt bool) (ctx context.Context, stop context.CancelFunc) {
+	sigs := []os.Signal{syscall.SIGHUP, syscall.SIGTERM}
+	if interrupt {
+		sigs = append(sigs, os.Interrupt)
+	}
+	return signal.NotifyContext(context.Background(), sigs...)
+}
+
+// reviewProgramErr is err from a view's program, except that a program
+// ended by a held signal (reviewHoldSignals) is no error.
+func reviewProgramErr(sig context.Context, err error) error {
+	if sig.Err() != nil && errors.Is(err, tea.ErrProgramKilled) {
+		return nil
+	}
+	return err
+}
 
 // reviewIsTerminal reports whether stdin and stdout are terminals. Tests
 // replace it.
@@ -216,6 +304,9 @@ func reviewRunAction(cmd *cobra.Command, act reviewAction, arg string, how model
 	if act == reviewPrint {
 		return reviewPrintJSON(ctx, out, st, cfg, r)
 	}
+	// A hang-up, SIGTERM or Ctrl-C waits for the action to be done and recorded.
+	_, stop := reviewHoldSignals(true)
+	defer stop()
 	var line string
 	switch act {
 	case reviewDoApprove:
@@ -259,7 +350,13 @@ func reviewRunView(cmd *cobra.Command, arg string) error {
 	}
 	src := newReviewSource(st, newTmuxClient(), cfg, logger, decideVia(), nil)
 	last := ui.NewReview(src, clock, opts)
-	if err = runProgram(reviewCapture{m: last, last: &last}, tea.WithAltScreen()); err != nil {
+	sig, stop := reviewHoldSignals(false)
+	defer stop()
+	err = reviewProgramErr(sig, runProgram(reviewCapture{m: last, last: &last}, tea.WithAltScreen(), tea.WithContext(sig)))
+	if werr := reviewWaitFlight(); err == nil {
+		err = werr
+	}
+	if err != nil {
 		return err
 	}
 	for _, line := range last.Result() {
@@ -637,6 +734,7 @@ func (s reviewSource) Approve(ctx context.Context, id, head string) (string, err
 	if s.refused != nil {
 		return "", s.refused
 	}
+	defer reviewFlight.begin()()
 	if err := reconcile(ctx, s.st, s.tm, s.cfg.LogPath, clock()); err != nil {
 		return "", err
 	}
@@ -651,6 +749,7 @@ func (s reviewSource) RequestChanges(ctx context.Context, id, note string) (stri
 	if s.refused != nil {
 		return "", s.refused
 	}
+	defer reviewFlight.begin()()
 	return s.after(ctx, id)(reviewRequestChanges(ctx, s.st, s.tm, s.log, id, note, s.via, clock()))
 }
 
@@ -659,6 +758,7 @@ func (s reviewSource) Drop(ctx context.Context, id string) (string, error) {
 	if s.refused != nil {
 		return "", s.refused
 	}
+	defer reviewFlight.begin()()
 	return s.after(ctx, id)(reviewDrop(ctx, s.st, id, s.via, clock()))
 }
 

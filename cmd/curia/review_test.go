@@ -6,11 +6,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -610,8 +613,8 @@ func TestReviewViewApprovesAndPrintsOutcome(t *testing.T) {
 	prev, prevProgram := reviewIsTerminal, runProgram
 	reviewIsTerminal = func() bool { return true }
 	runProgram = func(m tea.Model, opts ...tea.ProgramOption) error {
-		if _, ok := m.(reviewCapture); !ok || len(opts) != 1 {
-			t.Fatalf("model is %T with %d options, want the capture in the alt screen", m, len(opts))
+		if _, ok := m.(reviewCapture); !ok || len(opts) != 2 {
+			t.Fatalf("model is %T with %d options, want the capture in the alt screen, with the signal context", m, len(opts))
 		}
 		m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
 		m = reviewPump(t, m, m.Init())
@@ -788,4 +791,198 @@ func TestReviewSourceDiffCmd(t *testing.T) {
 	if want := []string{"/opt/bin/git", "-C", f.repo, "diff", "main..." + reviewBranch}; !slices.Equal(append([]string{cmd.Path}, cmd.Args[1:]...), want) {
 		t.Errorf("argv = %q, want %q", cmd.Args, want)
 	}
+}
+
+// The variables a signal test passes to its child (TestReviewChild).
+const (
+	reviewChildArgs = "CURIA_TEST_REVIEW_ARGS" // curia's arguments, joined by \x1f; "view" first drives the view
+	reviewChildHome = "CURIA_TEST_REVIEW_HOME"
+	reviewChildDB   = "CURIA_TEST_REVIEW_DB"
+)
+
+// TestReviewChild is no test of its own: the signal tests run it in a child
+// process, where it runs curia with the arguments they pass, as the user at
+// a terminal, against their home and store. With "view" first it runs the
+// review view, approves with a then y, and ends the program a second later,
+// while the merge's hook (3 s) runs (as a closed popup does), leaving the
+// approval in flight.
+func TestReviewChild(t *testing.T) {
+	joined := os.Getenv(reviewChildArgs)
+	if joined == "" {
+		t.Skip("run by the signal tests in a child process")
+	}
+	t.Setenv("HOME", os.Getenv(reviewChildHome))
+	t.Setenv("CURIA_DB", os.Getenv(reviewChildDB))
+	userTerminalAs(t, true)
+	useFakeTmux(t)
+	args := strings.Split(joined, "\x1f")
+	if args[0] == "view" {
+		args = args[1:]
+		reviewChildView(t)
+	}
+	stdout, stderr, err := reviewRunCmd(t, "", args...)
+	fmt.Printf("child err=%v\nstdout=%s\nstderr=%s\n", err, stdout, stderr)
+}
+
+// reviewChildView makes runProgram drive the review view: a then y, then
+// it returns a second later, with the approval still in flight.
+func reviewChildView(t *testing.T) {
+	t.Helper()
+	clk := &decideClock{t: time.Now()}
+	prevClock, prevTerm, prevProgram := clock, reviewIsTerminal, runProgram
+	clock, reviewIsTerminal = clk.now, func() bool { return true }
+	runProgram = func(m tea.Model, _ ...tea.ProgramOption) error {
+		m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
+		m = reviewPump(t, m, m.Init())
+		for _, k := range []string{"a", "y"} {
+			clk.advance(3 * time.Second)
+			var cmd tea.Cmd
+			m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+			m = reviewPump(t, m, cmd)
+		}
+		time.Sleep(time.Second)
+		return nil
+	}
+	t.Cleanup(func() { clock, reviewIsTerminal, runProgram = prevClock, prevTerm, prevProgram })
+}
+
+// reviewWaitFile waits up to 30 s for path to exist.
+func reviewWaitFile(t *testing.T, path string) {
+	t.Helper()
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never appeared", path)
+		}
+	}
+}
+
+// reviewChild starts curia args in a child process (TestReviewChild) in a
+// process group of its own, against f's home and store, with a hook named
+// hook that touches a marker, sleeps for 3 s and succeeds; it returns once
+// the hook has started. The child is killed if it is still running when
+// the test ends.
+func reviewChild(t *testing.T, f *reviewFixture, hook string, args ...string) (*exec.Cmd, *bytes.Buffer) {
+	t.Helper()
+	marker := filepath.Join(t.TempDir(), "hook-started")
+	lifecycleHooks(f.spawnFixture, hook, "#!/bin/sh\ntouch '"+marker+"'\nsleep 3\ntouch '"+marker+".done'\nexit 0\n")
+	self, err := os.Executable() // this test binary
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(self, "-test.run", "^TestReviewChild$", "-test.v")
+	cmd.Env = append(os.Environ(), reviewChildArgs+"="+strings.Join(args, "\x1f"),
+		reviewChildHome+"="+os.Getenv("HOME"), reviewChildDB+"="+f.db)
+	out := &bytes.Buffer{}
+	cmd.Stdout, cmd.Stderr = out, out
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	reviewWaitFile(t, marker)
+	return cmd, out
+}
+
+// reviewChildWait waits up to 60 s for the child to exit.
+func reviewChildWait(t *testing.T, cmd *exec.Cmd, out *bytes.Buffer) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		t.Logf("child exited: %v\n%s", err, out)
+	case <-time.After(60 * time.Second):
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		t.Fatalf("the child did not exit\n%s", out)
+	}
+}
+
+// reviewWantMerged checks that R-1 is recorded merged at head and that the
+// main checkout holds the merge, clean, with no merge under way.
+func (f *reviewFixture) wantMerged(head string) {
+	f.t.Helper()
+	if r := f.review(); r.Status != model.ReviewMerged || r.Head != head {
+		f.t.Errorf("R-1 is %s at %q, want merged at %s", r.Status, r.Head, head)
+	}
+	if got := f.head(f.repo, "main^2"); got != head {
+		f.t.Errorf("main^2 = %s, want the approved %s", got, head)
+	}
+	if s := f.status(); s != "" {
+		f.t.Errorf("status = %q, want clean", s)
+	}
+	if f.hasMergeHead() {
+		f.t.Error("MERGE_HEAD is left")
+	}
+	if _, err := os.Stat(filepath.Join(f.repo, ".git", "index.lock")); err == nil {
+		f.t.Error("index.lock is left")
+	}
+}
+
+// TestApproveSurvivesHangup: the terminal of curia review --approve goes
+// away (a hang-up to its process group) while a pre-merge-commit hook runs:
+// the merge completes, and the review is recorded merged before curia exits.
+func TestApproveSurvivesHangup(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	cmd, out := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge")
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	reviewChildWait(t, cmd, out)
+	f.wantMerged(head)
+}
+
+// TestApproveSurvivesTerminate: only curia gets SIGTERM, mid-merge: it
+// waits for the merge and records it.
+func TestApproveSurvivesTerminate(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	cmd, out := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge")
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	reviewChildWait(t, cmd, out)
+	f.wantMerged(head)
+}
+
+// TestApproveViewSurvivesHangup: the review view's program ends (the popup
+// closed) while its approval merges, and a hang-up follows: curia review
+// waits for the approval and records it before it exits.
+func TestApproveViewSurvivesHangup(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	cmd, out := reviewChild(t, f, "pre-merge-commit", "view", "review", "T-1")
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	reviewChildWait(t, cmd, out)
+	f.wantMerged(head)
+}
+
+// TestDashboardWaitsForReviewAction: the dashboard's program returns while
+// the approval it started still merges: curia ui returns only once the
+// review is recorded.
+func TestDashboardWaitsForReviewAction(t *testing.T) {
+	f := reviewWithLead(t, model.StateIdle)
+	head := f.head(f.wt, "HEAD")
+	lifecycleHooks(f.spawnFixture, "pre-merge-commit", "#!/bin/sh\nsleep 2\nexit 0\n")
+	prev := runProgram
+	runProgram = func(m tea.Model, _ ...tea.ProgramOption) error {
+		m, _ = m.Update(m.Init()())
+		for _, k := range []string{"r", "a", "y"} {
+			f.now = f.now.Add(2 * time.Second)
+			var cmd tea.Cmd
+			m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+			m = reviewPump(t, m, cmd) // drops the approval's command, still running, after 300 ms
+		}
+		return nil
+	}
+	t.Cleanup(func() { runProgram = prev })
+	if _, err := runRoot(t, "ui"); err != nil {
+		t.Fatal(err)
+	}
+	f.wantMerged(head)
 }
