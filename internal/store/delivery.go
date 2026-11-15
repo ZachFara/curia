@@ -98,13 +98,14 @@ ORDER BY delivered_at, kind, n LIMIT 1`
 // counts as live). A nested session started from another session's pane
 // inherits that pane, and one that died without SessionEnd stays idle or
 // needs_decision while the outer session is alive there, perhaps at a
-// permission prompt (Ruling 73).
+// permission prompt (Ruling 73). A row recorded on another tmux server than
+// sess's is in another pane, whatever its id (sameServer).
 func sharesPane(ctx context.Context, q dbtx, sess model.Session) (bool, error) {
 	var n int
 	err := q.QueryRowContext(ctx, `
 SELECT count(*) FROM sessions
-WHERE tmux_pane = ? AND id != ? AND COALESCE(state, '') NOT IN (?, ?)`,
-		sess.Pane, sess.ID, model.StateEnded, model.StateStale).Scan(&n)
+WHERE tmux_pane = ? AND id != ? AND COALESCE(state, '') NOT IN (?, ?)`+sameServer,
+		sess.Pane, sess.ID, model.StateEnded, model.StateStale, sess.Socket, sess.Socket).Scan(&n)
 	return n > 0, err
 }
 

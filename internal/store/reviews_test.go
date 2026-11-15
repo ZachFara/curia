@@ -504,7 +504,7 @@ func TestSessionEndReasonClearedOnResume(t *testing.T) {
 		}
 	}
 	upsert(t, s, model.Session{ID: "live", Agent: "claude", Pane: "%7", State: model.StateIdle})
-	if err := s.EndOthersInPane(ctx, "%7", "new", reviewT0); err != nil {
+	if err := s.EndOthersInPane(ctx, "%7", "", "new", reviewT0); err != nil {
 		t.Fatal(err)
 	}
 	if got := get(t, s, "live"); got.State != model.StateEnded || got.EndReason != "" {

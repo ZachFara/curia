@@ -169,7 +169,7 @@ func restoreNewFixture(t *testing.T) *restoreFixture {
 	t.Cleanup(func() {
 		newTmuxClient, clock, restoreSleep = prevClient, prevClock, prevSleep
 		restoreLookPath, restoreBin, restoreIsTerminal = prevLook, prevBin, prevTerm
-		restoreDryRun, restoreYes, restoreSince = false, false, 0
+		restoreDryRun, restoreYes, restoreSince, restoreIncludeClosed = false, false, 0, false
 		_ = st.Close()
 	})
 	return f
@@ -256,7 +256,7 @@ func (f *restoreFixture) reportAfter(n int, id string) {
 // (stdout and stderr) and its error.
 func (f *restoreFixture) run(stdin io.Reader, args ...string) (string, error) {
 	f.t.Helper()
-	restoreDryRun, restoreYes, restoreSince = false, false, 0
+	restoreDryRun, restoreYes, restoreSince, restoreIncludeClosed = false, false, 0, false
 	var out bytes.Buffer
 	rootCmd.SetIn(stdin)
 	rootCmd.SetOut(&out)
@@ -455,6 +455,12 @@ func TestPlanClassifiesEverySession(t *testing.T) {
 		f.session(18, func(s *model.Session) {
 			s.Pane, s.StartedAt, s.Socket = "%0", f.start.Add(time.Minute), "/private/tmp/tmux-501/other"
 		}),
+		// As 15, but started after this server did: its pane was closed while
+		// tmux kept running (I5); and one that did not even end.
+		f.session(19, func(s *model.Session) {
+			s.State, s.EndReason, s.Pane, s.StartedAt = model.StateEnded, "other", "%9", f.start.Add(10*time.Minute)
+		}),
+		f.session(20, func(s *model.Session) { s.Pane, s.StartedAt = "%9", f.start.Add(5*time.Minute) }),
 	}
 	rows := restorePlan(sessions, f.tm.Panes, tasks, f.now, 24*time.Hour)
 	want := map[string][2]string{
@@ -474,6 +480,8 @@ func TestPlanClassifiesEverySession(t *testing.T) {
 		restoreID(15):     {"restore", ""},
 		restoreID(16):     {"ended", "ended without a recorded reason (perhaps your own exit)"},
 		restoreID(18):     {"other server", "on another tmux server (other)"},
+		restoreID(19):     {"closed here", restoreClosedDetail(f, 19)},
+		restoreID(20):     {"closed here", restoreClosedDetail(f, 20)},
 	}
 	restoreWantRows(t, rows, want, restoreID(1), restoreID(17))
 	if r, _ := restoreRowOf(rows, restoreID(12)); !r.Linked || r.Task.ID != "T-1" || r.LastActive.IsZero() {
@@ -1336,5 +1344,181 @@ func TestRestoreInRealTmux(t *testing.T) {
 	}
 	if !strings.Contains(out, "restored "+s.ID[:8]+" in old_sess:repo1 ("+run.Pane+")") {
 		t.Errorf("output:\n%s", out)
+	}
+}
+
+// restoreClosedDetail is the skip detail of session n, in repo<n>, whose
+// pane was closed while tmux kept running.
+func restoreClosedDetail(f *restoreFixture, n int) string {
+	return "its pane was closed while tmux kept running; reopen it with claude --resume " + restoreID(n) + " in " +
+		filepath.Join(f.root, fmt.Sprintf("repo%d", n)) + ", or run curia restore --include-closed"
+}
+
+// TestPlanSkipsPaneClosedOnLiveServer: a session that started at or after
+// the listed server's start and is not on another server lost its pane on
+// that server, which is still running: it was closed, not crashed, and is
+// skipped (Ruling P4-R7), ended with "other" or not ended at all. One that
+// started before the server, on another server, or at an unknown time is
+// classified as before; with --include-closed the closed ones are offered.
+func TestPlanSkipsPaneClosedOnLiveServer(t *testing.T) {
+	f := restoreNewFixture(t)
+	after := f.start.Add(10 * time.Minute)
+	sessions := []model.Session{
+		f.session(1, func(s *model.Session) {
+			s.State, s.EndReason, s.Pane, s.StartedAt = model.StateEnded, "other", "%9", after
+		}),
+		f.session(2, func(s *model.Session) { s.Pane, s.StartedAt = "%8", after }),
+		f.session(3, func(s *model.Session) {
+			s.State, s.EndReason, s.StartedAt = model.StateEnded, "other", f.start.Add(-time.Minute)
+		}),
+		f.session(4, func(s *model.Session) { s.Pane, s.StartedAt, s.Socket = "%8", after, "/private/tmp/tmux-501/other" }),
+		f.session(5, func(s *model.Session) { s.StartedAt = f.start }), // at the server's start: started on it
+		f.session(6, func(s *model.Session) { s.StartedAt = time.Time{} }),
+	}
+	rows := restorePlan(sessions, f.tm.Panes, nil, f.now, 24*time.Hour)
+	restoreWantRows(t, rows, map[string][2]string{
+		restoreID(1): {"closed here", restoreClosedDetail(f, 1)},
+		restoreID(2): {"closed here", restoreClosedDetail(f, 2)},
+		restoreID(3): {"restore", ""},
+		restoreID(4): {"other server", "on another tmux server (other)"},
+		restoreID(5): {"closed here", restoreClosedDetail(f, 5)},
+		restoreID(6): {"restore", ""},
+	})
+	restoreIncludeClosed = true
+	rows = restorePlan(sessions, f.tm.Panes, nil, f.now, 24*time.Hour)
+	for _, n := range []int{1, 2, 5} {
+		if r, _ := restoreRowOf(rows, restoreID(n)); r.Action != restoreDo {
+			t.Errorf("--include-closed: %d is %q, want restore", n, r.Action)
+		}
+	}
+}
+
+// TestRestoreIncludeClosed: curia restore skips, and shows, a session closed
+// on the running server, with the command to reopen it; with
+// --include-closed it opens its window.
+func TestRestoreIncludeClosed(t *testing.T) {
+	f := restoreNewFixture(t)
+	s := f.seed(1, func(s *model.Session) {
+		s.State, s.EndReason, s.StartedAt = model.StateEnded, "other", f.start.Add(time.Minute)
+	})
+	out, err := f.run(nil, "--yes")
+	if err != nil || len(f.tm.specs) != 0 || !strings.Contains(out, "nothing to restore") ||
+		!strings.Contains(out, "skip: its pane was closed while tmux kept running; reopen it with claude --resume "+s.ID) {
+		t.Fatalf("without --include-closed: %v, %d windows\n%s", err, len(f.tm.specs), out)
+	}
+	f.reportAfter(1, s.ID)
+	out, err = f.run(nil, "--yes", "--include-closed")
+	if err != nil || len(f.tm.specs) != 1 || !slices.Contains(f.tm.specs[0].Command, s.ID) {
+		t.Fatalf("--include-closed: %v, windows %+v\n%s", err, f.tm.specs, out)
+	}
+}
+
+// TestRestoreSecondRunOpensNoSecondWindow: a session with no task whose
+// window sits at a dialog (it has not reported) is not offered again by a
+// second restore: its row was ended (curia_restore) in the update that
+// re-checked it before its window opened.
+func TestRestoreSecondRunOpensNoSecondWindow(t *testing.T) {
+	f := restoreNewFixture(t)
+	s := f.seed(1, nil)
+	out, err := f.run(nil, "--yes")
+	if err == nil || len(f.tm.specs) != 1 || !strings.Contains(out, "did not report within") {
+		t.Fatalf("first run: %v, %d windows\n%s", err, len(f.tm.specs), out)
+	}
+	if got := f.get(s.ID); got.State != model.StateEnded || got.EndReason != restoreEndReason {
+		t.Errorf("row after the first run = %s (%q), want ended (%s)", got.State, got.EndReason, restoreEndReason)
+	}
+	out, err = f.run(nil, "--yes")
+	if err != nil || len(f.tm.specs) != 1 || !strings.Contains(out, "nothing to restore") {
+		t.Errorf("second run: %v, %d windows, want no second window\n%s", err, len(f.tm.specs), out)
+	}
+	// The resumed session's SessionStart, when it comes, revives the row.
+	f.report(s.ID, "%100")
+	if got := f.get(s.ID); got.State != model.StateIdle || got.EndReason != "" {
+		t.Errorf("after its SessionStart: %s (%q)", got.State, got.EndReason)
+	}
+}
+
+// TestRestoreWindowFailurePutsRowBack: when its window cannot be opened, a
+// row restore ended to open it is as it was, and offered again next time.
+func TestRestoreWindowFailurePutsRowBack(t *testing.T) {
+	f := restoreNewFixture(t)
+	s := f.seed(1, nil)
+	f.tm.failOn = map[int]error{0: errors.New("tmux said no")}
+	if out, err := f.run(nil, "--yes"); err == nil {
+		t.Fatalf("restore succeeded\n%s", out)
+	}
+	// As planned: reconcile had marked it stale (its pane was gone).
+	if got := f.get(s.ID); got.State != model.StateStale || got.EndReason != "" {
+		t.Errorf("row = %s (%q), want it as planned: stale, no end reason", got.State, got.EndReason)
+	}
+	f.tm.failOn = nil
+	out, err := f.run(nil, "--dry-run")
+	if err != nil || !strings.Contains(out, spawnShortID(s.ID)) || !strings.Contains(out, "restore\n") {
+		t.Errorf("not offered again: %v\n%s", err, out)
+	}
+}
+
+// TestRestoreClaimCoversExecute: the claim is held from the confirmation
+// through the windows and the wait (10 minutes), not only the 2 minutes of
+// the question, and is given up at the end.
+func TestRestoreClaimCoversExecute(t *testing.T) {
+	f := restoreNewFixture(t)
+	s := f.seed(1, nil)
+	var during []bool
+	f.onSleep = func(n int) {
+		if n == 1 {
+			f.now = f.now.Add(restoreHold + time.Minute) // a long wait for the windows
+			during = append(during, f.claimFree())
+			f.now = f.now.Add(5 * time.Minute)
+			during = append(during, f.claimFree())
+			f.report(s.ID, "%100")
+		}
+	}
+	if out, err := f.run(nil, "--yes"); err != nil {
+		t.Fatalf("restore: %v\n%s", err, out)
+	}
+	if !slices.Equal(during, []bool{false, false}) {
+		t.Errorf("claim free during the run, 3 and 8 minutes in: %v, want held both times", during)
+	}
+	if !f.claimFree() {
+		t.Error("the claim was not given up")
+	}
+}
+
+// TestRestoreStaleTeamAfterPowerCut: after a power cut every row is stale
+// and the team's config is gone with its lead; a refresh (SetTeams with
+// nothing assigned) keeps the stale rows' membership (M8), so restore resumes
+// the lead and ends its teammates' rows rather than offering each.
+func TestRestoreStaleTeamAfterPowerCut(t *testing.T) {
+	f := restoreNewFixture(t)
+	lead := f.seed(1, nil)
+	mate1 := f.seed(2, func(s *model.Session) { s.Pane = "%8" })
+	mate2 := f.seed(3, func(s *model.Session) { s.Pane = "%9" })
+	f.setTeams(map[string]team.Membership{
+		lead.ID:  {TeamID: "session-00000001", Role: model.RoleLead, Member: "team-lead"},
+		mate1.ID: {TeamID: "session-00000001", Role: model.RoleTeammate, Member: "alpha"},
+		mate2.ID: {TeamID: "session-00000001", Role: model.RoleTeammate, Member: "beta"},
+	})
+	for _, id := range []string{lead.ID, mate1.ID, mate2.ID} {
+		if err := f.st.UpdateSession(context.Background(), id, func(s model.Session, _ bool) model.Session {
+			s.State = model.StateStale
+			return s
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.setTeams(map[string]team.Membership{}) // the dashboard's refresh: no team config left
+	f.reportAfter(1, lead.ID)
+	out, err := f.run(nil, "--yes")
+	if err != nil {
+		t.Fatalf("restore: %v\n%s", err, out)
+	}
+	if len(f.tm.specs) != 1 || !slices.Contains(f.tm.specs[0].Command, lead.ID) {
+		t.Fatalf("windows %+v, want only the lead's\n%s", f.tm.specs, out)
+	}
+	for _, id := range []string{mate1.ID, mate2.ID} {
+		if got := f.get(id); got.State != model.StateEnded || got.EndReason != restoreEndReason {
+			t.Errorf("teammate %s = %s (%q), want ended (%s)", id[:8], got.State, got.EndReason, restoreEndReason)
+		}
 	}
 }

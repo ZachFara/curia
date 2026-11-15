@@ -768,7 +768,7 @@ func reviewMarkers(ctx context.Context, st *store.Store, tm tmux.Client, logPath
 			windows = append(windows, s.TmuxWindow)
 		}
 	}
-	applyMarkers(ctx, tm, st, logPath, "review attention marker", windows)
+	applyMarkers(ctx, tm, st, logPath, "review attention marker", "", windows)
 }
 
 // reviewSplit sorts a task's tickets into the open assume tickets (open at

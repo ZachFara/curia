@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/attention"
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 )
@@ -61,17 +65,18 @@ func markSeen(ctx context.Context, args []string, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	windows := paneWindows(sessions, pane)
+	socket := seenSocket(os.Getenv("TMUX"))
+	windows := paneWindows(sessions, pane, socket)
 	if len(windows) == 0 {
 		return nil
 	}
-	if err = st.MarkSeen(ctx, pane, time.Now()); err != nil {
+	if err = st.MarkSeen(ctx, pane, socket, time.Now()); err != nil {
 		return err
 	}
 	client := newTmuxClient()
 	for _, w := range windows {
 		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
-		err = attention.Apply(actx, client, st, w)
+		err = attention.Apply(actx, client, st, w, socket)
 		cancel()
 		if err != nil {
 			return err
@@ -80,11 +85,23 @@ func markSeen(ctx context.Context, args []string, cfg config.Config) error {
 	return nil
 }
 
-// paneWindows returns the distinct non-empty windows of the sessions in pane.
-func paneWindows(sessions []model.Session, pane string) []string {
+// seenSocket is the socket path of the tmux server in tmuxEnv, the TMUX
+// variable tmux sets for the commands it runs ("<socket>,<pid>,<session>"),
+// or "" when it holds none: the pane being focused is on that server.
+func seenSocket(tmuxEnv string) string {
+	socket, _, ok := strings.Cut(tmuxEnv, ",")
+	if !ok || !filepath.IsAbs(socket) {
+		return ""
+	}
+	return socket
+}
+
+// paneWindows returns the distinct non-empty windows of the sessions in pane
+// of the tmux server at socket (fleet.OtherSocket).
+func paneWindows(sessions []model.Session, pane, socket string) []string {
 	var windows []string
 	for _, s := range sessions {
-		if s.Pane == pane && s.TmuxWindow != "" && !slices.Contains(windows, s.TmuxWindow) {
+		if s.Pane == pane && !fleet.OtherSocket(socket, s) && s.TmuxWindow != "" && !slices.Contains(windows, s.TmuxWindow) {
 			windows = append(windows, s.TmuxWindow)
 		}
 	}

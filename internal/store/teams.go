@@ -9,14 +9,17 @@ import (
 	"github.com/ZachFara/curia/internal/team"
 )
 
-// SetTeams writes team membership for every session that is not ended, and
-// returns how many rows changed. In one write transaction, each such
-// session's team columns become its entry in assigned, or NULL when it has
-// none or is stale (a stale session is in no team, whatever assigned says),
-// and are written only when they differ. Then each teammate with no task
-// takes the task of its team's live lead, when that has one. It writes no
-// other column: updated_at and seen_at are left alone, so a refresh never
-// looks like activity. An ended session is never written.
+// SetTeams writes team membership for every session that is neither ended
+// nor stale, and returns how many rows changed. In one write transaction,
+// each such session's team columns become its entry in assigned, or NULL
+// when it has none, and are written only when they differ. A stale
+// session's membership is left as it is (M8): after a power cut its team's
+// config is gone with its lead, and the teammates must still read as
+// teammates, so that curia restore resumes the lead and not each of them.
+// Then each teammate with no task takes the task of its team's live lead,
+// when that has one. It writes no other column: updated_at and seen_at are
+// left alone, so a refresh never looks like activity. An ended session is
+// never written.
 func (s *Store) SetTeams(ctx context.Context, assigned map[string]team.Membership) (int, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -43,20 +46,17 @@ type teamRow struct {
 	cur   team.Membership
 }
 
-// writeMemberships sets the team columns of every session that is not
-// ended to what assigned gives it, where they differ, and records the ids
-// it wrote in changed. An empty value is stored as NULL.
+// writeMemberships sets the team columns of every session that is neither
+// ended nor stale to what assigned gives it, where they differ, and records
+// the ids it wrote in changed. An empty value is stored as NULL.
 func writeMemberships(ctx context.Context, tx *sql.Tx, assigned map[string]team.Membership, changed map[string]bool) error {
 	all, err := teamRows(ctx, tx)
 	if err != nil {
 		return err
 	}
 	for _, r := range all {
-		var want team.Membership
-		if r.state != model.StateStale {
-			want = assigned[r.id]
-		}
-		if want == r.cur {
+		want := assigned[r.id]
+		if r.state == model.StateStale || want == r.cur {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
