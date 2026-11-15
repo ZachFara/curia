@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -502,13 +502,13 @@ func userTerminalUnset() error {
 // userProcessUnset is userProcess under test: a test that reaches the
 // ancestry walk without a process table of its own fails (the real one
 // would read the test's own parents, which may be an agent's).
-func userProcessUnset(int) (userProc, error) {
-	panic("userProcess called in a test that did not set a process table (userTerminalAs or userProcessesAs)")
+func userProcessUnset() (map[int]userProc, error) {
+	panic("userProcesses called in a test that did not set a process table (userTerminalAs or userProcessesAs)")
 }
 
 func init() {
 	userTerminalOpen = userTerminalUnset
-	userProcess = userProcessUnset
+	userProcesses = userProcessUnset
 }
 
 // userTerminalAs makes the controlling terminal openable (at) or not for
@@ -533,17 +533,11 @@ func userShellTable() map[int]userProc {
 }
 
 // userProcessesAs makes table the process table for the test: a pid not
-// in it cannot be read.
+// in it is not running (an ancestry through it cannot be read).
 func userProcessesAs(t *testing.T, table map[int]userProc) {
 	t.Helper()
-	userProcess = func(pid int) (userProc, error) {
-		p, ok := table[pid]
-		if !ok {
-			return userProc{}, fmt.Errorf("ps -p %d: exit status 1", pid)
-		}
-		return p, nil
-	}
-	t.Cleanup(func() { userProcess = userProcessUnset })
+	userProcesses = func() (map[int]userProc, error) { return maps.Clone(table), nil }
+	t.Cleanup(func() { userProcesses = userProcessUnset })
 }
 
 // TestUserOnlyRefusesBySessionEnv: the agent guard also refuses with
@@ -587,14 +581,14 @@ func TestUserOnlyRefusesBySessionEnv(t *testing.T) {
 			t.Errorf("in an ended session's pane: agentSign = %q, want none", sign)
 		}
 		// The agent's pane is gone (tmux restarted and %1 is someone else's):
-		// reconcile marks it stale, and the pane is the user's.
+		// the pane is the user's, and the guard writes nothing.
 		t.Setenv("TMUX_PANE", "%1")
 		fake.Panes = []tmux.Pane{{ID: "%1", Session: "work", WindowID: "@1", ServerStart: at(10, 0)}}
 		if sign := agentSign(); sign != "" {
 			t.Errorf("in a recycled pane: agentSign = %q, want none", sign)
 		}
-		if s := getSession(t, db, "agent-1"); s.State != model.StateStale {
-			t.Errorf("agent-1 = %s, want stale", s.State)
+		if s := getSession(t, db, "agent-1"); s.State != model.StateIdle {
+			t.Errorf("agent-1 = %s, want idle: the guard is read-only", s.State)
 		}
 	})
 	t.Run("no store yet", func(t *testing.T) {
@@ -620,7 +614,7 @@ func TestUserOnlyGuard(t *testing.T) {
 		t.Errorf("CLAUDECODE empty: %v", err)
 	}
 	t.Setenv("CLAUDECODE", "1")
-	if err := userOnly("x", "do x"); err == nil || !strings.Contains(err.Error(), "curia x cannot run inside an agent session (CLAUDECODE is set): only the user may do x") {
+	if err := userOnly("x", "do x"); err == nil || !strings.Contains(err.Error(), "curia x cannot run inside an agent session (CLAUDECODE is set; if you are not an agent, tmux may hold it: run tmux set-environment -gu CLAUDECODE and open a new shell): only the user may do x") {
 		t.Errorf("CLAUDECODE=1: %v", err)
 	}
 	t.Setenv("CLAUDECODE", "")
@@ -861,6 +855,70 @@ func TestUserAncestryWithoutPaneList(t *testing.T) {
 			t.Errorf("agentAncestor = %q, want none", got)
 		}
 	})
+}
+
+// The user works in pane %1 of a second tmux server (TMUX points at it)
+// while the agents' sessions are recorded in %1 and %2 of theirs: the pane
+// ids collide (re-review A). The guard reads, and writes no session row.
+//   - The second server started after the sessions: by fleet.Gone none of
+//     them is in it, so the user is let through.
+//   - It started before: %1 looks like agent-1's pane and the user is
+//     refused. Telling the servers apart needs a server identity on the
+//     session row (Plan 4); refusing is the safe side.
+func TestSecondServerPaneIDCollision(t *testing.T) {
+	me := os.Getppid()
+	shell := map[int]userProc{me: {4242, "-zsh", ""}, 4242: {1, "tmux", ""}}
+	unchanged := func(t *testing.T, db string) {
+		t.Helper()
+		for _, id := range []string{"agent-1", "agent-2"} {
+			if s := getSession(t, db, id); s.State != model.StateIdle {
+				t.Errorf("%s = %s, want idle: the guard writes nothing", id, s.State)
+			}
+		}
+	}
+	world := func(t *testing.T, serverStart time.Time) string {
+		t.Helper()
+		db, fake := readHome(t, []string{"%1"}, readSession("agent-1", model.StateIdle, "%1"), readSession("agent-2", model.StateIdle, "%2"))
+		fake.Panes[0].ServerStart = serverStart
+		fake.Panes[0].PID = 4242 // the user's shell in the second server's %1
+		userProcessesAs(t, shell)
+		t.Setenv("TMUX_PANE", "%1")
+		return db
+	}
+	t.Run("second server started after the sessions", func(t *testing.T) {
+		db := world(t, at(10, 0))
+		if err := userOnly("decide", "answer a decision"); err != nil {
+			t.Errorf("userOnly = %v, want the user let through", err)
+		}
+		unchanged(t, db)
+	})
+	t.Run("second server started before the sessions", func(t *testing.T) {
+		db := world(t, at(8, 0))
+		if err := userOnly("decide", "answer a decision"); err == nil || !strings.Contains(err.Error(), "agent session agent-1") {
+			t.Errorf("userOnly = %v, want the refusal naming agent-1 (needs a server identity to tell apart)", err)
+		}
+		unchanged(t, db)
+	})
+}
+
+// The real process table, read by ps: it holds this test process with its
+// parent. Whether a Claude Code ancestor is in it depends on where the
+// tests run (none on CI), so only the table itself is checked.
+func TestRealProcessTable(t *testing.T) {
+	table, err := psTable()
+	if err != nil {
+		t.Fatalf("psTable: %v", err)
+	}
+	p, ok := table[os.Getpid()]
+	if !ok {
+		t.Fatalf("psTable has no row for this process (%d) among %d", os.Getpid(), len(table))
+	}
+	if p.PPID != os.Getppid() {
+		t.Errorf("this process's parent = %d, want %d", p.PPID, os.Getppid())
+	}
+	if p.Comm == "" {
+		t.Error("this process's command name is empty")
+	}
 }
 
 // The user at a terminal decides while tmux is down and the asking session

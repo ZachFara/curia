@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/decision"
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -114,41 +115,88 @@ type userProc struct {
 	Args string // read only when Comm is an interpreter (claudeInterpreters)
 }
 
-// userProcess reads one process; tests replace it with a process table, and
-// the test default fails a test that has not set one.
-var userProcess = psProcess
+// userProcesses reads the process table once (re-review A, M8): every
+// process's parent, command name and, for an interpreter, arguments. Tests
+// replace it with a table of their own; the test default fails a test that
+// has not set one.
+var userProcesses = psTable
 
-// psProcess is userProcess from ps, run by absolute path with fixed
-// arguments and a short timeout: `ps -o ppid=,comm= -p <pid>`, and
-// `ps -o args= -p <pid>` for an interpreter.
-func psProcess(pid int) (userProc, error) {
-	out, err := psField(pid, "ppid=,comm=")
-	if err != nil {
-		return userProc{}, err
-	}
-	ppid, comm, ok := strings.Cut(out, " ")
-	n, err := strconv.Atoi(ppid)
-	if !ok || err != nil || n < 0 {
-		return userProc{}, fmt.Errorf("ps -p %d printed %q", pid, sanitize.Line(out, 80))
-	}
-	p := userProc{PPID: n, Comm: strings.TrimSpace(comm)}
-	if slices.Contains(claudeInterpreters, filepath.Base(p.Comm)) {
-		if p.Args, err = psField(pid, "args="); err != nil {
-			return userProc{}, err
+// psPaths are where ps is looked for, by absolute path only, never on PATH
+// (re-review A, M10).
+var psPaths = []string{"/bin/ps", "/usr/bin/ps"}
+
+// psTable is userProcesses from ps under one deadline: `ps -A -o
+// pid=,ppid=,comm=`, then `ps -A -o pid=,args=` when an interpreter
+// (claudeInterpreters) is running. One snapshot, so the walk sees one
+// consistent table.
+func psTable() (map[int]userProc, error) {
+	ps := ""
+	for _, p := range psPaths {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			ps = p
+			break
 		}
 	}
-	return p, nil
+	if ps == "" {
+		return nil, fmt.Errorf("no ps at %s", strings.Join(psPaths, " or "))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*subprocessTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, ps, "-A", "-o", "pid=,ppid=,comm=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("ps -A: %w", err)
+	}
+	table := map[int]userProc{}
+	interpreter := false
+	for line := range strings.Lines(string(out)) {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		pid, perr := strconv.Atoi(f[0])
+		ppid, qerr := strconv.Atoi(f[1])
+		if perr != nil || qerr != nil {
+			return nil, fmt.Errorf("ps -A printed %q", sanitize.Line(line, 80))
+		}
+		table[pid] = userProc{PPID: ppid, Comm: procComm(line)}
+		interpreter = interpreter || slices.Contains(claudeInterpreters, filepath.Base(table[pid].Comm))
+	}
+	if !interpreter {
+		return table, nil
+	}
+	if err = psArgs(ctx, ps, table); err != nil {
+		return nil, err
+	}
+	return table, nil
 }
 
-// psField is one `ps -o <format> -p <pid>` answer, trimmed.
-func psField(pid int, format string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), subprocessTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "/bin/ps", "-o", format, "-p", strconv.Itoa(pid)).Output()
+// psArgs fills in the arguments of every interpreter in table from `ps -A
+// -o pid=,args=`.
+func psArgs(ctx context.Context, ps string, table map[int]userProc) error {
+	out, err := exec.CommandContext(ctx, ps, "-A", "-o", "pid=,args=").Output()
 	if err != nil {
-		return "", fmt.Errorf("ps -p %d: %w", pid, err)
+		return fmt.Errorf("ps -A: %w", err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	for line := range strings.Lines(string(out)) {
+		id, args, _ := strings.Cut(strings.TrimSpace(line), " ")
+		pid, err := strconv.Atoi(id)
+		if p, ok := table[pid]; err == nil && ok && slices.Contains(claudeInterpreters, filepath.Base(p.Comm)) {
+			p.Args = strings.TrimSpace(args)
+			table[pid] = p
+		}
+	}
+	return nil
+}
+
+// procComm is the comm column of one `pid ppid comm` line: everything after
+// the second field, which may hold spaces.
+func procComm(line string) string {
+	rest := strings.TrimSpace(line)
+	for range 2 {
+		_, rest, _ = strings.Cut(rest, " ")
+		rest = strings.TrimLeft(rest, " ")
+	}
+	return strings.TrimRight(rest, " \n")
 }
 
 // claudeInterpreters are the programs that run Claude Code's JavaScript
@@ -187,6 +235,10 @@ func isClaudeCode(p userProc) bool {
 // alone (Ruling 123). Curia records no process id for a session, so only
 // these are checked.
 func agentAncestor() string {
+	table, err := userProcesses()
+	if err != nil {
+		return "its parent processes cannot be read: " + sanitize.Line(err.Error(), 120)
+	}
 	panes, why := agentPanePIDs()
 	if why != "" {
 		return why
@@ -203,9 +255,9 @@ func agentAncestor() string {
 			// itself this way (the stated limit of these guards).
 			return ""
 		}
-		p, err := userProcess(pid)
-		if err != nil {
-			return "its parent processes cannot be read: " + sanitize.Line(err.Error(), 120)
+		p, ok := table[pid]
+		if !ok {
+			return fmt.Sprintf("its parent processes cannot be read: process %d is not in the process table", pid)
 		}
 		switch {
 		case isClaudeCode(p):
@@ -225,6 +277,10 @@ func agentAncestor() string {
 // deeper than userAncestryLimit (Ruling 113: who sent a message is read
 // from the processes, not from variables the sender sets).
 func ancestorSession() (id string, ok bool) {
+	table, err := userProcesses()
+	if err != nil {
+		return "", false
+	}
 	panes, why := agentPanePIDs()
 	if why != "" {
 		return "", false
@@ -237,8 +293,8 @@ func ancestorSession() (id string, ok bool) {
 		if id := panes[pid]; id != "" {
 			return id, true
 		}
-		p, err := userProcess(pid)
-		if err != nil {
+		p, found := table[pid]
+		if !found {
 			return "", false
 		}
 		pid = p.PPID
@@ -287,14 +343,18 @@ func agentPanePIDs() (map[int]string, string) {
 		logInfo(cfg.LogPath, "user check: agent pane check skipped: tmux cannot list its panes", "err", sanitize.Line(err.Error(), 200))
 		return out, ""
 	}
+	// A session counts only on a server consistent with it (fleet.Gone, the
+	// rule reconcile uses): its pane listed and the server no newer than the
+	// session. Another server reached through the caller's TMUX, whose pane
+	// ids may collide, is then the Ruling 123 case.
 	shown := false
 	for _, s := range sessions {
+		if fleet.Gone(panes, s) {
+			continue
+		}
+		shown = true
 		for _, p := range panes {
-			if p.ID != s.Pane {
-				continue
-			}
-			shown = true
-			if p.PID > 1 {
+			if p.ID == s.Pane && p.PID > 1 {
 				out[p.PID] = s.ID
 			}
 		}
@@ -325,7 +385,11 @@ func userOnlyRunE(command, what string, run func(*cobra.Command, []string) error
 func agentSign() string {
 	for _, name := range []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID"} {
 		if os.Getenv(name) != "" {
-			return name + " is set"
+			// An agent's tmux command can leave it in the tmux server's global
+			// environment, and every new shell there inherits it (re-review A,
+			// M6).
+			return name + " is set; if you are not an agent, tmux may hold it: run tmux set-environment -gu " + name +
+				" and open a new shell"
 		}
 	}
 	pane := os.Getenv("TMUX_PANE")
@@ -346,19 +410,22 @@ func agentSign() string {
 	defer func() { _ = st.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*subprocessTimeout)
 	defer cancel()
+	// Read only: the guard never reconciles or writes (re-review A, I2). A
+	// session in this pane counts only when the server reached is consistent
+	// with it (fleet.Gone); when tmux cannot answer the ancestry decides.
 	s, found, err := agentInPane(ctx, st, pane)
-	if err == nil && found {
-		if err = reconcile(ctx, st, newTmuxClient(), cfg.LogPath, clock()); err == nil {
-			s, found, err = agentInPane(ctx, st, pane)
-		}
-	}
-	switch {
-	case err != nil:
+	if err != nil {
 		return "TMUX_PANE is set and the store cannot be read to check it"
-	case found:
-		return "this is pane " + sanitize.Line(pane, 20) + " of agent session " + spawnShortID(s.ID)
 	}
-	return ""
+	if !found {
+		return ""
+	}
+	panes, err := newTmuxClient().ListPanes(ctx)
+	if err != nil || fleet.Gone(panes, s) {
+		return ""
+	}
+	return "this is pane " + sanitize.Line(pane, 20) + " of agent session " + spawnShortID(s.ID) +
+		"; if no agent runs here any more, run curia ls, which marks a session whose pane is gone, or end it"
 }
 
 // agentInPane finds a session in pane that is neither ended nor stale.
