@@ -183,20 +183,26 @@ func checkSendLimits(ctx context.Context, tx *sql.Tx, m *model.Message) error {
 		return err
 	}
 	if queued >= SendQueuedLimit {
-		return fmt.Errorf("%w: the target already has %d queued messages from agents; send again once it has read them",
-			ErrTooMany, queued)
+		return fmt.Errorf("%w: the target already has %d queued messages from agents, the most it may hold; "+
+			"send again once it has read them", ErrTooMany, queued)
 	}
 	since := formatTime(m.CreatedAt.Add(-SendRateWindow))
 	if err := tx.QueryRowContext(ctx, sendRecent, m.SenderSession, since).Scan(&recent); err != nil {
 		return err
 	}
+	// The window in words, not as a Duration ("10 minutes", not "10m0s"):
+	// the sender reads it (re-review A, M7).
+	window := fmt.Sprintf("%d minutes", int(SendRateWindow/time.Minute))
 	switch {
 	case m.SenderSession != "" && recent >= SendRateLimit:
-		return fmt.Errorf("%w: you sent %d messages in the last %s, the most an agent may; wait before sending more",
-			ErrTooMany, recent, SendRateWindow)
+		return fmt.Errorf("%w: you sent %d messages in the last %s, the most an agent may; "+
+			"try again in a few minutes, once the earliest of them is %s old", ErrTooMany, recent, window, window)
 	case m.SenderSession == "" && recent >= SendUnknownLimit:
-		return fmt.Errorf("%w: senders Curia cannot identify as a live agent session sent %d messages in the last %s, "+
-			"the most they may together; wait, or send from your own session", ErrTooMany, recent, SendRateWindow)
+		return fmt.Errorf("%w: Curia cannot identify this send's sender as a live agent session "+
+			"(none was verified for it, or the session it names has ended or is not recorded), "+
+			"so it shares one count with every such sender: together they sent %d messages in the last %s, "+
+			"the most they may; try again in a few minutes, or send from your own live agent session",
+			ErrTooMany, recent, window)
 	}
 	return nil
 }

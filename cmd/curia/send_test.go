@@ -387,7 +387,7 @@ func TestSendRateLimitedCommand(t *testing.T) {
 		}
 	}
 	_, err := readRun(t, "", "send", "%3", "one more")
-	if err == nil || err.Error() != "not sent: the target already has 5 queued messages from agents; send again once it has read them" {
+	if err == nil || err.Error() != "not sent: the target already has 5 queued messages from agents, the most it may hold; send again once it has read them" {
 		t.Errorf("sixth send = %v, want the plain refusal", err)
 	}
 	if ms := sendMessages(t, db); len(ms) != store.SendQueuedLimit {

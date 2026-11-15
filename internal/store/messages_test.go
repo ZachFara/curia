@@ -927,7 +927,7 @@ func sendLimitPerSession(t *testing.T, s *store.Store) {
 	}
 	at := start.Add(store.SendRateWindow - time.Second)
 	_, err := s.CreateMessage(ctx, agentSend("chatty", "t-new", at))
-	if !errors.Is(err, store.ErrTooMany) || !strings.Contains(err.Error(), "20 messages in the last 10m0s") {
+	if !errors.Is(err, store.ErrTooMany) || !strings.Contains(err.Error(), "20 messages in the last 10 minutes, the most an agent may; try again in a few minutes") {
 		t.Fatalf("21st send in ten minutes = %v, want ErrTooMany naming the rate", err)
 	}
 	// Another real session is counted apart, and ten minutes after the
@@ -950,12 +950,86 @@ func sendLimitUnknown(t *testing.T, s *store.Store) {
 	}
 	for _, sender := range []string{"rot-4", ""} {
 		_, err := s.CreateMessage(ctx, agentSend(sender, "u-new", start))
-		if !errors.Is(err, store.ErrTooMany) || !strings.Contains(err.Error(), "cannot identify") {
+		if !errors.Is(err, store.ErrTooMany) || !strings.Contains(err.Error(), "cannot identify this send's sender as a live agent session") ||
+			!strings.Contains(err.Error(), "5 messages in the last 10 minutes") {
 			t.Errorf("sixth unknown send as %q = %v, want ErrTooMany for the shared bucket", sender, err)
 		}
 	}
 	// A verified session is not held back by the unknown senders.
 	createMessage(t, s, agentSend("real-b", "u-new", start))
+}
+
+// Two processes (two Store handles on one file) send 30 messages at once
+// as one verified sender to 30 targets: the count and the insert share one
+// write transaction, so exactly SendRateLimit are stored and the rest are
+// refused with ErrTooMany (re-review A). Thirty writers contending for the
+// write lock can wait past busy_timeout on a loaded machine; a send whose
+// BEGIN failed with SQLITE_BUSY ran nothing (begin), so it is sent again,
+// as a caller would, and only its final answer is counted.
+func TestSendLimitHoldsUnderConcurrency(t *testing.T) {
+	path := dbPath(t)
+	a, b := open(t, path), open(t, path)
+	liveSession(t, a, "chatty", "", model.StateIdle)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	stored, refused, other := 0, 0, []error{}
+	for i := range 30 {
+		wg.Go(func() {
+			s := a
+			if i%2 == 1 {
+				s = b
+			}
+			m := agentSend("chatty", fmt.Sprintf("target-%d", i), t0.Add(time.Duration(i)*time.Millisecond))
+			_, err := s.CreateMessage(context.Background(), m)
+			for try := 0; try < 20 && err != nil && strings.Contains(err.Error(), "begin: database is locked"); try++ {
+				time.Sleep(10 * time.Millisecond)
+				_, err = s.CreateMessage(context.Background(), m)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				stored++
+			case errors.Is(err, store.ErrTooMany):
+				refused++
+			default:
+				other = append(other, err)
+			}
+		})
+	}
+	wg.Wait()
+	if stored != store.SendRateLimit || refused != 30-store.SendRateLimit || len(other) != 0 {
+		t.Errorf("stored %d, refused %d (want %d and %d); other errors %v", stored, refused, store.SendRateLimit, 30-store.SendRateLimit, other)
+	}
+}
+
+// 0005_send_limits applies over a database that already has messages and
+// only the earlier migrations: its index is dropped and its record removed,
+// and reopening the store creates the index again (re-review A).
+func TestSendLimitsMigrationOverExistingDB(t *testing.T) {
+	path := dbPath(t)
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveSession(t, s, "x", "", model.StateIdle)
+	createMessage(t, s, agentSend("x", "y", t0))
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db := rawDB(t, path)
+	if _, err = db.Exec(`DROP INDEX messages_agent_sends; DELETE FROM schema_migrations WHERE name = '0005_send_limits.sql'`); err != nil {
+		t.Fatal(err)
+	}
+	s2 := open(t, path)
+	m, ok, err := s2.GetMessage(context.Background(), "M-1")
+	if err != nil || !ok || m.TargetSession != "y" {
+		t.Errorf("M-1 after migrating = %+v, %v, %v; want the message to y", m, ok, err)
+	}
+	var n int
+	if err = db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'messages_agent_sends'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("messages_agent_sends after migrating: %d, %v; want 1", n, err)
+	}
 }
 
 // sendLimitPlans: every count reads an index.
