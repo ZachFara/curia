@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -76,13 +77,13 @@ func installRecord(t *testing.T) *installRecorder {
 	return r
 }
 
-// installRun runs curia with args, resetting the install flag before and
+// installRun runs curia with args, resetting the install flags before and
 // after, because cobra keeps a flag's value between runs.
 func installRun(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	userTerminalAs(t, true) // install and uninstall are the user's
-	installNoAllowMCPTools = false
-	t.Cleanup(func() { installNoAllowMCPTools = false })
+	installNoAllowMCPTools, installNoStatusLine = false, false
+	t.Cleanup(func() { installNoAllowMCPTools, installNoStatusLine = false, false })
 	return runRoot(t, args...)
 }
 
@@ -198,8 +199,8 @@ func TestInstallAndUninstallRoundTrip(t *testing.T) {
 	if _, err := os.Stat(snippet); err != nil {
 		t.Errorf("snippet not written: %v", err)
 	}
-	if baks, _ := filepath.Glob(settings + ".bak.*"); len(baks) != 2 {
-		t.Errorf("backups = %v, want one from the hooks step and one from the tool rules", baks)
+	if baks, _ := filepath.Glob(settings + ".bak.*"); len(baks) != 3 {
+		t.Errorf("backups = %v, want one each from the hooks, the tool rules and the status line", baks)
 	}
 
 	if out, err := installRun(t, "uninstall"); err != nil {
@@ -883,5 +884,159 @@ func TestInstallRefusesBadTmuxKey(t *testing.T) {
 	out, err := installRun(t, "install")
 	if err == nil || !strings.Contains(err.Error(), "key_next") {
 		t.Fatalf("install: err = %v, want one naming key_next\n%s", err, out)
+	}
+}
+
+// installStatusLineValue returns the settings file's statusLine value and
+// whether the key is there.
+func installStatusLineValue(t *testing.T, path string) (any, bool) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	v, ok := m["statusLine"]
+	return v, ok
+}
+
+const installWantStatusLineAdded = "status line: registered curia statusline (cost and usage for the badge; skip with --no-statusline)\n"
+
+const installWantStatusLineSkipped = "status line: not registered (--no-statusline); cost and usage numbers are missing without it; " +
+	"to register it, run curia install without --no-statusline\n"
+
+// installWantStatusLineForeign is the line for a status line of the user's own.
+func installWantStatusLineForeign(bin string) string {
+	return "status line: you have your own, left as it is; to feed Curia from it, make its command: " +
+		install.StatusLineChain(bin) + " (until then, cost and usage numbers are missing)\n"
+}
+
+func TestInstallRegistersStatusLine(t *testing.T) {
+	installRecord(t)
+	h := installSetup(t, `{"model":"opus"}`)
+	out, err := installRun(t, "install")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	want := map[string]any{"type": "command", "command": install.StatusLineCommand(h.bin)}
+	if v, _ := installStatusLineValue(t, h.settings); !reflect.DeepEqual(v, want) {
+		t.Errorf("statusLine = %v, want %v", v, want)
+	}
+	if strings.Count(out, installWantStatusLineAdded) != 1 {
+		t.Errorf("install output lacks the line %q:\n%s", installWantStatusLineAdded, out)
+	}
+	before, _ := os.ReadFile(filepath.Clean(h.settings))
+	out, err = installRun(t, "install")
+	if err != nil {
+		t.Fatalf("second install: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "status line: already registered\n") || strings.Contains(out, installWantStatusLineAdded) {
+		t.Errorf("second install output:\n%s", out)
+	}
+	if after, _ := os.ReadFile(filepath.Clean(h.settings)); string(after) != string(before) {
+		t.Errorf("second install rewrote settings:\n%s", after)
+	}
+}
+
+func TestInstallNoStatusLineFlag(t *testing.T) {
+	installRecord(t)
+	h := installSetup(t, `{"model":"opus"}`)
+	out, err := installRun(t, "install", "--no-statusline")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if v, ok := installStatusLineValue(t, h.settings); ok {
+		t.Errorf("statusLine = %v, want none", v)
+	}
+	if strings.Count(out, installWantStatusLineSkipped) != 1 || strings.Contains(out, installWantStatusLineAdded) {
+		t.Errorf("install output lacks the hint %q, or registered:\n%s", installWantStatusLineSkipped, out)
+	}
+}
+
+func TestInstallLeavesForeignStatusLine(t *testing.T) {
+	for name, value := range map[string]string{
+		"user's command":   `{"type":"command","command":"~/bin/sl.sh","padding":0}`,
+		"a string":         `"~/bin/sl.sh"`,
+		"null":             `null`,
+		"no command":       `{"type":"command"}`,
+		"mentions curia":   `{"type":"command","command":"echo curia statusline"}`,
+		"another curia":    `{"type":"command","command":"/usr/local/bin/curia statusline"}`,
+		"an array of ours": `[{"type":"command","command":"/usr/local/bin/curia statusline"}]`,
+	} {
+		t.Run(name, func(t *testing.T) { installCheckForeignStatusLine(t, value) })
+	}
+}
+
+// installCheckForeignStatusLine installs and uninstalls with value as the
+// user's statusLine, and checks both leave it as it was and install says so.
+func installCheckForeignStatusLine(t *testing.T, value string) {
+	t.Helper()
+	installRecord(t)
+	h := installSetup(t, `{"statusLine":`+value+`}`)
+	var want any
+	if err := json.Unmarshal([]byte(value), &want); err != nil {
+		t.Fatal(err)
+	}
+	out, err := installRun(t, "install")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	if line := installWantStatusLineForeign(h.bin); strings.Count(out, line) != 1 || strings.Contains(out, installWantStatusLineAdded) {
+		t.Errorf("install output lacks %q, or says it registered:\n%s", line, out)
+	}
+	if v, ok := installStatusLineValue(t, h.settings); !ok || !reflect.DeepEqual(v, want) {
+		t.Errorf("statusLine = %v, want %v as it was", v, want)
+	}
+	if out, err := installRun(t, "uninstall"); err != nil || strings.Contains(out, "status line: removed") {
+		t.Errorf("uninstall: %v\n%s", err, out)
+	}
+	if v, ok := installStatusLineValue(t, h.settings); !ok || !reflect.DeepEqual(v, want) {
+		t.Errorf("statusLine after uninstall = %v, want %v as it was", v, want)
+	}
+}
+
+func TestUninstallRemovesOnlyOurStatusLine(t *testing.T) {
+	installRecord(t)
+	h := installSetup(t, `{"model":"opus"}`)
+	if out, err := installRun(t, "install"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	out, err := installRun(t, "uninstall")
+	if err != nil || strings.Count(out, "status line: removed\n") != 1 {
+		t.Errorf("uninstall: %v\n%s", err, out)
+	}
+	if v, ok := installStatusLineValue(t, h.settings); ok {
+		t.Errorf("statusLine after uninstall = %v", v)
+	}
+	b, _ := os.ReadFile(filepath.Clean(h.settings))
+	if !strings.Contains(string(b), `"model": "opus"`) {
+		t.Errorf("settings after uninstall: %s", b)
+	}
+	out, err = installRun(t, "uninstall")
+	if err != nil || strings.Contains(out, "status line:") {
+		t.Errorf("second uninstall: %v\n%s", err, out)
+	}
+}
+
+// An entry an earlier install wrote for a versioned path that an upgrade has
+// since deleted is repaired to this binary's command.
+func TestInstallRepairsStaleStatusLine(t *testing.T) {
+	installRecord(t)
+	stale := filepath.Join(t.TempDir(), "Cellar", "curia", "0.1.0", "bin", "curia")
+	h := installSetup(t, `{"statusLine":{"type":"command","command":`+installJSONString(install.StatusLineCommand(stale))+`}}`)
+	out, err := installRun(t, "install")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	want := map[string]any{"type": "command", "command": install.StatusLineCommand(h.bin)}
+	if v, _ := installStatusLineValue(t, h.settings); !reflect.DeepEqual(v, want) {
+		t.Errorf("statusLine = %v, want %v", v, want)
+	}
+	if line := "status line: re-registered curia statusline with " + h.bin +
+		" (the entry named another path for this binary)\n"; strings.Count(out, line) != 1 {
+		t.Errorf("install output lacks %q:\n%s", line, out)
 	}
 }
