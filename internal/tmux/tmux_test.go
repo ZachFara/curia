@@ -1432,13 +1432,17 @@ func TestCapturePaneStylesAndCursorInRealTmux(t *testing.T) {
 	}
 	pane := strings.TrimSpace(id)
 	c := NewExec(realSocket)
+	// Wait for the program's last step, the cursor move: a capture taken
+	// between the text and the move sees the cursor move and is not known.
 	var capt Capture
-	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(capt.Screen, "push it"); time.Sleep(20 * time.Millisecond) {
+	done := func() bool { return strings.Contains(capt.Screen, "push it") && capt.CursorKnown && capt.CursorX == 2 }
+	for deadline := time.Now().Add(5 * time.Second); !done(); time.Sleep(20 * time.Millisecond) {
 		if capt, err = c.CapturePane(ctx, pane); err != nil {
 			t.Fatal(err)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("CapturePane = %q, want the printed line", capt.Screen)
+			t.Fatalf("CapturePane = %q, cursor %d,%d known %v: want the printed line and the cursor at 2,0",
+				capt.Screen, capt.CursorX, capt.CursorY, capt.CursorKnown)
 		}
 	}
 	first := strings.SplitN(capt.Styled, "\n", 2)[0]
