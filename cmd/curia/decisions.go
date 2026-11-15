@@ -24,6 +24,7 @@ import (
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/tmux"
 	"github.com/ZachFara/curia/internal/ui"
 )
 
@@ -343,13 +344,14 @@ func agentPanePIDs() (map[int]string, string) {
 		logInfo(cfg.LogPath, "user check: agent pane check skipped: tmux cannot list its panes", "err", sanitize.Line(err.Error(), 200))
 		return out, ""
 	}
-	// A session counts only on a server consistent with it (fleet.Gone, the
-	// rule reconcile uses): its pane listed and the server no newer than the
-	// session. Another server reached through the caller's TMUX, whose pane
-	// ids may collide, is then the Ruling 123 case.
+	// A session counts only on a server consistent with it (decisionsOnServer,
+	// the rules reconcile uses): not recorded on another server, its pane
+	// listed and the server no newer than the session. Another server
+	// reached through the caller's TMUX, whose pane ids may collide, is then
+	// the Ruling 123 case.
 	shown := false
 	for _, s := range sessions {
-		if fleet.Gone(panes, s) {
+		if !decisionsOnServer(panes, s) {
 			continue
 		}
 		shown = true
@@ -379,9 +381,11 @@ func userOnlyRunE(command, what string, run func(*cobra.Command, []string) error
 // does (Ruling 112): Claude Code sets CLAUDECODE and CLAUDE_CODE_SESSION_ID
 // in every command it runs, and an agent's shell has TMUX_PANE set to the
 // pane of its live session. A pane match is checked against tmux first
-// (reconcile), so a session whose pane is gone, or whose pane id a tmux
-// restart gave to someone else, does not count. When the store cannot be
-// read the answer is an agent: Curia cannot tell.
+// (reconcile's rules), so a session whose pane is gone, whose pane id a tmux
+// restart gave to someone else, or that is recorded on another tmux server
+// than the one reached (pane ids are reused across servers), does not
+// count. When the store cannot be read the answer is an agent: Curia cannot
+// tell.
 func agentSign() string {
 	for _, name := range []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID"} {
 		if os.Getenv(name) != "" {
@@ -412,34 +416,46 @@ func agentSign() string {
 	defer cancel()
 	// Read only: the guard never reconciles or writes (re-review A, I2). A
 	// session in this pane counts only when the server reached is consistent
-	// with it (fleet.Gone); when tmux cannot answer the ancestry decides.
-	s, found, err := agentInPane(ctx, st, pane)
+	// with it (decisionsOnServer); when tmux cannot answer the ancestry decides.
+	// Each server can have a live session in a pane with this id, so every
+	// one is checked.
+	sessions, err := agentInPane(ctx, st, pane)
 	if err != nil {
 		return "TMUX_PANE is set and the store cannot be read to check it"
 	}
-	if !found {
+	if len(sessions) == 0 {
 		return ""
 	}
 	panes, err := newTmuxClient().ListPanes(ctx)
-	if err != nil || fleet.Gone(panes, s) {
+	if err != nil {
 		return ""
 	}
-	return "this is pane " + sanitize.Line(pane, 20) + " of agent session " + spawnShortID(s.ID) +
-		"; if no agent runs here any more, run curia ls, which marks a session whose pane is gone, or end it"
-}
-
-// agentInPane finds a session in pane that is neither ended nor stale.
-func agentInPane(ctx context.Context, st *store.Store, pane string) (model.Session, bool, error) {
-	sessions, err := st.ListSessions(ctx, store.ListFilter{})
-	if err != nil {
-		return model.Session{}, false, err
-	}
 	for _, s := range sessions {
-		if s.Pane == pane && s.State != model.StateEnded && s.State != model.StateStale {
-			return s, true, nil
+		if decisionsOnServer(panes, s) {
+			return "this is pane " + sanitize.Line(pane, 20) + " of agent session " + spawnShortID(s.ID) +
+				"; if no agent runs here any more, run curia ls, which marks a session whose pane is gone, or end it"
 		}
 	}
-	return model.Session{}, false, nil
+	return ""
+}
+
+// agentInPane finds the sessions in pane that are neither ended nor stale.
+func agentInPane(ctx context.Context, st *store.Store, pane string) ([]model.Session, error) {
+	sessions, err := st.ListSessions(ctx, store.ListFilter{})
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(sessions, func(s model.Session) bool {
+		return s.Pane != pane || s.State == model.StateEnded || s.State == model.StateStale
+	}), nil
+}
+
+// decisionsOnServer reports whether live session s is in a pane of the tmux
+// server whose panes are live, by reconcile's rules and without writing: s
+// is not recorded on another server (fleet.OtherServer), and its pane is
+// listed and not from before a restart (fleet.Gone).
+func decisionsOnServer(live []tmux.Pane, s model.Session) bool {
+	return !fleet.OtherServer(live, s) && !fleet.Gone(live, s)
 }
 
 // userTerminalOpen opens and closes the controlling terminal; tests
