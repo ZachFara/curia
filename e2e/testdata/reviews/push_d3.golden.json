@@ -1,0 +1,6 @@
+{
+  "topic": "curia-e2e",
+  "title": "D-3 api-server: decision needed",
+  "message": "Revoke every refresh token issued before the fix?\nA: Revoke them now\nB: Let them expire\nRecommended: B\nIrreversible: answer with curia decide D-3.",
+  "priority": 4
+}

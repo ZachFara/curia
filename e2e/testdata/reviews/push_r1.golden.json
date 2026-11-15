@@ -1,0 +1,6 @@
+{
+  "topic": "curia-e2e",
+  "title": "R-1 T-1: ready for review",
+  "message": "Fix the auth refresh\nTests (the agent's report): passed\nRotated the refresh token on every use and added a test for the expired case.\nTested with go test ./auth/..., which passes.\nLeft open: tokens issued before the fix are not revoked.",
+  "priority": 3
+}
