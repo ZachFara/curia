@@ -41,6 +41,7 @@ const taskNow = "2026-11-13T12:00:00Z"
 // database path.
 func taskHome(t *testing.T) string {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	db := hookHome(t)
 	prevClock := clock
 	now := decisionsParse(t, taskNow)
@@ -601,11 +602,12 @@ func TestTaskEditThroughEditor(t *testing.T) {
 	body := taskWriteFile(t, t.TempDir(), "b.md", "Old body\n")
 	taskMust(t, "task", "add", "Old title", "--repo", repo, "--body", body)
 	taskSetEditor(t, "/usr/bin/vim -f")
-	tty, err := os.Open(os.DevNull) // a character device stands in for the terminal
+	tty, err := os.Open(os.DevNull) // a character device stands in for the terminal on stdin
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tty.Close() }()
+	userTerminalAs(t, true) // and the user is at a terminal
 
 	var paths []string
 	editWith := func(rewrite func(content string) string) {
@@ -642,6 +644,22 @@ func TestTaskEditThroughEditor(t *testing.T) {
 			t.Errorf("temp file %s still exists (%v)", p, serr)
 		}
 	}
+}
+
+func TestTaskEditorNeedsTheUserAtATerminal(t *testing.T) {
+	taskHome(t)
+	repo := taskRepo(t, "main")
+	taskMust(t, "task", "add", "Plain", "--repo", repo)
+	taskSetEditor(t, "/usr/bin/vim -f")
+	devNull, err := os.Open(os.DevNull) // a character device, as an agent's stdin can be
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = devNull.Close() }()
+	userTerminalAs(t, false) // no controlling terminal: an agent's tool shell
+	// taskEditor is still the failing stub: reaching it would panic.
+	out, err := taskRun(t, devNull, "task", "edit", "T-1")
+	taskWantErr(t, err, out, "curia task edit cannot run without a terminal")
 }
 
 func TestTaskEditWithoutEditorStartsNothing(t *testing.T) {
@@ -703,6 +721,7 @@ func TestTaskEditorRunsWithoutShell(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = tty.Close() }()
+	userTerminalAs(t, true)
 	if out, rerr := taskRun(t, tty, "task", "edit", "T-1"); rerr != nil || out != "T-1 updated\n" {
 		t.Fatalf("edit with the configured editor: %v %q", rerr, out)
 	}

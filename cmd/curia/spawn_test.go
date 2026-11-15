@@ -43,6 +43,7 @@ type spawnFixture struct {
 
 func spawnNewFixture(t *testing.T) *spawnFixture {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	f := &spawnFixture{t: t, db: hookHome(t), fake: useFakeTmux(t)}
 	f.start = time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	f.now = f.start

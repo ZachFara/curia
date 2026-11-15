@@ -39,8 +39,9 @@ var (
 
 func init() {
 	cmd := &cobra.Command{
-		Use:   "pause <id>",
-		Short: "Stop a task's agent, commit its work and remove its worktree (the user only)",
+		Use:         "pause <id>",
+		Short:       "Stop a task's agent, commit its work and remove its worktree (the user only)",
+		Annotations: userOnlyMark(),
 		Long: "Closes the tmux panes of the task's agent sessions and its window, commits\n" +
 			"everything in its worktree (\"curia: WIP <id> (paused)\", through the\n" +
 			"repository's hooks unless --no-verify), then removes the worktree with git\n" +
@@ -60,8 +61,8 @@ func init() {
 
 func runPause(cmd *cobra.Command, args []string) error {
 	// No agent may pause anything (spec section 7).
-	if refuseInsideAgent() != nil {
-		return errors.New("curia pause cannot run inside an agent session (CLAUDECODE is set): only the user may pause a task")
+	if err := userOnly("pause", "pause a task"); err != nil {
+		return err
 	}
 	o := pauseOptions{Force: pauseForce, NoVerify: pauseNoVerify}
 	return lifecycleRunCmd(cmd, args[0], func(ctx context.Context, st *store.Store, cfg config.Config, out io.Writer) error {

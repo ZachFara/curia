@@ -95,10 +95,9 @@ func TestDecisionsEndToEnd(t *testing.T) {
 func (r *decisionsRun) secondAnswerRefused(t *testing.T) {
 	t.Helper()
 	before := readFile(t, r.paneFile("s1"))
-	stdout, _, _, err := r.h.run(nil, "decide", "D-1", "--option", "B", "--reason", "changed my mind")
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() != 1 || stdout != "" {
-		t.Errorf("second curia decide D-1: stdout %q, err %v, want a refusal with exit status 1", stdout, err)
+	stdout, stderr, code := r.term.run(t, r.h, r.h.env, "decide", "D-1", "--option", "B", "--reason", "changed my mind")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "D-1") {
+		t.Errorf("second curia decide D-1: stdout %q, stderr %q, exit %d, want a refusal with exit status 1", stdout, stderr, code)
 	}
 	time.Sleep(200 * time.Millisecond) // a typing would have landed by now
 	if got := readFile(t, r.paneFile("s1")); got != before {
@@ -117,10 +116,10 @@ func (r *decisionsRun) retractionAndBrackets(t *testing.T) {
 	d := r.startClient(t, "client_d", "TMUX_PANE=%1")
 	d.handshake(t)
 	d.call(t) // request_decision: D-7
-	if out := r.h.mustRun(t, "decide", "D-7", "--option", "A", "--reason", "not ready"); !strings.Contains(out, "queued: agent is working") {
+	if out := r.term.mustRun(t, r.h, "decide", "D-7", "--option", "A", "--reason", "not ready"); !strings.Contains(out, "queued: agent is working") {
 		t.Errorf("curia decide D-7 = %q, want it queued for the working session", out)
 	}
-	out := r.h.mustRun(t, "decisions", "edit", "D-2", "--supersede")
+	out := r.term.mustRun(t, r.h, "decisions", "edit", "D-2", "--supersede")
 	if want := "D-2 superseded\nD-2 retraction queued for the agent's Stop hook, or tell the agent to call check_decision D-2\n"; out != want {
 		t.Errorf("curia decisions edit D-2 --supersede = %q, want %q", out, want)
 	}
@@ -151,6 +150,7 @@ type decisionsRun struct {
 	panesDir string // where the panes write what they receive
 	hooks    []replayLine
 	a, b, c  *mcpClient
+	term     *terminal // curia decide is user-only: it runs at a terminal
 }
 
 func newDecisionsRun(t *testing.T, root, bin string) *decisionsRun {
@@ -168,6 +168,7 @@ func newDecisionsRun(t *testing.T, root, bin string) *decisionsRun {
 	r.h.env = slices.DeleteFunc(r.h.env, func(kv string) bool { return strings.HasPrefix(kv, "TMUX_TMPDIR=") })
 	r.h.env = append(r.h.env, "TMUX_TMPDIR="+r.srv.dir, "TMUX="+r.srv.tmuxVar)
 	r.hooks = readHookScript(t, root, r.repo)
+	r.term = startTerminal(t)
 	return r
 }
 
@@ -237,7 +238,7 @@ func (r *decisionsRun) refusedInsideAgent(t *testing.T) {
 // confirms it.
 func (r *decisionsRun) typedIntoIdlePane(t *testing.T) {
 	t.Helper()
-	out := r.h.mustRun(t, "decide", "D-1", "--option", "A",
+	out := r.term.mustRun(t, r.h, "decide", "D-1", "--option", "A",
 		"--reason", "Replays need 30 days of history; we already run Postgres (see ops).", "--scope", "repo")
 	if !strings.HasSuffix(out, "delivered (send_keys)\n") {
 		t.Errorf("curia decide D-1 = %q, want one line ending %q", out, "delivered (send_keys)")
@@ -263,7 +264,7 @@ func (r *decisionsRun) deliveredByStopHook(t *testing.T) {
 	r.b = r.startClient(t, "client_b", "TMUX_PANE=%1")
 	r.b.handshake(t)
 	r.b.call(t) // request_decision: D-2
-	out := r.h.mustRun(t, "decide", "D-2", "--text", "Keep the v1 endpoint for one release.", "--reason", "Two clients still call it.")
+	out := r.term.mustRun(t, r.h, "decide", "D-2", "--text", "Keep the v1 endpoint for one release.", "--reason", "Two clients still call it.")
 	if strings.Count(out, "\n") != 1 || !strings.Contains(out, "queued: agent is working") {
 		t.Errorf("curia decide D-2 = %q, want one line holding %q", out, "queued: agent is working")
 	}
@@ -296,12 +297,12 @@ func (r *decisionsRun) foundAsPrecedent(t *testing.T) {
 func (r *decisionsRun) assumptions(t *testing.T) {
 	t.Helper()
 	r.a.call(t) // request_decision: D-4, assume
-	if got, want := r.h.mustRun(t, "decide", "D-4", "--accept"), "D-4 confirmed · nothing to deliver\n"; got != want {
+	if got, want := r.term.mustRun(t, r.h, "decide", "D-4", "--accept"), "D-4 confirmed · nothing to deliver\n"; got != want {
 		t.Errorf("curia decide D-4 --accept = %q, want %q", got, want)
 	}
 	r.a.call(t) // request_decision: D-5, assume
 	r.quietHook(t, "Stop", "%0")
-	out := r.h.mustRun(t, "decide", "D-5", "--option", "B")
+	out := r.term.mustRun(t, r.h, "decide", "D-5", "--option", "B")
 	if !strings.HasSuffix(out, "delivered (send_keys)\n") {
 		t.Errorf("curia decide D-5 = %q, want one line ending %q", out, "delivered (send_keys)")
 	}
@@ -319,7 +320,7 @@ func (r *decisionsRun) paneGone(t *testing.T) {
 	r.quietHook(t, "Stop", "%2")
 	r.wantStates(t, map[string]string{sessionS3: "needs_decision"})
 	r.srv.mustRun(t, "kill-pane", "-t", "%2")
-	out := r.h.mustRun(t, "decide", "D-6", "--accept")
+	out := r.term.mustRun(t, r.h, "decide", "D-6", "--accept")
 	if strings.Count(out, "\n") != 1 || !strings.Contains(out, "pane gone") {
 		t.Errorf("curia decide D-6 = %q, want one line holding %q", out, "pane gone")
 	}

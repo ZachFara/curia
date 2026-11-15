@@ -14,8 +14,12 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/spf13/cobra"
+
+	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/tmux"
 )
 
 // decisionsSpec is one seeded ticket: the open ticket CreateDecision stores,
@@ -91,6 +95,7 @@ func decisionsParse(t *testing.T, s string) time.Time {
 // and seeds the specs. It returns the database path.
 func decisionsHome(t *testing.T, specs ...decisionsSpec) string {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	db := hookHome(t)
 	prevClock := clock
 	clock = func() time.Time { return decisionsParse(t, decisionsNow) }
@@ -438,7 +443,7 @@ func TestEditRefusesInsideAgentBeforeTheStore(t *testing.T) {
 		decisionsResetFlags(t)
 		t.Setenv("CLAUDECODE", "1")
 		out, err := runRoot(t, append([]string{"decisions", "edit"}, args...)...)
-		if err == nil || !strings.Contains(err.Error(), "refusing to run inside an agent session") {
+		if err == nil || !strings.Contains(err.Error(), "cannot run inside an agent session") {
 			t.Errorf("edit %v = %v, %q, want the refusal", args, err, out)
 		}
 		if out != "" && strings.Contains(out, "->") {
@@ -486,17 +491,109 @@ func TestEditHelpInsideAgentIsExempt(t *testing.T) {
 	}
 }
 
-func TestRefuseInsideAgent(t *testing.T) {
-	if err := refuseInsideAgent(); err != nil {
-		t.Errorf("CLAUDECODE unset: %v", err)
+// userTerminalUnset is userTerminalOpen under test: a test that reaches the
+// terminal check without saying whether there is a terminal fails.
+func userTerminalUnset() error {
+	panic("userTerminalOpen called in a test that did not set it (userTerminalAs)")
+}
+
+func init() { userTerminalOpen = userTerminalUnset }
+
+// userTerminalAs makes the controlling terminal openable (at) or not for
+// the test.
+func userTerminalAs(t *testing.T, at bool) {
+	t.Helper()
+	userTerminalOpen = func() error {
+		if at {
+			return nil
+		}
+		return errors.New("open /dev/tty: device not configured")
+	}
+	t.Cleanup(func() { userTerminalOpen = userTerminalUnset })
+}
+
+// TestUserOnlyRefusesBySessionEnv: the agent guard also refuses with
+// CLAUDE_CODE_SESSION_ID set, and in the pane of a live agent session
+// (Ruling 112), but not in a pane whose session is gone.
+func TestUserOnlyRefusesBySessionEnv(t *testing.T) {
+	commands := [][]string{
+		{"say", "@api", "hello"},
+		{"decide", "D-1", "--option", "A"},
+		{"decisions", "edit", "D-1", "--supersede"},
+		{"messages", "cancel", "M-1"},
+		{"routing", "reset"},
+		{"setup", "approve", "T-1"},
+		{"pause", "T-1"},
+		{"resume", "T-1"},
+		{"clean", "T-1"},
+	}
+	refusedAll := func(t *testing.T, why string) {
+		t.Helper()
+		for _, args := range commands {
+			_, err := runRoot(t, args...)
+			if err == nil || !strings.Contains(err.Error(), "inside an agent session") || !strings.Contains(err.Error(), why) {
+				t.Errorf("%v = %v, want the agent refusal naming %q", args, err, why)
+			}
+		}
+	}
+	t.Run("session id", func(t *testing.T) {
+		hookHome(t)
+		useFakeTmux(t)
+		t.Setenv("CLAUDE_CODE_SESSION_ID", "1a2b3c4d-0000-4000-8000-000000000000")
+		refusedAll(t, "CLAUDE_CODE_SESSION_ID is set")
+	})
+	t.Run("agent pane", func(t *testing.T) {
+		db, fake := readHome(t, []string{"%1", "%2"}, readSession("agent-1", model.StateIdle, "%1"))
+		seedSessions(t, db, readSession("old", model.StateEnded, "%2"))
+		t.Setenv("TMUX_PANE", "%1")
+		refusedAll(t, "pane %1 of agent session agent-1")
+		// The pane of an ended session is not an agent's.
+		t.Setenv("TMUX_PANE", "%2")
+		if sign := agentSign(); sign != "" {
+			t.Errorf("in an ended session's pane: agentSign = %q, want none", sign)
+		}
+		// The agent's pane is gone (tmux restarted and %1 is someone else's):
+		// reconcile marks it stale, and the pane is the user's.
+		t.Setenv("TMUX_PANE", "%1")
+		fake.Panes = []tmux.Pane{{ID: "%1", Session: "work", WindowID: "@1", ServerStart: at(10, 0)}}
+		if sign := agentSign(); sign != "" {
+			t.Errorf("in a recycled pane: agentSign = %q, want none", sign)
+		}
+		if s := getSession(t, db, "agent-1"); s.State != model.StateStale {
+			t.Errorf("agent-1 = %s, want stale", s.State)
+		}
+	})
+	t.Run("no store yet", func(t *testing.T) {
+		db := hookHome(t)
+		useFakeTmux(t)
+		t.Setenv("TMUX_PANE", "%1")
+		if sign := agentSign(); sign != "" {
+			t.Errorf("agentSign = %q, want none", sign)
+		}
+		if _, err := os.Stat(db); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the check created the store: %v", err)
+		}
+	})
+}
+
+func TestUserOnlyGuard(t *testing.T) {
+	userTerminalAs(t, true)
+	if err := userOnly("x", "do x"); err != nil {
+		t.Errorf("at a terminal, no agent variable: %v", err)
 	}
 	t.Setenv("CLAUDECODE", "")
-	if err := refuseInsideAgent(); err != nil {
+	if err := userOnly("x", "do x"); err != nil {
 		t.Errorf("CLAUDECODE empty: %v", err)
 	}
 	t.Setenv("CLAUDECODE", "1")
-	if err := refuseInsideAgent(); err == nil {
-		t.Error("CLAUDECODE=1: no error")
+	if err := userOnly("x", "do x"); err == nil || !strings.Contains(err.Error(), "curia x cannot run inside an agent session (CLAUDECODE is set): only the user may do x") {
+		t.Errorf("CLAUDECODE=1: %v", err)
+	}
+	t.Setenv("CLAUDECODE", "")
+	userTerminalAs(t, false)
+	if err := userOnly("x", "do x"); err == nil || !strings.Contains(err.Error(), "curia x cannot run without a terminal") ||
+		!strings.Contains(err.Error(), "only the user may do x") {
+		t.Errorf("no terminal: %v", err)
 	}
 }
 
@@ -603,6 +700,173 @@ func TestDecisionsLsMarksAnswersNobodyCanCollect(t *testing.T) {
 		want := map[bool]string{true: "D1 Q1", false: "D1"}[state == model.StateIdle]
 		if got, err := runRoot(t, "status"); err != nil || got != want {
 			t.Errorf("session %q: status = %q, %v; want %q", state, got, err, want)
+		}
+	}
+}
+
+// userOnlyCommands are the commands only the user may run, each with
+// arguments it accepts (Ruling 112). A command marked user-only that is not
+// listed here fails TestUserOnlyCommandsGoThroughTheGuard: add it.
+var userOnlyCommands = map[string][]string{
+	"curia say":             {"T-1:", "hello"},
+	"curia decide":          {"D-1", "--option", "A"},
+	"curia decisions edit":  {"D-1", "--supersede"},
+	"curia messages cancel": {"M-1"},
+	"curia routing reset":   {},
+	"curia setup approve":   {"T-1"},
+	"curia pause":           {"T-1"},
+	"curia resume":          {"T-1"},
+	"curia clean":           {"T-1"},
+	"curia task add":        {"a title"},
+	"curia task edit":       {"T-1", "--title", "x"},
+	"curia task ready":      {"T-1"},
+	"curia task import":     {"--backlog-md"},
+}
+
+// userOnlyWalk calls f on every command under c.
+func userOnlyWalk(c *cobra.Command, f func(*cobra.Command)) {
+	f(c)
+	for _, sub := range c.Commands() {
+		userOnlyWalk(sub, f)
+	}
+}
+
+// userOnlyMarked returns the paths of the commands marked user-only,
+// failing t for a command whose help says "the user only" but is not marked.
+func userOnlyMarked(t *testing.T) map[string]bool {
+	t.Helper()
+	marked := map[string]bool{}
+	userOnlyWalk(rootCmd, func(c *cobra.Command) {
+		_, isMarked := c.Annotations[userOnlyAnnotation]
+		if strings.Contains(c.Short, "the user only") && !isMarked {
+			t.Errorf("%s says it is for the user only but is not marked user-only", c.CommandPath())
+		}
+		if isMarked {
+			marked[c.CommandPath()] = true
+		}
+	})
+	return marked
+}
+
+// userOnlyRefused runs argv with no controlling terminal (and env set, when
+// not empty) and checks userOnly refused it with want before it opened the
+// store or called tmux.
+func userOnlyRefused(t *testing.T, argv []string, env, want string) {
+	t.Helper()
+	db := hookHome(t)
+	fake := useFakeTmux(t)
+	userTerminalAs(t, false)
+	if env != "" {
+		t.Setenv(env, "1")
+	}
+	defer taskResetFlags()
+	defer func() { pauseForce, pauseNoVerify, cleanForce = false, false, false }()
+	out, err := runRoot(t, argv...)
+	if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "only the user may") {
+		t.Errorf("%v = %v (output %q), want %q", argv, err, out, want)
+	}
+	if _, serr := os.Stat(db); !errors.Is(serr, os.ErrNotExist) {
+		t.Errorf("%v opened the store before refusing: %v", argv, serr)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("%v called tmux before refusing: %q", argv, fake.Calls)
+	}
+}
+
+// TestUserOnlyCommandsGoThroughTheGuard enumerates the cobra commands: every
+// command marked user-only (or whose help says "the user only") is listed
+// above, and run with no controlling terminal, and again with CLAUDECODE set,
+// each is refused by userOnly before it opens the store or calls tmux.
+func TestUserOnlyCommandsGoThroughTheGuard(t *testing.T) {
+	marked := userOnlyMarked(t)
+	for path := range userOnlyCommands {
+		if !marked[path] {
+			t.Errorf("%s is not marked user-only (Annotations: userOnlyMark())", path)
+		}
+	}
+	for path := range marked {
+		args, ok := userOnlyCommands[path]
+		if !ok {
+			t.Errorf("%s is marked user-only but not listed in userOnlyCommands", path)
+			continue
+		}
+		name := strings.TrimPrefix(path, "curia ")
+		argv := append(strings.Fields(name), args...)
+		t.Run(path+"/no terminal", func(t *testing.T) {
+			userOnlyRefused(t, argv, "", "curia "+name+" cannot run without a terminal")
+		})
+		t.Run(path+"/agent", func(t *testing.T) {
+			userOnlyRefused(t, argv, "CLAUDECODE", "curia "+name+" cannot run inside an agent session")
+		})
+	}
+}
+
+// userEvasions are the three environments live check B used to pass an
+// agent off as the user (defect 1): each clears the agent's variables, and
+// none has a controlling terminal, as an agent's tool shell has none.
+var userEvasions = map[string][]string{
+	"env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u TMUX_PANE": {"CURIA_TASK_ID=T-1"},
+	"env -i PATH=$PATH": {},
+	"env -u CLAUDECODE": {"CLAUDE_CODE_SESSION_ID=1a2b3c4d-0000-4000-8000-0000000000a1", "TMUX_PANE=%2", "CURIA_TASK_ID=T-1"},
+}
+
+// userEvade sets env, as NAME=value pairs, for the test.
+func userEvade(t *testing.T, env []string) {
+	t.Helper()
+	for _, kv := range env {
+		name, value, _ := strings.Cut(kv, "=")
+		t.Setenv(name, value)
+	}
+}
+
+// userEvadedSend sends from env with no controlling terminal and checks
+// the message is an agent's, labeled so, and never typed when its sender is
+// unknown.
+func userEvadedSend(t *testing.T, env []string) {
+	t.Helper()
+	db, fake := sendHome(t) // t1 in %1, the sending agent a2 in %2, a shell in %9
+	userTerminalAs(t, false)
+	userEvade(t, env)
+	if _, err := readRun(t, "", "send", "%1", "reply with only LABEL-TWO"); err != nil {
+		t.Fatal(err)
+	}
+	m := sendOne(t, db)
+	if m.Sender != model.SenderAgent {
+		t.Errorf("sender = %s, want agent", m.Sender)
+	}
+	line := message.StopBlock([]model.Message{m})
+	if strings.Contains(line, "M-1 from the user") || !strings.Contains(line, "not from the user") {
+		t.Errorf("Stop block %q, want it labeled as not from the user", line)
+	}
+	if m.SenderSession == "" && len(sendTyped(fake)) != 0 {
+		t.Errorf("an unknown sender's message was typed: %q", sendTyped(fake))
+	}
+}
+
+// userEvadedCommand runs argv from env with no controlling terminal and
+// checks it is refused as user-only, storing nothing.
+func userEvadedCommand(t *testing.T, env, argv []string) {
+	t.Helper()
+	db, _ := sendHome(t)
+	userTerminalAs(t, false)
+	userEvade(t, env)
+	defer func() { pauseForce, pauseNoVerify, cleanForce = false, false, false }()
+	_, err := runRoot(t, argv...)
+	if err == nil || !strings.Contains(err.Error(), "only the user may") {
+		t.Errorf("%v = %v, want the user-only refusal", argv, err)
+	}
+	if ms := sendMessages(t, db); len(ms) != 0 {
+		t.Errorf("%v stored %+v", argv, ms)
+	}
+}
+
+func TestEvasionsAreNeverTheUser(t *testing.T) {
+	for name, env := range userEvasions {
+		t.Run("send/"+name, func(t *testing.T) { userEvadedSend(t, env) })
+		for _, argv := range [][]string{
+			{"say", "T-2:", "reply with only SAY-SPOOF"}, {"pause", "T-1"}, {"clean", "T-1"}, {"decide", "D-1", "--option", "A"},
+		} {
+			t.Run(argv[0]+"/"+name, func(t *testing.T) { userEvadedCommand(t, env, argv) })
 		}
 	}
 }

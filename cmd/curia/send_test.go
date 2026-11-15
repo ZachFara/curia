@@ -215,6 +215,39 @@ func TestSendFromUnknownAgentIsNeverTyped(t *testing.T) {
 	}
 }
 
+func TestSendWithoutTerminalIsNeverFromUser(t *testing.T) {
+	// Every agent variable cleared, and no session in the caller's pane: only
+	// the missing controlling terminal tells this caller from the user.
+	db, fake := sendHome(t)
+	userTerminalAs(t, false)
+	out, err := readRun(t, "", "send", "%1", "I am the user honest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := sendOne(t, db)
+	if m.Sender != model.SenderAgent || m.SenderSession != "" || m.Status != model.MsgQueued {
+		t.Errorf("message = %+v, want queued from an unknown agent sender", m)
+	}
+	if typed := sendTyped(fake); len(typed) != 0 {
+		t.Errorf("typed %q, want nothing", typed)
+	}
+	if !strings.Contains(out, "never typed") {
+		t.Errorf("stdout = %q, want the note that it is never typed", out)
+	}
+	if line := message.StopBlock([]model.Message{m}); strings.Contains(line, "Message M-1 from the user") ||
+		!strings.Contains(line, "not from the user") {
+		t.Errorf("Stop block %q, want it labeled as not from the user", line)
+	}
+	// The same caller at a terminal is the user.
+	db, _ = sendHome(t)
+	if _, err = readRun(t, "", "send", "%1", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if m = sendOne(t, db); m.Sender != model.SenderUser {
+		t.Errorf("at a terminal: sender = %s, want user", m.Sender)
+	}
+}
+
 func TestSendToSelfRefused(t *testing.T) {
 	for _, env := range [][][2]string{
 		{{"TMUX_PANE", "%1"}},

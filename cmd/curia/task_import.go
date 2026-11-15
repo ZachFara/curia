@@ -25,14 +25,15 @@ var taskImportBacklogMD bool
 
 func init() {
 	c := &cobra.Command{
-		Use:   "import --backlog-md [<dir>]",
-		Short: "Import tasks from Backlog.md",
+		Use:         "import --backlog-md [<dir>]",
+		Short:       "Import tasks from Backlog.md",
+		Annotations: userOnlyMark(),
 		Long: "Reads the task files in backlog/tasks/ of the repository holding <dir>\n" +
 			"(default: the current directory): at most 500 regular .md files, by name.\n" +
 			"A file that is not a task, or is Done, is skipped. A task imported before is\n" +
 			"updated (title, body and tags); its status stays as you set it.",
 		Args: cobra.MaximumNArgs(1),
-		RunE: runTaskImport,
+		RunE: userOnlyRunE("task import", "import tasks", runTaskImport),
 	}
 	c.Flags().BoolVar(&taskImportBacklogMD, "backlog-md", false, "import Backlog.md task files")
 	taskCmd.AddCommand(c)

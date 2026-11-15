@@ -106,6 +106,9 @@ type tasksRun struct {
 	leadPane string
 	lead     *mcpClient
 	mate     *mcpClient
+	// term is where the user's commands run: they need a controlling
+	// terminal (Ruling 112).
+	term *terminal
 }
 
 func newTasksRun(t *testing.T, root, bin string) *tasksRun {
@@ -124,6 +127,7 @@ func newTasksRun(t *testing.T, root, bin string) *tasksRun {
 	r.srv = startTmux(t, filepath.Join(tmp, "tmuxhome"), r.paneFile("mate"), r.paneFile("web"), r.paneFile("spare"))
 	r.setEnv(t)
 	r.hooks = r.readHooks(t)
+	r.term = startTerminal(t)
 	return r
 }
 
@@ -211,13 +215,13 @@ func (r *tasksRun) addTasks(t *testing.T) {
 	t.Helper()
 	body := filepath.Join(r.tmp, "body.md")
 	tasksWrite(t, body, tasksBody)
-	if got := r.h.mustRun(t, "task", "add", "Fix the auth refresh", "--repo", r.repo, "--body", body); got != "T-1 added (backlog)\n" {
+	if got := r.user(t, "task", "add", "Fix the auth refresh", "--repo", r.repo, "--body", body); got != "T-1 added (backlog)\n" {
 		t.Errorf("curia task add = %q, want %q", got, "T-1 added (backlog)\n")
 	}
-	if got := r.h.mustRun(t, "task", "add", "Add request logging", "--repo", r.repo); got != "T-2 added (backlog)\n" {
+	if got := r.user(t, "task", "add", "Add request logging", "--repo", r.repo); got != "T-2 added (backlog)\n" {
 		t.Errorf("curia task add = %q, want %q", got, "T-2 added (backlog)\n")
 	}
-	if got := r.h.mustRun(t, "task", "ready", "T-1"); got != "T-1 ready\n" {
+	if got := r.user(t, "task", "ready", "T-1"); got != "T-1 ready\n" {
 		t.Errorf("curia task ready T-1 = %q, want %q", got, "T-1 ready\n")
 	}
 	r.wantTasks(t, map[string]string{"T-1": "ready", "T-2": "backlog"})
@@ -230,7 +234,7 @@ func (r *tasksRun) addTasks(t *testing.T) {
 // exits, as Claude Code does when the user leaves it.
 func (r *tasksRun) approveSetup(t *testing.T) {
 	t.Helper()
-	out := r.h.mustRun(t, "spawn", "T-2")
+	out := r.user(t, "spawn", "T-2")
 	if !strings.Contains(out, "Setup: .curia/setup.sh skipped: this content is not approved") {
 		t.Errorf("curia spawn T-2 = %q, want the unapproved setup script skipped", out)
 	}
@@ -264,7 +268,7 @@ func (r *tasksRun) approveSetup(t *testing.T) {
 // setup script ran there, with the brief as the stub's one argument.
 func (r *tasksRun) spawnFirst(t *testing.T) {
 	t.Helper()
-	out := r.h.mustRun(t, "spawn", "T-1")
+	out := r.user(t, "spawn", "T-1")
 	r.leadPane = r.spawnedPane(t, "T-1", out)
 	if !strings.Contains(out, "Setup: ran .curia/setup.sh (log: ") {
 		t.Errorf("curia spawn T-1 = %q, want the approved setup script run", out)
@@ -314,7 +318,7 @@ func (r *tasksRun) spawnAgainRefused(t *testing.T) {
 // submission confirms it.
 func (r *tasksRun) typedIntoIdlePane(t *testing.T) {
 	t.Helper()
-	if got := r.h.mustRun(t, "say", "T-1: use pnpm, not npm"); got != "M-1 delivered (send_keys)\n" {
+	if got := r.user(t, "say", "T-1: use pnpm, not npm"); got != "M-1 delivered (send_keys)\n" {
 		t.Errorf("curia say T-1: = %q, want %q", got, "M-1 delivered (send_keys)\n")
 	}
 	r.waitInput(t, r.goldenInputLines(t, 1))
@@ -330,7 +334,7 @@ func (r *tasksRun) typedIntoIdlePane(t *testing.T) {
 func (r *tasksRun) deliveredByStopHook(t *testing.T) {
 	t.Helper()
 	r.quietHook(t, "PreToolUse", tasksLeadToken)
-	out := r.h.mustRun(t, "say", "@api-server keep the public API unchanged (v1)")
+	out := r.user(t, "say", "@api-server keep the public API unchanged (v1)")
 	if !strings.HasPrefix(out, "M-2 queued") || strings.Count(out, "\n") != 1 {
 		t.Errorf("curia say @api-server = %q, want one line starting %q", out, "M-2 queued")
 	}
@@ -350,7 +354,7 @@ func (r *tasksRun) deliveredByStopHook(t *testing.T) {
 func (r *tasksRun) checkMessages(t *testing.T) {
 	t.Helper()
 	r.quietHook(t, "PreToolUse", tasksLeadToken)
-	if out := r.h.mustRun(t, "say", "T-1: also run the linter"); !strings.HasPrefix(out, "M-3 queued") {
+	if out := r.user(t, "say", "T-1: also run the linter"); !strings.HasPrefix(out, "M-3 queued") {
 		t.Errorf("curia say T-1: = %q, want a line starting %q", out, "M-3 queued")
 	}
 	r.lead = r.startClient(t, "client_lead", r.leadPane)
@@ -364,7 +368,7 @@ func (r *tasksRun) checkMessages(t *testing.T) {
 // Step 6: a rule by message, found as precedent by the agent.
 func (r *tasksRun) ruleAsPrecedent(t *testing.T) {
 	t.Helper()
-	out := r.h.mustRun(t, "say", "@api-server rule: always run make check before committing")
+	out := r.user(t, "say", "@api-server rule: always run make check before committing")
 	if want := "M-4 stored as rule D-1 (repo api-server)\n"; out != want {
 		t.Errorf("curia say rule: = %q, want %q", out, want)
 	}
@@ -374,7 +378,7 @@ func (r *tasksRun) ruleAsPrecedent(t *testing.T) {
 // Step 7: a task by message.
 func (r *tasksRun) taskByMessage(t *testing.T) {
 	t.Helper()
-	out := r.h.mustRun(t, "say", "@api-server task: add a rate limiter to the login route")
+	out := r.user(t, "say", "@api-server task: add a rate limiter to the login route")
 	if want := "M-5 filed as T-3 (backlog)\n"; out != want {
 		t.Errorf("curia say task: = %q, want %q", out, want)
 	}
@@ -399,6 +403,10 @@ func (r *tasksRun) agentSendAndRead(t *testing.T) {
 	if m := r.message(t, "M-6"); m.Sender != "agent" || m.SenderSession != tasksWeb || m.ConfirmedAt == nil {
 		t.Errorf("M-6 = %+v, want sent by agent %s and confirmed", m, tasksWeb)
 	}
+	// An agent writes no task (Ruling 113).
+	if stderr := r.fails(t, agent, "task", "add", "an agent's task", "--repo", r.repo); !strings.Contains(stderr, "only the user may") {
+		t.Errorf("curia task add from an agent: stderr %q, want the user-only refusal", stderr)
+	}
 	r.fails(t, agent, "send", "%99", "x")
 	r.fails(t, nil, "read", "%99")
 	lines := strings.Split(strings.TrimSuffix(r.h.mustRun(t, "read", r.leadPane, "--lines", "5"), "\n"), "\n")
@@ -420,7 +428,7 @@ func (r *tasksRun) routedByModel(t *testing.T) {
 		t.Errorf("the router was called by an addressed message:\n%s", readFile(t, record))
 	}
 	before := r.h.mustRun(t, "ls", "--json")
-	stderr := r.fails(t, nil, "say", "please look at the flaky test")
+	stderr := r.userFails(t, "say", "please look at the flaky test")
 	if !strings.Contains(stderr, "M-7 not sent") || !strings.Contains(stderr, "address it, for example @api-server") {
 		t.Errorf("unaddressed curia say: stderr %q, want M-7 not sent and the advice to address it", stderr)
 	}
@@ -502,7 +510,7 @@ func (r *tasksRun) checkClients(t *testing.T) {
 func (r *tasksRun) pause(t *testing.T) {
 	t.Helper()
 	tasksWrite(t, filepath.Join(r.worktree, "notes.txt"), "rotation done; tests next\n")
-	out := r.h.mustRun(t, "pause", "T-1")
+	out := r.user(t, "pause", "T-1")
 	for _, want := range []string{
 		"Closed pane api-server:T-1 (" + r.leadPane + ") of session 00000001\n",
 		"Closed pane api-server:T-1 (%0) of session 88888888\n",
@@ -536,7 +544,7 @@ func (r *tasksRun) pause(t *testing.T) {
 // lead's session, with no brief.
 func (r *tasksRun) resume(t *testing.T) {
 	t.Helper()
-	out := r.h.mustRun(t, "resume", "T-1")
+	out := r.user(t, "resume", "T-1")
 	if !strings.HasPrefix(out, "Resume: session 00000001 on branch "+tasksBranch+"\n") {
 		t.Errorf("curia resume T-1 printed:\n%s\nwant it to start with the session it resumes", out)
 	}
@@ -558,16 +566,16 @@ func (r *tasksRun) resume(t *testing.T) {
 // once the pane is gone and the branch merged, it removes both.
 func (r *tasksRun) clean(t *testing.T) {
 	t.Helper()
-	if stderr := r.fails(t, nil, "clean", "T-1"); !strings.Contains(stderr, "has a live session 00000001") {
+	if stderr := r.userFails(t, "clean", "T-1"); !strings.Contains(stderr, "has a live session 00000001") {
 		t.Errorf("curia clean T-1 with its agent running: stderr %q, want it to name the live session", stderr)
 	}
 	r.srv.mustRun(t, "kill-pane", "-t", r.leadPane)
 	r.waitPaneGone(t, r.leadPane)
-	if stderr := r.fails(t, nil, "clean", "T-1"); !strings.Contains(stderr, "is not merged into main") {
+	if stderr := r.userFails(t, "clean", "T-1"); !strings.Contains(stderr, "is not merged into main") {
 		t.Errorf("curia clean T-1 unmerged: stderr %q, want the refusal of an unmerged branch", stderr)
 	}
 	r.git(t, r.repo, "merge", "-q", "--ff-only", tasksBranch)
-	out := r.h.mustRun(t, "clean", "T-1")
+	out := r.user(t, "clean", "T-1")
 	for _, want := range []string{
 		"Branch " + tasksBranch + " is merged into main\n",
 		"Removed worktree " + r.worktree + "\n",
@@ -623,6 +631,26 @@ func (r *tasksRun) curia(env []string, args ...string) (stdout, stderr string, e
 	h.env = append(slices.Clone(r.h.env), env...)
 	stdout, stderr, _, err = h.run(nil, "", args...)
 	return stdout, stderr, err
+}
+
+// user runs curia as the user at a terminal (a window of the terminal
+// server) and returns its stdout, failing unless it exits 0 with nothing
+// on stderr.
+func (r *tasksRun) user(t *testing.T, args ...string) string {
+	t.Helper()
+	return r.term.mustRun(t, r.h, args...)
+}
+
+// userFails is user requiring exit status 1 and nothing on stdout; it
+// returns stderr.
+func (r *tasksRun) userFails(t *testing.T, args ...string) string {
+	t.Helper()
+	stdout, stderr, code := r.term.run(t, r.h, r.h.env, args...)
+	if code != 1 || stdout != "" {
+		t.Errorf("curia %s at a terminal: stdout %q, stderr %q, exit %d, want exit status 1 and nothing on stdout",
+			strings.Join(args, " "), stdout, stderr, code)
+	}
+	return stderr
 }
 
 // fails runs curia with env and requires exit status 1 and nothing on
@@ -978,9 +1006,17 @@ func TestStopHookLatencyWithMessages(t *testing.T) {
 	h := newHome(t, build(t, root))
 	repo := filepath.Join(h.dir, "repo")
 	gitInit(t, repo, h.dir)
+	// The tasks come from one Backlog.md import and the messages from the
+	// user at a terminal (Ruling 112): both are the user's to make.
+	term := startTerminal(t)
 	for i := range latencyTasks {
-		h.mustRun(t, "task", "add", fmt.Sprintf("Latency task %d", i+1), "--repo", repo, "--base", "main")
+		tasksWrite(t, filepath.Join(repo, "backlog", "tasks", fmt.Sprintf("task-%d - Latency task %d.md", i+1, i+1)),
+			fmt.Sprintf("---\nid: task-%d\ntitle: Latency task %d\nstatus: To Do\n---\n\nWork.\n", i+1, i+1))
 	}
+	if out := term.mustRun(t, h, "task", "import", "--backlog-md", repo); !strings.Contains(out, fmt.Sprint(latencyTasks)) {
+		t.Fatalf("curia task import printed %q, want %d tasks imported", out, latencyTasks)
+	}
+	send := term.userSender(t, h, latencyPane)
 	hookH := *h
 	hookH.env = append(slices.Clone(h.env), "TMUX_PANE="+latencyPane, "CURIA_TASK_ID=T-1")
 	start := hookPayload(t, map[string]any{
@@ -995,16 +1031,16 @@ func TestStopHookLatencyWithMessages(t *testing.T) {
 	})
 	// The delivered messages, handed over by Stops of at most eight each.
 	for i := range latencyDelivered {
-		h.mustRun(t, "send", latencyPane, fmt.Sprintf("Background message number %d.", i+1))
+		send(fmt.Sprintf("Background message number %d.", i+1))
 		if (i+1)%8 == 0 || i+1 == latencyDelivered {
 			latencyBlock(t, &hookH, stop)
 		}
 	}
-	h.mustRun(t, "send", latencyPane, "Warm-up message.")
+	send("Warm-up message.")
 	latencyBlock(t, &hookH, stop) // warm-up, untimed
 	var runs []time.Duration
 	for len(runs) < minTimedRuns {
-		h.mustRun(t, "send", latencyPane, fmt.Sprintf("Timed message number %d.", len(runs)+1))
+		send(fmt.Sprintf("Timed message number %d.", len(runs)+1))
 		runs = append(runs, latencyBlock(t, &hookH, stop))
 	}
 	t.Logf("%-12s %s (load average %s)", "Stop", stats(runs), loadAverage())

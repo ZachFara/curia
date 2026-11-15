@@ -77,7 +77,7 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 	// session as curia decide does (spec section 7): no factory is set,
 	// and the dashboard says why when d is pressed.
 	// T16: without its log file the dashboard still starts, without d.
-	if mode == ui.ModePopup && refuseInsideAgent() == nil {
+	if mode == ui.ModePopup && userOnly("ui", "answer decisions") == nil {
 		logger, closeLog, err := openLog(cfg.LogPath)
 		if err != nil {
 			return runProgram(m.WithoutDecide("decisions cannot be answered here: the log file cannot be opened"), opts...)

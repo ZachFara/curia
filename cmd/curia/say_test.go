@@ -72,6 +72,7 @@ func sayWorld(t *testing.T, sessions ...model.Session) (string, *tmux.Fake, *dec
 		fake.Panes = append(fake.Panes, tmux.Pane{ID: s.Pane, Session: "work", WindowID: "@1", ServerStart: at(8, 0)})
 	}
 	fake.Screen = decideIdleScreen
+	userTerminalAs(t, true) // the user, at a terminal
 	c := &decideClock{t: sayNow}
 	prev := clock
 	clock = c.now
@@ -448,6 +449,31 @@ func TestSayRuleBecomesPrecedent(t *testing.T) {
 	}
 	if sent := saySent(fake); len(sent) != 0 {
 		t.Errorf("typed %q, want nothing", sent)
+	}
+}
+
+func TestSayRuleNeedsTerminal(t *testing.T) {
+	db, fake, _ := sayWorld(t)
+	userTerminalAs(t, false) // every agent variable cleared, but no controlling terminal
+	calls := sayUseRouter(t, sayRouterNever(t))
+	for _, args := range [][]string{
+		{"@api-server", "rule:", "always", "use", "pnpm"},
+		{"@api-server", "use", "pnpm"},
+		{"T-1:", "stop"},
+	} {
+		_, _, err := sayRun(t, strings.NewReader(""), args...)
+		if err == nil || !strings.Contains(err.Error(), "curia say cannot run without a terminal") {
+			t.Errorf("say %q = %v, want the terminal refusal", args, err)
+		}
+	}
+	if _, found, gerr := sayOpen(t, db).GetDecision(context.Background(), "D-1"); gerr != nil || found {
+		t.Errorf("D-1 found %v (%v), want no rule stored", found, gerr)
+	}
+	if ms := sayMessages(t, db); len(ms) != 0 {
+		t.Errorf("messages = %+v, want none", ms)
+	}
+	if calls.Load() != 0 || len(saySent(fake)) != 0 {
+		t.Errorf("router calls %d, typed %q, want none", calls.Load(), saySent(fake))
 	}
 }
 

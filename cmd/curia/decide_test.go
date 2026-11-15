@@ -34,6 +34,7 @@ func decideSessionS1() model.Session {
 // returns the database path and the fake.
 func decideHome(t *testing.T, specs ...decisionsSpec) (string, *tmux.Fake) {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	db := decisionsHome(t, specs...)
 	seedSessions(t, db, decideSessionS1())
 	fake := useFakeTmux(t)
@@ -61,6 +62,7 @@ func decideResetFlags(t *testing.T) {
 // stdout and stderr apart.
 func decideRun(t *testing.T, stdin io.Reader, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	var out, errOut bytes.Buffer
 	rootCmd.SetIn(stdin)
 	rootCmd.SetOut(&out)

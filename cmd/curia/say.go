@@ -60,8 +60,9 @@ var saySleep = func(ctx context.Context, d time.Duration) error {
 
 func init() {
 	rootCmd.AddCommand(&cobra.Command{
-		Use:   "say [<text>... | -]",
-		Short: "Send a message to an agent, or make it a rule or a task (the user only)",
+		Use:         "say [<text>... | -]",
+		Short:       "Send a message to an agent, or make it a rule or a task (the user only)",
+		Annotations: userOnlyMark(),
 		Long: "Routes one message. An address at its start picks the target with no model:\n" +
 			"T-42: (a task), @<name> (an alias, task id, repository or branch), and rule: or\n" +
 			"task: for the kind. Without an address one bounded `claude -p` call suggests the\n" +
@@ -79,8 +80,8 @@ func runSay(cmd *cobra.Command, args []string) error {
 		return cmd.Help()
 	}
 	// Only the user instructs as the user (spec section 7).
-	if refuseInsideAgent() != nil {
-		return errors.New("curia say cannot run inside an agent session (CLAUDECODE is set): only the user may send a message")
+	if err := userOnly("say", "send a message"); err != nil {
+		return err
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -466,7 +467,8 @@ func (s *saySource) apply(ctx context.Context, m model.Message) model.MessageOut
 }
 
 // applyRule stores rule m as decided precedent and marks m applied with
-// its D- id.
+// its D- id. Only the user at a terminal gets here: curia say is user-only
+// (userOnly, Ruling 112).
 func (s *saySource) applyRule(ctx context.Context, m model.Message, now time.Time) model.MessageOutcome {
 	scope := model.ScopeRepo
 	if m.TargetRepo == "" {

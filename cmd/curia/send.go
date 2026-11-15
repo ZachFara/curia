@@ -128,13 +128,15 @@ func sendText(stdin io.Reader, args []string) (string, error) {
 }
 
 // sendSender is who sends: the user, or an agent session with its id
-// (mcpSession's, possibly empty) and its row (zero when unknown). Any sign
-// of an agent caller makes it an agent: CLAUDECODE, CLAUDE_CODE_SESSION_ID,
-// or a session mcpSession resolves (CURIA_SESSION_ID, or TMUX_PANE in a
-// session's pane). No flag or other variable makes it the user.
+// (mcpSession's, possibly empty) and its row (zero when unknown). It is the
+// user only when no session resolves (CURIA_SESSION_ID, or TMUX_PANE in a
+// session's pane) and the caller is the user at a terminal (userAtTerminal,
+// Ruling 112). Anything else, a script without a terminal included, is an
+// agent sender, labeled as one and never typed when its session is
+// unknown. No flag or other variable makes it the user.
 func sendSender(ctx context.Context, st *store.Store, logger *slog.Logger) (model.Sender, model.Session, string) {
 	sess, id := mcpSession(ctx, st, logger)
-	if id == "" && os.Getenv("CLAUDECODE") == "" && os.Getenv("CLAUDE_CODE_SESSION_ID") == "" {
+	if id == "" && userAtTerminal() {
 		return model.SenderUser, model.Session{}, ""
 	}
 	return model.SenderAgent, sess, id

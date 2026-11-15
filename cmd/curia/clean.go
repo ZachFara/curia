@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -26,8 +25,9 @@ const cleanLostShown = 50
 
 func init() {
 	cmd := &cobra.Command{
-		Use:   "clean <id>",
-		Short: "Remove a finished task's worktree and branch (the user only)",
+		Use:         "clean <id>",
+		Short:       "Remove a finished task's worktree and branch (the user only)",
+		Annotations: userOnlyMark(),
 		Long: "Removes the task's worktree (git worktree remove, never forced: a worktree\n" +
 			"with changes is left for you) and deletes its branch with git branch -d.\n" +
 			"The branch must be merged into the task's base branch; a squash or rebase\n" +
@@ -47,8 +47,8 @@ func init() {
 
 func runClean(cmd *cobra.Command, args []string) error {
 	// No agent may delete a task's work (spec section 7).
-	if refuseInsideAgent() != nil {
-		return errors.New("curia clean cannot run inside an agent session (CLAUDECODE is set): only the user may clean a task")
+	if err := userOnly("clean", "clean a task"); err != nil {
+		return err
 	}
 	force := cleanForce
 	return lifecycleRunCmd(cmd, args[0], func(ctx context.Context, st *store.Store, cfg config.Config, out io.Writer) error {

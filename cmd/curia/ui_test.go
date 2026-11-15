@@ -28,6 +28,7 @@ type dashboardRun struct {
 // model's first refresh and records its view.
 func useFakeProgram(t *testing.T) *dashboardRun {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	run := &dashboardRun{}
 	prev := runProgram
 	runProgram = func(m tea.Model, opts ...tea.ProgramOption) error {
@@ -120,6 +121,7 @@ func TestUIReportsStoreError(t *testing.T) {
 // model's first refresh, then drive, and records the view drive leaves.
 func uiDriveProgram(t *testing.T, drive func(m tea.Model) tea.Model) *dashboardRun {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	run := &dashboardRun{}
 	prev := runProgram
 	runProgram = func(m tea.Model, opts ...tea.ProgramOption) error {

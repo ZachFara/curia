@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"text/tabwriter"
 	"time"
@@ -52,10 +54,11 @@ func init() {
 	ls.Flags().StringVar(&decisionsStatus, "status", "open", "open (and answers not yet delivered), decided, closed or all")
 	ls.Flags().BoolVar(&decisionsJSON, "json", false, "print a JSON array instead of a table")
 	edit := &cobra.Command{
-		Use:   "edit <id>",
-		Short: "Rescope or supersede a decided ticket (the user only)",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runDecisionsEdit,
+		Use:         "edit <id>",
+		Short:       "Rescope or supersede a decided ticket (the user only)",
+		Annotations: userOnlyMark(),
+		Args:        cobra.ExactArgs(1),
+		RunE:        runDecisionsEdit,
 	}
 	edit.Flags().StringVar(&decisionsScope, "scope", "", "new scope: task, repo or global")
 	edit.Flags().BoolVar(&decisionsSupersede, "supersede", false, "mark the ticket superseded")
@@ -64,14 +67,118 @@ func init() {
 	rootCmd.AddCommand(parent)
 }
 
-// refuseInsideAgent returns an error when the command runs inside an agent
-// session: Claude Code sets CLAUDECODE in every command it runs. Commands
-// only the user may run call it first.
-func refuseInsideAgent() error {
-	if os.Getenv("CLAUDECODE") != "" {
-		return errors.New("refusing to run inside an agent session (CLAUDECODE is set): only the user may do this")
+// userOnlyAnnotation marks a command that only the user may run; such a
+// command calls userOnly before anything else, which a test checks for
+// every command so marked.
+const userOnlyAnnotation = "curia-user-only"
+
+// userOnlyMark is the Annotations value that marks a command user-only.
+func userOnlyMark() map[string]string { return map[string]string{userOnlyAnnotation: "yes"} }
+
+// userOnly is the one guard of the commands only the user may run (Ruling
+// 112): it refuses when the caller looks like an agent (agentSign) or has
+// no controlling terminal (userAtTerminal), saying which, as "curia
+// <command> cannot run …: only the user may <what>". An agent's tool shell
+// has no controlling terminal, so clearing its variables is not enough; a
+// script or cron job cannot act as the user either.
+func userOnly(command, what string) error {
+	if sign := agentSign(); sign != "" {
+		return fmt.Errorf("curia %s cannot run inside an agent session (%s): only the user may %s", command, sign, what)
+	}
+	if err := userTerminalOpen(); err != nil {
+		return fmt.Errorf("curia %s cannot run without a terminal (no controlling terminal: %s): only the user may %s, at a terminal",
+			command, sanitize.Line(err.Error(), 120), what)
 	}
 	return nil
+}
+
+// userOnlyRunE is run behind userOnly, as a cobra RunE.
+func userOnlyRunE(command, what string, run func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := userOnly(command, what); err != nil {
+			return err
+		}
+		return run(cmd, args)
+	}
+}
+
+// agentSign says why the caller looks like an agent, or "" when nothing
+// does (Ruling 112): Claude Code sets CLAUDECODE and CLAUDE_CODE_SESSION_ID
+// in every command it runs, and an agent's shell has TMUX_PANE set to the
+// pane of its live session. A pane match is checked against tmux first
+// (reconcile), so a session whose pane is gone, or whose pane id a tmux
+// restart gave to someone else, does not count. When the store cannot be
+// read the answer is an agent: Curia cannot tell.
+func agentSign() string {
+	for _, name := range []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID"} {
+		if os.Getenv(name) != "" {
+			return name + " is set"
+		}
+	}
+	pane := os.Getenv("TMUX_PANE")
+	if pane == "" {
+		return ""
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return "TMUX_PANE is set and the config cannot be read to check it"
+	}
+	if _, err = os.Stat(cfg.DBPath); errors.Is(err, fs.ErrNotExist) {
+		return "" // no store yet, so no session is tracked anywhere
+	}
+	st, err := openStore(cfg)
+	if err != nil {
+		return "TMUX_PANE is set and the store cannot be read to check it"
+	}
+	defer func() { _ = st.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*subprocessTimeout)
+	defer cancel()
+	s, found, err := agentInPane(ctx, st, pane)
+	if err == nil && found {
+		if err = reconcile(ctx, st, newTmuxClient(), cfg.LogPath, clock()); err == nil {
+			s, found, err = agentInPane(ctx, st, pane)
+		}
+	}
+	switch {
+	case err != nil:
+		return "TMUX_PANE is set and the store cannot be read to check it"
+	case found:
+		return "this is pane " + sanitize.Line(pane, 20) + " of agent session " + spawnShortID(s.ID)
+	}
+	return ""
+}
+
+// agentInPane finds a session in pane that is neither ended nor stale.
+func agentInPane(ctx context.Context, st *store.Store, pane string) (model.Session, bool, error) {
+	sessions, err := st.ListSessions(ctx, store.ListFilter{})
+	if err != nil {
+		return model.Session{}, false, err
+	}
+	for _, s := range sessions {
+		if s.Pane == pane && s.State != model.StateEnded && s.State != model.StateStale {
+			return s, true, nil
+		}
+	}
+	return model.Session{}, false, nil
+}
+
+// userTerminalOpen opens and closes the controlling terminal; tests
+// replace it (the test default fails a test that has not set its own).
+var userTerminalOpen = func() error {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	return tty.Close()
+}
+
+// userAtTerminal reports whether the caller is the user at a terminal
+// (Ruling 112): nothing marks it an agent (agentSign) and a controlling
+// terminal can be opened. An agent's tool shell has no controlling
+// terminal; a script, a cron job or a command with its terminal taken away
+// is not the user either. A tmux popup has one.
+func userAtTerminal() bool {
+	return agentSign() == "" && userTerminalOpen() == nil
 }
 
 // decisionsStatuses maps a --status value to the statuses it lists; nil
@@ -266,7 +373,7 @@ func decisionsDeliveryText(d model.Decision, states map[string]model.State) stri
 }
 
 func runDecisionsEdit(cmd *cobra.Command, args []string) error {
-	if err := refuseInsideAgent(); err != nil {
+	if err := userOnly("decisions edit", "curate a decision"); err != nil {
 		return err
 	}
 	id := args[0]
