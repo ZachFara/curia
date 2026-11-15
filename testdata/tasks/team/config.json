@@ -1,0 +1,38 @@
+{
+  "name": "session-00000001",
+  "createdAt": 1794618562459,
+  "leadAgentId": "team-lead@session-00000001",
+  "leadSessionId": "00000001-0000-4000-8000-000000000001",
+  "leadProcess": {
+    "pid": 45281,
+    "pidSpace": "host.local",
+    "claimedAt": 1794618562459
+  },
+  "members": [
+    {
+      "agentId": "team-lead@session-00000001",
+      "name": "team-lead",
+      "agentType": "team-lead",
+      "joinedAt": 1794618562459,
+      "tmuxPaneId": "leader",
+      "cwd": "<worktree>",
+      "subscriptions": [],
+      "backendType": "in-process"
+    },
+    {
+      "agentId": "alpha@session-00000001",
+      "name": "alpha",
+      "color": "blue",
+      "joinedAt": 1794618581006,
+      "tmuxPaneId": "%0",
+      "subscriptions": [],
+      "agentType": "general-purpose",
+      "model": "haiku",
+      "prompt": "You are alpha, a teammate on the agent team. Write the refresh token tests.",
+      "planModeRequired": false,
+      "cwd": "<worktree>",
+      "backendType": "tmux",
+      "isActive": true
+    }
+  ]
+}
