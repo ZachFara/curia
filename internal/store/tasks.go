@@ -38,7 +38,8 @@ func failTask(op, id string, err error) error {
 // order.
 const selectTasks = `
 SELECT n, id, title, body, repo, base_branch, status, source, source_ref, tags, branch, worktree,
-  team, agent_model, pane, resume_session, created_at, updated_at, launched_at, paused_at, cleaned_at
+  team, agent_model, pane, resume_session, created_at, updated_at, launched_at, paused_at, cleaned_at,
+  priority, agent
 FROM tasks`
 
 // scanTask reads one row of selectTasks.
@@ -48,7 +49,7 @@ func scanTask(sc scanner) (model.Task, error) {
 	var created, updated, launched, paused, cleaned sql.NullString
 	err := sc.Scan(&t.N, &t.ID, &t.Title, &t.Body, &t.Repo, &t.BaseBranch, &t.Status, &t.Source, &t.SourceRef,
 		&tags, &t.Branch, &t.Worktree, &t.Team, &t.AgentModel, &t.Pane, &t.ResumeSession,
-		&created, &updated, &launched, &paused, &cleaned)
+		&created, &updated, &launched, &paused, &cleaned, &t.Priority, &t.Agent)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -116,6 +117,18 @@ func checkStored(st model.TaskStatus) error {
 	return fmt.Errorf("status %q is not a stored task status", st)
 }
 
+// withDefaults gives a zero priority and an empty agent their defaults (2
+// and claude). Any other value is left for the table's CHECK to judge.
+func withDefaults(t model.Task) model.Task {
+	if t.Priority == 0 {
+		t.Priority = model.PriorityNormal
+	}
+	if t.Agent == "" {
+		t.Agent = model.AgentClaude
+	}
+	return t
+}
+
 // insertTask inserts t with the next id, T-<n>, and created_at = updated_at
 // = t.CreatedAt, and returns the id. The write lock makes the subselect
 // agree with the rowid n the row receives; rows are never deleted, so an
@@ -124,19 +137,21 @@ func insertTask(ctx context.Context, tx *sql.Tx, t model.Task) (string, error) {
 	if t.Source == "" {
 		t.Source = model.SourceLocal
 	}
+	t = withDefaults(t)
 	var id string
 	err := tx.QueryRowContext(ctx, `
 INSERT INTO tasks (
   id, title, body, repo, base_branch, status, source, source_ref, tags, branch, worktree,
-  team, agent_model, pane, resume_session, created_at, updated_at, launched_at, paused_at, cleaned_at
+  team, agent_model, pane, resume_session, created_at, updated_at, launched_at, paused_at, cleaned_at,
+  priority, agent
 ) VALUES (
   'T-' || (SELECT COALESCE(MAX(n), 0) + 1 FROM tasks), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 ) RETURNING id`,
 		t.Title, t.Body, t.Repo, t.BaseBranch, t.Status, t.Source, t.SourceRef, strings.Join(t.Tags, " "),
 		t.Branch, t.Worktree, t.Team, t.AgentModel, t.Pane, t.ResumeSession,
 		formatTime(t.CreatedAt), formatTime(t.CreatedAt), formatTime(t.LaunchedAt), formatTime(t.PausedAt),
-		formatTime(t.CleanedAt)).Scan(&id)
+		formatTime(t.CleanedAt), t.Priority, t.Agent).Scan(&id)
 	return id, err
 }
 
@@ -167,7 +182,8 @@ func (s *Store) CreateTask(ctx context.Context, t model.Task) (model.Task, error
 // ImportTask stores t, which comes from a source other than local, in one
 // write transaction. When a task with the same repo, source and source ref
 // exists, only its title, body and tags are replaced by t's, and it is
-// returned with created false. Otherwise t is created as CreateTask does
+// returned with created false (its priority, agent and status are the
+// user's and are never written by an import). Otherwise t is created as CreateTask does
 // and returned with created true.
 func (s *Store) ImportTask(ctx context.Context, t model.Task) (stored model.Task, created bool, err error) {
 	if t.Source == "" || t.Source == model.SourceLocal {
@@ -248,7 +264,7 @@ func (s *Store) ListTasks(ctx context.Context, f TaskFilter) ([]model.Task, erro
 // transaction that takes the write lock before reading: it loads the task
 // (ErrNoTask if there is none, and fn is not called), calls fn and writes
 // every column of what fn returns but n, id and created_at, updated_at
-// included. An error from fn rolls back and is returned as it is. A status
+// included. A zero priority or an empty agent keeps the stored one. An error from fn rolls back and is returned as it is. A status
 // other than backlog, ready or dropped is an error and writes nothing. It
 // returns the stored row.
 //
@@ -267,16 +283,22 @@ func (s *Store) UpdateTask(ctx context.Context, id string, fn func(model.Task) (
 	if err != nil {
 		return model.Task{}, err
 	}
+	if next.Priority == 0 {
+		next.Priority = cur.Priority
+	}
+	if next.Agent == "" {
+		next.Agent = cur.Agent
+	}
 	if err = checkStored(next.Status); err == nil {
 		_, err = tx.ExecContext(ctx, `
 UPDATE tasks SET title = ?, body = ?, repo = ?, base_branch = ?, status = ?, source = ?, source_ref = ?,
   tags = ?, branch = ?, worktree = ?, team = ?, agent_model = ?, pane = ?, resume_session = ?,
-  updated_at = ?, launched_at = ?, paused_at = ?, cleaned_at = ?
+  updated_at = ?, launched_at = ?, paused_at = ?, cleaned_at = ?, priority = ?, agent = ?
 WHERE n = ?`,
 			next.Title, next.Body, next.Repo, next.BaseBranch, next.Status, next.Source, next.SourceRef,
 			strings.Join(next.Tags, " "), next.Branch, next.Worktree, next.Team, next.AgentModel, next.Pane,
 			next.ResumeSession, formatTime(next.UpdatedAt), formatTime(next.LaunchedAt), formatTime(next.PausedAt),
-			formatTime(next.CleanedAt), cur.N)
+			formatTime(next.CleanedAt), next.Priority, next.Agent, cur.N)
 	}
 	if err != nil {
 		return model.Task{}, failTask("update task", id, err)
