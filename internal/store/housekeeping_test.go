@@ -6,6 +6,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/store"
 )
 
 func TestClaimNotifySlotOnePerWindow(t *testing.T) {
@@ -122,4 +125,206 @@ func TestPruneEventsBatches(t *testing.T) {
 	if left != 10 || newest != 10 {
 		t.Errorf("%d events left, %d of them new; want the 10 new ones", left, newest)
 	}
+}
+
+// restoreClaim runs ClaimRestore and requires it not to fail.
+func restoreClaim(t *testing.T, s *store.Store, now time.Time, hold time.Duration) bool {
+	t.Helper()
+	got, err := s.ClaimRestore(context.Background(), now, hold)
+	if err != nil {
+		t.Fatalf("ClaimRestore(%v): %v", now, err)
+	}
+	return got
+}
+
+func TestClaimRestoreOneHolder(t *testing.T) {
+	path := dbPath(t)
+	hs := handles(t, path, 3)
+	const hold = 2 * time.Minute
+	if !restoreClaim(t, hs[0], t0, hold) {
+		t.Fatal("first claim = false, want true")
+	}
+	if restoreClaim(t, hs[1], t0.Add(time.Second), hold) {
+		t.Error("second claim while held = true, want false")
+	}
+	if restoreClaim(t, hs[1], t0.Add(hold-1), hold) {
+		t.Error("claim just before hold has passed = true, want false")
+	}
+	// The first holder crashed: after hold its claim is taken over.
+	if !restoreClaim(t, hs[1], t0.Add(hold), hold) {
+		t.Error("claim after hold has passed = false, want true")
+	}
+	if restoreClaim(t, hs[2], t0.Add(hold+time.Second), hold) {
+		t.Error("claim right after a takeover = true, want false")
+	}
+	if err := hs[1].ReleaseRestore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !restoreClaim(t, hs[2], t0.Add(hold+2*time.Second), hold) {
+		t.Error("claim right after ReleaseRestore = false, want true")
+	}
+	// A clock set back cannot steal the claim.
+	if restoreClaim(t, hs[0], t0, hold) {
+		t.Error("claim at an earlier time = true, want false")
+	}
+}
+
+func TestRestoreReleaseKeepsNewerHolder(t *testing.T) {
+	path := dbPath(t)
+	hs := handles(t, path, 3)
+	ctx := context.Background()
+	const hold = 2 * time.Minute
+	if !restoreClaim(t, hs[0], t0, hold) {
+		t.Fatal("first claim = false")
+	}
+	if !restoreClaim(t, hs[1], t0.Add(hold), hold) {
+		t.Fatal("takeover = false")
+	}
+	// The slow first holder finishes late: its release must not free the
+	// claim the second holder now has.
+	if err := hs[0].ReleaseRestore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if restoreClaim(t, hs[2], t0.Add(hold+time.Second), hold) {
+		t.Error("a stale holder's release freed the newer claim")
+	}
+	// A handle that never held the claim releases nothing either.
+	if err := hs[2].ReleaseRestore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if restoreClaim(t, hs[2], t0.Add(hold+2*time.Second), hold) {
+		t.Error("a non-holder's release freed the claim")
+	}
+	if err := hs[1].ReleaseRestore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !restoreClaim(t, hs[2], t0.Add(hold+3*time.Second), hold) {
+		t.Error("the holder's own release did not free the claim")
+	}
+	// Releasing twice is harmless.
+	if err := hs[1].ReleaseRestore(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRestoreClaimRace(t *testing.T) {
+	path := dbPath(t)
+	hs := handles(t, path, 5)
+	ctx := context.Background()
+	const goroutines = 20
+	for round := range 10 {
+		now := t0.Add(time.Duration(round) * time.Hour)
+		got := make([]bool, goroutines)
+		errs := make([]error, goroutines)
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for g := range goroutines {
+			wg.Go(func() {
+				<-start
+				// One statement: SQLITE_BUSY means it wrote nothing.
+				errs[g] = retryBusy(func() error {
+					var err error
+					got[g], err = hs[g%len(hs)].ClaimRestore(ctx, now, 2*time.Minute)
+					return err
+				}, isBusy)
+			})
+		}
+		close(start)
+		wg.Wait()
+		won := 0
+		for g := range goroutines {
+			if errs[g] != nil {
+				t.Fatalf("round %d goroutine %d: %v", round, g, errs[g])
+			}
+			if got[g] {
+				won++
+			}
+		}
+		if won != 1 {
+			t.Fatalf("round %d: %d restores claimed at one instant, want 1", round, won)
+		}
+	}
+}
+
+func TestRestoreClaimRefusesNoHold(t *testing.T) {
+	s := open(t, dbPath(t))
+	for _, hold := range []time.Duration{0, -time.Minute} {
+		if got, err := s.ClaimRestore(context.Background(), t0, hold); err == nil || got {
+			t.Errorf("ClaimRestore(hold %v) = %v, %v; want false and an error", hold, got, err)
+		}
+	}
+	if !restoreClaim(t, s, t0, time.Minute) {
+		t.Error("a refused claim left something behind")
+	}
+}
+
+func TestRestoreCandidatesRule(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	ctx := context.Background()
+	since := t0.Add(-24 * time.Hour)
+	for _, c := range []struct {
+		id     string
+		state  model.State
+		reason string
+		at     time.Time
+	}{
+		{"working", model.StateWorking, "", t0},
+		{"idle", model.StateIdle, "", t0.Add(-time.Hour)},
+		{"stale", model.StateStale, "", t0.Add(-2 * time.Hour)},
+		{"waiting", model.StateWaiting, "", t0.Add(-3 * time.Hour)},
+		{"needs", model.StateNeedsDecision, "", t0.Add(-4 * time.Hour)},
+		{"tmux-killed", model.StateEnded, "other", t0.Add(-30 * time.Minute)},
+		{"odd-reason", model.StateEnded, "Not A Reason!", t0.Add(-40 * time.Minute)}, // stored as other
+		{"user-exit", model.StateEnded, "prompt_input_exit", t0.Add(-time.Minute)},
+		{"logout", model.StateEnded, "logout", t0.Add(-time.Minute)},
+		{"clear", model.StateEnded, "clear", t0.Add(-time.Minute)},
+		{"no-reason", model.StateEnded, "", t0.Add(-time.Minute)},
+		{"old-working", model.StateWorking, "", since.Add(-time.Nanosecond)},
+		{"old-killed", model.StateEnded, "other", since.Add(-time.Hour)},
+		{"edge", model.StateIdle, "", since},
+		{"no-time", model.StateIdle, "", time.Time{}},
+	} {
+		upsert(t, s, model.Session{ID: c.id, Agent: "claude", State: c.state, EndReason: c.reason, UpdatedAt: c.at})
+	}
+	ids := func(limit int) []string {
+		t.Helper()
+		got, err := s.RestoreCandidates(ctx, since, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]string, 0, len(got))
+		for _, sess := range got {
+			out = append(out, sess.ID)
+		}
+		return out
+	}
+	want := []string{"working", "tmux-killed", "odd-reason", "idle", "stale", "waiting", "needs", "edge"}
+	if got := ids(100); !reflect.DeepEqual(got, want) {
+		t.Errorf("RestoreCandidates = %v\nwant %v (most recently active first)", got, want)
+	}
+	if got := ids(3); !reflect.DeepEqual(got, want[:3]) {
+		t.Errorf("RestoreCandidates(limit 3) = %v, want %v", got, want[:3])
+	}
+	if got := ids(0); len(got) != 0 {
+		t.Errorf("RestoreCandidates(limit 0) = %v, want none", got)
+	}
+	// A crashed session that came back is a candidate as what it is now.
+	if err := s.UpdateSession(ctx, "tmux-killed", func(cur model.Session, _ bool) model.Session {
+		cur.State = model.StateIdle
+		return cur
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.RestoreCandidates(ctx, since, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sess := range got {
+		if sess.ID == "tmux-killed" && (sess.State != model.StateIdle || sess.EndReason != "") {
+			t.Errorf("revived session read back as %s / %q", sess.State, sess.EndReason)
+		}
+	}
+	t.Logf("RestoreCandidates plan:\n%s", queryPlan(t, rawDB(t, path), store.RestoreCandidatesQuery,
+		"2026-11-14T09:00:00.000000000Z", 32))
 }
