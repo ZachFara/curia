@@ -127,19 +127,34 @@ func sendText(stdin io.Reader, args []string) (string, error) {
 	return message.Normalize(raw)
 }
 
-// sendSender is who sends: the user, or an agent session with its id
-// (mcpSession's, possibly empty) and its row (zero when unknown). It is the
-// user only when no session resolves (CURIA_SESSION_ID, or TMUX_PANE in a
-// session's pane) and the caller is the user at a terminal (userAtTerminal,
-// Ruling 112). Anything else, a script without a terminal included, is an
-// agent sender, labeled as one and never typed when its session is
-// unknown. No flag or other variable makes it the user.
-func sendSender(ctx context.Context, st *store.Store, logger *slog.Logger) (model.Sender, model.Session, string) {
-	sess, id := mcpSession(ctx, st, logger)
-	if id == "" && userAtTerminal() {
+// sendSender is who sends: the user, or an agent with its verified session
+// (id and row; both empty when unverified). It is the user only when no
+// session is claimed (CURIA_SESSION_ID, or TMUX_PANE in a session's pane,
+// or CLAUDE_CODE_SESSION_ID) and the caller is the user at a terminal
+// (userAtTerminal, Rulings 112 and 119). An agent's session is read from
+// its processes (ancestorSession): the nearest ancestor that is the first
+// process of a live agent's pane names it. A claimed session must be that
+// one; a claim of another session, a claim with no agent found, or an
+// ancestry that cannot be read leave the sender unverified, which is
+// stored as an unknown agent sender: never typed, and counted with the
+// other unknown senders (Ruling 113). No flag or other variable makes it
+// the user.
+func sendSender(ctx context.Context, st *store.Store, claimed model.Session, claimedID string) (model.Sender, model.Session, string) {
+	if claimedID == "" && userAtTerminal() {
 		return model.SenderUser, model.Session{}, ""
 	}
-	return model.SenderAgent, sess, id
+	found, ok := ancestorSession()
+	switch {
+	case !ok || found == "", claimedID != "" && claimedID != found:
+		return model.SenderAgent, model.Session{}, ""
+	case claimedID == found:
+		return model.SenderAgent, claimed, found
+	}
+	sess, known, err := st.GetSession(ctx, found)
+	if err != nil || !known {
+		return model.SenderAgent, model.Session{}, ""
+	}
+	return model.SenderAgent, sess, found
 }
 
 // sendCheckSelf refuses a message into the caller's own session or pane:
@@ -191,9 +206,11 @@ func sendDeliver(ctx context.Context, w io.Writer, st *store.Store, tm tmux.Clie
 	if err != nil {
 		return err
 	}
-	sender, senderSess, senderID := sendSender(ctx, st, logger)
-	if err = sendCheckSelf(target, senderSess, senderID); err != nil {
-		return err
+	claimed, claimedID := mcpSession(ctx, st, logger)
+	sender, senderSess, senderID := sendSender(ctx, st, claimed, claimedID)
+	// Into the caller's own session or pane, claimed or verified: refused.
+	if err = errors.Join(sendCheckSelf(target, claimed, claimedID), sendCheckSelf(target, senderSess, senderID)); err != nil {
+		return errors.New("refusing to send into your own session or pane")
 	}
 	m, err := st.CreateMessage(ctx, model.Message{
 		Text: text, Kind: model.KindInstruction, Sender: sender, SenderSession: senderID,

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -394,11 +395,14 @@ func (r *tasksRun) agentSendAndRead(t *testing.T) {
 	if stderr := r.fails(t, agent, "say", "T-1: hello"); !strings.Contains(stderr, "inside an agent session") {
 		t.Errorf("curia say with CLAUDECODE=1: stderr %q, want the agent refusal", stderr)
 	}
-	stdout, stderr, err := r.curia(agent, "send", r.leadPane, "tests are green")
-	if err != nil || stderr != "" || stdout != "M-6 delivered (send_keys)\n" {
-		t.Errorf("curia send %s from %%1: stdout %q, stderr %q, err %v, want %q", r.leadPane, stdout, stderr, err,
+	// The sender is read from its processes (Ruling 113): the send runs
+	// under the web-app agent's pane process, as a tool of that agent would.
+	stdout, stderr, code := r.sendFromPane(t, "%1", r.leadPane, "tests are green")
+	if code != 0 || stderr != "" || stdout != "M-6 delivered (send_keys)\n" {
+		t.Errorf("curia send %s from %%1: stdout %q, stderr %q, exit %d, want %q", r.leadPane, stdout, stderr, code,
 			"M-6 delivered (send_keys)\n")
 	}
+
 	r.waitInput(t, r.goldenInputLines(t, 2))
 	if m := r.message(t, "M-6"); m.Sender != "agent" || m.SenderSession != tasksWeb || m.ConfirmedAt == nil {
 		t.Errorf("M-6 = %+v, want sent by agent %s and confirmed", m, tasksWeb)
@@ -635,6 +639,34 @@ func (r *tasksRun) curia(env []string, args ...string) (stdout, stderr string, e
 	h.env = append(slices.Clone(r.h.env), env...)
 	stdout, stderr, _, err = h.run(nil, "", args...)
 	return stdout, stderr, err
+}
+
+// paneLoopScript is the agents' server's pane program (startTmux): it
+// records each line typed into it in "$1" and draws "$2", the prompt.
+const paneLoopScript = `: > "$1"; while :; do printf '\033[H\033[2J%s' "$2"; IFS= read -r line || exit 0; printf '%s\n' "$line" >> "$1"; done`
+
+// sendFromPane runs `curia send target text` as a child of pane's first
+// process, with CLAUDECODE set as in an agent's tool shell, by respawning
+// the pane: it runs the send, writes its stdout, stderr and exit code, and
+// then becomes the pane's recording program again. It returns what the
+// send printed and its exit code.
+func (r *tasksRun) sendFromPane(t *testing.T, pane, target, text string) (stdout, stderr string, code int) {
+	t.Helper()
+	base := filepath.Join(r.tmp, "send-from-"+strings.TrimPrefix(pane, "%"))
+	script := `CLAUDECODE=1 "$0" send "$1" "$2" </dev/null >"$3.out" 2>"$3.err"; echo $? >"$3.rc.part"; mv "$3.rc.part" "$3.rc"; ` +
+		`exec /bin/sh -c "$4" sh "$5" "$6"`
+	r.srv.mustRun(t, "respawn-pane", "-k", "-t", pane, "--", "/bin/sh", "-c", script, r.h.bin, target, text, base,
+		paneLoopScript, r.paneFile("web"), claudePrompt)
+	for deadline := time.Now().Add(terminalDeadline); !exists(base + ".rc"); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("curia send from %s did not finish within %s", pane, terminalDeadline)
+		}
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(readFile(t, base+".rc")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return readFile(t, base+".out"), readFile(t, base+".err"), code
 }
 
 // user runs curia as the user at a terminal (a window of the terminal

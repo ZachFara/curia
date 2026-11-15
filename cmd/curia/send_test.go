@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -140,8 +141,29 @@ func TestSendRefusesSharedPane(t *testing.T) {
 	}
 }
 
+// sendAgentShell is the pid of the first process of a2's pane %2.
+const sendAgentShell = 4242
+
+// sendUnderAgent makes the caller's processes those of a tool shell of the
+// Claude Code agent a2 runs in pane %2: curia's parent a shell, then claude,
+// then the pane's shell (pid sendAgentShell), then tmux.
+func sendUnderAgent(t *testing.T, fake *tmux.Fake) {
+	t.Helper()
+	paneShell := sendAgentShell
+	i := slices.IndexFunc(fake.Panes, func(p tmux.Pane) bool { return p.ID == "%2" })
+	if i < 0 {
+		t.Fatal("no pane %2")
+	}
+	fake.Panes[i].PID = paneShell
+	userProcessesAs(t, map[int]userProc{
+		os.Getppid(): {PPID: 8001, Comm: "/bin/zsh"}, 8001: {PPID: paneShell, Comm: "claude"},
+		paneShell: {PPID: 8000, Comm: "-zsh"}, 8000: {PPID: 1, Comm: "tmux"},
+	})
+}
+
 func TestSendFromAgentIsLabelled(t *testing.T) {
 	db, fake := sendHome(t)
+	sendUnderAgent(t, fake)
 	t.Setenv("CLAUDECODE", "1")
 	t.Setenv("TMUX_PANE", "%2")
 	out, err := readRun(t, "", "send", "%1", "the api tests are green")
@@ -376,5 +398,102 @@ func TestSendRateLimitedCommand(t *testing.T) {
 	t.Setenv("TMUX_PANE", "")
 	if _, err = readRun(t, "", "send", "%3", "from the user"); err != nil {
 		t.Errorf("the user's send: %v", err)
+	}
+}
+
+// sendAncestryHome is sendHome with two more live agents, t3 in %3 and t4
+// in %4.
+func sendAncestryHome(t *testing.T) (string, *tmux.Fake) {
+	t.Helper()
+	db, fake := sendHome(t, readSession("t3", model.StateIdle, "%3"), readSession("t4", model.StateIdle, "%4"))
+	for _, p := range []string{"%3", "%4"} {
+		fake.Panes = append(fake.Panes, tmux.Pane{ID: p, Session: "work", WindowID: "@" + p[1:], ServerStart: at(8, 0)})
+	}
+	return db, fake
+}
+
+func TestSendSenderFromAncestry(t *testing.T) {
+	t.Run("claim matches the ancestry", sendAncestryMatches)
+	t.Run("claims another live session", sendAncestryOtherClaim)
+	t.Run("variables cleared, ancestry finds the agent", sendAncestryCleared)
+	t.Run("ancestry unreadable", sendAncestryUnreadable)
+	t.Run("rotating claimed ids hits the shared bucket", sendAncestryRotating)
+}
+
+// sendAncestryMatches: claim matches the ancestry.
+func sendAncestryMatches(t *testing.T) {
+	db, fake := sendAncestryHome(t)
+	sendUnderAgent(t, fake)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "a2")
+	if _, err := readRun(t, "", "send", "%1", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if m := sendOne(t, db); m.Sender != model.SenderAgent || m.SenderSession != "a2" {
+		t.Errorf("message = %+v, want verified a2", m)
+	}
+}
+
+// sendAncestryOtherClaim: claims another live session.
+func sendAncestryOtherClaim(t *testing.T) {
+	db, fake := sendAncestryHome(t)
+	sendUnderAgent(t, fake)
+	t.Setenv("CURIA_SESSION_ID", "t3")
+	if _, err := readRun(t, "", "send", "%1", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if m := sendOne(t, db); m.Sender != model.SenderAgent || m.SenderSession != "" {
+		t.Errorf("message = %+v, want an unknown agent sender, not t3", m)
+	}
+	if typed := sendTyped(fake); len(typed) != 0 {
+		t.Errorf("typed %q, want nothing", typed)
+	}
+}
+
+// sendAncestryCleared: variables cleared, ancestry finds the agent.
+func sendAncestryCleared(t *testing.T) {
+	db, fake := sendAncestryHome(t)
+	sendUnderAgent(t, fake)
+	if _, err := readRun(t, "", "send", "%1", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if m := sendOne(t, db); m.Sender != model.SenderAgent || m.SenderSession != "a2" {
+		t.Errorf("message = %+v, want verified a2", m)
+	}
+}
+
+// sendAncestryUnreadable: ancestry unreadable.
+func sendAncestryUnreadable(t *testing.T) {
+	db, _ := sendAncestryHome(t)
+	userProcessesAs(t, map[int]userProc{os.Getppid(): {PPID: 8001, Comm: "/bin/zsh"}}) // 8001 cannot be read
+	t.Setenv("TMUX_PANE", "%2")
+	if _, err := readRun(t, "", "send", "%1", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if m := sendOne(t, db); m.Sender != model.SenderAgent || m.SenderSession != "" {
+		t.Errorf("message = %+v, want an unknown agent sender", m)
+	}
+}
+
+// sendAncestryRotating: rotating claimed ids hits the shared bucket.
+func sendAncestryRotating(t *testing.T) {
+	db, fake := sendAncestryHome(t)
+	sendUnderAgent(t, fake)
+	claims := []string{"t1", "t3", "t4", "t3", "t4"}
+	targets := []string{"%3", "%4", "%1", "%1", "%3"}
+	for i, claim := range claims {
+		t.Setenv("CURIA_SESSION_ID", claim)
+		if _, err := readRun(t, "", "send", targets[i], fmt.Sprintf("message %d", i+1)); err != nil {
+			t.Fatalf("send %d claiming %s: %v", i+1, claim, err)
+		}
+	}
+	t.Setenv("CURIA_SESSION_ID", "t1")
+	_, err := readRun(t, "", "send", "%4", "one more")
+	if err == nil || !strings.Contains(err.Error(), "cannot identify") {
+		t.Errorf("sixth rotated send = %v, want the shared bucket's refusal", err)
+	}
+	for _, m := range sendMessages(t, db) {
+		if m.SenderSession != "" {
+			t.Errorf("message %s stored as from %q, want unknown", m.ID, m.SenderSession)
+		}
 	}
 }

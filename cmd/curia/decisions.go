@@ -210,16 +210,44 @@ func agentAncestor() string {
 		case isClaudeCode(p):
 			return fmt.Sprintf("it runs under Claude Code (process %d)", pid)
 		case panes[pid] != "":
-			return fmt.Sprintf("it runs under the pane of agent session %s (process %d)", panes[pid], pid)
+			return fmt.Sprintf("it runs under the pane of agent session %s (process %d)", spawnShortID(panes[pid]), pid)
 		}
 		pid = p.PPID
 	}
 	return fmt.Sprintf("its parent processes are more than %d deep", userAncestryLimit)
 }
 
+// ancestorSession is the live tracked session whose pane's first process
+// is the nearest ancestor of this process to be one (the agent running in
+// that pane started it), "" when the walk reaches pid 1 without one; ok is
+// false when the ancestry or the panes cannot be read, or the walk is
+// deeper than userAncestryLimit (Ruling 113: who sent a message is read
+// from the processes, not from variables the sender sets).
+func ancestorSession() (id string, ok bool) {
+	panes, why := agentPanePIDs()
+	if why != "" {
+		return "", false
+	}
+	pid := os.Getppid()
+	for range userAncestryLimit {
+		if pid <= 1 {
+			return "", true
+		}
+		if id := panes[pid]; id != "" {
+			return id, true
+		}
+		p, err := userProcess(pid)
+		if err != nil {
+			return "", false
+		}
+		pid = p.PPID
+	}
+	return "", false
+}
+
 // agentPanePIDs maps the pid of the first process of each pane holding a
-// live tracked session (neither ended nor stale) to that session's short
-// id, or says why it cannot, and then the caller is refused: the store
+// live tracked session (neither ended nor stale) to that session's id, or
+// says why it cannot, and then the caller is refused: the store
 // cannot be read, or it has live sessions with panes and the tmux server
 // cannot list its panes or shows none of them (the caller's TMUX or
 // TMUX_TMPDIR may name another server). With no store yet, or no live
@@ -263,7 +291,7 @@ func agentPanePIDs() (map[int]string, string) {
 			}
 			shown = true
 			if p.PID > 1 {
-				out[p.PID] = spawnShortID(s.ID)
+				out[p.PID] = s.ID
 			}
 		}
 	}
