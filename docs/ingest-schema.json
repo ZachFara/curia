@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ZachFara/curia/blob/main/docs/ingest-schema.json",
+  "title": "curia ingest document",
+  "description": "One JSON document per turn, written to the stdin of `curia ingest` (at most 64 KiB). Curia refuses a document that is not one JSON object, is too large, has another schema_version or a bad session_id. A bad optional field is dropped alone and the rest is stored. An absent or null field changes nothing and ingest never clears a stored value. Unknown fields are ignored. model, context_used and context_max are read and ignored: hooks and the transcript own them. Time bounds are checked against the clock when the document is read: at from now - 24h to now + 1m; cache_expires_at from now - 7d to now + 2h; resets_at from now - 1h to now + 8d (else the reading is kept without a reset time). Source of truth: docs/superpowers/plans/2026-11-13-curia-plan-5-cost-and-integrations.md section 4.2.",
+  "type": "object",
+  "required": ["schema_version", "session_id"],
+  "additionalProperties": true,
+  "$defs": {
+    "window": {
+      "type": "object",
+      "required": ["used_percentage"],
+      "additionalProperties": true,
+      "properties": {
+        "used_percentage": {
+          "description": "Percent of the window used.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "resets_at": {
+          "description": "When the window resets: RFC 3339, or a number of Unix seconds.",
+          "oneOf": [
+            { "type": "string", "format": "date-time" },
+            { "type": "number" },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "description": "Required. The number 1. Not stored.",
+      "const": 1
+    },
+    "session_id": {
+      "description": "Required. The Claude Code session id; the key the cost and cache values are stored under.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+    },
+    "at": {
+      "description": "When the reading was taken, RFC 3339. Default: now.",
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "cost_usd": {
+      "description": "The session's running cost in US dollars.",
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "cache_expires_at": {
+      "description": "When the session's prompt cache goes cold, RFC 3339.",
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "cache_rebuild_usd": {
+      "description": "What rebuilding the cold cache would cost, in US dollars.",
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1000
+    },
+    "rate_limits": {
+      "description": "The account's usage windows. One usage sample is stored per window.",
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "properties": {
+        "five_hour": { "$ref": "#/$defs/window" },
+        "seven_day": { "$ref": "#/$defs/window" }
+      }
+    },
+    "model": {
+      "description": "Read and ignored.",
+      "type": ["string", "null"]
+    },
+    "context_used": {
+      "description": "Read and ignored.",
+      "type": ["number", "null"]
+    },
+    "context_max": {
+      "description": "Read and ignored.",
+      "type": ["number", "null"]
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "session_id": "7c1e5a52-0f1b-4c1e-9a53-5d3f0c1a2b44",
+      "at": "2026-11-11T13:40:00Z",
+      "model": "claude-sonnet-4-5",
+      "cost_usd": 4.12,
+      "context_used": 142000,
+      "context_max": 200000,
+      "cache_expires_at": "2026-11-11T14:05:00Z",
+      "cache_rebuild_usd": 1.68,
+      "rate_limits": {
+        "five_hour": { "used_percentage": 62, "resets_at": "2026-11-11T16:00:00Z" },
+        "seven_day": { "used_percentage": 31, "resets_at": "2026-11-14T09:00:00Z" }
+      }
+    }
+  ]
+}

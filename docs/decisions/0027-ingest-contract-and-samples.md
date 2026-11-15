@@ -1,0 +1,22 @@
+# 0027. Ingest contract and samples
+
+Status: accepted (Plan 5 setup). The plan numbers this record 0025; 0021 to 0026 were taken by Plan 4. Probe S1 has not run; its result can amend the status-line mapping and Task 2.
+
+## Context
+
+Spec F15: cost-lens pushes one JSON document per turn into `curia ingest`, and Curia computes no cost itself. Spec F16 wants a series of account usage samples to forecast time to limit. cost-lens 0.3.0 has no push to Curia yet (verified at the desk), so Claude Code's own status-line command is the only live source until it does. Ingest accepts numbers from any local process, an agent included.
+
+## Decision
+
+- **One ingest path.** `curia ingest` reads one JSON document of at most 64 KiB from stdin; `curia ingest --statusline` and `curia statusline` read Claude Code's status-line JSON and store it the same way. The contract is `docs/ingest-schema.json`; the parser is `usage.ParseDoc`. `schema_version` 1 and a `session_id` matching `^[A-Za-z0-9_-]{1,64}$` are required; a bad optional field is dropped alone and logged by name, never by value; unknown fields are ignored; `model`, `context_used` and `context_max` are read and ignored (hooks and the transcript own them). The contract gains an optional `at` (the reading's own time, accepted from 24 hours back to 1 minute ahead).
+- **Absent or null changes nothing.** Ingest never clears a stored value, so the status line (no cache fields) cannot erase what cost-lens pushed.
+- **One `BEGIN IMMEDIATE` transaction** (`store.Ingest`): `COALESCE` update of `sessions.cost_usd`, `cache_expires_at` and `cache_rebuild_usd` (touching neither `updated_at` nor `seen_at`, creating no row); a cost sample for a known session; a usage sample per window (stored for an unknown session too: the windows belong to the account); an identical reading less than 60 seconds after the last adds no sample; at most 200 old rows are pruned (usage samples after 8 days, cost samples after 24 hours).
+- **Migration `0006_cost.sql`** (Plan 5 plan section 4.1): `usage_samples`, `cost_samples`, `tasks.priority` (1 to 3, default 2), `tasks.agent` (`claude` or `codex`, default `claude`), `decisions.exported_at`. `window` is accepted as a column name by SQLite 3.51.0 (verified at the desk). Two files numbered 0005 already exist and migrations are tracked by file name, so this plan's migration is `0006`; setup creates none.
+- **The status line is registered by `curia install` when the owner has none, and never replaces one** (`--no-statusline` opts out). It prints `<model> · ctx 71% · $4.12 · 5h 62%` and exits 0 on every path.
+- **Package boundaries.** Three pure packages are added between `team` and `store`: `usage` (may import `model` to `team`), `export` (those and `usage`), `linear` (those and `export`; the only one that may use `net/http`, enforced by review, since depguard here governs internal imports). Every rule from `store` down gains the three in its allow list and the `unlisted` catch-all excludes their directories, as decision 0015 did for Plan 3's four.
+
+## Consequences
+
+- Ingest can be fed false numbers by an agent: the cost is a wrong warning, suggestion or default model, each visible and overridable, and nothing automatic depends on them (decision 0028).
+- Without cost-lens's push, cache state stays blank in daily use; the status line gives cost and usage only.
+- The depguard rules and the layout allow-list name directories that do not exist yet; that is safe, as in decisions 0010 and 0015. Verified during setup with temporary files (all removed): `usage` importing `store`, `export` importing `hook` and `linear` importing `usage` each fail depguard; `export` importing `usage`, `linear` importing `export`, `store` importing `linear` and `ui` importing `linear` pass.

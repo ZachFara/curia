@@ -15,6 +15,7 @@ root_files=(
 	.golangci.yml
 	.goreleaser.yaml
 	AGENTS.md
+	CHANGELOG.md
 	CLAUDE.md
 	Makefile
 	LICENSE
@@ -29,7 +30,7 @@ root_files=(
 top_dirs=(cmd internal e2e testdata docs scripts .github)
 
 # Packages allowed under internal/ (plan File structure table).
-internal_pkgs=(model config sanitize decision precedent task message route team store state transcript hook tmux fleet attention notify deliver mcp ui install)
+internal_pkgs=(model config sanitize decision precedent task message route team store state transcript hook tmux fleet attention notify deliver mcp ui install usage export linear)
 
 # Commands allowed under cmd/.
 cmd_dirs=(curia)

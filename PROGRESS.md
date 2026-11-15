@@ -1,6 +1,154 @@
 # PROGRESS
 
-This file mirrors the plans for humans; it does not replace them. Task order, interfaces and tests come from the current plan, `docs/superpowers/plans/2026-11-13-curia-plan-4-reviews-remote-restore.md`. Plan 3 (`docs/superpowers/plans/2026-11-13-curia-plan-3-tasks-and-routing.md`) is complete; its record is kept below. Plan 2 (`docs/superpowers/plans/2026-11-11-curia-plan-2-decisions.md`) is complete; its record is kept below. Plan 1 (`docs/superpowers/plans/2026-11-11-curia-plan-1-foundation.md`) is complete; its record is kept below.
+This file mirrors the plans for humans; it does not replace them. Task order, interfaces and tests come from the current plan, `docs/superpowers/plans/2026-11-13-curia-plan-5-cost-and-integrations.md`. Plan 4 (`docs/superpowers/plans/2026-11-13-curia-plan-4-reviews-remote-restore.md`) is built on `plan-4` and not yet in `main`; its record is kept below. Plan 3 (`docs/superpowers/plans/2026-11-13-curia-plan-3-tasks-and-routing.md`) is complete; its record is kept below. Plan 2 (`docs/superpowers/plans/2026-11-11-curia-plan-2-decisions.md`) is complete; its record is kept below. Plan 1 (`docs/superpowers/plans/2026-11-11-curia-plan-1-foundation.md`) is complete; its record is kept below.
+
+# Plan 5 (Cost, Forecasting and Integrations): setup in progress
+
+## Plan 5 status
+
+- **Plan:** `docs/superpowers/plans/2026-11-13-curia-plan-5-cost-and-integrations.md` (22 implementer tasks and the orchestrator's docs task, 5 waves). Integration branch: `plan-5` (already cut, from `plan-4`). Every task PR goes into `plan-5`.
+- **Plan 4 is not yet in `main`.** Its acceptance task, final review and fix wave are in progress. `plan-5` was cut from `plan-4`, so it does not hold the fix wave: after that fix wave, `plan-4` (and then `main`, once Plan 4 has merged there) must be merged into `plan-5` before Wave 1 starts. The plan's "Dependencies on Plans 3 and 4 to re-verify" table is checked against the code at that point; a difference in a name or signature amends the tasks named, a difference in behavior is a Ruling.
+- **Setup (plan section 6):** PR `chore/plan5-setup` into `plan-5` carries the shared-file changes: CI on `plan-5`; depguard rules for `internal/usage`, `internal/export` and `internal/linear` (allow-lines added to every rule below them and to `unlisted`); `scripts/check-layout.sh` (the three packages, `CHANGELOG.md` at the root); `CURIA_LINEAR_API_KEY` and `CODEX_HOME` in the test guard of `cmd/curia/main_test.go`; `docs/ingest-schema.json`; AGENTS.md; decision records 0027 to 0031; and this section. Item 1 (`go.mod`, `go.sum`, `Makefile`, `lefthook.yml`, `.goreleaser.yaml`: no module is added) needs no change. Not done by this PR: `README.md` and `CHANGELOG.md` (the plan gives them to Task 23) and the recorded fixtures (listed below).
+- **Decision record numbers differ from the plan's.** The plan numbers its five records 0025 to 0029; Plan 4 took 0021 to 0026, so they are **0027** (ingest contract and samples, plan sections 4.1 to 4.3, with the package boundaries), **0028** (the forecast is advice), **0029** (one-way exports), **0030** (Linear is read-only) and **0031** (Codex as a second agent). Read every "0025" to "0029" in the plan as 0027 to 0031 respectively.
+- **Migration numbering.** This plan's only migration is `0006_cost.sql`, created by Task 6. Two files numbered 0005 already exist (`0005_reviews.sql` and `0005_send_limits.sql`); migrations are tracked by file name, so `0006` is the next free number. Setup creates no migration.
+- **Live probes S1, C2, X2 (orchestrator, local only), X1 and L1 and O1 (owner), A1 (owner, optional) have not run.** Their results become Rulings and AGENTS.md entries and may amend tasks before dispatch (see the table below). No task is blocked on an owner's probe: each carries a built fixture, and its captured-fixture test skips, naming the probe, until the file exists. Task 10 is the exception: it waits for X1 and X2.
+- **Addressed by this plan:** the plan's section 14 lists what it picks up from Plans 1 to 4 and what it cuts from V1; those rows are marked addressed here as their tasks merge (none yet).
+- **Reviews:** only at the final PR (owner's decision of 2026-11-13, as in Plan 4). A task merges when its named tests and `make check` pass and CI is green, and it is one commit.
+- **Process:** one commit per task, with cheap checks first (`gofumpt -l`, `.bin/golangci-lint run` on the task's packages, `go vet`, the focused `go test -race`); the gate lock is a fair queue (wait, never start a second run); `make check` output is never piped through `tail`. The orchestrator starts a task the moment every task on its Needs line has merged; the wave number is only the earliest point at which it can start.
+- **V1 completion:** the plan's section 17 ("V1 completion": the spec's goals one by one and the features with what is not in V1) is copied into this file by Task 23 with each row's final state. It is not copied here.
+
+## Plan 5 tasks
+
+Every task's done criteria also include: `make check` passes in the task's worktree; the PR into `plan-5` uses the PR template; CI (`check`) is green; the task is one commit; no shared file is touched (plan section 2). The tests named per task are those of the plan's task text; the plan is the authority.
+
+Model column: the plan's suggested models (section 7), **suggested, confirmed at dispatch**. Needs column: the plan's dependencies (section 7). Hot files: `cmd/curia/install.go` and `install_test.go` are edited by Task 9, then Task 10; `internal/ui/model.go`, `view.go`, `ui_test.go`, `cmd/curia/ui.go` and `ui_test.go` by Task 20, then Task 21.
+
+### Before wave 1
+
+| Step | Owner | Done criteria | Status |
+| --- | --- | --- | --- |
+| Plan 4 into `plan-5` | orchestrator | Plan 4's acceptance task, final review and fix wave merged; `plan-4` (then `main`) merged into `plan-5`; the plan's dependency table checked against the merged code | waiting on Plan 4's fix wave |
+| Live probes S1, C2, X2 | orchestrator | each run as plan section 13 prescribes (private tmux server, temp `HOME` and `CURIA_DB`, `claude --settings <temp file> --setting-sources project`; local files only); results recorded as Rulings and in AGENTS.md; the tasks each probe names amended before dispatch; fixtures committed | not run |
+| Probes X1, L1, O1 | owner | X1 starts a Codex session on the owner's OpenAI account; L1 needs the owner's Linear API key; O1 needs the owner's Obsidian (plan section 13); fixtures committed when run | not run; waiting on the owner |
+| Probe A1 | owner (optional) | `curia export commons <id>` entry accepted by Agent Commons `propose` | not run; optional |
+| Setup PR (plan section 6) | orchestrator | `chore/plan5-setup` merged into `plan-5`; `make check` and CI green | open |
+
+### Wave 1
+
+| Task | Title | Model | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Types and config | Sonnet (suggested, confirmed at dispatch) | none | plan task 1 complete; its named tests pass under `-race` | not started |
+| 4 | Export rules | Sonnet (suggested, confirmed at dispatch) | none | plan task 4 complete; its named tests pass under `-race` | not started |
+| 5 | Linear client | Opus (suggested, confirmed at dispatch) | none | plan task 5 complete; its named tests pass under `-race` | not started |
+| 9 | Install: status line | Opus (suggested, confirmed at dispatch) | none | plan task 9 complete; its named tests pass under `-race` | not started |
+| 11 | Push: the stakes line | Sonnet (suggested, confirmed at dispatch) | none | plan task 11 complete; its named tests pass under `-race` | not started |
+
+### Wave 2
+
+| Task | Title | Model | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 2 | Usage: ingest contract, status line, cost-lens summary | Sonnet (suggested, confirmed at dispatch) | 1 | plan task 2 complete; its named tests pass under `-race` | not started |
+| 3 | Usage: forecast, burn, cells | Opus (suggested, confirmed at dispatch) | 1 | plan task 3 complete; its named tests pass under `-race` | not started |
+| 6 | Store: ingest and samples | Opus (suggested, confirmed at dispatch) | 1 | plan task 6 complete; its named tests pass under `-race` | not started |
+| 8 | Hook and state: the session's agent | Opus (suggested, confirmed at dispatch) | 1 | plan task 8 complete; its named tests pass under `-race` | not started |
+| 10 | Install: Codex | Opus (suggested, confirmed at dispatch) | 9, and probes X1 and X2 | plan task 10 complete; its named tests pass under `-race` | not started |
+| 12 | Fleet: forecast in the badge, cost and cache of a unit | Sonnet (suggested, confirmed at dispatch) | 1 | plan task 12 complete; its named tests pass under `-race` | not started |
+
+### Wave 3
+
+| Task | Title | Model | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 7 | Store: priority, agent, export mark | Sonnet (suggested, confirmed at dispatch) | 6 | plan task 7 complete; its named tests pass under `-race` | not started |
+| 13 | `curia ingest`, `curia statusline` | Opus (suggested, confirmed at dispatch) | 2, 6 | plan task 13 complete; its named tests pass under `-race` | not started |
+| 14 | `curia status` forecast, `curia usage` | Sonnet (suggested, confirmed at dispatch) | 3, 6, 12 | plan task 14 complete; its named tests pass under `-race` | not started |
+| 19 | Review: branch cost | Opus (suggested, confirmed at dispatch) | 2 | plan task 19 complete; its named tests pass under `-race` | not started |
+| 20 | Dashboard: cost, cache, burn sort | Opus (suggested, confirmed at dispatch) | 3, 6, 12 | plan task 20 complete; its named tests pass under `-race` | not started |
+
+### Wave 4
+
+| Task | Title | Model | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 15 | Task priority | Sonnet (suggested, confirmed at dispatch) | 7 | plan task 15 complete; its named tests pass under `-race` | not started |
+| 16 | Linear import | Opus (suggested, confirmed at dispatch) | 5, 7 | plan task 16 complete; its named tests pass under `-race` | not started |
+| 17 | Spawn and launch: agent and cheaper model | Opus (suggested, confirmed at dispatch) | 3, 6, 7 | plan task 17 complete; its named tests pass under `-race` | not started |
+| 18 | `curia export` | Sonnet (suggested, confirmed at dispatch) | 4, 7 | plan task 18 complete; its named tests pass under `-race` | not started |
+| 21 | Dashboard: pause suggestion | Opus (suggested, confirmed at dispatch) | 7, 14, 20 | plan task 21 complete; its named tests pass under `-race` | not started |
+
+### Wave 5
+
+| Task | Title | Model | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 22 | Acceptance | Opus (suggested, confirmed at dispatch) | 1 to 21 (10 may be pending: see the task) | plan task 22 complete; its named tests pass under `-race` | not started |
+
+### After wave 5
+
+| Task | Title | Model | Needs | Done criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| 23 | V1 docs and release notes (orchestrator's docs task) | orchestrator | 22 | `README.md`, `CHANGELOG.md`, `AGENTS.md`, `PROGRESS.md` (with section 17's V1 completion tables) and `docs/` updated; `docs/v1-as-built.md` lists every difference from `docs/DESIGN.md` (default of question 9); the changelog prepared and the tag `v1.0.0` left to the owner (question 10) | not started |
+
+## Plan 5 probes
+
+Plan section 13. The orchestrator runs the probes that are not the owner's before dispatch, locally, with a private tmux server and temp `HOME`, `CURIA_DB` and `CODEX_HOME`; the real `~/.claude/settings.json`, `~/.tmux.conf`, `~/.config/curia`, `~/.codex` and the default tmux server are never touched.
+
+| Probe | Who | Question (short) | Amends if not as assumed | Result |
+| --- | --- | --- | --- | --- |
+| S1 | orchestrator | What JSON does Claude Code give a `statusLine` command (names, `resets_at` form, `rate_limits` on a subscription only)? | Task 2's mapping; Task 13's latency gate | not run |
+| C2 | orchestrator | Does the cost-lens analyzer, given the main repository, count sessions that ran in a sibling worktree? | Task 19 (argument, or the branch cost cut) | not run |
+| X2 | orchestrator | What does `codex mcp add curia -- /x/curia mcp` write into a temp `CODEX_HOME`, and what does `remove` leave? | Task 10's recognition | not run |
+| X1 | owner (starts a Codex session on the owner's account) | Where does Codex 0.166.0 read hooks, what do payloads hold, what does a Stop hook's output do, what does trust need? | Tasks 8 and 10; decision 0031 | not run; waiting on the owner |
+| L1 | owner (needs the Linear API key) | Does Linear accept the query, filter and `Authorization` form? | Tasks 5 and 16 (`linear.Query`, decoder) | not run; waiting on the owner |
+| O1 | owner (needs Obsidian) | Does a note built from hostile text render inert, and does the front matter read as properties? | Task 4; decision 0029 | not run; waiting on the owner |
+| A1 | owner, optional | Does Agent Commons accept the printed entry through `propose`? | `export.CommonsEntry` | not run; optional |
+
+## Plan 5 smoke and live checks
+
+Run by the orchestrator on `plan-5` after the tasks the plan names (plan section 7), temp `HOME` and `CURIA_DB`, a private tmux server.
+
+| When | Check | Result |
+| --- | --- | --- |
+| Tasks 6 and 7 merged | `make check`; open the new database with the Plan 4 binary's `curia ls`, `curia task ls` and `curia hook Stop`, and the reverse; a Plan 4 `task edit` leaves `priority` alone | none yet |
+| Tasks 13 and 14 merged | three `curia ingest` documents with `at` 15, 8 and 1 minutes ago; `curia status` shows the warning; `curia usage` lists the windows; `echo garbage \| curia ingest; echo $?` prints `0` | none yet |
+| Tasks 9, 13, 20 merged | **live check A** (real Claude Code, status line through the temp settings file): samples and cost filled after two turns; the status line reads as plan section 4.3; the dashboard shows `COST`; the stakes line appears only after an ingest with `cache_expires_at` | none yet |
+| Tasks 17, 18, 19, 21 merged | **live check B:** under a hand-made warning series `curia spawn` starts the real agent with `--model sonnet` and says why; `P` then `y` pauses the suggested task and a held `y` or a paste does not; `curia decide` writes a note into a throwaway folder; the review shows the branch cost from the real analyzer | none yet |
+| Task 22 merged | `deadcode ./...` without `-test`: only test doubles are reported; then Task 23 | none yet |
+
+## Plan 5 Rulings
+
+Format: Ruling: what, why, cost if wrong. **Plan 5's rulings will be numbered after Plan 4's records are written:** Plan 4's final review and fix wave are still in progress and its rulings (from 124) are not yet recorded, so the first free number is not known. Plan 5's rulings are kept in the working ledger until then.
+
+## Plan 5 Open Questions
+
+Plan section 15. Each has the plan's default and blocks nothing; **the project proceeds on every default** until the owner answers.
+
+1. **`curia install` adds a status line to Claude Code when you have none** (plan decision 7). It prints the model, context, cost and five-hour usage, and it is the only live source of usage numbers until cost-lens pushes. Default: added, `--no-statusline` to skip, never replacing yours. Proceeding on the default.
+2. **Pausing on a forecast takes `P` and then `y`,** not the spec's one key (decision 13). Default: two keys. Proceeding on the default.
+3. **The cheaper model is `sonnet`** (`usage.cheaper_model`). Default: `sonnet`; say so if it should be another name or off. Proceeding on the default.
+4. **Agent Commons: Curia prints the entry and does not send it** (decision 22). Default: printed. Say so if a direct publish is worth a task after V1, and whether a decision is the kind of entry you want in that store at all. Proceeding on the default.
+5. **Obsidian notes put all ticket text and your reasoning inside code fences** (decision 19), in the folder `obsidian.dir`, written after each `curia decide`. Default: as planned. Probe O1 is yours. Proceeding on the default.
+6. **Linear: which issues.** Default: assigned to you, backlog or unstarted, optionally one team, at most 200; the key in `CURIA_LINEAR_API_KEY` (a Keychain item `env:CURIA_LINEAR_API_KEY`). Probe L1 is yours. Proceeding on the default.
+7. **Codex: approve probe X1** (one Codex session on your OpenAI account, in a throwaway repository). Default: not run; Codex is tracked and spawned on built fixtures, and `curia install --codex` waits. Proceeding on the default.
+8. **Who builds the cost-lens push,** and when. Default: you, in cost-lens, after V1, against `docs/ingest-schema.json`; until then cache state is blank in daily use and the forecast runs on the status line's numbers. Proceeding on the default.
+9. **`docs/DESIGN.md` against what was built.** Default: the spec stays as you wrote it and `docs/v1-as-built.md` lists every difference. Say so if the spec itself should be amended. Proceeding on the default.
+10. **The tag `v1.0.0`.** Default: the orchestrator prepares the changelog and stops; you push the tag, which publishes the release and the Homebrew formula. Proceeding on the default.
+11. **Attribution in dollars** (decision 12) and **no API-mode figure in the badge** (decision 11). Default: as planned. Proceeding on the default.
+12. **Plan 2 Open Question 22, still open:** typing depends on recognizing Claude Code's screen, so a Claude Code upgrade can turn typing off silently. Default: after an upgrade the orchestrator re-captures the idle screens in a live check when asked; V1 does not check the Claude Code version by itself. Proceeding on the default.
+
+The "decision N" numbers in these questions are the plan's own section 12 numbers, not decision records.
+
+## Plan 5 Ledger
+
+- 2026-11-15: setup PR `chore/plan5-setup` into `plan-5` opened (this change). Not done by it: `README.md` and `CHANGELOG.md` (Task 23), and the fixtures below (the probes have not run).
+
+## Plan 5 fixtures expected from the probes (plan section 6, item 9)
+
+Committed by the orchestrator from the probes, never generated by a task. None exists yet:
+
+- `internal/usage/testdata/statusline-captured.json` (S1)
+- `internal/usage/testdata/summary-captured.json` (the analyzer's real output for a throwaway repository, titles, paths and branch names replaced by placeholders)
+- `internal/hook/testdata/codex/*.json` (X1, when the owner has approved it)
+- `internal/install/testdata/codex/` (X1 and X2)
+- `internal/linear/testdata/issues-captured.json` (L1, when the owner has run it)
+
 
 # Plan 4 (Review Queue, Remote Answers and Restore): setup in progress
 
