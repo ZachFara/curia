@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -196,7 +197,10 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	sess = seenIfFocused(ctx, client, st, before, sess, logger)
 	for _, w := range markerWindows(before, sess) {
 		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
-		if aerr := attention.Apply(actx, client, st, w); aerr != nil {
+		// A window that is gone (a session's previous window after pause
+		// closed it, say) has no marker to set: not an error (live check B
+		// defect 8), as in reconcile.
+		if aerr := attention.Apply(actx, client, st, w); aerr != nil && !errors.Is(aerr, tmux.ErrNoWindow) {
 			logger.Error("hook attention marker", "window", w, "err", aerr.Error())
 		}
 		cancel()

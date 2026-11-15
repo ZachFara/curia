@@ -1083,6 +1083,7 @@ func (b *serveBlockingTmux) ListPanes(ctx context.Context) ([]tmux.Pane, error) 
 func serveConfig(t *testing.T, public, listen string) string {
 	t.Helper()
 	db := hookHome(t)
+	userTerminalAs(t, true) // the user, at a terminal: serve is user-only
 	body := "[serve]\n"
 	if public != "" {
 		body += fmt.Sprintf("public_url = %q\n", public)

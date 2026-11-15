@@ -1,0 +1,6 @@
+{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"claude-code","version":"2.1.325"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"check_messages","arguments":{}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_decisions","arguments":{"query":"make check committing"}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"request_decision","arguments":{"question":"Rotate the refresh token on every use or only when it expires?","options":[{"key":"A","label":"On every use"},{"key":"B","label":"Only on expiry"}],"recommendation":"A","rationale":"Rotation on use limits a stolen token to one request.","reversibility":"costly","mode":"blocking"}}}

@@ -127,6 +127,7 @@ type restoreFixture struct {
 
 func restoreNewFixture(t *testing.T) *restoreFixture {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal: restore is user-only
 	f := &restoreFixture{t: t, db: hookHome(t)}
 	f.start = time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
 	f.now = f.start.Add(time.Hour)
@@ -395,6 +396,7 @@ func TestRestoreRefusesInsideAgent(t *testing.T) {
 
 func TestRestoreNeedsATmuxServer(t *testing.T) {
 	db := hookHome(t)
+	userTerminalAs(t, true)
 	_, err := runRoot(t, "restore", "--yes")
 	if err == nil || err.Error() != "no tmux server is running: start tmux, then run curia restore again" {
 		t.Fatalf("restore = %v, want the no-server line", err)

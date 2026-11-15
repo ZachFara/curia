@@ -688,7 +688,7 @@ func TestReviewSourceDetail(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup)
+	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
 	det, err := src.Detail(context.Background(), "R-1")
 	if err != nil {
 		t.Fatal(err)
@@ -711,7 +711,7 @@ func TestReviewSourceDetail(t *testing.T) {
 
 func TestReviewSourceApproveRefusesChangedBranch(t *testing.T) {
 	f := reviewNew(t)
-	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup)
+	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
 	det, err := src.Detail(context.Background(), "R-1")
 	if err != nil {
 		t.Fatal(err)
@@ -745,7 +745,7 @@ func TestReviewSourceApproveRefusesChangedBranch(t *testing.T) {
 func TestReviewSourceQueueRunsNoGit(t *testing.T) {
 	f := reviewNew(t)
 	calls := reviewRecordGit(t)
-	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup)
+	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
 	rows, err := src.Queue(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -780,7 +780,7 @@ func reviewSetExpiry(t *testing.T, f *reviewFixture, id string, at time.Time) {
 func TestReviewSourceDiffCmd(t *testing.T) {
 	f := reviewNew(t)
 	reviewUseDiffTools(t, func(name string) (string, error) { return filepath.Join("/opt/bin", name), nil })
-	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup)
+	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
 	cmd, err := src.DiffCmd(context.Background(), "R-1")
 	if err != nil {
 		t.Fatal(err)

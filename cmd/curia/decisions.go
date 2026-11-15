@@ -2,17 +2,25 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/decision"
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -52,10 +60,11 @@ func init() {
 	ls.Flags().StringVar(&decisionsStatus, "status", "open", "open (and answers not yet delivered), decided, closed or all")
 	ls.Flags().BoolVar(&decisionsJSON, "json", false, "print a JSON array instead of a table")
 	edit := &cobra.Command{
-		Use:   "edit <id>",
-		Short: "Rescope or supersede a decided ticket (the user only)",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runDecisionsEdit,
+		Use:         "edit <id>",
+		Short:       "Rescope or supersede a decided ticket (the user only)",
+		Annotations: userOnlyMark(),
+		Args:        cobra.ExactArgs(1),
+		RunE:        runDecisionsEdit,
 	}
 	edit.Flags().StringVar(&decisionsScope, "scope", "", "new scope: task, repo or global")
 	edit.Flags().BoolVar(&decisionsSupersede, "supersede", false, "mark the ticket superseded")
@@ -64,14 +73,390 @@ func init() {
 	rootCmd.AddCommand(parent)
 }
 
-// refuseInsideAgent returns an error when the command runs inside an agent
-// session: Claude Code sets CLAUDECODE in every command it runs. Commands
-// only the user may run call it first.
-func refuseInsideAgent() error {
-	if os.Getenv("CLAUDECODE") != "" {
-		return errors.New("refusing to run inside an agent session (CLAUDECODE is set): only the user may do this")
+// userOnlyAnnotation marks a command that only the user may run; such a
+// command calls userOnly before anything else, which a test checks for
+// every command so marked.
+const userOnlyAnnotation = "curia-user-only"
+
+// userOnlyMark is the Annotations value that marks a command user-only.
+func userOnlyMark() map[string]string { return map[string]string{userOnlyAnnotation: "yes"} }
+
+// userOnly is the one guard of the commands only the user may run (Rulings
+// 112 and 119): it refuses when the caller looks like an agent (agentSign),
+// has no controlling terminal, or descends from an agent (agentAncestor),
+// saying which, as "curia <command> cannot run …: only the user may
+// <what>". An agent's tool shell has no controlling terminal, so clearing
+// its variables is not enough, and a pseudo-terminal of its own (script,
+// expect) does not change whose child it is; a script or cron job cannot
+// act as the user either.
+func userOnly(command, what string) error {
+	if sign := agentSign(); sign != "" {
+		return fmt.Errorf("curia %s cannot run inside an agent session (%s): only the user may %s", command, sign, what)
+	}
+	if err := userTerminalOpen(); err != nil {
+		return fmt.Errorf("curia %s cannot run without a terminal (no controlling terminal: %s): only the user may %s, at a terminal",
+			command, sanitize.Line(err.Error(), 120), what)
+	}
+	if why := agentAncestor(); why != "" {
+		return fmt.Errorf("curia %s cannot run inside an agent session (%s): only the user may %s", command, why, what)
 	}
 	return nil
+}
+
+// userAncestryLimit bounds the walk up the parent processes.
+const userAncestryLimit = 64
+
+// userProc is what the ancestry walk reads of one process: its parent pid,
+// its command name (ps's comm: the executable, as a path or a base name)
+// and, for an interpreter, its arguments.
+type userProc struct {
+	PPID int
+	Comm string
+	Args string // read only when Comm is an interpreter (claudeInterpreters)
+}
+
+// userProcesses reads the process table once (re-review A, M8): every
+// process's parent, command name and, for an interpreter, arguments. Tests
+// replace it with a table of their own; the test default fails a test that
+// has not set one.
+var userProcesses = psTable
+
+// psPaths are where ps is looked for, by absolute path only, never on PATH
+// (re-review A, M10).
+var psPaths = []string{"/bin/ps", "/usr/bin/ps"}
+
+// psTable is userProcesses from ps under one deadline: `ps -A -o
+// pid=,ppid=,comm=`, then `ps -A -o pid=,args=` when an interpreter
+// (claudeInterpreters) is running. One snapshot, so the walk sees one
+// consistent table.
+func psTable() (map[int]userProc, error) {
+	ps := ""
+	for _, p := range psPaths {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			ps = p
+			break
+		}
+	}
+	if ps == "" {
+		return nil, fmt.Errorf("no ps at %s", strings.Join(psPaths, " or "))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*subprocessTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, ps, "-A", "-o", "pid=,ppid=,comm=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("ps -A: %w", err)
+	}
+	table := map[int]userProc{}
+	interpreter := false
+	for line := range strings.Lines(string(out)) {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		pid, perr := strconv.Atoi(f[0])
+		ppid, qerr := strconv.Atoi(f[1])
+		if perr != nil || qerr != nil {
+			return nil, fmt.Errorf("ps -A printed %q", sanitize.Line(line, 80))
+		}
+		table[pid] = userProc{PPID: ppid, Comm: procComm(line)}
+		interpreter = interpreter || slices.Contains(claudeInterpreters, filepath.Base(table[pid].Comm))
+	}
+	if !interpreter {
+		return table, nil
+	}
+	if err = psArgs(ctx, ps, table); err != nil {
+		return nil, err
+	}
+	return table, nil
+}
+
+// psArgs fills in the arguments of every interpreter in table from `ps -A
+// -o pid=,args=`.
+func psArgs(ctx context.Context, ps string, table map[int]userProc) error {
+	out, err := exec.CommandContext(ctx, ps, "-A", "-o", "pid=,args=").Output()
+	if err != nil {
+		return fmt.Errorf("ps -A: %w", err)
+	}
+	for line := range strings.Lines(string(out)) {
+		id, args, _ := strings.Cut(strings.TrimSpace(line), " ")
+		pid, err := strconv.Atoi(id)
+		if p, ok := table[pid]; err == nil && ok && slices.Contains(claudeInterpreters, filepath.Base(p.Comm)) {
+			p.Args = strings.TrimSpace(args)
+			table[pid] = p
+		}
+	}
+	return nil
+}
+
+// procComm is the comm column of one `pid ppid comm` line: everything after
+// the second field, which may hold spaces.
+func procComm(line string) string {
+	rest := strings.TrimSpace(line)
+	for range 2 {
+		_, rest, _ = strings.Cut(rest, " ")
+		rest = strings.TrimLeft(rest, " ")
+	}
+	return strings.TrimRight(rest, " \n")
+}
+
+// claudeInterpreters are the programs that run Claude Code's JavaScript
+// CLI when it is installed from npm.
+var claudeInterpreters = []string{"node", "bun"}
+
+// isClaudeCode reports whether p is Claude Code. Seen on the dev Mac (Claude
+// Code 2.1.325, native install): comm "claude" or ".../.local/bin/claude",
+// args "claude --continue ...". An npm install runs as node (or bun) with
+// the script as its first argument: ".../bin/claude" through npm's link, or
+// ".../@anthropic-ai/claude-code/cli.js". The match is on those base names
+// only, never on any argument that merely holds the word.
+func isClaudeCode(p userProc) bool {
+	if filepath.Base(p.Comm) == "claude" {
+		return true
+	}
+	if !slices.Contains(claudeInterpreters, filepath.Base(p.Comm)) {
+		return false
+	}
+	for _, a := range strings.Fields(p.Args)[min(1, len(strings.Fields(p.Args))):] {
+		if strings.HasPrefix(a, "-") {
+			continue // the interpreter's own flags
+		}
+		dir, base := filepath.Base(filepath.Dir(a)), filepath.Base(a)
+		return base == "claude" || (dir == "claude-code" && (base == "cli.js" || base == "cli.mjs"))
+	}
+	return false
+}
+
+// agentAncestor says why the caller descends from an agent, or "" when it
+// does not (Ruling 119): walking from the parent to pid 1, a process is
+// Claude Code (isClaudeCode) or the first process of the pane of a live
+// tracked session (agentPanePIDs). It fails closed: an ancestry it cannot
+// read, one deeper than userAncestryLimit, or a store it cannot read are an
+// agent's; with no readable pane list it relies on the Claude Code ancestor
+// alone (Ruling 123). Curia records no process id for a session, so only
+// these are checked.
+func agentAncestor() string {
+	table, err := userProcesses()
+	if err != nil {
+		return "its parent processes cannot be read: " + sanitize.Line(err.Error(), 120)
+	}
+	panes, why := agentPanePIDs()
+	if why != "" {
+		return why
+	}
+	pid := os.Getppid()
+	for range userAncestryLimit {
+		if pid <= 1 {
+			// Reaching pid 1 with no agent on the way is the user's: a
+			// terminal, a tmux popup or run-shell job (through the tmux
+			// server), or an orphan. Requiring a known terminal program
+			// would refuse users of any other one and still let a run-shell
+			// job through, which has the ancestry of the user's own popup:
+			// a process of the same operating-system user can always detach
+			// itself this way (the stated limit of these guards).
+			return ""
+		}
+		p, ok := table[pid]
+		if !ok {
+			return fmt.Sprintf("its parent processes cannot be read: process %d is not in the process table", pid)
+		}
+		switch {
+		case isClaudeCode(p):
+			return fmt.Sprintf("it runs under Claude Code (process %d)", pid)
+		case panes[pid] != "":
+			return fmt.Sprintf("it runs under the pane of agent session %s (process %d)", spawnShortID(panes[pid]), pid)
+		}
+		pid = p.PPID
+	}
+	return fmt.Sprintf("its parent processes are more than %d deep", userAncestryLimit)
+}
+
+// ancestorSession is the live tracked session whose pane's first process
+// is the nearest ancestor of this process to be one (the agent running in
+// that pane started it), "" when the walk reaches pid 1 without one; ok is
+// false when the ancestry or the panes cannot be read, or the walk is
+// deeper than userAncestryLimit (Ruling 113: who sent a message is read
+// from the processes, not from variables the sender sets).
+func ancestorSession() (id string, ok bool) {
+	table, err := userProcesses()
+	if err != nil {
+		return "", false
+	}
+	panes, why := agentPanePIDs()
+	if why != "" {
+		return "", false
+	}
+	pid := os.Getppid()
+	for range userAncestryLimit {
+		if pid <= 1 {
+			return "", true
+		}
+		if id := panes[pid]; id != "" {
+			return id, true
+		}
+		p, found := table[pid]
+		if !found {
+			return "", false
+		}
+		pid = p.PPID
+	}
+	return "", false
+}
+
+// agentPanePIDs maps the pid of the first process of each pane holding a
+// live tracked session (neither ended nor stale) to that session's id, or
+// says why it cannot when the store cannot be read, and then the caller is
+// refused. When the tmux pane list cannot be read, or the server the
+// caller's TMUX reaches shows none of the live agents' panes, the pane
+// check is skipped (Ruling 123): the map is empty, one INFO line says why,
+// and the guard decides on the Claude Code ancestor, the terminal and the
+// environment alone, so a tmux server that is down or restarted does not
+// lock the user out. With no store yet, or no live session in a pane, the
+// map is empty.
+func agentPanePIDs() (map[int]string, string) {
+	out := map[int]string{}
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, "the config cannot be read to check for agents: " + sanitize.Line(err.Error(), 120)
+	}
+	if _, err = os.Stat(cfg.DBPath); errors.Is(err, fs.ErrNotExist) {
+		return out, ""
+	}
+	st, err := openStore(cfg)
+	if err != nil {
+		return nil, "the store cannot be read to check for agents"
+	}
+	defer func() { _ = st.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*subprocessTimeout)
+	defer cancel()
+	sessions, err := st.ListSessions(ctx, store.ListFilter{})
+	if err != nil {
+		return nil, "the store cannot be read to check for agents"
+	}
+	sessions = slices.DeleteFunc(sessions, func(s model.Session) bool {
+		return s.Pane == "" || s.State == model.StateEnded || s.State == model.StateStale
+	})
+	if len(sessions) == 0 {
+		return out, ""
+	}
+	panes, err := newTmuxClient().ListPanes(ctx)
+	if err != nil {
+		logInfo(cfg.LogPath, "user check: agent pane check skipped: tmux cannot list its panes", "err", sanitize.Line(err.Error(), 200))
+		return out, ""
+	}
+	// A session counts only on a server consistent with it (fleet.Gone, the
+	// rule reconcile uses): its pane listed and the server no newer than the
+	// session. Another server reached through the caller's TMUX, whose pane
+	// ids may collide, is then the Ruling 123 case.
+	shown := false
+	for _, s := range sessions {
+		if fleet.Gone(panes, s) {
+			continue
+		}
+		shown = true
+		for _, p := range panes {
+			if p.ID == s.Pane && p.PID > 1 {
+				out[p.PID] = s.ID
+			}
+		}
+	}
+	if !shown {
+		logInfo(cfg.LogPath, "user check: agent pane check skipped: the tmux server reached shows none of the live agents' panes")
+	}
+	return out, ""
+}
+
+// userOnlyRunE is run behind userOnly, as a cobra RunE.
+func userOnlyRunE(command, what string, run func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := userOnly(command, what); err != nil {
+			return err
+		}
+		return run(cmd, args)
+	}
+}
+
+// agentSign says why the caller looks like an agent, or "" when nothing
+// does (Ruling 112): Claude Code sets CLAUDECODE and CLAUDE_CODE_SESSION_ID
+// in every command it runs, and an agent's shell has TMUX_PANE set to the
+// pane of its live session. A pane match is checked against tmux first
+// (reconcile), so a session whose pane is gone, or whose pane id a tmux
+// restart gave to someone else, does not count. When the store cannot be
+// read the answer is an agent: Curia cannot tell.
+func agentSign() string {
+	for _, name := range []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID"} {
+		if os.Getenv(name) != "" {
+			// An agent's tmux command can leave it in the tmux server's global
+			// environment, and every new shell there inherits it (re-review A,
+			// M6).
+			return name + " is set; if you are not an agent, tmux may hold it: run tmux set-environment -gu " + name +
+				" and open a new shell"
+		}
+	}
+	pane := os.Getenv("TMUX_PANE")
+	if pane == "" {
+		return ""
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return "TMUX_PANE is set and the config cannot be read to check it"
+	}
+	if _, err = os.Stat(cfg.DBPath); errors.Is(err, fs.ErrNotExist) {
+		return "" // no store yet, so no session is tracked anywhere
+	}
+	st, err := openStore(cfg)
+	if err != nil {
+		return "TMUX_PANE is set and the store cannot be read to check it"
+	}
+	defer func() { _ = st.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*subprocessTimeout)
+	defer cancel()
+	// Read only: the guard never reconciles or writes (re-review A, I2). A
+	// session in this pane counts only when the server reached is consistent
+	// with it (fleet.Gone); when tmux cannot answer the ancestry decides.
+	s, found, err := agentInPane(ctx, st, pane)
+	if err != nil {
+		return "TMUX_PANE is set and the store cannot be read to check it"
+	}
+	if !found {
+		return ""
+	}
+	panes, err := newTmuxClient().ListPanes(ctx)
+	if err != nil || fleet.Gone(panes, s) {
+		return ""
+	}
+	return "this is pane " + sanitize.Line(pane, 20) + " of agent session " + spawnShortID(s.ID) +
+		"; if no agent runs here any more, run curia ls, which marks a session whose pane is gone, or end it"
+}
+
+// agentInPane finds a session in pane that is neither ended nor stale.
+func agentInPane(ctx context.Context, st *store.Store, pane string) (model.Session, bool, error) {
+	sessions, err := st.ListSessions(ctx, store.ListFilter{})
+	if err != nil {
+		return model.Session{}, false, err
+	}
+	for _, s := range sessions {
+		if s.Pane == pane && s.State != model.StateEnded && s.State != model.StateStale {
+			return s, true, nil
+		}
+	}
+	return model.Session{}, false, nil
+}
+
+// userTerminalOpen opens and closes the controlling terminal; tests
+// replace it (the test default fails a test that has not set its own).
+var userTerminalOpen = func() error {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	return tty.Close()
+}
+
+// userAtTerminal reports whether the caller is the user at a terminal
+// (Rulings 112 and 119): userOnly would let it run. A tmux popup or
+// run-shell job descends from the tmux server, not from an agent.
+func userAtTerminal() bool {
+	return userOnly("", "") == nil
 }
 
 // decisionsStatuses maps a --status value to the statuses it lists; nil
@@ -266,7 +651,7 @@ func decisionsDeliveryText(d model.Decision, states map[string]model.State) stri
 }
 
 func runDecisionsEdit(cmd *cobra.Command, args []string) error {
-	if err := refuseInsideAgent(); err != nil {
+	if err := userOnly("decisions edit", "curate a decision"); err != nil {
 		return err
 	}
 	id := args[0]

@@ -80,6 +80,7 @@ func installRecord(t *testing.T) *installRecorder {
 // after, because cobra keeps a flag's value between runs.
 func installRun(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	userTerminalAs(t, true) // install and uninstall are the user's
 	installNoAllowMCPTools = false
 	t.Cleanup(func() { installNoAllowMCPTools = false })
 	return runRoot(t, args...)

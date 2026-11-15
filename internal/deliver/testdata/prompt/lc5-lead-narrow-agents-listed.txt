@@ -1,0 +1,23 @@
+  tell me to shut it
+  down.
+
+────────────────────────
+❯ shut the team down
+────────────────────────
+  ⏵⏵ auto mode on
+
+  ⏺ main
+  ◯ alpha  Curia … 40s
+  ◯ beta   Create… 40s
+
+
+
+
+
+
+
+
+
+
+
+

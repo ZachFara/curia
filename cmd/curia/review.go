@@ -37,6 +37,9 @@ var (
 // reviewMaxStdin is the most `--note -` reads from stdin.
 const reviewMaxStdin = 64 << 10
 
+// reviewWhat is what the user-only guard says only the user may do here.
+const reviewWhat = "review work"
+
 // reviewLineMax bounds a printed outcome line, in runes.
 const reviewLineMax = 600
 
@@ -56,8 +59,9 @@ func init() {
 			"--note <text> (or - for stdin) sends the note to the task's agent as a\n" +
 			"message. --drop drops the task; its agent is not stopped. --json prints the\n" +
 			"review's detail and acts on nothing. Refuses to run inside an agent session.",
-		Args: cobra.MaximumNArgs(1),
-		RunE: runReview,
+		Annotations: userOnlyMark(),
+		Args:        cobra.MaximumNArgs(1),
+		RunE:        runReview,
 	}
 	f := cmd.Flags()
 	f.BoolVar(&reviewApproveFlag, "approve", false, "approve the review: merge, or open a pull request")
@@ -83,8 +87,8 @@ const (
 
 func runReview(cmd *cobra.Command, args []string) error {
 	// Only the user approves, sends back or drops work (spec section 7).
-	if refuseInsideAgent() != nil {
-		return errors.New("curia review cannot run inside an agent session (CLAUDECODE is set): only the user may review")
+	if err := userOnly("review", reviewWhat); err != nil {
+		return err
 	}
 	act, err := reviewFlags(args)
 	if err != nil {
@@ -253,7 +257,7 @@ func reviewRunView(cmd *cobra.Command, arg string) error {
 		}
 		opts.TaskID = r.TaskID
 	}
-	src := newReviewSource(st, newTmuxClient(), cfg, logger, decideVia())
+	src := newReviewSource(st, newTmuxClient(), cfg, logger, decideVia(), nil)
 	last := ui.NewReview(src, clock, opts)
 	if err = runProgram(reviewCapture{m: last, last: &last}, tea.WithAltScreen()); err != nil {
 		return err
@@ -341,7 +345,7 @@ func reviewPending(ctx context.Context, st *store.Store, id string) (model.Revie
 func reviewApprove(ctx context.Context, st *store.Store, cfg config.Config, reviewID string, how model.ApproveHow,
 	seen string, via model.AnsweredVia, now time.Time,
 ) (string, error) {
-	if err := refuseInsideAgent(); err != nil {
+	if err := userOnly("review", reviewWhat); err != nil {
 		return "", err
 	}
 	r, t, err := reviewPending(ctx, st, reviewID)
@@ -441,7 +445,7 @@ func reviewExpired(n int) string {
 func reviewRequestChanges(ctx context.Context, st *store.Store, tm tmux.Client, logger *slog.Logger, reviewID, note string,
 	via model.AnsweredVia, now time.Time,
 ) (string, error) {
-	if err := refuseInsideAgent(); err != nil {
+	if err := userOnly("review", reviewWhat); err != nil {
 		return "", err
 	}
 	note, err := task.NormalizeNote(strings.TrimSpace(note)) // a note from stdin ends with a line break
@@ -478,7 +482,7 @@ func reviewRequestChanges(ctx context.Context, st *store.Store, tm tmux.Client, 
 	if err != nil {
 		return "", fmt.Errorf("%sthe note is saved but could not be sent: %s", done, sanitize.Line(err.Error(), reviewGitErrMax))
 	}
-	return done + sendOutcomeLine(out), nil
+	return done + sayOutcomeLine(out), nil
 }
 
 // reviewTarget is the session a change request goes to: the task's first
@@ -499,7 +503,7 @@ func reviewTarget(ctx context.Context, st *store.Store, r model.Review) (string,
 
 // reviewDrop closes pending review reviewID as dropped, which stores its task dropped too.
 func reviewDrop(ctx context.Context, st *store.Store, reviewID string, via model.AnsweredVia, now time.Time) (string, error) {
-	if err := refuseInsideAgent(); err != nil {
+	if err := userOnly("review", reviewWhat); err != nil {
 		return "", err
 	}
 	r, _, err := reviewPending(ctx, st, reviewID)
@@ -574,11 +578,18 @@ type reviewSource struct {
 	cfg config.Config
 	log *slog.Logger
 	via model.AnsweredVia
+	// refused is the user-only guard's refusal of the caller, or nil: with
+	// it the view is read-only, and approve, request changes and drop do
+	// nothing and say why (the dashboard's caller, as the board's).
+	refused error
 }
 
-// newReviewSource returns the ui.ReviewSource of curia review. Task 20 reuses it for the dashboard.
-func newReviewSource(st *store.Store, tm tmux.Client, cfg config.Config, logger *slog.Logger, via model.AnsweredVia) ui.ReviewSource {
-	return reviewSource{st: st, tm: tm, cfg: cfg, log: logger, via: via}
+// newReviewSource returns the ui.ReviewSource of curia review. Task 20 reuses it for the dashboard,
+// with refused the guard's answer for the dashboard's caller (nil for curia review, which has passed it).
+func newReviewSource(st *store.Store, tm tmux.Client, cfg config.Config, logger *slog.Logger, via model.AnsweredVia,
+	refused error,
+) ui.ReviewSource {
+	return reviewSource{st: st, tm: tm, cfg: cfg, log: logger, via: via, refused: refused}
 }
 
 // Queue is the pending reviews of tasks not stored dropped, oldest first.
@@ -623,6 +634,9 @@ func (s reviewSource) Detail(ctx context.Context, id string) (ui.ReviewDetail, e
 // Approve approves review id at head, the branch head that was shown, as
 // review.approve says.
 func (s reviewSource) Approve(ctx context.Context, id, head string) (string, error) {
+	if s.refused != nil {
+		return "", s.refused
+	}
 	if err := reconcile(ctx, s.st, s.tm, s.cfg.LogPath, clock()); err != nil {
 		return "", err
 	}
@@ -634,11 +648,17 @@ func (s reviewSource) Approve(ctx context.Context, id, head string) (string, err
 
 // RequestChanges sends review id back with note.
 func (s reviewSource) RequestChanges(ctx context.Context, id, note string) (string, error) {
+	if s.refused != nil {
+		return "", s.refused
+	}
 	return s.after(ctx, id)(reviewRequestChanges(ctx, s.st, s.tm, s.log, id, note, s.via, clock()))
 }
 
 // Drop drops review id and its task.
 func (s reviewSource) Drop(ctx context.Context, id string) (string, error) {
+	if s.refused != nil {
+		return "", s.refused
+	}
 	return s.after(ctx, id)(reviewDrop(ctx, s.st, id, s.via, clock()))
 }
 

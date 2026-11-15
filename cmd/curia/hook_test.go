@@ -478,6 +478,23 @@ func TestHookAppliesMarker(t *testing.T) {
 	}
 }
 
+func TestHookGoneWindowIsNotLogged(t *testing.T) {
+	hookHome(t)
+	gone := &goneWindowTmux{}
+	prevClient := newTmuxClient
+	newTmuxClient = func() tmux.Client { return gone }
+	prev := hookRun
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		return hook.Result{Session: model.Session{ID: "A", TmuxWindow: "@7", State: model.StateIdle, UpdatedAt: time.Now()}}, nil
+	}
+	t.Cleanup(func() { hookRun, newTmuxClient = prev, prevClient })
+	res := runHookCmd(t, strings.NewReader(`{}`), "hook", "SessionStart")
+	assertQuietExitZero(t, res)
+	if log := readLog(t); len(log) != 0 {
+		t.Errorf("log = %q, want nothing for a window that is gone", log)
+	}
+}
+
 func TestHookWithoutWindowAppliesNothing(t *testing.T) {
 	hookHome(t)
 	fake := useFakeTmux(t)
@@ -1097,10 +1114,10 @@ func hookLatency(t *testing.T, st *store.Store, env hook.Env, kind model.EventKi
 	return durations
 }
 
-// TestHookLatencyUnchanged is TestHookLatency's method and threshold (200
-// in-process PostToolUse runs, p95 under 20 ms) through the real hookEnv,
-// with CURIA_TASK_ID set and a linked worktree as cwd. It also reports 200
-// SessionStarts, each a new session and so one real git process, without
+// TestHookLatencyUnchanged is TestHookLatency's method and threshold (1000
+// in-process PostToolUse runs in one pass, p95 under 20 ms, Ruling 114)
+// through the real hookEnv, with CURIA_TASK_ID set and a linked worktree as
+// cwd. It also reports 200 SessionStarts, each a new session and so one real git process, without
 // gating them: a fork from the race-instrumented test binary on a host that
 // other worktrees' checks load varies by tens of milliseconds at p95, before
 // this change as after it. The whole-process gate covers SessionStart.
@@ -1121,8 +1138,8 @@ func TestHookLatencyUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const runs = 200
-	starts := hookLatency(t, st, env, model.SessionStart, runs, func(i int) []byte {
+	const starts, runs = 200, 1000 // reported only; gated (Ruling 114)
+	started := hookLatency(t, st, env, model.SessionStart, starts, func(i int) []byte {
 		return fmt.Appendf(nil, `{"session_id":"S%d","transcript_path":%q,"cwd":%q,"source":"startup"}`, i, tr, wt)
 	})
 	tools := hookLatency(t, st, env, model.PostToolUse, runs, func(int) []byte {
@@ -1139,8 +1156,9 @@ func TestHookLatencyUnchanged(t *testing.T) {
 	for _, m := range []struct {
 		kind model.EventKind
 		d    []time.Duration
-	}{{model.SessionStart, starts}, {model.PostToolUse, tools}} {
-		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, runs, m.d[runs/2], m.d[runs*95/100], m.d[runs-1])
+	}{{model.SessionStart, started}, {model.PostToolUse, tools}} {
+		n := len(m.d)
+		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, n, m.d[n/2], m.d[n*95/100], m.d[n-1])
 	}
 	if p95 := tools[runs*95/100]; p95 >= 20*time.Millisecond {
 		t.Errorf("PostToolUse p95 = %v, want < 20ms", p95)
@@ -1186,13 +1204,13 @@ func TestHookReadsTaskFromEnvironment(t *testing.T) {
 // PaneInfo reports it.
 var hookSocketPane = tmux.Pane{ID: "%3", Session: "api", WindowID: "@7", Socket: "/tmp/tmux-1/default"}
 
-// TestHookLatencySocketPane is TestHookLatency's method and threshold (200
-// in-process runs, p95 under 20 ms, no retry) through the real hookEnv in a
-// pane whose PaneInfo carries a socket, with a fake tmux. It gates
-// PostToolUse, as TestHookLatency does, and reports SessionStart (one real
-// git process each), Stop with nothing queued and SessionEnd (each
-// SessionEnd's session is brought back first by an untimed prompt) without
-// gating them: one gate per test keeps a loaded CI runner's stalls from
+// TestHookLatencySocketPane is TestHookLatency's method and threshold (1000
+// in-process PostToolUse runs in one pass, p95 under 20 ms, no retry, Ruling
+// 114) through the real hookEnv in a pane whose PaneInfo carries a socket,
+// with a fake tmux. It gates PostToolUse, as TestHookLatency does, and
+// reports 200 each of SessionStart (one real git process each), Stop with
+// nothing queued and SessionEnd (each SessionEnd's session is brought back
+// first by an untimed prompt) without gating them: one gate per test keeps a loaded CI runner's stalls from
 // failing it three times as often. tmux is asked once per SessionStart and
 // never otherwise.
 func TestHookLatencySocketPane(t *testing.T) {
@@ -1221,16 +1239,16 @@ func TestHookLatencySocketPane(t *testing.T) {
 		}
 		_ = f.Close()
 	}
-	const runs = 200
+	const runs, gatedRuns = 200, 1000 // reported; gated (Ruling 114)
 	last := fmt.Sprintf("S%d", runs-1)
 	body := func(id, extra string) []byte {
 		return fmt.Appendf(nil, `{"session_id":%q,"transcript_path":%q,"cwd":%q%s}`, id, tr, cwd, extra)
 	}
-	// timed is hookLatency's loop: prep(i) runs untimed and gives the i-th
-	// payload.
-	timed := func(kind model.EventKind, prep func(i int) []byte) []time.Duration {
-		d := make([]time.Duration, 0, runs)
-		for i := range runs {
+	// timed is hookLatency's loop of n runs: prep(i) runs untimed and gives
+	// the i-th payload.
+	timed := func(kind model.EventKind, n int, prep func(i int) []byte) []time.Duration {
+		d := make([]time.Duration, 0, n)
+		for i := range n {
 			b := prep(i)
 			began := time.Now()
 			if _, rerr := hook.Run(context.Background(), kind, b, env, st, config.Default()); rerr != nil {
@@ -1241,18 +1259,18 @@ func TestHookLatencySocketPane(t *testing.T) {
 		slices.Sort(d)
 		return d
 	}
-	starts := timed(model.SessionStart, func(i int) []byte {
+	starts := timed(model.SessionStart, runs, func(i int) []byte {
 		return body(fmt.Sprintf("S%d", i), `,"source":"startup"`)
 	})
-	tools := timed(model.PostToolUse, func(int) []byte {
+	tools := timed(model.PostToolUse, gatedRuns, func(int) []byte {
 		appendLine()
 		return body(last, `,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
 	})
-	stops := timed(model.Stop, func(int) []byte {
+	stops := timed(model.Stop, runs, func(int) []byte {
 		appendLine()
 		return body(last, `,"last_assistant_message":"Done."`)
 	})
-	ends := timed(model.SessionEnd, func(int) []byte {
+	ends := timed(model.SessionEnd, runs, func(int) []byte {
 		if _, rerr := hook.Run(context.Background(), model.UserPromptSubmit, body(last, `,"prompt":"go on"`), env, st, config.Default()); rerr != nil {
 			t.Fatal(rerr)
 		}
@@ -1263,8 +1281,9 @@ func TestHookLatencySocketPane(t *testing.T) {
 		d     []time.Duration
 		gated bool
 	}{{model.SessionStart, starts, false}, {model.PostToolUse, tools, true}, {model.Stop, stops, false}, {model.SessionEnd, ends, false}} {
-		p50, p95 := m.d[runs/2], m.d[runs*95/100]
-		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, runs, p50, p95, m.d[runs-1])
+		n := len(m.d)
+		p50, p95 := m.d[n/2], m.d[n*95/100]
+		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, n, p50, p95, m.d[n-1])
 		if m.gated && p95 >= 20*time.Millisecond {
 			t.Errorf("%s p95 = %v, want < 20ms", m.kind, p95)
 		}

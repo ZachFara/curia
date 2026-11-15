@@ -39,16 +39,18 @@ var (
 
 func init() {
 	cmd := &cobra.Command{
-		Use:   "pause <id>",
-		Short: "Stop a task's agent, commit its work and remove its worktree (the user only)",
+		Use:         "pause <id>",
+		Short:       "Stop a task's agent, commit its work and remove its worktree (the user only)",
+		Annotations: userOnlyMark(),
 		Long: "Closes the tmux panes of the task's agent sessions and its window, commits\n" +
 			"everything in its worktree (\"curia: WIP <id> (paused)\", through the\n" +
 			"repository's hooks unless --no-verify), then removes the worktree with git\n" +
 			"worktree remove, never forced. The branch stays, and curia resume <id>\n" +
 			"brings the worktree and the agent's conversation back. A worktree holding\n" +
-			"ignored files (dependencies, .env) is not removed, because git would delete\n" +
-			"them without a word. Refuses while an agent is working or waiting, unless\n" +
-			"--force. Refuses to run inside an agent session.",
+			"ignored files (dependencies, .env) is kept where it is, because git would\n" +
+			"delete them without a word; the task is paused all the same and resume\n" +
+			"reuses it. Refuses while an agent is working or waiting, unless --force.\n" +
+			"Refuses to run inside an agent session.",
 		Args: cobra.ExactArgs(1),
 		RunE: runPause,
 	}
@@ -59,8 +61,8 @@ func init() {
 
 func runPause(cmd *cobra.Command, args []string) error {
 	// No agent may pause anything (spec section 7).
-	if refuseInsideAgent() != nil {
-		return errors.New("curia pause cannot run inside an agent session (CLAUDECODE is set): only the user may pause a task")
+	if err := userOnly("pause", "pause a task"); err != nil {
+		return err
 	}
 	o := pauseOptions{Force: pauseForce, NoVerify: pauseNoVerify}
 	return lifecycleRunCmd(cmd, args[0], func(ctx context.Context, st *store.Store, cfg config.Config, out io.Writer) error {
@@ -104,10 +106,6 @@ func pauseTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.
 	if err != nil {
 		return err
 	}
-	// Checked first so that, in the usual case, nothing at all is done.
-	if err = pauseIgnoredStop(ctx, t, path, "Nothing was done."); err != nil {
-		return err
-	}
 	plan, err := pauseMakePlan(ctx, st, tm, cfg, t, o.Force)
 	if err != nil {
 		return err
@@ -119,15 +117,14 @@ func pauseTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.
 	if err != nil {
 		return err
 	}
-	left := "Left: the agent's panes closed, " + commit + ", the worktree " + sanitize.Line(path, 300) + " in place."
-	if err = pauseIgnoredStop(ctx, t, path, left); err != nil {
-		return err
+	kept := pauseKeepWorktree(ctx, path, out)
+	if !kept {
+		left := "Left: the agent's panes closed, " + commit + ", the worktree " + sanitize.Line(path, 300) + " in place."
+		if err = pauseRemove(ctx, t, path, left, out); err != nil {
+			return err
+		}
 	}
-	_, _ = fmt.Fprintln(out, "No ignored files in the worktree")
-	if err = pauseRemove(ctx, t, path, left, out); err != nil {
-		return err
-	}
-	return pauseRecord(ctx, st, t, plan.resume, out)
+	return pauseRecord(ctx, st, t, plan.resume, kept, out)
 }
 
 // pauseCheck is pause's first rule: the task exists, was spawned, is not
@@ -394,22 +391,23 @@ func pauseCommitError(t model.Task, path string, err error, index string) error 
 		t.ID, err, sanitize.Line(path, 300), index, t.ID, t.ID)
 }
 
-// pauseIgnoredStop stops the pause when the worktree holds ignored files,
-// which git worktree remove deletes without a word: a paused task has no
-// worktree, so the pause cannot finish. left says what the pause has done
-// so far.
-func pauseIgnoredStop(ctx context.Context, t model.Task, path, left string) error {
+// pauseKeepWorktree reports whether the pause keeps the worktree at path in
+// place (Ruling 111): when it holds ignored files, which git worktree remove
+// deletes without a word, or when Curia cannot tell. It says which.
+func pauseKeepWorktree(ctx context.Context, path string, out io.Writer) bool {
 	n, names, err := lifecycleIgnored(ctx, path)
-	if err != nil {
-		return fmt.Errorf("%s not paused: look for ignored files: %w. %s", t.ID, err, left)
+	switch {
+	case err != nil:
+		_, _ = fmt.Fprintf(out, "Kept worktree %s: Curia could not look for ignored files in it (%s), so it does not remove it\n",
+			sanitize.Line(path, 300), sanitize.Line(err.Error(), 200))
+		return true
+	case n > 0:
+		_, _ = fmt.Fprintf(out, "Kept worktree %s: it holds %s (%s), which git worktree remove would delete without a word\n",
+			sanitize.Line(path, 300), lifecycleCount(n, "ignored entry", "ignored entries"), strings.Join(names, ", "))
+		return true
 	}
-	if n == 0 {
-		return nil
-	}
-	return fmt.Errorf("%s not paused: its worktree %s holds %s (%s), which git worktree remove would delete without a word, "+
-		"so Curia does not remove it. %s To finish: move or delete them yourself (if .curia/setup.sh recreates them, "+
-		"deleting is safe: curia resume runs it), then run curia pause %s again",
-		t.ID, sanitize.Line(path, 300), lifecycleCount(n, "ignored entry", "ignored entries"), strings.Join(names, ", "), left, t.ID)
+	_, _ = fmt.Fprintln(out, "No ignored files in the worktree")
+	return false
 }
 
 // pauseRemove removes the worktree with git worktree remove, never forced,
@@ -432,20 +430,28 @@ func pauseRemove(ctx context.Context, t model.Task, path, left string, out io.Wr
 }
 
 // pauseRecord stores the pause: paused_at, no pane, the resume session,
-// and no launch claim (nothing is launching; resume takes a new one).
-func pauseRecord(ctx context.Context, st *store.Store, t model.Task, resume string, out io.Writer) error {
+// and no launch claim (nothing is launching; resume takes a new one). kept
+// says the worktree stayed on disk, which resume then reuses.
+func pauseRecord(ctx context.Context, st *store.Store, t model.Task, resume string, kept bool, out io.Writer) error {
 	now := clock()
 	_, err := st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
 		cur.PausedAt, cur.Pane, cur.ResumeSession, cur.LaunchedAt, cur.UpdatedAt = now, "", resume, time.Time{}, now
 		return cur, nil
 	})
 	if err != nil {
-		return fmt.Errorf("%s: the worktree is removed and the branch %s kept, but recording the pause failed: %w. "+
-			"To finish: curia spawn %s starts an agent on the branch again (a new conversation)", t.ID, t.Branch, err, t.ID)
+		where := "the worktree is removed"
+		if kept {
+			where = "the worktree is kept"
+		}
+		return fmt.Errorf("%s: %s and the branch %s kept, but recording the pause failed: %w. "+
+			"To finish: curia spawn %s starts an agent on the branch again (a new conversation)", t.ID, where, t.Branch, err, t.ID)
 	}
 	how := "no session to resume: the agent will start from the brief"
 	if resume != "" {
 		how = "it continues session " + spawnShortID(resume)
+	}
+	if kept {
+		how += "; the worktree stays where it is and resume reuses it"
 	}
 	_, _ = fmt.Fprintf(out, "Paused %s: curia resume %s brings it back (%s)\n", t.ID, t.ID, how)
 	return nil

@@ -114,8 +114,9 @@ func init() {
 			"session). It never touches a window that exists and types nothing itself; a\n" +
 			"restored team lead gets a message asking it to respawn its team. Refuses to\n" +
 			"run inside an agent session.",
-		Args: cobra.NoArgs,
-		RunE: runRestore,
+		Annotations: userOnlyMark(),
+		Args:        cobra.NoArgs,
+		RunE:        runRestore,
 	}
 	c.Flags().BoolVar(&restoreDryRun, "dry-run", false, "print the plan and change nothing")
 	c.Flags().BoolVar(&restoreYes, "yes", false, "restore without asking")
@@ -134,8 +135,8 @@ type restoreEnv struct {
 
 func runRestore(cmd *cobra.Command, _ []string) error {
 	// No agent may start agents (spec section 7).
-	if refuseInsideAgent() != nil {
-		return errors.New("curia restore cannot run inside an agent session (CLAUDECODE is set): only the user may restore sessions")
+	if err := userOnly("restore", "restore sessions"); err != nil {
+		return err
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -729,8 +730,8 @@ func restoreOpen(ctx context.Context, e restoreEnv, r restoreRow, tools restoreT
 }
 
 // restoreClaimTask checks that t's worktree is still its worktree on its
-// branch and takes the task's launch claim (store.ClaimLaunch), so no
-// curia spawn of the task runs meanwhile.
+// branch and takes the task's launch claim (store.ClaimLaunch, against the
+// pane the plan read), so no curia spawn of the task runs meanwhile.
 func restoreClaimTask(ctx context.Context, st *store.Store, t model.Task) (model.Task, error) {
 	ours, err := worktreeIsOurs(ctx, t.Repo, t.Worktree, t.Branch)
 	if err != nil {
@@ -740,7 +741,7 @@ func restoreClaimTask(ctx context.Context, st *store.Store, t model.Task) (model
 		return model.Task{}, fmt.Errorf("%s is missing or no longer %s's worktree on %s; no window opened",
 			sanitize.Line(t.Worktree, 300), t.ID, sanitize.Line(t.Branch, 80))
 	}
-	claimed, err := st.ClaimLaunch(ctx, t.ID, clock(), restoreHold)
+	claimed, err := st.ClaimLaunch(ctx, t.ID, t.Pane, clock(), restoreHold)
 	if errors.Is(err, store.ErrTaskBusy) {
 		return model.Task{}, fmt.Errorf("%s was launched less than %v ago (a curia spawn may be starting it): wait, then run curia restore again", t.ID, restoreHold)
 	}
@@ -894,7 +895,7 @@ func restoreNotice(ctx context.Context, e restoreEnv, l *restoreLaunch) {
 		_, _ = fmt.Fprintf(e.out, "team notice %s for %s: %s\n", m.ID, short, sanitize.Line(err.Error(), 300))
 		return
 	}
-	_, _ = fmt.Fprintf(e.out, "team notice for %s: %s\n", short, sendOutcomeLine(out))
+	_, _ = fmt.Fprintf(e.out, "team notice for %s: %s\n", short, sayOutcomeLine(out))
 	_, _ = fmt.Fprintln(e.out, "Restore never types the notice itself: it is typed only into an empty prompt (a resumed "+
 		"session shows \"← for agents\" for its first seconds), otherwise the lead gets it at its next stop or by "+
 		"check_messages. Prompt the lead if it stays idle.")
