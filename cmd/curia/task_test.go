@@ -749,3 +749,78 @@ func TestTaskReady(t *testing.T) {
 	out, err := taskRun(t, nil, "task", "ready", "T-7")
 	taskWantErr(t, err, out, "T-7", "no such task")
 }
+
+func TestTaskLsShowsReviewThenDone(t *testing.T) {
+	db := taskHome(t)
+	repo := taskRepo(t, "main")
+	taskMust(t, "task", "add", "Work", "--repo", repo)
+	taskMust(t, "task", "ready", "T-1")
+	st := taskOpen(t, db)
+	ctx := context.Background()
+	now := decisionsParse(t, taskNow)
+	complete := func() {
+		t.Helper()
+		_, _, err := st.CompleteTask(ctx, model.Review{TaskID: "T-1", SessionID: "s1", Summary: "done", Tests: model.TestsPassed, CreatedAt: now})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := func() (string, string) {
+		t.Helper()
+		rows := taskLs(t, "--status", "all")
+		if len(rows) != 1 {
+			t.Fatalf("rows = %+v", rows)
+		}
+		return rows[0].Status, rows[0].StoredStatus
+	}
+	complete()
+	if s, stored := status(); s != "review" || stored != "ready" {
+		t.Fatalf("pending: %s (stored %s), want review (ready)", s, stored)
+	}
+	if _, _, err := st.CloseReview(ctx, "R-1", store.ReviewClose{Status: model.ReviewMerged, How: model.ApproveMerge}, now); err != nil {
+		t.Fatal(err)
+	}
+	if s, stored := status(); s != "done" || stored != "ready" {
+		t.Fatalf("merged: %s (stored %s), want done (ready)", s, stored)
+	}
+	complete()
+	if s, _ := status(); s != "review" {
+		t.Fatalf("second complete_task: %s, want review", s)
+	}
+}
+
+func TestTaskLsStatusFilterReviewAndDone(t *testing.T) {
+	db := taskHome(t)
+	repo := taskRepo(t, "main")
+	for _, title := range []string{"Review", "Done", "Changes", "Plain"} {
+		taskMust(t, "task", "add", title, "--repo", repo)
+		taskMust(t, "task", "ready", "T-"+map[string]string{"Review": "1", "Done": "2", "Changes": "3", "Plain": "4"}[title])
+	}
+	st := taskOpen(t, db)
+	ctx := context.Background()
+	now := decisionsParse(t, taskNow)
+	for _, id := range []string{"T-1", "T-2", "T-3"} {
+		if _, _, err := st.CompleteTask(ctx, model.Review{TaskID: id, SessionID: "s", Summary: "x", Tests: model.TestsPassed, CreatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := st.CloseReview(ctx, "R-2", store.ReviewClose{Status: model.ReviewMerged, How: model.ApproveMerge}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.CloseReview(ctx, "R-3", store.ReviewClose{Status: model.ReviewChanges, Notes: "fix"}, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"--status", "review"}, []string{"T-1"}},
+		{[]string{"--status", "done"}, []string{"T-2"}},
+		{[]string{"--status", "ready"}, []string{"T-3", "T-4"}},
+		{nil, []string{"T-3", "T-4", "T-1", "T-2"}},
+	} {
+		if got := taskLsIDs(t, c.args...); !slices.Equal(got, c.want) {
+			t.Errorf("task ls %v = %v, want %v", c.args, got, c.want)
+		}
+	}
+}
