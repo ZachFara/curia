@@ -239,7 +239,7 @@ Eighteen features, grouped by the four jobs from section 1 plus a cost layer: se
 
 **Statuses:** backlog, ready, running, needs\_decision, review, done, dropped. Only backlog, ready and dropped are set by me; the rest are derived from session and review state, so the board never goes stale.
 
-**Commands:** `curia task add "title" --repo . [--body file.md]`, `curia task ls`, `curia task edit T-42`, `curia task ready T-42`. The task body is the starting brief given to the agent, so writing a good task is writing a good prompt.
+**Commands:** `curia task add "title" --repo . [--body file.md]`, `curia task ls`, `curia task edit T-42`, `curia task ready T-42`. The task body is the starting brief given to the agent, so writing a good task is writing a good prompt. (amended, Ruling 107: `curia task edit` opens an editor only from the `editor` config option, an argument vector run without a shell; `$VISUAL` and `$EDITOR` are not read, and flags cover every field. amended, Ruling 113: `task add`, `edit`, `ready` and `import` are user-only; an agent cannot run them.)
 
 **Views:** a kanban view inside the F3 popup (`t`), and `curia task ls` for scripting.
 
@@ -250,16 +250,16 @@ Eighteen features, grouped by the four jobs from section 1 plus a cost layer: se
 **Spawn:** `curia spawn T-42 [--agent claude] [--model opus]` does, in order:
 
 1. Create a worktree at `<repo>/../.curia-worktrees/<repo>-T-42` on branch `curia/T-42-<slug>` from the task's base branch.
-2. Run the repo's setup script if one exists (`.curia/setup.sh`: install deps, copy `.env`).
+2. Run the repo's setup script if one exists (`.curia/setup.sh`: install deps, copy `.env`). (amended, Ruling 108: it runs only if the user approved that exact content for that repository with `curia setup approve`; an unapproved or changed script is skipped with a note. amended, Ruling 109: approval shows the whole script, refuses one the display cannot show faithfully, and needs the first 8 hex of its hash typed at the terminal.)
 3. Open a tmux window named `T-42` in a session named after the repo.
 4. Launch the agent with the task body plus a standard preamble (how to use decision tools, how to signal completion).
 5. Link session to task; task becomes `running`.
 
 **Native worktrees first:** for Claude Code, steps 1 and 3 wrap Claude Code's own worktree sessions (`claude -w <name> --tmux`) instead of Curia running git and tmux itself. Curia keeps its own worktree path only for Codex. `--team` adds an Agent Teams lead (F14).
 
-**Lifecycle commands:** `curia pause` (commit WIP, remove worktree, keep branch), `curia resume` (recreate worktree, `claude --resume <session>`), `curia clean` (remove worktree and branch after merge). Pattern from Claude Squad.
+**Lifecycle commands:** `curia pause` (commit WIP, remove worktree, keep branch; amended, Ruling 111: the worktree is removed only when it holds no ignored files, otherwise it is kept in place and the task is marked paused), `curia resume` (recreate worktree, `claude --resume <session>`), `curia clean` (remove worktree and branch after merge; amended, Ruling 111: ignored files are removed only under `--force`, after being named, and the task is marked dropped). All three are user-only (amended, Ruling 112). Pattern from Claude Squad.
 
-**Agent-facing CLI:** `curia ls --json`, `curia read <pane> [--lines 50]` (capture-pane), `curia send <pane> "text"`, `curia spawn`. Agents can call these, which is what the operator skill (F14) builds on. `send` only targets panes registered as agent sessions.
+**Agent-facing CLI:** `curia ls --json`, `curia read <pane> [--lines 50]` (capture-pane), `curia send <pane> "text"`, `curia spawn`. Agents can call these, which is what the operator skill (F14) builds on. `send` only targets panes registered as agent sessions. (amended, Ruling 112: `send` labels a message as from the user only for a person at a terminal, otherwise as from another agent session. amended, Ruling 113: an agent's `send` is refused when the target already holds 5 queued agent messages or the sender made 20 in 10 minutes, and an agent's `spawn` accepts only a task whose stored status is `ready`.)
 
 ### F7. Decision queue
 
@@ -357,7 +357,7 @@ There is deliberately no tool to answer a ticket. Answers only come through `cur
 
 **Why this split:** Agent Teams works at the level of one job (one lead, one codebase, short-lived). Curia works at the level of the whole portfolio (many independent tasks across repos and days, plus decisions, precedent, cost and review). A Curia executor agent would duplicate the team lead and compete with an experimental Anthropic feature that will keep moving.
 
-**Detection:** teammates are ordinary Claude Code instances, so F1's hooks fire for each. Curia reads team membership from the team config Claude Code maintains, where the lead's entry carries the agent type `team-lead`, and stores it as two new `sessions` columns: `team_id` and `team_role` (lead, teammate, or empty for solo sessions).
+**Detection:** teammates are ordinary Claude Code instances, so F1's hooks fire for each. Curia reads team membership from the team config Claude Code maintains, where the lead's entry carries the agent type `team-lead`, and stores it as two new `sessions` columns: `team_id` and `team_role` (lead, teammate, or empty for solo sessions). (amended, Ruling 98: the config is `~/.claude/teams/session-<8 hex of the lead's session id>/config.json`; the lead is the member whose session is `leadSessionId`, its pane id is the literal `leader`, a teammate is identified only by its `tmuxPaneId`. amended, Ruling 115: a pane match counts only when the session is in the lead's tmux window and has no task or the lead's.)
 
 **Dashboard:** a team shows as one collapsible group: the lead row on top, teammates indented beneath. The group row aggregates state (worst state wins, so one waiting teammate marks the team), cost, open decisions and cache state. Solo sessions display as before.
 
@@ -423,12 +423,12 @@ Curia validates `schema_version`, ignores unknown fields, and never fails the ca
 
 **What:** the inbound mirror of the decision queue. Agents send judgment calls up to me (F7); this sends my thoughts down to them. I type a message once, in plain language, and Curia works out which agent, task or repo it belongs to and how it should land.
 
-**Entry points:** `curia say "..."` from any shell (including SSH from my phone), and `prefix + m` in tmux, which opens a one-line prompt in a popup.
+**Entry points:** `curia say "..."` from any shell (including SSH from my phone), and `prefix + m` in tmux, which opens a one-line prompt in a popup. (amended, Ruling 112: `curia say` is user-only and needs a controlling terminal, so SSH needs a pty; a message from anywhere else is not sent as the user's.)
 
 **Routing, in order:**
 
 1. **Explicit address.** A message starting with `@<repo>`, `@<alias>` or a task id (`T-42:`) routes deterministically against repo names, branches, task ids and aliases. No model call.
-2. **Haiku suggestion.** Otherwise Curia calls Haiku through `claude -p --model haiku --output-format json`, so it runs on my existing Claude login with no separate API key. The prompt holds my message plus a compact list of live sessions and open tasks (id, repo, branch, task title, latest update). Haiku returns `{target, kind, confidence, runner_up}`. Timeout: 5 seconds; on timeout or error I pick the target by hand.
+2. **Haiku suggestion.** Otherwise Curia calls Haiku through `claude -p --model haiku --output-format json` (amended, Ruling 99: with `--safe-mode --no-session-persistence --tools ""` and no `--json-schema`; the plain JSON answer is parsed strictly), so it runs on my existing Claude login with no separate API key. The prompt holds my message plus a compact list of live sessions and open tasks (id, repo, branch, task title, latest update). Haiku returns `{target, kind, confidence, runner_up}`. Timeout: 5 seconds; on timeout or error I pick the target by hand.
 
 **Message kinds** (from the same Haiku call, or a prefix like `rule:` or `task:`):
 
@@ -447,7 +447,7 @@ Curia validates `schema_version`, ignores unknown fields, and never fails the ca
 - **Undo window.** An auto-routed message shows `→ api-server (u to undo, 5s)` and is held for 5 seconds before delivery. Undo cancels it outright, since nothing has reached the agent yet.
 - **Keeps measuring.** One auto-eligible message in ten still asks for confirmation, so accuracy keeps being measured. If it drops below 95%, auto-send switches itself off and says so in the status badge.
 
-**Data:** a `messages` table: `id`, `text`, `kind`, `target_session`, `target_task`, `target_repo`, `suggested_target`, `confidence`, `routed_by` (address, confirmed, overridden, auto), `status` (held, delivered, undone, cancelled), `created_at`, `delivered_at`. Labels for the accuracy gate come from `routed_by`.
+**Data:** a `messages` table: `id`, `text`, `kind`, `target_session`, `target_task`, `target_repo`, `suggested_target`, `confidence`, `routed_by` (address, confirmed, overridden, auto), `status` (held, delivered, undone, canceled; amended, Ruling 97: the spelling is `canceled`), `created_at`, `delivered_at`. Labels for the accuracy gate come from `routed_by`.
 
 **Safety:** routed text goes through the same sanitizing path as decision answers (section 7). The list Haiku sees contains only session metadata, never transcript content.
 
