@@ -34,7 +34,7 @@ import (
 var (
 	reviewApproveFlag, reviewMergeFlag, reviewPRFlag  bool
 	reviewChangesFlag, reviewDropFlag, reviewJSONFlag bool
-	reviewNoteFlag                                    string
+	reviewNoteFlag, reviewHeadFlag                    string
 )
 
 // reviewMaxStdin is the most `--note -` reads from stdin.
@@ -150,7 +150,10 @@ func init() {
 			"named): a approves, c requests changes, x drops, o opens the diff tool.\n" +
 			"--approve merges the task's branch into its base in your checkout (git merge\n" +
 			"--no-ff, which must have the base checked out), or with --pr pushes it and\n" +
-			"opens a pull request with gh; the default is review.approve. --request-changes\n" +
+			"opens a pull request with gh; the default is review.approve. It needs --head\n" +
+			"<commit>, the branch head you looked at (curia review <id> --json prints it;\n" +
+			"at least 7 hex digits), and refuses when the branch is no longer there.\n" +
+			"Without --head it prints the head and the command to run. --request-changes\n" +
 			"--note <text> (or - for stdin) sends the note to the task's agent as a\n" +
 			"message. --drop drops the task; its agent is not stopped. --json prints the\n" +
 			"review's detail and acts on nothing. Refuses to run inside an agent session.",
@@ -162,6 +165,7 @@ func init() {
 	f.BoolVar(&reviewApproveFlag, "approve", false, "approve the review: merge, or open a pull request")
 	f.BoolVar(&reviewMergeFlag, "merge", false, "with --approve: merge into the base branch in your checkout")
 	f.BoolVar(&reviewPRFlag, "pr", false, "with --approve: push the branch and open a pull request")
+	f.StringVar(&reviewHeadFlag, "head", "", "with --approve: the branch head you looked at (a commit id, 7 to 64 hex digits)")
 	f.BoolVar(&reviewChangesFlag, "request-changes", false, "send the task back to its agent with --note")
 	f.StringVar(&reviewNoteFlag, "note", "", "the change request (- reads it from stdin)")
 	f.BoolVar(&reviewDropFlag, "drop", false, "drop the task (its agent is not stopped)")
@@ -253,8 +257,8 @@ func reviewFlagAction() (reviewAction, error) {
 		return 0, errors.New("--json acts on nothing: give it without --approve, --request-changes or --drop")
 	}
 	switch {
-	case (reviewMergeFlag || reviewPRFlag) && !reviewApproveFlag:
-		return 0, errors.New("--merge and --pr go with --approve")
+	case (reviewMergeFlag || reviewPRFlag || reviewHeadFlag != "") && !reviewApproveFlag:
+		return 0, errors.New("--merge, --pr and --head go with --approve")
 	case reviewMergeFlag && reviewPRFlag:
 		return 0, errors.New("give --merge or --pr, not both")
 	case reviewNoteFlag != "" && !reviewChangesFlag:
@@ -317,10 +321,14 @@ func reviewRunAction(cmd *cobra.Command, act reviewAction, arg string, how model
 	var line string
 	switch act {
 	case reviewDoApprove:
+		var seen string
+		if seen, err = reviewFlagHead(ctx, st, r, how); err != nil {
+			return err
+		}
 		if err = reconcile(ctx, st, tm, cfg.LogPath, clock()); err != nil {
 			return err
 		}
-		line, err = reviewApprove(ctx, st, cfg, r.ID, how, "", model.AnsweredCLI, clock())
+		line, err = reviewApprove(ctx, st, cfg, r.ID, how, seen, model.AnsweredCLI, clock())
 	case reviewDoChanges:
 		line, err = reviewRequestChanges(ctx, st, tm, logger, r.ID, note, model.AnsweredCLI, clock())
 	default:
@@ -332,6 +340,38 @@ func reviewRunAction(cmd *cobra.Command, act reviewAction, arg string, how model
 	reviewMarkers(ctx, st, tm, cfg.LogPath, r.TaskID)
 	_, err = fmt.Fprintln(out, sanitize.Line(line, reviewLineMax))
 	return err
+}
+
+// reviewFlagHead is the full commit id --head names on review r's branch (Ruling 121). Without --head it
+// says what the branch is at now and the exact command that approves that commit; a --head that is not
+// the branch's head now is "the branch changed since you looked".
+func reviewFlagHead(ctx context.Context, st *store.Store, r model.Review, how model.ApproveHow) (string, error) {
+	_, t, err := reviewPending(ctx, st, r.ID)
+	if err != nil {
+		return "", err
+	}
+	if reviewHeadFlag != "" {
+		return reviewResolveHead(ctx, t, reviewHeadFlag)
+	}
+	head, err := reviewHead(ctx, t)
+	switch {
+	case err != nil:
+		return "", err
+	case head == "":
+		return "", fmt.Errorf("--approve needs --head <commit>, and branch %s does not exist", t.Branch)
+	}
+	what := ""
+	if stat, serr := reviewStatAt(ctx, t, head, reviewStatWidth); serr == nil && stat != "" {
+		lines := strings.Split(stat, "\n")
+		what = " (" + strings.TrimSpace(lines[len(lines)-1]) + ")"
+	}
+	flag := ""
+	if how != "" {
+		flag = " --" + string(how)
+	}
+	return "", fmt.Errorf("--approve needs --head <commit>, the branch head you looked at: %s is at %s%s. "+
+		"Look at it with curia review %s (or --json), then approve exactly that commit with:\n  curia review %s --approve%s --head %s",
+		t.Branch, head, what, r.ID, r.ID, flag, head)
 }
 
 // reviewRunView runs the review view (all pending reviews, or those of the
@@ -444,8 +484,8 @@ func reviewPending(ctx context.Context, st *store.Store, id string) (model.Revie
 // reviewApprove, reviewRequestChanges and reviewDrop are the three actions of section 4.6; each returns its outcome line.
 //
 // reviewApprove approves pending review reviewID as how says ("" takes review.approve): a merge, or a pull
-// request. seen is the branch head the user was shown (the view's), or "" for the flag form, where the head
-// taken by the checks is the one approved. Before git runs, the approval's intent (how, the head, the stat) is
+// request. seen is the full commit id of the branch head the user was shown (the view's, or the flag form's
+// --head), and the only commit approved: when the branch is elsewhere it refuses. Before git runs, the approval's intent (how, the head, the stat) is
 // recorded on the review, which is also its claim: a second approval is refused while it stands. An intent
 // to merge whose head is already in the base, left by an approval that was killed after git merged, is
 // recorded as merged. A refusal or failure leaves the review pending.
@@ -475,7 +515,7 @@ func reviewApprove(ctx context.Context, st *store.Store, cfg config.Config, revi
 	if err != nil {
 		return "", err
 	}
-	if seen != "" && seen != head {
+	if seen != head {
 		return "", errReviewBranchChanged
 	}
 	if r, err = st.ClaimReviewIntent(ctx, r.ID, store.ReviewIntent{How: how, Head: head, DiffStat: stat}, now, reviewIntentHold); err != nil {
@@ -511,7 +551,7 @@ func reviewBusyNow(ctx context.Context, st *store.Store, r model.Review, err err
 }
 
 // reviewFoundDone records review r merged, and reports done, when an approval recorded the intent to merge
-// r's head, the branch is still at that head (and it is seen, when seen is given), and the base already
+// r's head, the branch is still at that head, which is seen, and the base already
 // contains it: an approval whose process was killed after git merged. Otherwise it does nothing.
 func reviewFoundDone(ctx context.Context, st *store.Store, r model.Review, t model.Task, seen string,
 	via model.AnsweredVia, now time.Time,

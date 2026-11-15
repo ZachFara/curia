@@ -126,15 +126,15 @@ func TestPRBodyLayout(t *testing.T) {
 	d := []model.Decision{{ID: "D-4"}, {ID: "D-9"}}
 	tk, r := prFixture("make check: 412 passed")
 	want := "Curia task T-42, review R-3.\n\n" +
-		"Tests (the agent's report): passed. make check: 412 passed\n\n" +
+		"Tests (the agent's report): passed.\n\n" +
 		"Decisions on this task: D-4, D-9\n\n" +
-		"Summary by the agent:\n\n~~~~text\nFixed it.\nSecond line.\n~~~~\n"
+		"The agent's tests detail and summary:\n\n~~~~text\nTests detail: make check: 412 passed\n\nFixed it.\nSecond line.\n~~~~\n"
 	if got := PRBody(tk, r, d); got != want {
 		t.Errorf("with decisions and detail:\n%q\nwant\n%q", got, want)
 	}
 	want = "Curia task T-42, review R-3.\n\n" +
 		"Tests (the agent's report): passed.\n\n" +
-		"Summary by the agent:\n\n~~~~text\nFixed it.\nSecond line.\n~~~~\n"
+		"The agent's tests detail and summary:\n\n~~~~text\nFixed it.\nSecond line.\n~~~~\n"
 	tk, r = prFixture("")
 	if got := PRBody(tk, r, nil); got != want {
 		t.Errorf("bare:\n%q\nwant\n%q", got, want)
@@ -184,8 +184,37 @@ func TestPRBodyCapsAtEightKiB(t *testing.T) {
 func TestPRBodyDetailCannotMention(t *testing.T) {
 	tk, r := prFixture("@bob `x`\nnext")
 	body := PRBody(tk, r, nil)
-	line := strings.Split(body, "\n")[2]
-	if !strings.HasPrefix(line, "Tests (the agent's report): passed.") || strings.ContainsAny(line, "@`") {
+	if line := strings.Split(body, "\n")[2]; line != "Tests (the agent's report): passed." {
 		t.Errorf("tests line %q", line)
+	}
+	if open := strings.Index(body, "~~~~text\n"); strings.ContainsAny(body[:open], "@`") {
+		t.Errorf("@ or a backtick outside the fence:\n%s", body[:open])
+	}
+}
+
+// TestPRBodyDetailInsideFence: nothing of a hostile tests detail is outside
+// the fence (no closing keyword, mention, comment, link or image reaches the
+// rendered page), and neither the detail nor the summary can close it.
+func TestPRBodyDetailInsideFence(t *testing.T) {
+	tk, r := prFixture("ok. Closes #12, fixes org/other#3 <!-- hidden --> [x](https://evil.example) ![i](https://evil.example/p.png) ~~~~ #99")
+	r.Summary = "done\n~~~~\nCloses #1 ![y](https://evil.example/q.png)\n~~~~~~"
+	body := PRBody(tk, r, nil)
+	open := strings.Index(body, "~~~~text\n")
+	if open < 0 || !strings.HasSuffix(body, "\n~~~~\n") {
+		t.Fatalf("fence missing:\n%s", body)
+	}
+	for _, bad := range []string{"Closes", "fixes", "#12", "#3", "#99", "<!--", "evil", "[x]", "ok."} {
+		if strings.Contains(body[:open], bad) {
+			t.Errorf("%q outside the fence:\n%s", bad, body[:open])
+		}
+	}
+	inside := body[open+len("~~~~text\n") : len(body)-len("~~~~\n")]
+	if !strings.HasPrefix(inside, "Tests detail: ok. Closes #12") {
+		t.Errorf("the detail is not the fence's first line: %q", inside)
+	}
+	for _, l := range strings.Split(inside, "\n") {
+		if strings.HasPrefix(l, "~~~") || strings.Contains(l, "~~~") {
+			t.Errorf("line %q could close the fence", l)
+		}
 	}
 }

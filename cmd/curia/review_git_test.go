@@ -977,3 +977,63 @@ func TestMergeRefusesStagedIndex(t *testing.T) {
 	}
 	f.wantPending()
 }
+
+// reviewUseGHFunc makes reviewGH answer with answer, and finds gh.
+func reviewUseGHFunc(t *testing.T, answer func(args []string) ([]byte, error)) *reviewGHRecorder {
+	t.Helper()
+	rec := &reviewGHRecorder{}
+	prevGH, prevLook := reviewGH, reviewGHLookPath
+	reviewGH = func(_ context.Context, dir string, args ...string) ([]byte, error) {
+		rec.calls = append(rec.calls, reviewGHCall{dir: dir, args: slices.Clone(args)})
+		return answer(args)
+	}
+	reviewGHLookPath = func(string) (string, error) { return "/opt/bin/gh", nil }
+	t.Cleanup(func() { reviewGH, reviewGHLookPath = prevGH, prevLook })
+	return rec
+}
+
+// TestPRApproveAgainRecordsExistingPR: gh pr create fails because the pull
+// request exists (an earlier approve's gh failed late, or the user opened
+// it): gh pr view finds it open, from the branch into the base, and the
+// review is recorded approved with its URL. One that is closed, into
+// another base or with an odd URL is not taken, and the review stays
+// pending.
+func TestPRApproveAgainRecordsExistingPR(t *testing.T) {
+	view := func(json string) func([]string) ([]byte, error) {
+		return func(args []string) ([]byte, error) {
+			if args[1] == "create" {
+				return nil, errors.New("exit status 1: a pull request for branch \"" + reviewBranch + "\" into branch \"main\" already exists")
+			}
+			return []byte(json), nil
+		}
+	}
+	pr := func(url, state, base string) string {
+		return `{"url":"` + url + `","state":"` + state + `","baseRefName":"` + base + `","headRefName":"` + reviewBranch + `"}`
+	}
+	f := reviewNew(t)
+	gh := reviewUseGHFunc(t, view(pr("https://github.com/o/r/pull/5", "OPEN", "main")))
+	line, err := f.approve(model.ApprovePR, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := f.review(); r.Status != model.ReviewApproved || r.PRURL != "https://github.com/o/r/pull/5" {
+		t.Errorf("R-1 = %+v, want approved with the existing pull request", r)
+	}
+	if !strings.Contains(line, "https://github.com/o/r/pull/5") {
+		t.Errorf("line = %q", line)
+	}
+	if len(gh.calls) != 2 || !slices.Equal(gh.calls[1].args, []string{"pr", "view", reviewBranch, "--json", "url,state,baseRefName,headRefName"}) {
+		t.Errorf("gh calls = %+v", gh.calls)
+	}
+	for _, bad := range []string{
+		pr("https://github.com/o/r/pull/5", "CLOSED", "main"), pr("https://github.com/o/r/pull/5", "MERGED", "main"),
+		pr("https://github.com/o/r/pull/5", "OPEN", "release"), pr("javascript:alert(1)", "OPEN", "main"), "not json",
+	} {
+		g := reviewNew(t)
+		reviewUseGHFunc(t, view(bad))
+		if _, err := g.approve(model.ApprovePR, ""); err == nil || !strings.Contains(err.Error(), "gh pr create failed") {
+			t.Errorf("%s: %v, want the failure", bad, err)
+		}
+		g.wantPending()
+	}
+}

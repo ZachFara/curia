@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -39,6 +40,9 @@ const (
 var (
 	// reviewHeadPattern is a full commit id: SHA-1 or SHA-256.
 	reviewHeadPattern = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+	// reviewPrefixPattern is what --head takes: a commit id, or a prefix of
+	// one of at least 7 hex digits.
+	reviewPrefixPattern = regexp.MustCompile(`^(?:[0-9a-f]{7,40}|[0-9a-f]{64})$`)
 	// reviewRemotePattern is the only form of remote name pushed to.
 	reviewRemotePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 	// reviewURLPattern is the only form of pull-request URL kept from gh.
@@ -111,6 +115,37 @@ func reviewHead(ctx context.Context, t model.Task) (string, error) {
 		return "", nil
 	}
 	return "", worktreeGitError(res, worktreeGitLimit)
+}
+
+// reviewResolveHead is the full commit id of t's branch head when given (--head) names it: the whole id,
+// or a prefix of at least 7 hex digits that no other object in the repository shares (git rev-parse
+// --disambiguate, which reads object names only, never a ref). Anything else is refused, before any git
+// call for a malformed value; a commit that is not the branch's head now is "the branch changed since you
+// looked".
+func reviewResolveHead(ctx context.Context, t model.Task, given string) (string, error) {
+	if !reviewPrefixPattern.MatchString(given) {
+		return "", fmt.Errorf("--head %q: give the commit id you looked at, 7 to 64 lower-case hex digits", sanitize.Line(given, 80))
+	}
+	head, err := reviewHead(ctx, t)
+	switch {
+	case err != nil:
+		return "", err
+	case head == "":
+		return "", fmt.Errorf("branch %s does not exist in %s", t.Branch, sanitize.Line(t.Repo, 300))
+	case !strings.HasPrefix(head, given):
+		return "", fmt.Errorf("the branch changed since you looked: %s is now at %s, not %s. Look at it again with curia review %s",
+			t.Branch, reviewShort(head), given, t.ID)
+	case len(given) == len(head):
+		return head, nil
+	}
+	out, err := worktreeRun(ctx, worktreeGitLimit, t.Repo, "rev-parse", "--disambiguate="+given)
+	if err != nil {
+		return "", err
+	}
+	if n := len(strings.Fields(out)); n != 1 {
+		return "", fmt.Errorf("--head %s names %d objects in %s: give more of the commit id", given, n, sanitize.Line(t.Repo, 300))
+	}
+	return head, nil
 }
 
 // reviewShort is the short form of commit id head.
@@ -564,11 +599,39 @@ func reviewOpenPR(ctx context.Context, t model.Task, r model.Review, decided []m
 	defer cancel()
 	out, err := reviewGH(gctx, t.Repo, "pr", "create", "--base", t.BaseBranch, "--head", t.Branch,
 		"--title", task.PRTitle(t), "--body", task.PRBody(t, r, decided))
-	if err != nil {
-		return "", fmt.Errorf("%s, but gh pr create failed: %s. The review stays pending: approve again to retry, or open the pull request yourself",
-			pushed, sanitize.Line(err.Error(), reviewGitErrMax))
+	if err == nil {
+		return reviewPRURL(out), nil
 	}
-	return reviewPRURL(out), nil
+	// The pull request may exist already: opened by an earlier approve whose
+	// gh failed late, or by hand as the message below suggests (I8).
+	if url := reviewOpenPRURL(context.WithoutCancel(ctx), t); url != "" {
+		return url, nil
+	}
+	return "", fmt.Errorf("%s, but gh pr create failed: %s. The review stays pending: approve again to retry, or open the pull request "+
+		"yourself and approve again to record it", pushed, sanitize.Line(err.Error(), reviewGitErrMax))
+}
+
+// reviewOpenPRURL is the URL of the open pull request of t's branch into t's base, as gh pr view says
+// (argv, bounded by reviewGHLimit), or "" when there is none, gh fails, or what it prints is not one
+// plain https URL of the same form gh pr create's is kept in.
+func reviewOpenPRURL(ctx context.Context, t model.Task) string {
+	gctx, cancel := context.WithTimeout(ctx, reviewGHLimit)
+	defer cancel()
+	out, err := reviewGH(gctx, t.Repo, "pr", "view", t.Branch, "--json", "url,state,baseRefName,headRefName")
+	if err != nil {
+		return ""
+	}
+	var pr struct {
+		URL         string `json:"url"`
+		State       string `json:"state"`
+		BaseRefName string `json:"baseRefName"`
+		HeadRefName string `json:"headRefName"`
+	}
+	if json.Unmarshal(out, &pr) != nil || pr.State != "OPEN" || pr.BaseRefName != t.BaseBranch ||
+		pr.HeadRefName != t.Branch || !reviewURLPattern.MatchString(pr.URL) {
+		return ""
+	}
+	return pr.URL
 }
 
 // reviewSameHead refuses when t's branch is no longer at head.

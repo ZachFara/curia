@@ -43,10 +43,17 @@ func reviewRunCmd(t *testing.T, stdin string, args ...string) (stdout, stderr st
 		rootCmd.SetArgs(nil)
 		reviewApproveFlag, reviewMergeFlag, reviewPRFlag = false, false, false
 		reviewChangesFlag, reviewDropFlag, reviewJSONFlag = false, false, false
-		reviewNoteFlag = ""
+		reviewNoteFlag, reviewHeadFlag = "", ""
 	}()
 	err = rootCmd.Execute()
 	return out.String(), errOut.String(), err
+}
+
+// headArg is --head and the branch's head now: the commit a user who has
+// just looked approves.
+func (f *reviewFixture) headArg() []string {
+	f.t.Helper()
+	return []string{"--head", f.head(f.wt, "HEAD")}
 }
 
 // reviewWithLead is reviewNew with the lead session linked to T-1, idle in
@@ -154,7 +161,7 @@ func TestReviewRefusesInsideAgent(t *testing.T) {
 func TestReviewApproveMerges(t *testing.T) {
 	f := reviewNew(t)
 	head := f.head(f.wt, "HEAD")
-	stdout, stderr, err := reviewRunCmd(t, "", "review", "R-1", "--approve")
+	stdout, stderr, err := reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve"}, f.headArg()...)...)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, stderr)
 	}
@@ -177,7 +184,7 @@ func TestReviewApproveExpiresAssumptions(t *testing.T) {
 	a1 := reviewTicket(f, "Assume v2 endpoint?", model.ModeAssume)
 	a2 := reviewTicket(f, "Assume 5 minute margin?", model.ModeAssume)
 	b := reviewTicket(f, "Rotate the key?", model.ModeBlocking)
-	stdout, stderr, err := reviewRunCmd(t, "", "review", "T-1", "--approve", "--merge")
+	stdout, stderr, err := reviewRunCmd(t, "", append([]string{"review", "T-1", "--approve", "--merge"}, f.headArg()...)...)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, stderr)
 	}
@@ -197,7 +204,7 @@ func TestReviewApproveExpiresAssumptions(t *testing.T) {
 func TestReviewApprovePRFlagAndConfig(t *testing.T) {
 	f := reviewNew(t)
 	reviewUseGH(t, "https://github.com/o/r/pull/3\n")
-	stdout, stderr, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--pr")
+	stdout, stderr, err := reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve", "--pr"}, f.headArg()...)...)
 	if err != nil {
 		t.Fatalf("--pr: %v\n%s", err, stderr)
 	}
@@ -211,7 +218,7 @@ func TestReviewApprovePRFlagAndConfig(t *testing.T) {
 	g := reviewNew(t)
 	reviewConfig(t, "[review]\napprove = \"pr\"\n")
 	gh := reviewUseGH(t, "https://github.com/o/r/pull/4\n")
-	if _, stderr, err = reviewRunCmd(t, "", "review", "R-1", "--approve"); err != nil {
+	if _, stderr, err = reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve"}, g.headArg()...)...); err != nil {
 		t.Fatalf("config pr: %v\n%s", err, stderr)
 	}
 	if r := g.review(); r.Status != model.ReviewApproved || r.PRURL != "https://github.com/o/r/pull/4" || len(gh.calls) != 1 {
@@ -221,7 +228,7 @@ func TestReviewApprovePRFlagAndConfig(t *testing.T) {
 	h := reviewNew(t)
 	reviewConfig(t, "[review]\napprove = \"pr\"\n")
 	gh = reviewUseGH(t, "")
-	if _, stderr, err = reviewRunCmd(t, "", "review", "R-1", "--approve", "--merge"); err != nil {
+	if _, stderr, err = reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve", "--merge"}, h.headArg()...)...); err != nil {
 		t.Fatalf("--merge over config: %v\n%s", err, stderr)
 	}
 	if r := h.review(); r.Status != model.ReviewMerged || len(gh.calls) != 0 {
@@ -234,7 +241,7 @@ func TestReviewApproveFailureStaysPending(t *testing.T) {
 	f.commitOnBranch("README", "branch side\n", "branch readme")
 	f.commitOnMain("README", "main side\n", "main readme")
 	before := f.head(f.repo, "HEAD")
-	stdout, stderr, err := reviewRunCmd(t, "", "review", "R-1", "--approve")
+	stdout, stderr, err := reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve"}, f.headArg()...)...)
 	if err == nil || !strings.Contains(stderr, "; nothing was merged") {
 		t.Fatalf("err %v, stderr %q; want the failure", err, stderr)
 	}
@@ -247,7 +254,7 @@ func TestReviewApproveFailureStaysPending(t *testing.T) {
 	}
 	// A working agent: refused before any git that changes something.
 	g := reviewWithLead(t, model.StateWorking)
-	if _, stderr, err = reviewRunCmd(t, "", "review", "R-1", "--approve"); err == nil ||
+	if _, stderr, err = reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve"}, g.headArg()...)...); err == nil ||
 		!strings.Contains(stderr, "the agent is still working; wait for it to stop") {
 		t.Errorf("working agent: err %v, stderr %q", err, stderr)
 	}
@@ -416,6 +423,9 @@ func TestReviewActionReappliesMarker(t *testing.T) {
 		{"review", "R-1", "--drop"},
 	} {
 		f := reviewWithLead(t, model.StateIdle)
+		if args[2] == "--approve" {
+			args = append(args, f.headArg()...)
+		}
 		f.fake.Calls = nil
 		if _, stderr, err := reviewRunCmd(t, "", args...); err != nil {
 			t.Fatalf("%q: %v\n%s", args, err, stderr)
@@ -451,6 +461,8 @@ func TestReviewFlagErrors(t *testing.T) {
 		{"review", "-x", "--drop"},
 		{"review", "R-1", "R-2", "--drop"},
 		{"review", "R-1;x", "--drop"},
+		{"review", "R-1", "--head", "abcdef1"},
+		{"review", "R-1", "--drop", "--head", "abcdef1"},
 	} {
 		if _, _, err := reviewRunCmd(t, "", args...); err == nil {
 			t.Errorf("%q: no error", args)
@@ -477,7 +489,7 @@ func TestReviewResolveByTaskAndByReview(t *testing.T) {
 	if _, err := reviewResolve(ctx, f.st, "R-9"); err == nil || err.Error() != "no review R-9" {
 		t.Errorf("R-9: %v", err)
 	}
-	if _, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, "", model.AnsweredCLI, f.now); err != nil {
+	if _, err := f.approve(model.ApproveMerge, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := reviewResolve(ctx, f.st, "R-1"); err == nil || err.Error() != "R-1 is merged" {
@@ -646,7 +658,7 @@ func TestReviewOutputIsSanitised(t *testing.T) {
 	f := reviewNew(t)
 	f.update("T-1", func(tk *model.Task) { tk.Title = "evil \x1b]0;pwned\x07 \x1b[31mtitle" })
 	lifecycleHooks(f.spawnFixture, "commit-msg", "#!/bin/sh\nprintf 'hook \\033[2J\\033]0;x\\007 says no\\n' >&2\nexit 1\n")
-	for _, args := range [][]string{{"review", "R-1", "--json"}, {"review", "R-1", "--approve"}} {
+	for _, args := range [][]string{{"review", "R-1", "--json"}, append([]string{"review", "R-1", "--approve"}, f.headArg()...)} {
 		stdout, stderr, _ := reviewRunCmd(t, "", args...)
 		for _, s := range []string{stdout, stderr} {
 			if strings.ContainsAny(s, "\x1b\x07") {
@@ -928,7 +940,7 @@ func (f *reviewFixture) wantMerged(head string) {
 func TestApproveSurvivesHangup(t *testing.T) {
 	f := reviewNew(t)
 	head := f.head(f.wt, "HEAD")
-	cmd, out, _ := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge")
+	cmd, out, _ := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge", "--head", head)
 	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP); err != nil {
 		t.Fatal(err)
 	}
@@ -941,7 +953,7 @@ func TestApproveSurvivesHangup(t *testing.T) {
 func TestApproveSurvivesTerminate(t *testing.T) {
 	f := reviewNew(t)
 	head := f.head(f.wt, "HEAD")
-	cmd, out, _ := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge")
+	cmd, out, _ := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge", "--head", head)
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
@@ -996,7 +1008,7 @@ func TestDashboardWaitsForReviewAction(t *testing.T) {
 func TestApproveRecordsMergeFoundDone(t *testing.T) {
 	f := reviewNew(t)
 	head := f.head(f.wt, "HEAD")
-	cmd, out, marker := reviewChild(t, f, "post-merge", "review", "R-1", "--approve", "--merge")
+	cmd, out, marker := reviewChild(t, f, "post-merge", "review", "R-1", "--approve", "--merge", "--head", head)
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
@@ -1027,7 +1039,7 @@ func TestSecondApproverRefusedWhileFirstMerges(t *testing.T) {
 	f := reviewNew(t)
 	f.now = time.Now()
 	head := f.head(f.wt, "HEAD")
-	cmd, out, _ := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge")
+	cmd, out, _ := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge", "--head", head)
 	_, err := f.approve(model.ApproveMerge, "")
 	if err == nil || !strings.Contains(err.Error(), "R-1 is being approved (merge at "+head[:7]+") by another curia since ") {
 		t.Errorf("second approve: %v, want the in-flight refusal", err)
@@ -1117,4 +1129,89 @@ func TestRecordErrorNeverAdvisesDrop(t *testing.T) {
 	if msg := reviewRecordError(context.Background(), f.st, r, "merged", head, store.ErrReviewClosed).Error(); !strings.Contains(msg, "another curia recorded it meanwhile (merged)") {
 		t.Errorf("closed by another: %q", msg)
 	}
+}
+
+// TestApproveFlagNeedsHead: without --head the flag form approves nothing:
+// it prints the branch's head, its stat line and the exact command that
+// approves that commit, and exits 1.
+func TestApproveFlagNeedsHead(t *testing.T) {
+	f := reviewNew(t)
+	head, before := f.head(f.wt, "HEAD"), f.head(f.repo, "HEAD")
+	for _, c := range []struct {
+		args []string
+		flag string
+	}{{[]string{"review", "R-1", "--approve"}, ""}, {[]string{"review", "T-1", "--approve", "--pr"}, " --pr"}} {
+		stdout, stderr, err := reviewRunCmd(t, "", c.args...)
+		if err == nil || stdout != "" {
+			t.Fatalf("%q: approved: %q, %v", c.args, stdout, err)
+		}
+		msg := err.Error()
+		for _, want := range []string{
+			"--approve needs --head <commit>", reviewBranch + " is at " + head + " (1 file changed, 1 insertion(+))",
+			"\n  curia review R-1 --approve" + c.flag + " --head " + head,
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("%q: error %q lacks %q", c.args, msg, want)
+			}
+		}
+		if !strings.Contains(stderr, head) {
+			t.Errorf("%q: stderr %q does not show the head", c.args, stderr)
+		}
+	}
+	if f.head(f.repo, "HEAD") != before {
+		t.Error("main moved")
+	}
+	if r := f.review(); r.Status != model.ReviewPending || !r.IntentAt.IsZero() {
+		t.Errorf("R-1 = %+v, want pending with no intent", r)
+	}
+}
+
+// TestApproveFlagRefusesMovedBranch: a commit that lands on the branch after
+// the user looked is never merged: --head (whole or a prefix) no longer
+// names the branch's head.
+func TestApproveFlagRefusesMovedBranch(t *testing.T) {
+	f := reviewNew(t)
+	shown, before := f.head(f.wt, "HEAD"), f.head(f.repo, "HEAD")
+	f.commitOnBranch("evil.go", "package auth // added after the developer looked\n", "sneak")
+	for _, h := range []string{shown, shown[:7], shown[:12]} {
+		_, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", h)
+		if err == nil || !strings.Contains(err.Error(), "the branch changed since you looked: "+reviewBranch+" is now at ") {
+			t.Errorf("--head %s: %v, want the changed-branch refusal", h, err)
+		}
+	}
+	if f.head(f.repo, "HEAD") != before {
+		t.Error("main moved")
+	}
+	if _, err := os.Stat(filepath.Join(f.repo, "evil.go")); err == nil {
+		t.Error("the unseen commit was merged")
+	}
+	f.wantPending()
+}
+
+// TestApproveFlagAcceptsPrefix: --head may be the whole id or a prefix of at
+// least 7 hex digits of the branch's head; anything else is refused before
+// git runs a merge.
+func TestApproveFlagAcceptsPrefix(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	for _, bad := range []string{head[:6], strings.ToUpper(head[:7]), "HEAD", "main", "-x", "--upload-pack=x", head + "0", "g" + head[:7]} {
+		if _, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", bad); err == nil ||
+			!strings.Contains(err.Error(), "give the commit id you looked at, 7 to 64 lower-case hex digits") {
+			t.Errorf("--head %q: %v, want the refusal", bad, err)
+		}
+	}
+	other := f.head(f.repo, "main")
+	if _, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", other[:7]); err == nil ||
+		!strings.Contains(err.Error(), "the branch changed since you looked") {
+		t.Errorf("--head of another commit: %v", err)
+	}
+	f.wantPending()
+	stdout, stderr, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", head[:7])
+	if err != nil {
+		t.Fatalf("%v\n%s", err, stderr)
+	}
+	if !strings.HasPrefix(stdout, "R-1 approved: merged "+reviewBranch+" into main ("+head[:7]+")") {
+		t.Errorf("stdout = %q", stdout)
+	}
+	f.wantMerged(head)
 }
