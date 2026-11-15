@@ -1024,13 +1024,18 @@ func tasksStatSources(t *testing.T, root string) {
 const (
 	latencyTasks     = 200
 	latencyDelivered = 500
-	latencyPane      = "%0" // the terminal server's sleeping pane
+	// latencyMessageRuns is this gate's sample count: it stays at 400,
+	// not minTimedRuns, because each sample here is two processes (a send,
+	// then the timed Stop) and 1000 of them would add about 27 s to make
+	// check (Ruling 114 allows that exception).
+	latencyMessageRuns = 400
+	latencyPane        = "%0" // the terminal server's sleeping pane
 )
 
 // TestStopHookLatencyWithMessages is step 15: on a fresh store with no tmux,
 // latencyTasks tasks and latencyDelivered delivered messages for one
 // session whose hooks carry CURIA_TASK_ID; then, after one untimed warm-up,
-// at least minTimedRuns sequential `curia hook Stop` processes are timed,
+// at least latencyMessageRuns sequential `curia hook Stop` processes are timed,
 // stdio as files, each claiming the one message queued before it. Their p95
 // must be under p95Budget.
 func TestStopHookLatencyWithMessages(t *testing.T) {
@@ -1080,7 +1085,7 @@ func TestStopHookLatencyWithMessages(t *testing.T) {
 	send("Warm-up message.")
 	latencyBlock(t, &hookH, stop) // warm-up, untimed
 	var runs []time.Duration
-	for len(runs) < minTimedRuns {
+	for len(runs) < latencyMessageRuns {
 		send(fmt.Sprintf("Timed message number %d.", len(runs)+1))
 		runs = append(runs, latencyBlock(t, &hookH, stop))
 	}

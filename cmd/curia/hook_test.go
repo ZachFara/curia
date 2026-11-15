@@ -1113,10 +1113,10 @@ func hookLatency(t *testing.T, st *store.Store, env hook.Env, kind model.EventKi
 	return durations
 }
 
-// TestHookLatencyUnchanged is TestHookLatency's method and threshold (200
-// in-process PostToolUse runs, p95 under 20 ms) through the real hookEnv,
-// with CURIA_TASK_ID set and a linked worktree as cwd. It also reports 200
-// SessionStarts, each a new session and so one real git process, without
+// TestHookLatencyUnchanged is TestHookLatency's method and threshold (1000
+// in-process PostToolUse runs in one pass, p95 under 20 ms, Ruling 114)
+// through the real hookEnv, with CURIA_TASK_ID set and a linked worktree as
+// cwd. It also reports 200 SessionStarts, each a new session and so one real git process, without
 // gating them: a fork from the race-instrumented test binary on a host that
 // other worktrees' checks load varies by tens of milliseconds at p95, before
 // this change as after it. The whole-process gate covers SessionStart.
@@ -1137,8 +1137,8 @@ func TestHookLatencyUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const runs = 200
-	starts := hookLatency(t, st, env, model.SessionStart, runs, func(i int) []byte {
+	const starts, runs = 200, 1000 // reported only; gated (Ruling 114)
+	started := hookLatency(t, st, env, model.SessionStart, starts, func(i int) []byte {
 		return fmt.Appendf(nil, `{"session_id":"S%d","transcript_path":%q,"cwd":%q,"source":"startup"}`, i, tr, wt)
 	})
 	tools := hookLatency(t, st, env, model.PostToolUse, runs, func(int) []byte {
@@ -1155,8 +1155,9 @@ func TestHookLatencyUnchanged(t *testing.T) {
 	for _, m := range []struct {
 		kind model.EventKind
 		d    []time.Duration
-	}{{model.SessionStart, starts}, {model.PostToolUse, tools}} {
-		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, runs, m.d[runs/2], m.d[runs*95/100], m.d[runs-1])
+	}{{model.SessionStart, started}, {model.PostToolUse, tools}} {
+		n := len(m.d)
+		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, n, m.d[n/2], m.d[n*95/100], m.d[n-1])
 	}
 	if p95 := tools[runs*95/100]; p95 >= 20*time.Millisecond {
 		t.Errorf("PostToolUse p95 = %v, want < 20ms", p95)
