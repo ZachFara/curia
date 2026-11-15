@@ -544,3 +544,29 @@ func TestReconcileUnknownSocketBehavesAsBefore(t *testing.T) {
 		})
 	}
 }
+
+// OtherServer is Reconcile's server rule for callers that must not type
+// into, or count, a pane whose id the session's own server also uses.
+func TestOtherServer(t *testing.T) {
+	start := t0.Add(-30 * time.Minute)
+	noSocket := []tmux.Pane{{ID: "%9", ServerStart: start}}
+	for _, tc := range []struct {
+		name, socket string
+		live         []tmux.Pane
+		want         bool
+	}{
+		{"another server", "/tmp/a", onServer("/tmp/b", start, "%1"), true},
+		{"the same server", "/tmp/b", onServer("/tmp/b", start, "%1"), false},
+		{"first known socket decides", "/tmp/a", append(noSocket, onServer("/tmp/b", start, "%1")...), true},
+		{"first known socket is the same", "/tmp/b", append(noSocket, onServer("/tmp/b", start, "%1")...), false},
+		{"session socket unknown", "", onServer("/tmp/b", start, "%1"), false},
+		{"server socket unknown", "/tmp/a", onServer("", start, "%1"), false},
+		{"no panes", "/tmp/a", nil, false},
+	} {
+		s := sess("s", model.StateIdle, "%1", t0)
+		s.Socket = tc.socket
+		if got := fleet.OtherServer(tc.live, s); got != tc.want {
+			t.Errorf("%s: OtherServer = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

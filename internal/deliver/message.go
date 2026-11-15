@@ -30,8 +30,10 @@ const (
 // target session touches no tmux. Otherwise it takes Answer's path from step
 // 2 with the message in place of an answer: ListPanes (1 s) and
 // fleet.Reconcile; store.ClaimMessageTyping, whose refusal leaves the
-// message queued with a note; CapturePane and readPrompt; store.StillTypable
-// and, for a message an agent session sent, the sender guard; then SendKeys
+// message queued with a note; the server check (a session recorded on
+// another tmux server is not typed into); CapturePane and readPrompt; the
+// server check again, store.StillTypable and, for a message an agent
+// session sent, the sender guard; then SendKeys
 // with message.TypedLine, the only text typed. Every refusal after the claim
 // undoes it once (store.RequeueMessage); a SendKeys error wrapping
 // tmux.ErrPartialSend keeps it, so the line is never typed or handed over

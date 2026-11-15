@@ -61,6 +61,15 @@ func Gone(live []tmux.Pane, s model.Session) bool {
 	return newServer(live).goneFrom(s, s.Pane)
 }
 
+// OtherServer reports whether session s was recorded on another tmux server
+// than the one whose panes are live: its Socket is known and differs from
+// that server's, the first non-empty Socket among live. A pane of live with
+// s's pane id is then not s's pane (pane ids are reused across servers). An
+// unknown socket on either side is false. It is Reconcile's rule.
+func OtherServer(live []tmux.Pane, s model.Session) bool {
+	return newServer(live).elsewhere(s)
+}
+
 // server is what Reconcile knows of the live tmux server.
 type server struct {
 	alive  map[string]bool
@@ -89,10 +98,16 @@ func (srv server) goneFrom(s model.Session, pane string) bool {
 	if s.Pane == "" || s.Pane != pane || s.State == model.StateEnded || s.State == model.StateStale {
 		return false
 	}
-	if s.Socket != "" && srv.socket != "" && s.Socket != srv.socket {
+	if srv.elsewhere(s) {
 		return false // on another server, whose panes were not listed
 	}
 	return !srv.alive[pane] || (!s.StartedAt.IsZero() && s.StartedAt.Before(srv.start))
+}
+
+// elsewhere reports whether s was recorded on another server than srv:
+// both sockets are known and differ.
+func (srv server) elsewhere(s model.Session) bool {
+	return s.Socket != "" && srv.socket != "" && s.Socket != srv.socket
 }
 
 // markStale marks the session listed as stale, deciding again from the

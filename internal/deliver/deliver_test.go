@@ -1135,8 +1135,312 @@ func TestFailedRequeueSaysSo(t *testing.T) {
 	wantWarnNoError(t, buf)
 }
 
+// Sockets of two tmux servers whose pane ids collide (plan section 4.9):
+// %5 exists on both.
+const (
+	socketA = "/tmp/a/default"
+	socketB = "/tmp/b/other"
+	socketC = "/tmp/c/third"
+)
+
+// paneOn is livePane as the server on socket lists it ("" for a tmux that
+// reports no socket).
+func paneOn(socket string) tmux.Pane {
+	p := livePane
+	p.Socket = socket
+	return p
+}
+
+// askerOn is asker() recorded on the server on socket.
+func askerOn(socket string) model.Session {
+	s := asker()
+	s.Socket = socket
+	return s
+}
+
+// noteOtherServer is the note for a line not typed because its session is
+// on the server named name; ask is the user's way to hand it over.
+func noteOtherServer(name, ask string) string {
+	return "the agent is on another tmux server (" + name + "); nothing typed; " + ask
+}
+
+// paneCalls are the CapturePane and SendKeys calls among calls: reading
+// the agent's pane or typing into it.
+func paneCalls(calls []string) []string {
+	var out []string
+	for _, c := range calls {
+		if strings.HasPrefix(c, "CapturePane") || strings.HasPrefix(c, "SendKeys") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// A session recorded on one tmux server is never captured from nor typed
+// into a pane with its pane id on another (plan section 4.9): the check
+// comes right after the claim, before the capture, and the claim is undone.
+func TestAnswerNotTypedAcrossServers(t *testing.T) {
+	for name, panes := range map[string][]tmux.Pane{
+		"the pane reports the other server": {paneOn(socketB)},
+		// The server's socket is the first one a pane reports.
+		"a pane before it reports none": {{ID: "%9", Session: "work", WindowID: "@9", ServerStart: livePane.ServerStart}, paneOn(socketB)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			seeded := askerOn(socketA)
+			seedSession(t, st, seeded)
+			d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+			fake := &tmux.Fake{Screen: idleScreen, Panes: panes}
+			log, buf := testLog()
+			out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := paneCalls(fake.Calls); len(got) != 0 {
+				t.Errorf("pane calls = %q, want none: the pane id %%5 on the other server is not the agent's", got)
+			}
+			wantQueued(t, st, out, d.ID, noteOtherServer("default", "tell the agent to call check_decision D-1"))
+			if s := getSession(t, st, seeded.ID); s.State == model.StateStale || s.Socket != socketA {
+				t.Errorf("session = %s on %q, want not stale, still on %q", s.State, s.Socket, socketA)
+			}
+			if !strings.Contains(buf.String(), "another tmux server") || strings.Contains(buf.String(), "level=ERROR") {
+				t.Errorf("log does not say why nothing was typed, or has an ERROR:\n%s", buf)
+			}
+		})
+	}
+}
+
+func TestAnswerTypedOnSameServer(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, askerOn(socketA))
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{paneOn(socketA)}}
+	log, _ := testLog()
+	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "SendKeys %5 " + decision.TypedMessage(out.Decision)
+	if got := sendKeysCalls(fake.Calls); !slices.Equal(got, []string{want}) || out.Note != "" {
+		t.Errorf("SendKeys calls = %q, note %q; want %q and no note", got, out.Note, want)
+	}
+	if out.Decision.DeliveredVia != model.ViaSendKeys {
+		t.Errorf("outcome via = %q, want send_keys", out.Decision.DeliveredVia)
+	}
+}
+
+// An unknown socket on either side (a row from before Plan 4, or a tmux
+// that does not report one) decides nothing.
+func TestAnswerUnknownSocketTypedAsBefore(t *testing.T) {
+	for name, c := range map[string]struct{ session, panes string }{
+		"session has none":  {"", socketB},
+		"panes report none": {socketA, ""},
+		"neither has one":   {"", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			seedSession(t, st, askerOn(c.session))
+			d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+			fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{paneOn(c.panes)}}
+			log, _ := testLog()
+			out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := sendKeysCalls(fake.Calls); len(got) != 1 || out.Note != "" {
+				t.Errorf("SendKeys calls = %q, note %q; want one, no note", got, out.Note)
+			}
+		})
+	}
+}
+
+// The stored socket is untrusted: its last element is cleaned and cut
+// before it is put in the note or the log.
+func TestCrossServerNoteIsClean(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, askerOn("/tmp/a/\x1b[31m\x07"+strings.Repeat("x", 200)))
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{paneOn(socketB)}}
+	log, buf := testLog()
+	out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paneCalls(fake.Calls); len(got) != 0 {
+		t.Errorf("pane calls = %q, want none", got)
+	}
+	for _, r := range out.Note {
+		if r < 0x20 || r == 0x7f {
+			t.Errorf("note %q holds control rune %U", out.Note, r)
+		}
+	}
+	const head, tail = "the agent is on another tmux server (", "); nothing typed; tell the agent to call check_decision D-1"
+	name, okHead := strings.CutPrefix(out.Note, head)
+	name, okTail := strings.CutSuffix(name, tail)
+	if !okHead || !okTail {
+		t.Fatalf("note = %q, want %q<name>%q", out.Note, head, tail)
+	}
+	if n := len([]rune(name)); n > 40 || n < 10 || strings.Contains(name, "/") {
+		t.Errorf("name in the note = %q (%d runes), want the last element cut to at most 40 runes", name, n)
+	}
+	if strings.ContainsAny(buf.String(), "\x1b\x07") {
+		t.Errorf("log holds a control rune:\n%q", buf)
+	}
+}
+
+// After the refusal the answer is still the agent's to collect, once: by
+// its Stop hook or by its own check_decision.
+func TestCrossServerRefusalLeavesAnswerCollectable(t *testing.T) {
+	refused := func(t *testing.T) (*store.Store, model.Decision) {
+		t.Helper()
+		st := openStore(t)
+		seedSession(t, st, askerOn(socketA))
+		d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+		fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{paneOn(socketB)}}
+		log, _ := testLog()
+		out, err := deliver.Answer(context.Background(), st, fake, log, d.ID, answerA, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantQueued(t, st, out, d.ID, noteOtherServer("default", "tell the agent to call check_decision D-1"))
+		return st, d
+	}
+	stop := func(t *testing.T, st *store.Store, at time.Time) []model.Decision {
+		t.Helper()
+		var got []model.Decision
+		err := st.UpdateSessionTx(context.Background(), "s1", func(tx *store.Tx, s model.Session, _ bool) (model.Session, error) {
+			var cerr error
+			got, cerr = tx.ClaimDeliveries(context.Background(), "s1", at)
+			return s, cerr
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	t.Run("stop hook", func(t *testing.T) {
+		st, d := refused(t)
+		if got := stop(t, st, now.Add(time.Minute)); len(got) != 1 || got[0].ID != d.ID || got[0].DeliveredVia != model.ViaStopHook {
+			t.Fatalf("Stop claimed %+v, want %s by stop_hook", got, d.ID)
+		}
+		if again := stop(t, st, now.Add(2*time.Minute)); len(again) != 0 {
+			t.Errorf("second Stop claimed %d answers, want 0", len(again))
+		}
+	})
+	t.Run("check_decision", func(t *testing.T) {
+		st, d := refused(t)
+		got, found, err := st.CheckDecision(context.Background(), d.ID, "s1", now.Add(time.Minute))
+		if err != nil || !found || got.DeliveredVia != model.ViaCheck {
+			t.Fatalf("check_decision = %+v, found %v, %v; want it delivered by check", got, found, err)
+		}
+		if again := stop(t, st, now.Add(2*time.Minute)); len(again) != 0 {
+			t.Errorf("Stop after check_decision claimed %d answers, want 0", len(again))
+		}
+	})
+}
+
+// movingTmux's capture shows the empty prompt while a SessionStart records
+// session s1 on the server on socket, as a resume in another server whose
+// pane has the same id would.
+type movingTmux struct {
+	*tmux.Fake
+	st     *store.Store
+	socket string
+}
+
+func (m movingTmux) CapturePane(ctx context.Context, pane string) (tmux.Capture, error) {
+	capt, err := m.Fake.CapturePane(ctx, pane)
+	if err == nil {
+		err = m.st.UpdateSession(ctx, "s1", func(s model.Session, _ bool) model.Session {
+			s.Socket = m.socket
+			return s
+		})
+	}
+	return capt, err
+}
+
+// The server is checked again in the re-read after the capture.
+func TestServerChangeDuringCaptureIsNotTyped(t *testing.T) {
+	for name, c := range map[string]struct {
+		claimed, moved string
+		typed          bool
+	}{
+		"same server, then another": {socketA, socketC, false},
+		"unknown, then another":     {"", socketC, false},
+		"unknown, then this one":    {"", socketA, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			seedSession(t, st, askerOn(c.claimed))
+			d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+			fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{paneOn(socketA)}}
+			log, _ := testLog()
+			out, err := deliver.Answer(context.Background(), st, movingTmux{fake, st, c.moved}, log, d.ID, answerA, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Contains(fake.Calls, "CapturePane %5") {
+				t.Fatalf("tmux calls = %q, want the capture", fake.Calls)
+			}
+			got := sendKeysCalls(fake.Calls)
+			if c.typed {
+				if len(got) != 1 || out.Note != "" {
+					t.Errorf("SendKeys calls = %q, note %q; want one, no note", got, out.Note)
+				}
+				return
+			}
+			if len(got) != 0 {
+				t.Errorf("typed into a session that moved to another server during the capture: %q", got)
+			}
+			wantQueued(t, st, out, d.ID, noteOtherServer("third", "tell the agent to call check_decision D-1"))
+		})
+	}
+}
+
+// closingCaptureTmux's capture shows the empty prompt, then closes the
+// store Answer was given, so the re-read after it fails.
+type closingCaptureTmux struct {
+	*tmux.Fake
+	st *store.Store
+}
+
+func (c closingCaptureTmux) CapturePane(ctx context.Context, pane string) (tmux.Capture, error) {
+	capt, err := c.Fake.CapturePane(ctx, pane)
+	if err == nil {
+		err = c.st.Close()
+	}
+	return capt, err
+}
+
+// A store error in the re-read after the capture types nothing.
+func TestRecheckStoreErrorTypesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "curia.db")
+	st := openStoreAt(t, path)
+	seedSession(t, st, askerOn(socketA))
+	d := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+	doomed := openStoreAt(t, path)
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{paneOn(socketA)}}
+	log, buf := testLog()
+	out, err := deliver.Answer(context.Background(), doomed, closingCaptureTmux{fake, doomed}, log, d.ID, answerA, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+		t.Errorf("typed after a failed re-read: %q", got)
+	}
+	want := "could not check the session again; nothing typed and the answer could not be queued again; " +
+		"tell the agent to call check_decision D-1"
+	if out.Note != want {
+		t.Errorf("note = %q, want %q", out.Note, want)
+	}
+	wantWarnNoError(t, buf)
+}
+
 // realSocket is per run, so concurrent test runs never share a server.
 var realSocket = fmt.Sprintf("curia-test-%d", os.Getpid())
+
+// realOtherSocket is a second server of the same run (plan section 4.9).
+var realOtherSocket = realSocket + "b"
 
 // realServer starts a throwaway tmux server with no configuration on its
 // own socket (never the default server), whose one pane runs argv in dir,
@@ -1144,20 +1448,26 @@ var realSocket = fmt.Sprintf("curia-test-%d", os.Getpid())
 // it, and the pane.
 func realServer(t *testing.T, dir string, argv ...string) (tmux.Client, func(args ...string) (string, error), tmux.Pane) {
 	t.Helper()
+	return realServerOn(t, realSocket, dir, argv...)
+}
+
+// realServerOn is realServer on the private socket named socket.
+func realServerOn(t *testing.T, socket, dir string, argv ...string) (tmux.Client, func(args ...string) (string, error), tmux.Pane) {
+	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not on PATH")
 	}
 	raw := func(args ...string) (string, error) {
-		out, err := exec.Command("tmux", append([]string{"-L", realSocket, "-f", os.DevNull}, args...)...).CombinedOutput()
+		out, err := exec.Command("tmux", append([]string{"-L", socket, "-f", os.DevNull}, args...)...).CombinedOutput()
 		return string(out), err
 	}
-	t.Cleanup(func() { killServer(realSocket) })
+	t.Cleanup(func() { killServer(socket) })
 	_, _ = raw("kill-server") // clear a leftover server from an aborted run
 	args := append([]string{"new-session", "-d", "-s", "t", "-x", "200", "-y", "50", "-c", dir, "--"}, argv...)
 	if out, err := raw(args...); err != nil {
 		t.Fatalf("new-session: %v: %s", err, out)
 	}
-	client := tmux.NewExec(realSocket)
+	client := tmux.NewExec(socket)
 	panes, err := client.ListPanes(context.Background())
 	if err != nil || len(panes) != 1 {
 		t.Fatalf("ListPanes = %v, %v, want one pane", panes, err)
@@ -1291,6 +1601,126 @@ func TestHostileTextIsInertInARealShell(t *testing.T) {
 	}
 	if len(notFound) != 1 || !shellNotFound.MatchString(notFound[0]) {
 		t.Errorf("pane shows %q, want exactly one line saying the command Decision was not found", screen)
+	}
+}
+
+// recordingPane is the one pane of a private tmux server: it draws Claude
+// Code's empty prompt and records in file what is typed into it.
+type recordingPane struct {
+	client tmux.Client
+	pane   tmux.Pane
+	file   string
+}
+
+// typed is what the pane has recorded so far.
+func (p recordingPane) typed(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Clean(p.file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// waitTyped waits for one typed line in the pane and returns it.
+func (p recordingPane) waitTyped(t *testing.T) string {
+	t.Helper()
+	var got string
+	waitFor(t, "the typed line", func() bool {
+		b, err := os.ReadFile(filepath.Clean(p.file))
+		got = string(b)
+		return err == nil && strings.HasSuffix(got, "\n")
+	})
+	return got
+}
+
+// collidingServers starts two private tmux servers (realSocket and
+// realOtherSocket), each with one recording pane, in dir. A fresh server
+// numbers its panes from %0, so the two panes have the same id.
+func collidingServers(t *testing.T, dir string) (a, b recordingPane) {
+	t.Helper()
+	start := func(socket, name string) recordingPane {
+		file := filepath.Join(dir, name)
+		client, raw, pane := realServerOn(t, socket, dir, "/bin/sh", "-c", `printf '%s' "$2"; exec cat > "$1"`, "sh", file, idleScreen)
+		waitForPrompt(t, raw, pane)
+		return recordingPane{client: client, pane: pane, file: file}
+	}
+	a, b = start(realSocket, "a"), start(realOtherSocket, "b")
+	if a.pane.ID != b.pane.ID || a.pane.Socket == "" || b.pane.Socket == "" || a.pane.Socket == b.pane.Socket {
+		t.Fatalf("setup: panes %s on %q and %s on %q, want one id on two known sockets", a.pane.ID, a.pane.Socket, b.pane.ID, b.pane.Socket)
+	}
+	return a, b
+}
+
+// sessionOn is realAsker in p's pane, recorded on p's server.
+func sessionOn(p recordingPane) model.Session {
+	s := realAsker(p.pane)
+	s.Socket = p.pane.Socket
+	return s
+}
+
+// crossServers starts collidingServers in a fresh directory and returns
+// them as home, the server the session is recorded on (the second one when
+// onB), and away, the other one.
+func crossServers(t *testing.T, onB bool) (home, away recordingPane) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "cx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	home, away = collidingServers(t, dir)
+	if onB {
+		return away, home
+	}
+	return home, away
+}
+
+// Two real servers whose panes have the same id: an answer for a session
+// on one is never typed into the other's pane, whichever server the command
+// reaches, and is typed on its own.
+func TestAnswerNeverTypedIntoAnotherServersPane(t *testing.T) {
+	for _, onB := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recorded on the second server %v", onB), func(t *testing.T) {
+			home, away := crossServers(t, onB)
+			st := openStore(t)
+			seeded := sessionOn(home)
+			seedSession(t, st, seeded)
+			d1 := seedTicket(t, st, model.ModeBlocking, "Postgres table")
+			log, buf := testLog()
+			out, err := deliver.Answer(context.Background(), st, away.client, log, d1.ID, answerA, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantQueued(t, st, out, d1.ID, noteOtherServer(filepath.Base(home.pane.Socket), "tell the agent to call check_decision D-1"))
+			if s := getSession(t, st, seeded.ID); s.State == model.StateStale {
+				t.Errorf("session marked stale through the other server")
+			}
+			d2 := seedTicket(t, st, model.ModeBlocking, "Redis cluster")
+			out2, err := deliver.Answer(context.Background(), st, home.client, log, d2.ID, answerA, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out2.Note != "" || out2.Decision.DeliveredVia != model.ViaSendKeys {
+				t.Fatalf("on its own server: note %q, via %q, want typed; log:\n%s", out2.Note, out2.Decision.DeliveredVia, buf)
+			}
+			wantTypedOnlyHome(t, home, away, decision.TypedMessage(out2.Decision))
+			if d := getDecision(t, st, d1.ID); d.Delivery != model.DeliveryQueued {
+				t.Errorf("%s = %s, want still queued for its Stop hook", d1.ID, d.Delivery)
+			}
+		})
+	}
+}
+
+// wantTypedOnlyHome checks that home's pane received line and nothing
+// else, and that away's pane, with the same id, received nothing.
+func wantTypedOnlyHome(t *testing.T, home, away recordingPane, line string) {
+	t.Helper()
+	if got := home.waitTyped(t); got != line+"\n" {
+		t.Errorf("its own pane received %q, want %q", got, line+"\n")
+	}
+	if got := away.typed(t); got != "" {
+		t.Errorf("the other server's pane %s received %q, want nothing", away.pane.ID, got)
 	}
 }
 

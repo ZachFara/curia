@@ -414,6 +414,87 @@ func TestMessageStateChangeAfterCaptureIsNotTyped(t *testing.T) {
 	}
 }
 
+// idleTargetOn is idleTarget() recorded on the server on socket.
+func idleTargetOn(socket string) model.Session {
+	s := idleTarget()
+	s.Socket = socket
+	return s
+}
+
+// The same for deliver.Message (plan section 4.9): no capture, no typing,
+// the claim undone, and the agent's Stop hook still gets it once.
+func TestMessageNotTypedAcrossServers(t *testing.T) {
+	st := openStore(t)
+	seeded := idleTargetOn(socketA)
+	seedSession(t, st, seeded)
+	m := seedMessage(t, st, "s1", "use pnpm")
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{paneOn(socketB)}}
+	log, _ := testLog()
+	out, err := deliver.Message(context.Background(), st, fake, log, m.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paneCalls(fake.Calls); len(got) != 0 {
+		t.Errorf("pane calls = %q, want none: the pane id %%5 on the other server is not the agent's", got)
+	}
+	wantMsgQueued(t, st, out, m.ID, noteOtherServer("default", askMessages))
+	if s := getSession(t, st, seeded.ID); s.State != model.StateIdle {
+		t.Errorf("session = %s, want idle (not stale)", s.State)
+	}
+	got := stopClaims(t, st, now.Add(time.Minute))
+	if len(got) != 1 || got[0].ID != m.ID || got[0].DeliveredVia != model.ViaStopHook {
+		t.Fatalf("Stop claimed %+v, want M-1 by stop_hook", got)
+	}
+	if again := stopClaims(t, st, now.Add(2*time.Minute)); len(again) != 0 {
+		t.Errorf("second Stop claimed %d messages, want 0", len(again))
+	}
+}
+
+func TestMessageTypedOnSameServer(t *testing.T) {
+	for name, c := range map[string]struct{ session, panes string }{
+		"same server":       {socketA, socketA},
+		"session has none":  {"", socketB},
+		"panes report none": {socketA, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := openStore(t)
+			seedSession(t, st, idleTargetOn(c.session))
+			m := seedMessage(t, st, "s1", "use pnpm")
+			fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{paneOn(c.panes)}}
+			log, _ := testLog()
+			out, err := deliver.Message(context.Background(), st, fake, log, m.ID, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "SendKeys %5 " + message.TypedLine(out.Message)
+			if got := sendKeysCalls(fake.Calls); !slices.Equal(got, []string{want}) || out.Note != "" {
+				t.Errorf("SendKeys calls = %q, note %q; want %q and no note", got, out.Note, want)
+			}
+			wantTypedUnconfirmed(t, st, m.ID, now)
+		})
+	}
+}
+
+// The re-read after the capture checks the server again for a message too.
+func TestMessageServerChangeDuringCaptureIsNotTyped(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, idleTargetOn(socketA))
+	m := seedMessage(t, st, "s1", "use pnpm")
+	fake := &tmux.Fake{Screen: idleScreen, Panes: []tmux.Pane{paneOn(socketA)}}
+	log, _ := testLog()
+	out, err := deliver.Message(context.Background(), st, movingTmux{fake, st, socketC}, log, m.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(fake.Calls, "CapturePane %5") {
+		t.Fatalf("tmux calls = %q, want the capture", fake.Calls)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+		t.Errorf("typed into a session that moved to another server during the capture: %q", got)
+	}
+	wantMsgQueued(t, st, out, m.ID, noteOtherServer("third", askMessages))
+}
+
 func TestMessageSendKeysFailureRequeues(t *testing.T) {
 	st := openStore(t)
 	seedSession(t, st, idleTarget())
@@ -875,6 +956,35 @@ func TestTypedMessageReachesRealPane(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "Message M-1 from the user: ") || !strings.HasSuffix(got, " Wording simplified: call check_messages.\n") {
 		t.Errorf("pane received %q, want the fixed words and the simplified suffix", got)
+	}
+}
+
+// Two real servers whose panes have the same id: a message for a session
+// on one is never typed into the other's pane, whichever server the command
+// reaches; it stays queued, and the same message is then typed on its own
+// server.
+func TestMessageNeverTypedIntoAnotherServersPane(t *testing.T) {
+	for _, onB := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recorded on the second server %v", onB), func(t *testing.T) {
+			home, away := crossServers(t, onB)
+			st := openStore(t)
+			seedSession(t, st, sessionOn(home))
+			m := seedMessage(t, st, "s1", "use pnpm")
+			log, buf := testLog()
+			out, err := deliver.Message(context.Background(), st, away.client, log, m.ID, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantMsgQueued(t, st, out, m.ID, noteOtherServer(filepath.Base(home.pane.Socket), askMessages))
+			out, err = deliver.Message(context.Background(), st, home.client, log, m.ID, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.Note != "" || out.Message.DeliveredVia != model.ViaSendKeys {
+				t.Fatalf("on its own server: note %q, via %q, want typed; log:\n%s", out.Note, out.Message.DeliveredVia, buf)
+			}
+			wantTypedOnlyHome(t, home, away, message.TypedLine(out.Message))
+		})
 	}
 }
 
