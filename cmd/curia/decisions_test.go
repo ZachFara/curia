@@ -1041,6 +1041,8 @@ var userOnlyCommands = map[string][]string{
 	"curia review":          {"R-1", "--drop"},
 	"curia restore":         {"--dry-run"},
 	"curia serve":           {},
+	"curia export obsidian": {},
+	"curia export commons":  {"D-1"},
 }
 
 // userNotOnlyCommands are the leaf commands anyone, an agent included, may

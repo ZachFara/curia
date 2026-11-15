@@ -149,9 +149,19 @@ func runDecideAnswer(cmd *cobra.Command, id string, a model.Answer) error {
 		return err
 	}
 	if decideJSON {
-		return decidePrintJSON(cmd.OutOrStdout(), out)
+		err = decidePrintJSON(cmd.OutOrStdout(), out)
+	} else {
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), decideLine(out))
 	}
-	_, err = fmt.Fprintln(cmd.OutOrStdout(), decideLine(out))
+	// The answer is stored and delivered: the note sweep runs last, and its
+	// failure is only a line (on stderr with --json, which keeps stdout one object).
+	if line := exportAfterAnswer(ctx, st, cfg, cfg.LogPath, clock()); line != "" {
+		w := cmd.OutOrStdout()
+		if decideJSON {
+			w = cmd.ErrOrStderr()
+		}
+		_, _ = fmt.Fprintln(w, line)
+	}
 	return err
 }
 
@@ -172,8 +182,12 @@ func runDecideView() error {
 		return err
 	}
 	defer func() { _ = closeLog() }()
-	src := newDecideSource(st, newTmuxClient(), logger)
-	return runProgram(ui.NewDecide(src, clock, ui.DecideOptions{Via: decideVia()}), tea.WithAltScreen())
+	src := &exportCountingSource{DecideSource: newDecideSource(st, newTmuxClient(), logger)}
+	err = runProgram(ui.NewDecide(src, clock, ui.DecideOptions{Via: decideVia()}), tea.WithAltScreen())
+	if src.answered.Load() > 0 {
+		exportAfterAnswer(context.Background(), st, cfg, cfg.LogPath, clock()) // the popup prints nothing
+	}
+	return err
 }
 
 // decideVia is how an answer given in a view is recorded: over SSH when
