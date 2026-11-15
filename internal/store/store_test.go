@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -163,12 +164,128 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	open(t, path)
-	if n := countMigrations(t, path); n != 5 {
-		t.Errorf("schema_migrations has %d rows, want 5", n)
+	if n := countMigrations(t, path); n != 6 {
+		t.Errorf("schema_migrations has %d rows, want 6", n)
 	}
 	names := migrationNames(t, rawDB(t, path))
-	if want := []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("migration names = %v, want %v", names, want)
+	}
+}
+
+// allMigrations is every migration file in the order Open applies them:
+// file name order, so the two files numbered 0005 (Plan 4's reviews and
+// Plan 3's send limits, merged with their names kept) apply in a fixed order.
+var allMigrations = []string{
+	"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql",
+	"0005_reviews.sql", "0005_send_limits.sql",
+}
+
+// plan3Applied is what a Plan 3 binary (with the fix wave) applies.
+var plan3Applied = []string{
+	"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_send_limits.sql",
+}
+
+// migratedDatabase builds, at path, a database with exactly the migrations
+// named applied and recorded, as a binary built with only those files
+// leaves it.
+func migratedDatabase(t *testing.T, path string, names ...string) *sql.DB {
+	t.Helper()
+	db := rawDB(t, path)
+	if _, err := db.Exec(`PRAGMA journal_mode = WAL;
+CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		body, err := os.ReadFile(filepath.Clean(filepath.Join("migrations", name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(string(body)); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err = db.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, '2026-11-14T09:00:00.000000000Z')`, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return db
+}
+
+// appliedOrder is the migration names in the order they were recorded.
+func appliedOrder(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT name FROM schema_migrations ORDER BY rowid`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return names
+}
+
+// wantMergedSchema checks that both 0005 migrations took effect: Plan 4's
+// reviews table and session columns, and Plan 3's send-limit index.
+func wantMergedSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, q := range []struct{ what, sql string }{
+		{"table reviews", `SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'reviews'`},
+		{"table pushes", `SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'pushes'`},
+		{"sessions.end_reason", `SELECT count(*) FROM pragma_table_info('sessions') WHERE name = 'end_reason'`},
+		{"index messages_agent_sends", `SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'messages_agent_sends'`},
+	} {
+		var n int
+		if err := db.QueryRow(q.sql).Scan(&n); err != nil || n != 1 {
+			t.Errorf("%s: %d, %v; want it present", q.what, n, err)
+		}
+	}
+}
+
+// TestBothMigrationsNumberedFive: migrations are tracked by file name, and
+// the merge of plan-3 into plan-4 keeps both 0005 files under their names
+// (renaming one would run it again on a database that has it). Open
+// applies both, in file name order, on a fresh database, on a Plan 4
+// database (0005_reviews.sql applied) and on a Plan 3 database
+// (0005_send_limits.sql applied), and each runs once.
+func TestBothMigrationsNumberedFive(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		applied []string // nil: a fresh database
+		order   []string // the recorded order after Open
+	}{
+		{"fresh", nil, allMigrations},
+		{"plan 4 database", allMigrations[:5], allMigrations},
+		{"plan 3 database", plan3Applied, append(slices.Clone(plan3Applied), "0005_reviews.sql")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			path := dbPath(t)
+			if c.applied != nil {
+				migratedDatabase(t, path, c.applied...)
+			}
+			for range 2 { // the second Open finds nothing pending
+				s, err := store.Open(path)
+				if err != nil {
+					t.Fatalf("Open: %v", err)
+				}
+				if err = s.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			db := rawDB(t, path)
+			if got := appliedOrder(t, db); !reflect.DeepEqual(got, c.order) {
+				t.Errorf("applied = %v, want %v", got, c.order)
+			}
+			wantMergedSchema(t, db)
+		})
 	}
 }
 
@@ -494,8 +611,8 @@ func TestConcurrentOpenOfFreshFile(t *testing.T) {
 	for round := range 10 {
 		path := filepath.Join(t.TempDir(), fmt.Sprintf("round%d.db", round))
 		openAndUpsertConcurrently(t, path, openers)
-		if n := countMigrations(t, path); n != 5 {
-			t.Errorf("round %d: schema_migrations has %d rows, want 5", round, n)
+		if n := countMigrations(t, path); n != 6 {
+			t.Errorf("round %d: schema_migrations has %d rows, want 6", round, n)
 		}
 		got, err := open(t, path).ListSessions(context.Background(), store.ListFilter{})
 		if err != nil {

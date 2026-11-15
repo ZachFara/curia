@@ -35,8 +35,9 @@ func init() {
 			"each session's task and open decisions (DEC, red when one blocks); an agent\n" +
 			"team is one row, which Space expands. j/k or the arrows move, Enter or a\n" +
 			"click jumps to the session's pane (a team's: the member most in need of you)\n" +
-			"and closes the popup, d opens the session's decisions to answer them and r\n" +
-			"the review waiting for its task (neither inside an agent session), t opens\n" +
+			"and closes the popup, d opens the session's decisions to answer them (not\n" +
+			"inside an agent session) and r the review waiting for its task (read-only\n" +
+			"inside an agent session), t opens\n" +
 			"the task board (n there spawns a task), / filters on repo, branch, last\n" +
 			"update and member name, x then y kills the pane, q or Esc quits.",
 		Args: cobra.NoArgs,
@@ -69,32 +70,58 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 	client := newTmuxClient()
 	src := storeSource{st: st, tm: client, cfg: cfg}
 	m := ui.New(src, client, cfg, clock, mode)
+	// The dashboard's actions with a user's effect (the board's ready and
+	// spawn keys, d, x y, and the review view's a, c and x) are the
+	// user-only commands' (spec section 7, re-review A, C1): the guard is
+	// asked once, and when it refuses each of those keys shows its reason
+	// and does nothing. Jumps and views stay.
+	refused := userOnly("ui", "change, spawn or kill from the dashboard, or answer decisions and reviews")
 	if mode == ui.ModePopup {
-		bsrc := boardSource{st: st, tm: client, cfg: cfg}
+		bsrc := boardSource{st: st, tm: client, cfg: cfg, refused: refused}
 		m = m.WithBoard(func() tea.Model { return ui.NewBoard(bsrc, client, clock, true) })
 	}
-	// d answers through curia decide's path and r acts through curia
-	// review's, so both refuse inside an agent session as those commands
-	// do (spec section 7): no factory is set, and the dashboard says why
-	// when d or r is pressed.
-	// T16: without its log file the dashboard still starts, without d or r.
-	if mode == ui.ModePopup && refuseInsideAgent() == nil {
-		logger, closeLog, err := openLog(cfg.LogPath)
-		if err != nil {
-			return runProgram(m.WithoutDecide("decisions cannot be answered here: the log file cannot be opened").
-				WithoutReview("reviews cannot be opened here: the log file cannot be opened"), opts...)
+	if refused != nil {
+		m = m.WithoutKill(refused.Error())
+		if mode == ui.ModePopup {
+			m = m.WithoutDecide(refused.Error())
 		}
+	}
+	// d answers through curia decide's path, so it opens only for the user
+	// (above). r opens the review view for anyone, read-only when the guard
+	// refuses: its approve, change request and drop return the guard's
+	// reason (reviewSource.refused), as the board's keys do.
+	if mode == ui.ModePopup {
+		var closeLog func() error
+		m, closeLog = dashboardPopupViews(m, st, client, cfg, refused)
 		defer func() { _ = closeLog() }()
-		dsrc, via := newDecideSource(st, client, logger), decideVia()
+	}
+	return runProgram(m, opts...)
+}
+
+// dashboardPopupViews gives the popup's m its decide view (only when the
+// guard let the caller through: refused is nil) and its review view
+// (read-only when refused is set), over the log file, and returns the
+// function that closes the log. T16: without its log file the dashboard
+// still starts, without d or r.
+func dashboardPopupViews(m ui.Model, st *store.Store, client tmux.Client, cfg config.Config, refused error) (ui.Model, func() error) {
+	logger, closeLog, err := openLog(cfg.LogPath)
+	if err != nil {
+		if refused == nil {
+			m = m.WithoutDecide("decisions cannot be answered here: the log file cannot be opened")
+		}
+		return m.WithoutReview("reviews cannot be opened here: the log file cannot be opened"), func() error { return nil }
+	}
+	dsrc, via := newDecideSource(st, client, logger), decideVia()
+	if refused == nil {
 		m = m.WithDecide(func(id string) tea.Model {
 			return ui.NewDecide(dsrc, clock, ui.DecideOptions{SessionID: id, Embedded: true, Via: via})
 		})
-		rsrc := newReviewSource(st, client, cfg, logger, via)
-		m = m.WithReview(func(id string) tea.Model {
-			return ui.NewReview(rsrc, clock, ui.ReviewOptions{TaskID: id, Embedded: true})
-		})
 	}
-	return runProgram(m, opts...)
+	rsrc := newReviewSource(st, client, cfg, logger, via, refused)
+	m = m.WithReview(func(id string) tea.Model {
+		return ui.NewReview(rsrc, clock, ui.ReviewOptions{TaskID: id, Embedded: true})
+	})
+	return m, closeLog
 }
 
 // storeSource is the dashboard's ui.Source: on every read it reconciles
@@ -153,6 +180,9 @@ type boardSource struct {
 	st  *store.Store
 	tm  tmux.Client
 	cfg config.Config
+	// refused is the user-only guard's refusal of the dashboard's caller, or
+	// nil: with it, the board's ready and spawn keys do nothing and say why.
+	refused error
 }
 
 // Cards reconciles with tmux, as the dashboard's refresh does (the board
@@ -169,6 +199,9 @@ func (b boardSource) Cards(ctx context.Context) ([]task.Card, error) {
 // transaction: any other status is refused, and so is a task that is no
 // longer in backlog or ready (dropped meanwhile).
 func (b boardSource) SetStatus(ctx context.Context, id string, to model.TaskStatus) error {
+	if b.refused != nil {
+		return b.refused
+	}
 	if !uiBacklogOrReady(to) {
 		return fmt.Errorf("the board moves a task only between backlog and ready, not to %q", sanitize.Line(string(to), 40))
 	}
@@ -196,8 +229,13 @@ func uiBacklogOrReady(s model.TaskStatus) bool {
 // script's), so a slow checkout or setup is not cut short. The board runs
 // it off its update loop and refuses another action until it returns.
 func (b boardSource) Spawn(ctx context.Context, id string) (string, error) {
+	if b.refused != nil {
+		return "", b.refused
+	}
 	var out bytes.Buffer
-	r, err := spawnTask(context.WithoutCancel(ctx), b.st, b.tm, b.cfg, id, spawnOptions{Wait: 0, Out: &out})
+	// ReadyOnly unless the guard passed (Ruling 113), should the source be
+	// wired without the refusal elsewhere.
+	r, err := spawnTask(context.WithoutCancel(ctx), b.st, b.tm, b.cfg, id, spawnOptions{Wait: 0, Out: &out, ReadyOnly: b.refused != nil})
 	if err != nil {
 		return "", err
 	}

@@ -322,8 +322,9 @@ func init() {
 		Short: "Approve a repository's .curia/setup.sh for curia spawn",
 	}
 	parent.AddCommand(&cobra.Command{
-		Use:   "approve <task id>",
-		Short: "Show the task's .curia/setup.sh and approve its exact content for the repository",
+		Use:         "approve <task id>",
+		Short:       "Show the task's .curia/setup.sh and approve its exact content for the repository",
+		Annotations: userOnlyMark(),
 		Long: "Shows the whole setup script in the task's worktree (path, size, SHA-256 and\n" +
 			"every line, numbered) and asks you to type the first 8 characters of its SHA-256\n" +
 			"on your terminal; then that exact content is approved for the task's repository.\n" +
@@ -340,8 +341,8 @@ func init() {
 // runSetupApprove is curia setup approve <id>.
 func runSetupApprove(cmd *cobra.Command, args []string) error {
 	// No agent may approve code to run (spec section 7, Ruling 108).
-	if refuseInsideAgent() != nil {
-		return errors.New("curia setup approve cannot run inside an agent session (CLAUDECODE is set): only the user may approve a setup script")
+	if err := userOnly("setup approve", "approve a setup script"); err != nil {
+		return err
 	}
 	id := args[0]
 	if !task.ValidID(id) {

@@ -48,6 +48,7 @@ func routingSeed(t *testing.T, db string, n int, rejected func(i int) bool) {
 
 func routingHome(t *testing.T) string {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	db := hookHome(t)
 	t.Cleanup(func() { routingJSON = false })
 	return db
@@ -139,7 +140,7 @@ func TestRoutingReset(t *testing.T) {
 	_ = st.Close()
 
 	t.Setenv("CLAUDECODE", "1")
-	if _, rerr := runRoot(t, "routing", "reset"); rerr == nil || !strings.Contains(rerr.Error(), "refusing to run inside an agent session") {
+	if _, rerr := runRoot(t, "routing", "reset"); rerr == nil || !strings.Contains(rerr.Error(), "cannot run inside an agent session") {
 		t.Fatalf("inside agent: %v", rerr)
 	}
 	if e, tr := routingState(t, db); e.IsZero() || tr.IsZero() {

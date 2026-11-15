@@ -1,0 +1,24 @@
+✻ Worked for 9s · done 6:32 PM
+
+❯ Without using any tool, say in one sentence what a package.json file is for.
+
+⏺ A package.json file is the manifest for a Node.js project that holds its
+  metadata, such as name and version, along with its dependencies and scripts.
+
+✻ Cooked for 1s · done 6:33 PM
+
+❯ Without using any tool, suggest one more field this package.json could have,
+  in one sentence.
+
+⏺ You could add a "description" field, which gives a short summary of what the
+  package does and is shown in registries and search results.
+
+✻ Cooked for 2s · done 6:33 PM
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏸ plan mode on (shift+tab to cycle)
+
+
+

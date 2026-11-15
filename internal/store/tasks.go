@@ -289,22 +289,26 @@ WHERE n = ?`,
 }
 
 // ClaimLaunch claims task id for a launch at now, in one write transaction
-// (plan section 4.6, step 1): ErrNoTask if there is none, ErrTaskBusy when
-// its launched_at is after now - hold (a launch is under way, or started
-// too recently to have died); otherwise launched_at becomes now and the
-// stored task is returned.
-func (s *Store) ClaimLaunch(ctx context.Context, id string, now time.Time, hold time.Duration) (model.Task, error) {
+// (plan section 4.6, step 1): ErrNoTask if there is none; ErrTaskBusy while
+// a launch is under way (launched_at after now - hold and no window
+// recorded yet: a spawn records its pane when it has opened one), or when
+// the stored pane is not seenPane, the pane the caller's idle check looked
+// at (another spawn recorded a window since). Otherwise launched_at becomes
+// now, the pane is cleared until this launch records its own, and the
+// stored task is returned. launched_at is never cleared here: pause and
+// clean read it as the time the recorded pane was opened.
+func (s *Store) ClaimLaunch(ctx context.Context, id, seenPane string, now time.Time, hold time.Duration) (model.Task, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return model.Task{}, failTask("claim launch of", id, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	cur, err := loadTask(ctx, tx, id)
-	if err == nil && cur.LaunchedAt.After(now.Add(-hold)) {
+	if err == nil && (cur.Pane != seenPane || (cur.Pane == "" && cur.LaunchedAt.After(now.Add(-hold)))) {
 		err = ErrTaskBusy
 	}
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `UPDATE tasks SET launched_at = ? WHERE n = ?`, formatTime(now), cur.N)
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET launched_at = ?, pane = '' WHERE n = ?`, formatTime(now), cur.N)
 	}
 	if err != nil {
 		return model.Task{}, failTask("claim launch of", id, err)

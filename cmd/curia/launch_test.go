@@ -77,14 +77,14 @@ func launchRun(t *testing.T, stdin io.Reader, args ...string) (stdout, stderr st
 	rootCmd.SetErr(&errOut)
 	rootCmd.SetArgs(append([]string{"launch"}, args...))
 	t.Cleanup(func() {
-		launchModel, launchTeam, launchResume = "", false, ""
+		launchModel, launchTeam, launchResume, launchAfterPause = "", false, "", false
 		rootCmd.SetIn(nil)
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
 		rootCmd.SetArgs(nil)
 	})
 	err = rootCmd.Execute()
-	launchModel, launchTeam, launchResume = "", false, ""
+	launchModel, launchTeam, launchResume, launchAfterPause = "", false, "", false
 	return out.String(), errOut.String(), err
 }
 
@@ -166,6 +166,9 @@ func TestLaunchModelTeamResume(t *testing.T) {
 			[]string{"claude", "--model", "opus", "--teammate-mode", "tmux", "--resume", launchUUID},
 			true,
 		},
+		// After a pause the agent is told its work is in the WIP commit.
+		{[]string{"T-1", "--resume", launchUUID, "--after-pause"}, []string{"claude", "--resume", launchUUID, launchAfterPauseNote("T-1")}, false},
+		{[]string{"T-1", "--after-pause"}, []string{"claude", task.Brief(tk, false) + "\n\n" + launchAfterPauseNote("T-1")}, false},
 	}
 	for _, c := range cases {
 		rec := launchRecord(t)

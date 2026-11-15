@@ -82,8 +82,9 @@ func init() {
 			"Tailscale tunnel, or tailscale serve in front of a loopback address. With\n" +
 			"[ntfy] configured it also sends the queued phone pushes. Refuses to run\n" +
 			"inside an agent session.",
-		Args: cobra.NoArgs,
-		RunE: runServe,
+		Annotations: userOnlyMark(),
+		Args:        cobra.NoArgs,
+		RunE:        runServe,
 	}
 	cmd.Flags().StringVar(&serveListenFlag, "listen", "", "the ip:port to listen on (loopback or Tailscale only)")
 	rootCmd.AddCommand(cmd)
@@ -91,8 +92,8 @@ func init() {
 
 func runServe(cmd *cobra.Command, _ []string) error {
 	// Only the user answers a decision (spec section 7).
-	if refuseInsideAgent() != nil {
-		return errors.New("curia serve cannot run inside an agent session (CLAUDECODE is set): only the user may answer a decision")
+	if err := userOnly("serve", "answer a decision"); err != nil {
+		return err
 	}
 	cfg, err := loadConfig()
 	if err != nil {

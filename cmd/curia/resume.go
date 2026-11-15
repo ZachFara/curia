@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -17,8 +16,9 @@ import (
 
 func init() {
 	rootCmd.AddCommand(&cobra.Command{
-		Use:   "resume <id>",
-		Short: "Bring a paused task's worktree and agent back (the user only)",
+		Use:         "resume <id>",
+		Short:       "Bring a paused task's worktree and agent back (the user only)",
+		Annotations: userOnlyMark(),
 		Long: "Adds the paused task's worktree again on its branch (with its WIP commit),\n" +
 			"runs .curia/setup.sh as curia spawn does, and opens the task's window with\n" +
 			"claude --resume on the session the pause recorded (or the task's brief when\n" +
@@ -31,8 +31,8 @@ func init() {
 
 func runResume(cmd *cobra.Command, args []string) error {
 	// No agent may spawn or resume anything (spec section 7).
-	if refuseInsideAgent() != nil {
-		return errors.New("curia resume cannot run inside an agent session (CLAUDECODE is set): only the user may resume a task")
+	if err := userOnly("resume", "resume a task"); err != nil {
+		return err
 	}
 	return lifecycleRunCmd(cmd, args[0], func(ctx context.Context, st *store.Store, cfg config.Config, out io.Writer) error {
 		return resumeTask(ctx, st, newTmuxClient(), cfg, args[0], out)
@@ -60,12 +60,20 @@ func resumeTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 	}); err != nil {
 		return err
 	}
-	r, err := spawnTask(ctx, st, tm, cfg, id, spawnOptions{Team: t.Team, Resume: t.ResumeSession, Wait: spawnWait, Out: out})
+	o := spawnOptions{Team: t.Team, Resume: t.ResumeSession, Wait: spawnWait, Out: out, AfterPause: resumeAfterWIP(ctx, t)}
+	r, err := spawnTask(ctx, st, tm, cfg, id, o)
 	if err != nil {
 		return resumeRepause(ctx, st, t, err)
 	}
 	_, err = fmt.Fprintln(out, spawnLine(r))
 	return err
+}
+
+// resumeAfterWIP reports whether t's branch ends in the WIP commit its
+// pause made, which the resumed agent is then told about.
+func resumeAfterWIP(ctx context.Context, t model.Task) bool {
+	subject, err := worktreeRun(ctx, worktreeGitLimit, t.Repo, "log", "-1", "--no-show-signature", "--format=%s", "refs/heads/"+t.Branch, "--")
+	return err == nil && subject == "curia: WIP "+t.ID+" (paused)"
 }
 
 // resumeCheck is resume's first rule: the task is paused, its branch still

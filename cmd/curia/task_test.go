@@ -19,6 +19,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/tmux"
 )
 
 // taskUnexpectedEditor is taskEditor under test: no test may start a real
@@ -40,6 +41,7 @@ const taskNow = "2026-11-13T12:00:00Z"
 // database path.
 func taskHome(t *testing.T) string {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	db := hookHome(t)
 	prevClock := clock
 	now := decisionsParse(t, taskNow)
@@ -452,6 +454,26 @@ func TestTaskLsTableIsSanitised(t *testing.T) {
 	}
 }
 
+func TestTaskLsReconcilesFirst(t *testing.T) {
+	db := taskHome(t)
+	repo := taskRepo(t, "main")
+	taskMust(t, "task", "add", "Dies", "--repo", repo)
+	taskPutSession(t, db, "s1", "T-1", "%1", model.StateIdle)
+	fake := useFakeTmux(t)
+	fake.Panes = []tmux.Pane{{ID: "%1", Session: "api", WindowID: "@1"}}
+	if out := taskMust(t, "task", "ls"); !strings.Contains(out, "running") || !strings.Contains(out, "%1") {
+		t.Fatalf("with the agent's pane open:\n%s", out)
+	}
+	fake.Panes = nil // the agent's pane was killed
+	out := taskMust(t, "task", "ls")
+	if strings.Contains(out, "running") || strings.Contains(out, "%1") {
+		t.Errorf("after the pane died, task ls still shows the agent:\n%s", out)
+	}
+	if s := getSession(t, db, "s1"); s.State != model.StateStale {
+		t.Errorf("s1 state = %s, want stale", s.State)
+	}
+}
+
 func TestTaskLsTableNotes(t *testing.T) {
 	db := taskHome(t)
 	repo := taskRepo(t, "main")
@@ -462,8 +484,9 @@ func TestTaskLsTableNotes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = raw.Close() }()
-	if _, err := raw.Exec(`UPDATE tasks SET status = 'ready', paused_at = ?, worktree = '/w/one' WHERE id = 'T-1'`,
-		"2026-11-13T11:00:00.000000000Z"); err != nil {
+	kept := t.TempDir() // a worktree the pause kept on disk
+	if _, err := raw.Exec(`UPDATE tasks SET status = 'ready', paused_at = ?, worktree = ? WHERE id = 'T-1'`,
+		"2026-11-13T11:00:00.000000000Z", kept); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := raw.Exec(`UPDATE tasks SET status = 'ready', worktree = '/w/two' WHERE id = 'T-2'`); err != nil {
@@ -481,6 +504,15 @@ func TestTaskLsTableNotes(t *testing.T) {
 	}
 	if !strings.Contains(lines[2], "running") || strings.Contains(lines[2], "worktree") || !strings.Contains(lines[2], "%7 +1") {
 		t.Errorf("running task: %q, want running, no worktree note, agent %%7 +1", lines[2])
+	}
+	// A pause that removed the worktree: the path is still recorded, but the
+	// note says only paused.
+	if _, err := raw.Exec(`UPDATE tasks SET worktree = ? WHERE id = 'T-1'`, filepath.Join(kept, "removed")); err != nil {
+		t.Fatal(err)
+	}
+	lines = strings.Split(strings.TrimSuffix(taskMust(t, "task", "ls"), "\n"), "\n")
+	if !strings.Contains(lines[1], "ready (paused)") || strings.Contains(lines[1], "worktree") {
+		t.Errorf("paused task whose worktree was removed: %q, want ready (paused)", lines[1])
 	}
 }
 
@@ -570,11 +602,12 @@ func TestTaskEditThroughEditor(t *testing.T) {
 	body := taskWriteFile(t, t.TempDir(), "b.md", "Old body\n")
 	taskMust(t, "task", "add", "Old title", "--repo", repo, "--body", body)
 	taskSetEditor(t, "/usr/bin/vim -f")
-	tty, err := os.Open(os.DevNull) // a character device stands in for the terminal
+	tty, err := os.Open(os.DevNull) // a character device stands in for the terminal on stdin
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tty.Close() }()
+	userTerminalAs(t, true) // and the user is at a terminal
 
 	var paths []string
 	editWith := func(rewrite func(content string) string) {
@@ -611,6 +644,22 @@ func TestTaskEditThroughEditor(t *testing.T) {
 			t.Errorf("temp file %s still exists (%v)", p, serr)
 		}
 	}
+}
+
+func TestTaskEditorNeedsTheUserAtATerminal(t *testing.T) {
+	taskHome(t)
+	repo := taskRepo(t, "main")
+	taskMust(t, "task", "add", "Plain", "--repo", repo)
+	taskSetEditor(t, "/usr/bin/vim -f")
+	devNull, err := os.Open(os.DevNull) // a character device, as an agent's stdin can be
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = devNull.Close() }()
+	userTerminalAs(t, false) // no controlling terminal: an agent's tool shell
+	// taskEditor is still the failing stub: reaching it would panic.
+	out, err := taskRun(t, devNull, "task", "edit", "T-1")
+	taskWantErr(t, err, out, "curia task edit cannot run without a terminal")
 }
 
 func TestTaskEditWithoutEditorStartsNothing(t *testing.T) {
@@ -672,6 +721,7 @@ func TestTaskEditorRunsWithoutShell(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = tty.Close() }()
+	userTerminalAs(t, true)
 	if out, rerr := taskRun(t, tty, "task", "edit", "T-1"); rerr != nil || out != "T-1 updated\n" {
 		t.Fatalf("edit with the configured editor: %v %q", rerr, out)
 	}

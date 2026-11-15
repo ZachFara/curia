@@ -126,6 +126,7 @@ type Model struct {
 
 	open     func(sessionID string) tea.Model // builds the decide view; nil: d cannot answer
 	noAnswer string                           // why d cannot answer; "": inside an agent session
+	noKill   string                           // why x cannot kill; "": it can
 	board    func() tea.Model                 // builds the task board; nil: t and n say why
 	review   func(taskID string) tea.Model    // builds the review view; nil: r says why
 	noReview string                           // why r cannot open a review; "": inside an agent session
@@ -238,6 +239,13 @@ func (m Model) WithDecide(open func(sessionID string) tea.Model) Model {
 // WithoutDecide returns m with the d key disabled, saying why when pressed.
 func (m Model) WithoutDecide(why string) Model {
 	m.open, m.noAnswer = nil, why
+	return m
+}
+
+// WithoutKill returns m with x (kill a pane) disabled, saying why when
+// pressed.
+func (m Model) WithoutKill(why string) Model {
+	m.noKill = why
 	return m
 }
 
@@ -776,6 +784,9 @@ func (m Model) jump() (Model, tea.Cmd) {
 func (m Model) askKill() Model {
 	r, ok := m.current()
 	switch {
+	case m.noKill != "":
+		m.notice = m.noKill
+		return m
 	case !ok:
 		return m
 	case r.kind == rowGroup:

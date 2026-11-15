@@ -53,8 +53,9 @@ var taskEditor = taskDefaultEditor
 
 func init() {
 	add := &cobra.Command{
-		Use:   "add <title>",
-		Short: "Add a task to the backlog",
+		Use:         "add <title>",
+		Short:       "Add a task to the backlog",
+		Annotations: userOnlyMark(),
 		Long: "Adds a task for the git repository holding --repo (default: the current\n" +
 			"directory), which must be a main worktree, not a linked one. --base defaults\n" +
 			"to the branch checked out there. --body reads the brief from a file, or from\n" +
@@ -79,8 +80,9 @@ func init() {
 	ls.Flags().StringVar(&taskLsRepo, "repo", "", "only tasks of the repository holding this directory")
 	ls.Flags().BoolVar(&taskLsJSON, "json", false, "print a JSON array instead of a table")
 	edit := &cobra.Command{
-		Use:   "edit <id>",
-		Short: "Change a task",
+		Use:         "edit <id>",
+		Short:       "Change a task",
+		Annotations: userOnlyMark(),
 		Long: "Changes the fields given by flags; --body reads the brief from a file, or\n" +
 			"from stdin with -. With no flag, on a terminal, opens the editor set by the\n" +
 			"editor option of the config file on the title, a blank line and the body.\n" +
@@ -94,10 +96,11 @@ func init() {
 	edit.Flags().StringArrayVar(&taskEditTags, "tag", nil, "a tag (repeatable; replaces the tags)")
 	edit.Flags().StringVar(&taskEditStatus, "status", "", "backlog, ready or dropped")
 	ready := &cobra.Command{
-		Use:   "ready <id>",
-		Short: "Mark a task ready to spawn",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runTaskReady,
+		Use:         "ready <id>",
+		Short:       "Mark a task ready to spawn",
+		Annotations: userOnlyMark(),
+		Args:        cobra.ExactArgs(1),
+		RunE:        runTaskReady,
 	}
 	taskCmd.AddCommand(add, ls, edit, ready)
 	rootCmd.AddCommand(taskCmd)
@@ -227,6 +230,10 @@ func taskProblemsError(what string, ps []task.Problem) error {
 }
 
 func runTaskAdd(cmd *cobra.Command, args []string) error {
+	// An agent may not write a brief another agent starts from (Ruling 113).
+	if err := userOnly("task add", "add a task"); err != nil {
+		return err
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -324,6 +331,12 @@ func runTaskLs(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	// A session whose pane is gone must not show its task running: mark it
+	// stale first, as the board does (skipped, and logged, when tmux cannot
+	// list its panes).
+	if err = reconcile(cmd.Context(), st, newTmuxClient(), cfg.LogPath, clock()); err != nil {
+		return err
+	}
 	cards, err := taskCards(cmd.Context(), st, clock())
 	if err != nil {
 		return err
@@ -408,19 +421,26 @@ func taskPrintJSON(w io.Writer, cards []task.Card) error {
 func taskCell(s string) string { return ui.Cell(sanitize.Line(s, task.MaxTitle)) }
 
 // taskStatusText is c's status with what the status cannot say: paused
-// when the task is paused, worktree when it has one and no live session.
+// when the task is paused, worktree when its worktree is on disk and it has
+// no live session (so a paused task says whether the pause kept it).
 func taskStatusText(c task.Card) string {
 	var notes []string
 	if !c.Task.PausedAt.IsZero() {
 		notes = append(notes, "paused")
 	}
-	if c.Task.Worktree != "" && len(c.Sessions) == 0 {
+	if c.Task.Worktree != "" && len(c.Sessions) == 0 && taskOnDisk(c.Task.Worktree) {
 		notes = append(notes, "worktree")
 	}
 	if len(notes) == 0 {
 		return string(c.Status)
 	}
 	return string(c.Status) + " (" + strings.Join(notes, ", ") + ")"
+}
+
+// taskOnDisk reports whether something is at path.
+func taskOnDisk(path string) bool {
+	_, err := os.Lstat(filepath.Clean(path))
+	return err == nil
 }
 
 // taskAgentText is the pane of c's lead (or solo) live session, with the
@@ -493,6 +513,9 @@ func taskEditStatusOf(name string) (model.TaskStatus, error) {
 }
 
 func runTaskEdit(cmd *cobra.Command, args []string) error {
+	if err := userOnly("task edit", "change a task"); err != nil {
+		return err
+	}
 	id := args[0]
 	if err := taskCheckID(id); err != nil {
 		return err
@@ -560,7 +583,8 @@ func taskNoEditorError() error {
 		sanitize.Line(where, 200))
 }
 
-// taskIsTerminal reports whether in is a terminal (a character device).
+// taskIsTerminal reports whether in is a character device, as a terminal
+// is (so is /dev/null: who is at it is userAtTerminal's question).
 func taskIsTerminal(in io.Reader) bool {
 	f, ok := in.(*os.File)
 	if !ok {
@@ -637,6 +661,9 @@ func taskRunEditor(ctx context.Context, argv []string, id, content string) (stri
 }
 
 func runTaskReady(cmd *cobra.Command, args []string) error {
+	if err := userOnly("task ready", "mark a task ready"); err != nil {
+		return err
+	}
 	id := args[0]
 	if err := taskCheckID(id); err != nil {
 		return err

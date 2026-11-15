@@ -18,6 +18,7 @@ import (
 	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/team"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -267,6 +268,10 @@ func TestMessagePaneRefusals(t *testing.T) {
 		{fixture: "lc4-idle-focus-hint-same-line.txt", why: unknown},
 		{fixture: "lc4-fresh-focus-hint-second-line.txt", why: unknown},
 		{fixture: "lc3-idle-auto-34col.txt", why: unknown},
+		{fixture: "lc5-draft-equals-suggestion.txt", why: "prompt has a draft; nothing typed"},
+		{fixture: "lc5-suggestion-push-it-plain.txt", why: "prompt has a draft; nothing typed"}, // no attributes: a draft
+		{fixture: "lc5-survey-idle.txt", why: "Claude Code's feedback survey is on screen, and a typed line holds digits " +
+			"that would answer it; nothing typed"},
 		{fixture: "built-other-footer.txt", why: unknown},
 		{fixture: "lc4-idle-auto-tasks-hint.txt", sync: true, why: "the agent's window has synchronize-panes on, so typing would reach every pane in it; nothing typed"},
 		{fixture: "lc3-idle-auto-200col.txt", capErr: errors.New("tmux capture-pane: can't find pane: %5"), why: "could not read the agent's pane; nothing typed"},
@@ -292,6 +297,80 @@ func TestMessagePaneRefusals(t *testing.T) {
 			}
 			wantMsgQueued(t, st, out, m.ID, c.why+mQueued)
 		})
+	}
+}
+
+// Ruling 110, LA1: an idle agent whose prompt shows Claude Code's dim
+// suggestion, captured with escape sequences and the cursor at the input's
+// start, is typed into; the same screen with the text typed is not.
+func TestMessageTypedOverDimSuggestion(t *testing.T) {
+	styled := mustRead(filepath.Join("testdata", "prompt", "lc5-t4-after-brief.esc"))
+	at := strings.Index(styled, "\x1b[39m❯\u00a0\x1b[2mpush it")
+	if at < 0 {
+		t.Fatal("the captured suggestion line was not found")
+	}
+	row := strings.Count(styled[:at], "\n")
+	const (
+		draft          = "prompt has a draft; nothing typed"
+		suggestOrDraft = "the agent's prompt shows a suggestion or a draft (the cursor is not where an empty prompt has it); nothing typed"
+	)
+	pasted := strings.Replace(styled, "\x1b[2mpush it", "\x1b[2m[Pasted text #1 +12 lines]", 1)
+	for _, c := range []struct {
+		name    string
+		styled  string
+		cursorX int
+		why     string // "" is typed
+	}{
+		{"dim suggestion", styled, 2, ""},
+		{"the same text typed", strings.Replace(styled, "\x1b[39m❯\u00a0\x1b[2mpush it\x1b[0m", "\x1b[39m❯\u00a0push it", 1), 2, draft},
+		// Re-review B, m7: the dim line with the cursor after it, as after
+		// typing it, is refused and says it may be either.
+		{"dim line, cursor after it", styled, 9, suggestOrDraft},
+		// Re-review B: a paste's placeholder is the user's draft, dim or not.
+		{"dim paste placeholder", pasted, 2, draft},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			st := openStore(t)
+			seedSession(t, st, idleTarget())
+			m := seedMessage(t, st, "s1", "use pnpm")
+			fake := &tmux.Fake{Styled: c.styled, CursorX: c.cursorX, CursorY: row, CursorKnown: true, Panes: []tmux.Pane{livePane}}
+			log, _ := testLog()
+			out, err := deliver.Message(context.Background(), st, fake, log, m.ID, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(sendKeysCalls(fake.Calls)) == 1; got != (c.why == "") {
+				t.Errorf("typed = %v (calls %q, note %q), want %v", got, fake.Calls, out.Note, c.why == "")
+			}
+			if c.why != "" {
+				wantMsgQueued(t, st, out, m.ID, c.why+mQueued)
+			}
+		})
+	}
+}
+
+// Live check B, defect 3: a team lead whose teammates are listed under its
+// prompt gets a note that says so, not "prompt not recognized".
+func TestMessageToTeamLeadWithTeammatesNote(t *testing.T) {
+	st := openStore(t)
+	seedSession(t, st, idleTarget())
+	if _, err := st.SetTeams(context.Background(), map[string]team.Membership{
+		"s1": {TeamID: "session-1", Role: model.RoleLead, Member: "team-lead"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := seedMessage(t, st, "s1", "use pnpm")
+	fake := &tmux.Fake{Screen: mustRead(filepath.Join("testdata", "prompt", "lc5-lead-narrow-agents-listed.txt")), Panes: []tmux.Pane{livePane}}
+	log, _ := testLog()
+	out, err := deliver.Message(context.Background(), st, fake, log, m.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sendKeysCalls(fake.Calls); len(got) != 0 {
+		t.Errorf("typed into the lead: %q", got)
+	}
+	if !strings.Contains(out.Note, "the agent leads a team whose teammates are alive, and nothing is typed to a team lead then") {
+		t.Errorf("note = %q, want the team lead note", out.Note)
 	}
 }
 

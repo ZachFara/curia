@@ -578,3 +578,24 @@ func TestClaimMessagesConcurrentStopsDeliverEachOnce(t *testing.T) {
 		}
 	}
 }
+
+// The typing claim's unconfirmed-line check and check_messages' claim and
+// confirm use the partial index too, so they read only the rows not yet
+// delivered (ledger, Task 18 and Task 26).
+func TestTypingAndCheckMessagesUseTheIndex(t *testing.T) {
+	path := dbPath(t)
+	open(t, path)
+	db := rawDB(t, path)
+	for _, q := range []struct {
+		name, sql string
+		args      []any
+	}{
+		{"unconfirmed", store.UnconfirmedQuery, []any{"s1", "s1"}},
+		{"check claim", store.CheckClaim, []any{"x", "x", "s1"}},
+		{"check confirm", store.CheckConfirm, []any{"x", "s1"}},
+	} {
+		if plan := queryPlan(t, db, q.sql, q.args...); !strings.Contains(plan, "messages_undelivered") {
+			t.Errorf("%s does not use messages_undelivered:\n%s", q.name, plan)
+		}
+	}
+}

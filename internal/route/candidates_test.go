@@ -202,3 +202,54 @@ func checkLabels(t *testing.T, got []Candidate) {
 		}
 	}
 }
+
+func TestCandidatesSkipStale(t *testing.T) {
+	s := []model.Session{
+		{ID: "dead1", Repo: "/w/x", TaskID: "T-1", State: model.StateStale},
+		{ID: "dead2", Repo: "/w/x", TaskID: "T-1", State: model.StateStale},
+		{ID: "live", Repo: "/w/x", TaskID: "T-1", State: model.StateIdle},
+		{ID: "gone", Repo: "/w/y", State: model.StateEnded},
+	}
+	cards := []task.Card{{Task: model.Task{ID: "T-1", Repo: "/w/x"}, Status: model.TaskRunning}}
+	cands := Candidates(s, cards)
+	if g := strings.Join(keys(cands), ","); g != "s1,T-1,r1,global" || cands[0].Session.ID != "live" {
+		t.Fatalf("candidates = %s (%+v), want only the live session", g, cands)
+	}
+	got, err := Settle(model.KindInstruction, cands[1], cands)
+	if err != nil || got.Session != "live" || got.Task != "T-1" {
+		t.Fatalf("Settle(T-1) = %+v, %v, want the live session", got, err)
+	}
+	// a repository whose only sessions are stale has no live agent
+	only := Candidates([]model.Session{{ID: "dead", Repo: "/w/z", State: model.StateStale}}, nil)
+	if g := strings.Join(keys(only), ","); g != "global" {
+		t.Fatalf("stale-only candidates = %s, want global alone", g)
+	}
+}
+
+func TestRepoRuleWithTwoAgentsResolvesToRepo(t *testing.T) {
+	s, c := fixture()
+	cands := Candidates(s, c)
+	matches := Resolve(message.Address{Name: "api-server"}, cands, nil)
+	if len(matches) != 2 {
+		t.Fatalf("matches = %v, want both api-server sessions", keys(matches))
+	}
+	for _, kind := range []model.MessageKind{model.KindRule, model.KindTask} {
+		got := ForKind(kind, matches, cands)
+		if len(got) != 1 || got[0].Type != TargetRepo || got[0].Repo != "/w/api-server" {
+			t.Errorf("%s: ForKind = %v, want the api-server repository", kind, keys(got))
+		}
+	}
+	// an instruction still needs the user to pick a session
+	if got := ForKind(model.KindInstruction, matches, cands); strings.Join(keys(got), ",") != "s1,s2" {
+		t.Errorf("instruction: ForKind = %v, want both sessions", keys(got))
+	}
+	// matches in two repositories stay ambiguous
+	two := []Candidate{cands[0], cands[2]} // s1 in api-server, s3 in web
+	if got := ForKind(model.KindRule, two, cands); len(got) != 2 {
+		t.Errorf("two repos: ForKind = %v, want both kept", keys(got))
+	}
+	// a single match is kept as it is
+	if got := ForKind(model.KindRule, matches[:1], cands); len(got) != 1 || got[0].Key != "s1" {
+		t.Errorf("one match: ForKind = %v, want s1", keys(got))
+	}
+}

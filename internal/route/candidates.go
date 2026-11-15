@@ -37,8 +37,9 @@ type Candidate struct {
 	Repo    string // the repository of any candidate but global
 }
 
-// Candidates lists the targets (section 4.10): the live sessions, a
-// teammate left out in favor of its lead; the tasks shown as backlog,
+// Candidates lists the targets (section 4.10): the live sessions (not
+// ended, not stale: a stale session's pane is gone), a teammate left out in
+// favor of its lead; the tasks shown as backlog,
 // ready, running or needs_decision; the distinct repositories of those; and
 // global.
 func Candidates(sessions []model.Session, cards []task.Card) []Candidate {
@@ -53,7 +54,7 @@ func Candidates(sessions []model.Session, cards []task.Card) []Candidate {
 	}
 	n := 0
 	for _, s := range sessions {
-		if s.State == model.StateEnded || s.TeamRole == model.RoleTeammate {
+		if s.State == model.StateEnded || s.State == model.StateStale || s.TeamRole == model.RoleTeammate {
 			continue
 		}
 		n++
@@ -139,6 +140,26 @@ func Resolve(a message.Address, cands []Candidate, aliases map[string]string) []
 		}
 	}
 	return nil
+}
+
+// ForKind narrows the candidates an address matched for a message of kind:
+// a rule or a task goes to a repository, so several matches that all lie in
+// one repository mean that repository, not an ambiguity. Anything else is
+// returned as it is.
+func ForKind(kind model.MessageKind, matches, cands []Candidate) []Candidate {
+	if len(matches) < 2 || (kind != model.KindRule && kind != model.KindTask) {
+		return matches
+	}
+	repo := matches[0].Repo
+	for _, m := range matches {
+		if m.Repo == "" || m.Repo != repo {
+			return matches
+		}
+	}
+	if r := pick(cands, func(c Candidate) bool { return c.Type == TargetRepo && c.Repo == repo }); len(r) == 1 {
+		return r
+	}
+	return matches
 }
 
 // unalias replaces name by its alias value, once.

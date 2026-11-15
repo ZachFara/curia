@@ -29,6 +29,7 @@ type messagesSpec struct {
 
 func messagesHome(t *testing.T, specs ...messagesSpec) string {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	db := hookHome(t)
 	now, err := time.Parse(time.RFC3339, messagesNow)
 	if err != nil {
@@ -301,7 +302,7 @@ func TestMessagesCancelRefusesInsideAgent(t *testing.T) {
 	db := messagesHome(t, messagesSpec{text: "a", status: "queued"})
 	t.Setenv("CLAUDECODE", "1")
 	_, err := runRoot(t, "messages", "cancel", "M-1")
-	if err == nil || !strings.Contains(err.Error(), "refusing to run inside an agent session") {
+	if err == nil || !strings.Contains(err.Error(), "cannot run inside an agent session") {
 		t.Fatalf("err = %v", err)
 	}
 	st, err := store.Open(db)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -873,5 +874,179 @@ func TestListMessagesFilters(t *testing.T) {
 	}
 	if _, ok, err := s.GetMessage(ctx, "M-9"); err != nil || ok {
 		t.Errorf("GetMessage(missing) = %v, %v; want false, nil", ok, err)
+	}
+}
+
+// agentSend is an agent's curia send from sender to target at at.
+func agentSend(sender, target string, at time.Time) model.Message {
+	return model.Message{
+		Text: "from " + sender, Kind: model.KindInstruction, Sender: model.SenderAgent, SenderSession: sender,
+		TargetSession: target, RoutedBy: model.RoutedSend, Status: model.MsgQueued, CreatedAt: at,
+	}
+}
+
+func TestSendRateLimited(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	for _, id := range []string{"real-a", "real-b", "chatty"} {
+		liveSession(t, s, id, "", model.StateIdle)
+	}
+	liveSession(t, s, "gone", "", model.StateEnded)
+	t.Run("queued per target, whoever sends", func(t *testing.T) { sendLimitQueued(t, s) })
+	t.Run("per verified session in ten minutes", func(t *testing.T) { sendLimitPerSession(t, s) })
+	t.Run("made-up, cleared and ended ids share one bucket", func(t *testing.T) { sendLimitUnknown(t, s) })
+	sendLimitPlans(t, path)
+}
+
+// sendLimitQueued: the per-target cap holds across claimed identities.
+func sendLimitQueued(t *testing.T, s *store.Store) {
+	ctx := context.Background()
+	for i, sender := range []string{"real-a", "real-b", "made-up-1", "", "gone"} {
+		createMessage(t, s, agentSend(sender, "busy", t0.Add(time.Duration(i)*time.Second)))
+	}
+	_, err := s.CreateMessage(ctx, agentSend("real-a", "busy", t0.Add(time.Minute)))
+	if !errors.Is(err, store.ErrTooMany) || !strings.Contains(err.Error(), "5 queued messages from agents") {
+		t.Fatalf("sixth queued agent message = %v, want ErrTooMany naming the queue", err)
+	}
+	// The user is never limited, nor is a target with room.
+	createMessage(t, s, instruction("from the user", "busy"))
+	createMessage(t, s, agentSend("real-a", "free", t0.Add(time.Minute)))
+	// Once they are delivered there is room again.
+	if _, err = s.CheckMessages(ctx, "busy", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	createMessage(t, s, agentSend("real-a", "busy", t0.Add(time.Minute)))
+}
+
+// sendLimitPerSession: a verified session has its own count.
+func sendLimitPerSession(t *testing.T, s *store.Store) {
+	ctx := context.Background()
+	start := t0.Add(time.Hour)
+	for i := range store.SendRateLimit {
+		createMessage(t, s, agentSend("chatty", fmt.Sprintf("t%d", i), start.Add(time.Duration(i)*time.Second)))
+	}
+	at := start.Add(store.SendRateWindow - time.Second)
+	_, err := s.CreateMessage(ctx, agentSend("chatty", "t-new", at))
+	if !errors.Is(err, store.ErrTooMany) || !strings.Contains(err.Error(), "20 messages in the last 10 minutes, the most an agent may; try again in a few minutes") {
+		t.Fatalf("21st send in ten minutes = %v, want ErrTooMany naming the rate", err)
+	}
+	// Another real session is counted apart, and ten minutes after the
+	// first send there is room again.
+	createMessage(t, s, agentSend("real-b", "t-new", at))
+	createMessage(t, s, agentSend("chatty", "t-new", start.Add(store.SendRateWindow+time.Second)))
+}
+
+// sendLimitUnknown: senders that are not a live tracked session share one
+// tighter bucket, whatever id they claim.
+func sendLimitUnknown(t *testing.T, s *store.Store) {
+	ctx := context.Background()
+	start := t0.Add(2 * time.Hour)
+	claims := []string{"rot-1", "", "rot-2", "gone", "rot-3"}
+	for i, sender := range claims {
+		m := createMessage(t, s, agentSend(sender, fmt.Sprintf("u%d", i), start))
+		if m.SenderSession != "" {
+			t.Errorf("claimed sender %q stored as %q, want unknown", sender, m.SenderSession)
+		}
+	}
+	for _, sender := range []string{"rot-4", ""} {
+		_, err := s.CreateMessage(ctx, agentSend(sender, "u-new", start))
+		if !errors.Is(err, store.ErrTooMany) || !strings.Contains(err.Error(), "cannot identify this send's sender as a live agent session") ||
+			!strings.Contains(err.Error(), "5 messages in the last 10 minutes") {
+			t.Errorf("sixth unknown send as %q = %v, want ErrTooMany for the shared bucket", sender, err)
+		}
+	}
+	// A verified session is not held back by the unknown senders.
+	createMessage(t, s, agentSend("real-b", "u-new", start))
+}
+
+// Two processes (two Store handles on one file) send 30 messages at once
+// as one verified sender to 30 targets: the count and the insert share one
+// write transaction, so exactly SendRateLimit are stored and the rest are
+// refused with ErrTooMany (re-review A). Thirty writers contending for the
+// write lock can wait past busy_timeout on a loaded machine; a send whose
+// BEGIN failed with SQLITE_BUSY ran nothing (begin), so it is sent again,
+// as a caller would, and only its final answer is counted.
+func TestSendLimitHoldsUnderConcurrency(t *testing.T) {
+	path := dbPath(t)
+	a, b := open(t, path), open(t, path)
+	liveSession(t, a, "chatty", "", model.StateIdle)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	stored, refused, other := 0, 0, []error{}
+	for i := range 30 {
+		wg.Go(func() {
+			s := a
+			if i%2 == 1 {
+				s = b
+			}
+			m := agentSend("chatty", fmt.Sprintf("target-%d", i), t0.Add(time.Duration(i)*time.Millisecond))
+			_, err := s.CreateMessage(context.Background(), m)
+			for try := 0; try < 20 && err != nil && strings.Contains(err.Error(), "begin: database is locked"); try++ {
+				time.Sleep(10 * time.Millisecond)
+				_, err = s.CreateMessage(context.Background(), m)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				stored++
+			case errors.Is(err, store.ErrTooMany):
+				refused++
+			default:
+				other = append(other, err)
+			}
+		})
+	}
+	wg.Wait()
+	if stored != store.SendRateLimit || refused != 30-store.SendRateLimit || len(other) != 0 {
+		t.Errorf("stored %d, refused %d (want %d and %d); other errors %v", stored, refused, store.SendRateLimit, 30-store.SendRateLimit, other)
+	}
+}
+
+// 0005_send_limits applies over a database that already has messages and
+// only the earlier migrations: its index is dropped and its record removed,
+// and reopening the store creates the index again (re-review A).
+func TestSendLimitsMigrationOverExistingDB(t *testing.T) {
+	path := dbPath(t)
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveSession(t, s, "x", "", model.StateIdle)
+	createMessage(t, s, agentSend("x", "y", t0))
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db := rawDB(t, path)
+	if _, err = db.Exec(`DROP INDEX messages_agent_sends; DELETE FROM schema_migrations WHERE name = '0005_send_limits.sql'`); err != nil {
+		t.Fatal(err)
+	}
+	s2 := open(t, path)
+	m, ok, err := s2.GetMessage(context.Background(), "M-1")
+	if err != nil || !ok || m.TargetSession != "y" {
+		t.Errorf("M-1 after migrating = %+v, %v, %v; want the message to y", m, ok, err)
+	}
+	var n int
+	if err = db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'messages_agent_sends'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("messages_agent_sends after migrating: %d, %v; want 1", n, err)
+	}
+}
+
+// sendLimitPlans: every count reads an index.
+func sendLimitPlans(t *testing.T, path string) {
+	t.Helper()
+	db := rawDB(t, path)
+	for _, q := range []struct {
+		name, sql, index string
+		args             []any
+	}{
+		{"queued", store.SendQueuedQuery, "messages_undelivered", []any{"busy"}},
+		{"recent", store.SendRecentQuery, "messages_agent_sends", []any{"chatty", "2026"}},
+		{"recent unknown", store.SendRecentQuery, "messages_agent_sends", []any{"", "2026"}},
+		{"sender live", store.SendSenderLive, "SEARCH sessions USING", []any{"chatty"}},
+	} {
+		if plan := queryPlan(t, db, q.sql, q.args...); !strings.Contains(plan, q.index) {
+			t.Errorf("the %s count does not use %s:\n%s", q.name, q.index, plan)
+		}
 	}
 }

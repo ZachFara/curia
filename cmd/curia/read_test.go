@@ -24,10 +24,13 @@ func readSession(id string, st model.State, pane string) model.Session {
 
 // readHome isolates HOME and CURIA_DB, fixes the clock, seeds sessions and
 // makes the commands use a tmux.Fake whose live panes are panes, showing
-// Claude Code's idle prompt. It returns the database path and the fake.
+// Claude Code's idle prompt. The caller is the user at a terminal unless
+// the test says otherwise (userTerminalAs). It returns the database path and
+// the fake.
 func readHome(t *testing.T, panes []string, sessions ...model.Session) (string, *tmux.Fake) {
 	t.Helper()
 	db := hookHome(t)
+	userTerminalAs(t, true)
 	prevClock := clock
 	clock = func() time.Time { return at(12, 0) }
 	t.Cleanup(func() { clock = prevClock; readLines = readDefaultLines })

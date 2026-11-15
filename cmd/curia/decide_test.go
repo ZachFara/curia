@@ -34,6 +34,7 @@ func decideSessionS1() model.Session {
 // returns the database path and the fake.
 func decideHome(t *testing.T, specs ...decisionsSpec) (string, *tmux.Fake) {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	db := decisionsHome(t, specs...)
 	seedSessions(t, db, decideSessionS1())
 	fake := useFakeTmux(t)
@@ -61,6 +62,7 @@ func decideResetFlags(t *testing.T) {
 // stdout and stderr apart.
 func decideRun(t *testing.T, stdin io.Reader, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	userTerminalAs(t, true) // the user, at a terminal
 	var out, errOut bytes.Buffer
 	rootCmd.SetIn(stdin)
 	rootCmd.SetOut(&out)
@@ -256,8 +258,9 @@ func TestDecideFlagErrors(t *testing.T) {
 				t.Errorf("decide %v: %s = %s, want open", args, id, d.Status)
 			}
 		}
-		if len(fake.Calls) != 0 {
-			t.Errorf("decide %v: tmux calls = %q", args, fake.Calls)
+		// Only the user-only guard's read of the panes (Ruling 119).
+		if len(fake.Calls) != 0 && !slices.Equal(fake.Calls, []string{"ListPanes"}) {
+			t.Errorf("decide %v: tmux calls = %q, want none but the guard's ListPanes", args, fake.Calls)
 		}
 		decideOption, decideText, decideReason, decideScope = "", "", "", ""
 		decideAccept, decideJSON = false, false
@@ -462,9 +465,27 @@ func TestDecideSourceAnswerIsNotRedelivered(t *testing.T) {
 
 // A delivery that fails is not a command failure: the answer is stored and
 // the line says what happened, with a WARN in the log and no ERROR.
+// decideDownAfterGuard is a tmux server that answers the user-only guard's
+// pane list (Ruling 119) with s1's pane and is gone for every call after.
+type decideDownAfterGuard struct {
+	downTmux
+	listed bool
+}
+
+func (d *decideDownAfterGuard) ListPanes(context.Context) ([]tmux.Pane, error) {
+	if d.listed {
+		return nil, errNoServer
+	}
+	d.listed = true
+	return []tmux.Pane{{ID: "%1", Session: "work", WindowID: "@1", ServerStart: at(8, 0)}}, nil
+}
+
 func TestDecideDeliveryFailureIsReportedNotFailed(t *testing.T) {
 	db, _ := decideHome(t, decideOpenSpecs()...)
-	useDownTmux(t)
+	down := &decideDownAfterGuard{}
+	prev := newTmuxClient
+	newTmuxClient = func() tmux.Client { return down }
+	t.Cleanup(func() { newTmuxClient = prev })
 	out, _, err := decideRun(t, strings.NewReader(""), "D-1", "--option", "A", "--reason", "r")
 	if err != nil {
 		t.Fatalf("decide = %v, want success", err)

@@ -20,11 +20,8 @@ import (
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
-// Limits of `curia send`.
-const (
-	sendStdinMax  = 64 << 10 // bytes of text read from stdin
-	sendNoteLimit = 300      // runes of a printed delivery note
-)
+// sendStdinMax is how many bytes of text `curia send -` reads from stdin.
+const sendStdinMax = 64 << 10
 
 // sendPanePattern is the only form of pane `curia send` and `curia read`
 // accept (plan section 4.8).
@@ -95,20 +92,6 @@ func sendPaneSession(ctx context.Context, st *store.Store, pane string) (model.S
 	return model.Session{}, sendPaneError{msg: "pane " + pane + " is shared by more than one live session", shared: true}
 }
 
-// sendOutcomeLine is the one line printed for o, such as "M-12 delivered
-// (send_keys)" or "M-12 queued: <note>".
-func sendOutcomeLine(o model.MessageOutcome) string {
-	m := o.Message
-	s := sanitize.Line(m.ID, 20) + " " + sanitize.Line(string(m.Status), 20)
-	if m.Status == model.MsgDelivered && m.DeliveredVia != "" {
-		s += " (" + sanitize.Line(string(m.DeliveredVia), 20) + ")"
-	}
-	if o.Note != "" {
-		s += ": " + sanitize.Line(o.Note, sendNoteLimit)
-	}
-	return s
-}
-
 // sendText is the message text: the arguments after the pane joined by
 // spaces, or stdin (at most sendStdinMax bytes) for a lone "-", normalised
 // by message.Normalize.
@@ -127,17 +110,34 @@ func sendText(stdin io.Reader, args []string) (string, error) {
 	return message.Normalize(raw)
 }
 
-// sendSender is who sends: the user, or an agent session with its id
-// (mcpSession's, possibly empty) and its row (zero when unknown). Any sign
-// of an agent caller makes it an agent: CLAUDECODE, CLAUDE_CODE_SESSION_ID,
-// or a session mcpSession resolves (CURIA_SESSION_ID, or TMUX_PANE in a
-// session's pane). No flag or other variable makes it the user.
-func sendSender(ctx context.Context, st *store.Store, logger *slog.Logger) (model.Sender, model.Session, string) {
-	sess, id := mcpSession(ctx, st, logger)
-	if id == "" && os.Getenv("CLAUDECODE") == "" && os.Getenv("CLAUDE_CODE_SESSION_ID") == "" {
+// sendSender is who sends: the user, or an agent with its verified session
+// (id and row; both empty when unverified). It is the user only when no
+// session is claimed (CURIA_SESSION_ID, or TMUX_PANE in a session's pane,
+// or CLAUDE_CODE_SESSION_ID) and the caller is the user at a terminal
+// (userAtTerminal, Rulings 112 and 119). An agent's session is read from
+// its processes (ancestorSession): the nearest ancestor that is the first
+// process of a live agent's pane names it. A claimed session must be that
+// one; a claim of another session, a claim with no agent found, or an
+// ancestry that cannot be read leave the sender unverified, which is
+// stored as an unknown agent sender: never typed, and counted with the
+// other unknown senders (Ruling 113). No flag or other variable makes it
+// the user.
+func sendSender(ctx context.Context, st *store.Store, claimed model.Session, claimedID string) (model.Sender, model.Session, string) {
+	if claimedID == "" && userAtTerminal() {
 		return model.SenderUser, model.Session{}, ""
 	}
-	return model.SenderAgent, sess, id
+	found, ok := ancestorSession()
+	switch {
+	case !ok || found == "", claimedID != "" && claimedID != found:
+		return model.SenderAgent, model.Session{}, ""
+	case claimedID == found:
+		return model.SenderAgent, claimed, found
+	}
+	sess, known, err := st.GetSession(ctx, found)
+	if err != nil || !known {
+		return model.SenderAgent, model.Session{}, ""
+	}
+	return model.SenderAgent, sess, found
 }
 
 // sendCheckSelf refuses a message into the caller's own session or pane:
@@ -189,14 +189,19 @@ func sendDeliver(ctx context.Context, w io.Writer, st *store.Store, tm tmux.Clie
 	if err != nil {
 		return err
 	}
-	sender, senderSess, senderID := sendSender(ctx, st, logger)
-	if err = sendCheckSelf(target, senderSess, senderID); err != nil {
-		return err
+	claimed, claimedID := mcpSession(ctx, st, logger)
+	sender, senderSess, senderID := sendSender(ctx, st, claimed, claimedID)
+	// Into the caller's own session or pane, claimed or verified: refused.
+	if err = errors.Join(sendCheckSelf(target, claimed, claimedID), sendCheckSelf(target, senderSess, senderID)); err != nil {
+		return errors.New("refusing to send into your own session or pane")
 	}
 	m, err := st.CreateMessage(ctx, model.Message{
 		Text: text, Kind: model.KindInstruction, Sender: sender, SenderSession: senderID,
 		TargetSession: target.ID, RoutedBy: model.RoutedSend, Status: model.MsgQueued, CreatedAt: clock(),
 	})
+	if errors.Is(err, store.ErrTooMany) { // Ruling 113: plain words for the sending agent
+		return errors.New("not sent: " + strings.TrimPrefix(err.Error(), store.ErrTooMany.Error()+": "))
+	}
 	if err != nil {
 		return err
 	}
@@ -204,7 +209,7 @@ func sendDeliver(ctx context.Context, w io.Writer, st *store.Store, tm tmux.Clie
 	if err != nil {
 		return err
 	}
-	lines := sendOutcomeLine(out)
+	lines := sayOutcomeLine(out) // the one outcome line of say and send
 	if sender == model.SenderAgent && senderSess.ID == "" {
 		lines += "\n" + sanitize.Line(m.ID, 20) + ": Curia cannot identify the sending agent session, so this " +
 			"message is never typed; the target gets it at its next stop or with check_messages."

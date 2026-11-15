@@ -52,6 +52,15 @@ func Reconcile(ctx context.Context, st *store.Store, live []tmux.Pane, now time.
 	return windows, nil
 }
 
+// Gone reports whether session s, neither ended nor stale and in a pane,
+// has lost its pane on the tmux server whose panes are live: the pane is not
+// listed, or s started before that server did (a restarted or another
+// server numbers its panes from %0 again). It is Reconcile's rule, for
+// callers that must decide without writing.
+func Gone(live []tmux.Pane, s model.Session) bool {
+	return newServer(live).goneFrom(s, s.Pane)
+}
+
 // server is what Reconcile knows of the live tmux server.
 type server struct {
 	alive  map[string]bool

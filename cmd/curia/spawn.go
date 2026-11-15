@@ -29,6 +29,12 @@ type spawnOptions struct {
 	Team   bool          // --team
 	Resume string        // a session id: curia resume
 	Wait   time.Duration // how long to wait for the agent's first hook; 0: do not wait
+	// ReadyOnly refuses a task whose stored status is not ready: the caller
+	// is an agent (Ruling 113).
+	ReadyOnly bool
+	// AfterPause tells the agent that its branch ends in the pause's WIP
+	// commit (curia resume).
+	AfterPause bool
 	// Out receives the lines saying what the spawn did, as it goes (the
 	// worktree, the setup script); nil discards them.
 	Out io.Writer
@@ -99,8 +105,10 @@ func runSpawn(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = st.Close() }()
 	out := cmd.OutOrStdout()
+	// An agent (anything but the user at a terminal) may spawn only what the
+	// user marked ready (Ruling 113).
 	r, err := spawnTask(cmd.Context(), st, newTmuxClient(), cfg, args[0],
-		spawnOptions{Model: spawnModel, Team: spawnTeam, Wait: spawnWait, Out: out})
+		spawnOptions{Model: spawnModel, Team: spawnTeam, Wait: spawnWait, Out: out, ReadyOnly: !userAtTerminal()})
 	if err != nil {
 		return err
 	}
@@ -163,6 +171,9 @@ func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 		return model.Task{}, fmt.Errorf("%s is dropped", id)
 	case !t.PausedAt.IsZero() && o.Resume == "":
 		return model.Task{}, fmt.Errorf("%s is paused: use curia resume", id)
+	case o.ReadyOnly && t.Status != model.TaskReady:
+		return model.Task{}, fmt.Errorf("%s is %s: an agent may spawn only a task the user marked ready (curia task ready %s)",
+			id, t.Status, id)
 	}
 	if o.Model == "" {
 		o.Model = t.AgentModel
@@ -175,15 +186,18 @@ func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 
 // spawnCheckIdle refuses a task with a live linked session, or whose
 // recorded pane is still open, after marking stale the sessions whose pane
-// is gone. When tmux cannot list its panes (often: no server yet) no pane
-// is open.
+// is gone. A pane is the task's only when tmux lists it on a server that
+// started before the launch (lifecyclePaneStateOf): after a tmux restart
+// the same id names someone else's pane. A listed pane that cannot be told
+// apart (no launch time) still refuses. When tmux cannot list its panes
+// (often: no server yet) no pane is open.
 func spawnCheckIdle(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.Config, t model.Task) error {
 	if err := reconcile(ctx, st, tm, cfg.LogPath, clock()); err != nil {
 		return err
 	}
 	tctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 	defer cancel()
-	panes, _ := tm.ListPanes(tctx)
+	panes, perr := tm.ListPanes(tctx)
 	sessions, err := st.TaskSessions(ctx, t.ID)
 	if err != nil {
 		return err
@@ -193,10 +207,23 @@ func spawnCheckIdle(ctx context.Context, st *store.Store, tm tmux.Client, cfg co
 		return fmt.Errorf("%s is already running in %s (session %s): end that session first",
 			t.ID, spawnWhere(panes, s.Pane), spawnShortID(s.ID))
 	}
-	if t.Pane != "" && slices.ContainsFunc(panes, func(p tmux.Pane) bool { return p.ID == t.Pane }) {
+	if spawnPaneOpen(panes, perr, t) {
 		return fmt.Errorf("%s's window %s is still open: close it first", t.ID, spawnWhere(panes, t.Pane))
 	}
 	return nil
+}
+
+// spawnPaneOpen reports whether t's recorded pane is still its window: tmux
+// lists it and it is not a recycled id (lifecyclePaneStateOf), or it is
+// listed and cannot be told apart.
+func spawnPaneOpen(panes []tmux.Pane, perr error, t model.Task) bool {
+	switch lifecyclePaneStateOf(panes, perr, t.Pane, t.LaunchedAt) {
+	case lifecyclePaneOurs:
+		return true
+	case lifecyclePaneUnknown:
+		return t.Pane != "" && slices.ContainsFunc(panes, func(p tmux.Pane) bool { return p.ID == t.Pane })
+	}
+	return false
 }
 
 // spawnWhere names pane as session:window (pane), from tmux's list.
@@ -220,10 +247,11 @@ func spawnShortID(id string) string {
 }
 
 // spawnClaim takes the launch claim (store.ClaimLaunch), held for the setup
-// limit plus a minute.
+// limit plus a minute while no window is recorded, and only if the task's
+// recorded pane is still t.Pane, the one spawnCheckIdle found closed.
 func spawnClaim(ctx context.Context, st *store.Store, t model.Task) (model.Task, error) {
 	hold := spawnSetupLimit + time.Minute
-	claimed, err := st.ClaimLaunch(ctx, t.ID, clock(), hold)
+	claimed, err := st.ClaimLaunch(ctx, t.ID, t.Pane, clock(), hold)
 	if !errors.Is(err, store.ErrTaskBusy) {
 		return claimed, err
 	}
@@ -313,16 +341,32 @@ func spawnWorktree(ctx context.Context, st *store.Store, t model.Task, out io.Wr
 	shown := sanitize.Line(path, 300) + " on branch " + branch
 	if ours {
 		_, _ = fmt.Fprintf(out, "Worktree: reusing %s\n", shown)
-	} else {
-		if err = spawnAddWorktree(ctx, t, path, branch); err != nil {
-			return t, err
-		}
-		_, _ = fmt.Fprintf(out, "Worktree: created %s (from %s)\n", shown, t.BaseBranch)
+	} else if err = spawnNewWorktree(ctx, t, path, branch, shown, out); err != nil {
+		return t, err
 	}
 	return st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
 		cur.Branch, cur.Worktree, cur.UpdatedAt = branch, path, clock()
 		return cur, nil
 	})
+}
+
+// spawnNewWorktree adds the worktree at path on branch and says which: on a
+// new branch from the base, or again on the branch that exists (after a
+// pause or a clean of the worktree), with its commits.
+func spawnNewWorktree(ctx context.Context, t model.Task, path, branch, shown string, out io.Writer) error {
+	existed, err := refExists(ctx, t.Repo, "refs/heads/"+branch)
+	if err == nil {
+		err = spawnAddWorktree(ctx, t, path, branch)
+	}
+	if err != nil {
+		return err
+	}
+	if existed {
+		_, _ = fmt.Fprintf(out, "Worktree: added %s again (the branch exists, with its commits)\n", shown)
+	} else {
+		_, _ = fmt.Fprintf(out, "Worktree: created %s (from %s)\n", shown, t.BaseBranch)
+	}
+	return nil
 }
 
 // spawnAddWorktree adds the worktree at path, which must not exist: a
@@ -349,6 +393,9 @@ func spawnCommand(bin, id string, o spawnOptions) []string {
 	}
 	if o.Resume != "" {
 		c = append(c, "--resume", o.Resume)
+	}
+	if o.AfterPause {
+		c = append(c, "--after-pause")
 	}
 	return c
 }

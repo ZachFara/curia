@@ -17,6 +17,12 @@ const (
 const (
 	StopStateQuery   = stopState
 	BadgeExtrasQuery = badgeExtras
+	SendQueuedQuery  = sendQueued
+	SendRecentQuery  = sendRecent
+	SendSenderLive   = sendSenderLive
+	UnconfirmedQuery = unconfirmedQuery
+	CheckClaim       = checkClaimQuery
+	CheckConfirm     = checkConfirmQuery
 )
 
 // The reviews' and the task views' statements, for their query plans.
