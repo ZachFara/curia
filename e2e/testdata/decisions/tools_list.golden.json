@@ -82,6 +82,19 @@
           "properties": {}
         },
         "name": "check_messages"
+      },
+      {
+        "description": "Tell the user the task is finished and ready for review. Call it once everything is committed, with a short summary and the state of the tests.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["summary", "tests_status"],
+          "properties": {
+            "summary": {"type": "string"},
+            "tests_status": {"type": "string", "enum": ["passed", "failed", "not_run"]},
+            "tests_detail": {"type": "string"}
+          }
+        },
+        "name": "complete_task"
       }
     ]
   }
