@@ -58,7 +58,7 @@ func pushClaim(t *testing.T, s *store.Store, hash string, now time.Time) (model.
 // pushFinish runs FinishPush and requires it to succeed.
 func pushFinish(t *testing.T, s *store.Store, n int64, status model.PushStatus, errText string, retryAt, now time.Time) {
 	t.Helper()
-	if err := s.FinishPush(context.Background(), n, status, errText, retryAt, now); err != nil {
+	if err := s.FinishPush(context.Background(), n, pushGet(t, s, n).Attempts, status, errText, retryAt, now); err != nil {
 		t.Fatalf("FinishPush(%d, %s): %v", n, status, err)
 	}
 }
@@ -492,12 +492,12 @@ func TestFinishPushTable(t *testing.T) {
 		{"queued", retryAt},
 		{model.PushPending, time.Time{}},
 	} {
-		if err := s.FinishPush(ctx, p.N, c.status, "x", c.retryAt, now); err == nil {
+		if err := s.FinishPush(ctx, p.N, p.Attempts, c.status, "x", c.retryAt, now); err == nil {
 			t.Errorf("FinishPush(%q, retry %v) = nil, want an error", c.status, c.retryAt)
 		}
 	}
 	pushAssert(t, "after refused finishes", pushGet(t, s, p.N), p)
-	if err := s.FinishPush(ctx, 999, model.PushSent, "", time.Time{}, now); err != nil {
+	if err := s.FinishPush(ctx, 999, 1, model.PushSent, "", time.Time{}, now); err != nil {
 		t.Errorf("FinishPush of an unknown row = %v, want nil (nothing to change)", err)
 	}
 }
@@ -927,5 +927,61 @@ func TestPushClaimPastSettleBatch(t *testing.T) {
 	}
 	if due, err := s.PushesDue(ctx, t0.Add(time.Hour)); err != nil || due {
 		t.Errorf("PushesDue after settling = %v, %v; want false", due, err)
+	}
+}
+
+// TestFinishIgnoresReclaimedRow: a sender that stalled past PushReclaim and
+// reports late cannot finish the row another sender claimed again since
+// (M5); the new claim's own finish works.
+func TestFinishIgnoresReclaimedRow(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	tk := pushTicket(t, s, "Which port?")
+	pushEnqueue(t, s, model.PushDecision, tk.ID, []string{"phone"}, t0)
+	first, ok := pushClaim(t, s, pushHash("old"), t0)
+	if !ok {
+		t.Fatal("no claim")
+	}
+	at := t0.Add(3 * time.Minute)
+	second, ok := pushClaim(t, s, pushHash("fresh"), at)
+	if !ok || second.Attempts != 2 {
+		t.Fatalf("reclaim = %+v, %v", second, ok)
+	}
+	// The stalled first sender reports its send now.
+	if err := s.FinishPush(ctx, first.N, first.Attempts, model.PushSent, "", time.Time{}, at); err != nil {
+		t.Fatal(err)
+	}
+	if got := pushGet(t, s, first.N); got.Status != model.PushSending || got.Attempts != 2 || !got.SentAt.IsZero() {
+		t.Errorf("the stalled sender finished the reclaimed row: %+v", got)
+	}
+	if err := s.FinishPush(ctx, second.N, second.Attempts, model.PushSent, "", time.Time{}, at); err != nil {
+		t.Fatal(err)
+	}
+	if got := pushGet(t, s, first.N); got.Status != model.PushSent || got.TokenHash != pushHash("fresh") {
+		t.Errorf("the second sender's finish = %+v, want sent with its token", got)
+	}
+}
+
+// TestClearPushToken: the hash of a push being sent is cleared; a row that
+// is not sending is left alone.
+func TestClearPushToken(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	tk := pushTicket(t, s, "Which port?")
+	pushEnqueue(t, s, model.PushDecision, tk.ID, []string{"phone", "tablet"}, t0)
+	p, _ := pushClaim(t, s, pushHash("a"), t0)
+	if err := s.ClearPushToken(ctx, p.N); err != nil {
+		t.Fatal(err)
+	}
+	if got := pushGet(t, s, p.N); got.TokenHash != "" || got.Status != model.PushSending {
+		t.Errorf("after clear: %+v", got)
+	}
+	q, _ := pushClaim(t, s, pushHash("b"), t0)
+	pushFinish(t, s, q.N, model.PushSent, "", time.Time{}, t0)
+	if err := s.ClearPushToken(ctx, q.N); err != nil {
+		t.Fatal(err)
+	}
+	if got := pushGet(t, s, q.N); got.TokenHash != pushHash("b") {
+		t.Errorf("a sent push lost its hash: %+v", got)
 	}
 }

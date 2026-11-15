@@ -86,11 +86,6 @@ func pushAccess() (access string, ignored bool) {
 	return v, false
 }
 
-// pushFlush sends every push that is due, one at a time, until none is due or ctx ends, and returns how many it sent.
-func pushFlush(ctx context.Context, st *store.Store, cfg config.Config, pub notify.Publisher, now func() time.Time) (int, error) {
-	return pushFlusher{st: st, cfg: cfg, pub: pub, now: now, log: slog.New(slog.DiscardHandler)}.flush(ctx)
-}
-
 // pushLoop flushes when kick fires and every pushEvery, until ctx ends. It never returns an error: failures are logged.
 // It also flushes once at start, so a push held back while no Curia
 // process was alive goes out when the next one starts.
@@ -199,6 +194,11 @@ func (f pushFlusher) one(ctx context.Context) (sent, found bool, err error) {
 		f.finish(ctx, p, model.PushPending, "store unreadable", f.retryAt(p, nil))
 		return false, true, err
 	}
+	if hash != "" && len(n.Actions) == 0 { // a review, an irreversible ticket: no button holds the token
+		if cerr := f.st.ClearPushToken(sctx, p.N); cerr != nil {
+			f.logPush(slog.LevelWarn, p, "token hash not cleared", "err", cerr.Error())
+		}
+	}
 	if why != "" {
 		f.finish(ctx, p, model.PushDropped, why, time.Time{})
 		f.logPush(slog.LevelInfo, p, "dropped", "why", why)
@@ -277,7 +277,7 @@ func (f pushFlusher) result(ctx context.Context, p model.Push, err error) {
 		f.finish(ctx, p, model.PushSent, "", time.Time{})
 		f.logPush(slog.LevelInfo, p, "sent")
 	case ctx.Err() != nil && !errors.Is(err, notify.ErrRejected):
-		f.finish(ctx, p, model.PushPending, pushReason(err), f.now())
+		f.finish(ctx, p, model.PushPending, pushReason(err), notify.NotBefore(f.now(), f.cfg.Ntfy.Quiet))
 		f.logPush(slog.LevelInfo, p, "released", "why", pushReason(err))
 	case !errors.Is(err, notify.ErrUnavailable) && !errors.Is(err, notify.ErrRateLimited):
 		f.finish(ctx, p, model.PushFailed, pushReason(err), time.Time{})
@@ -294,7 +294,8 @@ func (f pushFlusher) result(ctx context.Context, p model.Push, err error) {
 
 // retryAt is when p is tried again after err: 30 s doubled for each
 // attempt after the first, or a 429's Retry-After when that is later, at
-// most pushBackoffMax from now.
+// most pushBackoffMax from now, and never inside quiet hours: a time inside
+// them moves to their end, as a new push's does (M3).
 func (f pushFlusher) retryAt(p model.Push, err error) time.Time {
 	wait := pushBackoffMax
 	if p.Attempts >= 1 && p.Attempts <= 6 { // 30 s × 2^5 is past the bound
@@ -304,7 +305,7 @@ func (f pushFlusher) retryAt(p model.Push, err error) time.Time {
 	if errors.As(err, &se) && se.RetryAfter > wait {
 		wait = min(se.RetryAfter, pushBackoffMax)
 	}
-	return f.now().Add(wait)
+	return notify.NotBefore(f.now().Add(wait), f.cfg.Ntfy.Quiet)
 }
 
 // finish records p's result on a context detached from ctx's
@@ -313,7 +314,7 @@ func (f pushFlusher) retryAt(p model.Push, err error) time.Time {
 func (f pushFlusher) finish(ctx context.Context, p model.Push, status model.PushStatus, why string, retryAt time.Time) {
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pushFinishLimit)
 	defer cancel()
-	if err := f.st.FinishPush(fctx, p.N, status, why, retryAt, f.now()); err != nil {
+	if err := f.st.FinishPush(fctx, p.N, p.Attempts, status, why, retryAt, f.now()); err != nil {
 		f.logPush(slog.LevelWarn, p, "result not recorded", "err", err.Error())
 	}
 }
