@@ -1,0 +1,24 @@
+
+❯ Use the Agent tool to start one general-purpose subagent whose only job is to
+  reply with the word PONG without using any tool. Wait for it to finish, then
+  reply with only the word FINISHED.
+
+⏺ Agent(Reply PONG)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+⏺ The subagent is still running. I'll reply FINISHED once its completion
+  notification arrives.
+
+✻ Waiting for 1 background agent to finish
+
+⏺ Agent "Reply PONG" finished · 1s
+
+⏺ FINISHED
+
+✻ Sautéed for 8s · done 11:25 AM
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏸ plan mode on (shift+tab to cycle) · /tasks to see subagents
+

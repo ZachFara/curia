@@ -1416,3 +1416,55 @@ func TestFakeRecordsNewWindowAndCaptureTail(t *testing.T) {
 		t.Fatalf("Calls = %q\nwant %q", f.Calls, want)
 	}
 }
+
+// The capture carries the cells' attributes (-e) beside the plain text, and
+// the cursor, read before and after it.
+func TestCapturePaneStylesAndCursorInRealTmux(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	// A dim suggestion after the prompt mark, then the cursor put back on
+	// row 0, column 2 (1-based 1;3), where typed text would start.
+	id, err := tm("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "t:", "/bin/sh", "-c",
+		`printf '\033[2J\033[H❯ \033[2mpush it\033[0m\033[1;3H'; exec cat`)
+	if err != nil {
+		t.Fatalf("new-window: %v: %s", err, id)
+	}
+	pane := strings.TrimSpace(id)
+	c := NewExec(realSocket)
+	var capt Capture
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(capt.Screen, "push it"); time.Sleep(20 * time.Millisecond) {
+		if capt, err = c.CapturePane(ctx, pane); err != nil {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("CapturePane = %q, want the printed line", capt.Screen)
+		}
+	}
+	first := strings.SplitN(capt.Styled, "\n", 2)[0]
+	if !strings.Contains(first, "\x1b[2m") || !strings.Contains(first, "push it") {
+		t.Errorf("Styled first line = %q, want the dim attribute before push it", first)
+	}
+	if line := strings.SplitN(capt.Screen, "\n", 2)[0]; line != "❯ push it" {
+		t.Errorf("Screen first line = %q, want the plain text", line)
+	}
+	if !capt.CursorKnown || capt.CursorX != 2 || capt.CursorY != 0 {
+		t.Errorf("cursor = %d,%d known %v, want 2,0 known", capt.CursorX, capt.CursorY, capt.CursorKnown)
+	}
+}
+
+func TestStripEscapes(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain":                                    "plain",
+		"\x1b[39m❯ \x1b[2mpush it\x1b[0m":          "❯ push it",
+		"\x1b[38;5;220m⏵⏵\x1b[39m on":              "⏵⏵ on",
+		"a\x1b]8;;http://x\x1b\\link\x1b]8;;\x07b": "alinkb",
+		"cut \x1b[38;5":                            "cut ",
+		"lone \x1bx":                               "lone x",
+		"two\x1b[1m\nlines\x1b[0m":                 "two\nlines",
+	} {
+		if got := StripEscapes(in); got != want {
+			t.Errorf("StripEscapes(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

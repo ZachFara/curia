@@ -229,7 +229,10 @@ func (c *execClient) runFor(ctx context.Context, timeout time.Duration, args ...
 // syncFormat is what CapturePane asks about a pane before capturing it. The
 // pane id tells a real pane from an unknown target, which tmux expands to
 // empty fields.
-const syncFormat = "#{pane_id}\t#{synchronize-panes}"
+const syncFormat = "#{pane_id}\t#{synchronize-panes}\t#{cursor_x}\t#{cursor_y}"
+
+// cursorFormat is what CapturePane asks again after the capture.
+const cursorFormat = "#{pane_id}\t#{cursor_x}\t#{cursor_y}"
 
 func (c *execClient) CapturePane(ctx context.Context, pane string) (Capture, error) {
 	if !paneIDPattern.MatchString(pane) {
@@ -240,14 +243,80 @@ func (c *execClient) CapturePane(ctx context.Context, pane string) (Capture, err
 		return Capture{}, err
 	}
 	f := strings.Split(strings.TrimSuffix(out, "\n"), "\t")
-	if len(f) != 2 || f[0] != pane {
+	if len(f) != 4 || f[0] != pane {
 		return Capture{}, fmt.Errorf("tmux capture-pane: unexpected answer %q for %q", out, pane)
 	}
-	screen, err := c.run(ctx, "capture-pane", "-p", "-t", pane)
+	styled, err := c.run(ctx, "capture-pane", "-e", "-p", "-t", pane)
 	if err != nil {
 		return Capture{}, err
 	}
-	return Capture{Screen: screen, Synchronized: f[1] == "1"}, nil
+	capt := Capture{Screen: StripEscapes(styled), Styled: styled, Synchronized: f[1] == "1"}
+	after, err := c.run(ctx, "display-message", "-p", "-t", pane, cursorFormat)
+	if err != nil {
+		return Capture{}, err
+	}
+	g := strings.Split(strings.TrimSuffix(after, "\n"), "\t")
+	x, xerr := strconv.Atoi(f[2])
+	y, yerr := strconv.Atoi(f[3])
+	if xerr == nil && yerr == nil && len(g) == 3 && g[0] == pane && g[1] == f[2] && g[2] == f[3] {
+		capt.CursorX, capt.CursorY, capt.CursorKnown = x, y, true
+	}
+	return capt, nil
+}
+
+// StripEscapes removes the escape sequences capture-pane -e writes (CSI
+// sequences such as SGR, and OSC sequences such as hyperlinks) from s. Any
+// other escape character is removed alone.
+func StripEscapes(s string) string {
+	if !strings.ContainsRune(s, '\x1b') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] != '\x1b' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		i += escapeLen(s[i:])
+	}
+	return b.String()
+}
+
+// escapeLen is the length of the escape sequence at the start of s, which
+// starts with ESC: a CSI sequence ends at its final byte (0x40 to 0x7e), an
+// OSC one at BEL or ESC \ (or the end of the line); anything else is the
+// ESC alone.
+func escapeLen(s string) int {
+	if len(s) < 2 {
+		return len(s)
+	}
+	switch s[1] {
+	case '[':
+		for j := 2; j < len(s); j++ {
+			if s[j] >= 0x40 && s[j] <= 0x7e {
+				return j + 1
+			}
+			if s[j] == '\n' {
+				return j
+			}
+		}
+		return len(s)
+	case ']':
+		for j := 2; j < len(s); j++ {
+			switch {
+			case s[j] == '\a':
+				return j + 1
+			case s[j] == '\x1b' && j+1 < len(s) && s[j+1] == '\\':
+				return j + 2
+			case s[j] == '\n':
+				return j
+			}
+		}
+		return len(s)
+	}
+	return 1
 }
 
 // windowTimeout bounds NewWindow, all its tmux invocations together.

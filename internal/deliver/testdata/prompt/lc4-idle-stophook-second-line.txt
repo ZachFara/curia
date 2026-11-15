@@ -1,0 +1,24 @@
+  I created HELLO.txt containing hi and left it uncommitted, so it shows as
+  untracked in git status.
+
+✻ Sautéed for 3s · done 11:12 AM
+
+❯ Message M-3 from the user: Reply with only the word DRAFT-TEST.
+
+⏺ DRAFT-TEST
+
+⏺ Ran 1 stop hook (ctrl+o to expand)
+  ⎿  Stop hook error: Curia: messages for you.
+  Message M-4 from the user: Reply with only the word SECOND-TEST.
+
+⏺ SECOND-TEST
+
+✻ Baked for 2s · done 11:13 AM
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)
+                                      Stop hook error occurred · ctrl+o to see
+
+

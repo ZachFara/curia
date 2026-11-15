@@ -305,7 +305,14 @@ var promptNotes = map[promptState]string{
 	promptManage: "background agents or teammates are listed under the agent's prompt " +
 		"(nothing is typed to a team lead while its teammates are alive); nothing typed",
 	promptShell: "the pane shows a shell: the session's Claude Code is not at its prompt; nothing typed",
+	promptSurvey: "Claude Code's feedback survey is on screen, and a typed line holds digits that would answer it; " +
+		"nothing typed",
 }
+
+// noteTeamLead is the refusal for a team lead whose teammates are listed
+// under its prompt (live check B, defect 3).
+const noteTeamLead = "the agent leads a team whose teammates are alive, and nothing is typed to a team lead then; " +
+	"it gets this at its next stop; nothing typed"
 
 // noteSynchronized is the refusal for a window with synchronize-panes on.
 const noteSynchronized = "the agent's window has synchronize-panes on, so typing would reach every pane in it; nothing typed"
@@ -327,12 +334,16 @@ func (r *delivery) paneRefusal(ctx context.Context, id string, sess model.Sessio
 		r.log.Info("deliver: not typing into a synchronized window", "id", id, "pane", sess.Pane)
 		return noteSynchronized
 	}
-	state := readPrompt(capt.Screen)
+	state := readCapture(capt)
 	if state == promptEmpty {
 		return ""
 	}
-	r.log.Info("deliver: not typing into the agent's pane", "id", id, "pane", sess.Pane, "why", promptNotes[state])
-	return promptNotes[state]
+	note := promptNotes[state]
+	if state == promptManage && sess.TeamRole == model.RoleLead {
+		note = noteTeamLead
+	}
+	r.log.Info("deliver: not typing into the agent's pane", "id", id, "pane", sess.Pane, "why", note)
+	return note
 }
 
 // typeLine types claimed item it into the pane of sess, once a capture of

@@ -48,9 +48,10 @@ type Client interface {
 	// submitted; the caller must not retry by typing again. Any other error
 	// means nothing was typed, as far as tmux reported.
 	SendKeys(ctx context.Context, pane, text string) error
-	// CapturePane returns the visible text of the pane, one line per row
-	// and no escape sequences, and whether its window has synchronize-panes
-	// on. It refuses a pane that is not a pane id.
+	// CapturePane returns the visible text of the pane, one line per row,
+	// both with its escape sequences (capture-pane -e) and without, where
+	// its cursor is, and whether its window has synchronize-panes on. It
+	// refuses a pane that is not a pane id.
 	CapturePane(ctx context.Context, pane string) (Capture, error)
 	// Bell rings the pane's bell.
 	Bell(ctx context.Context, pane string) error
@@ -73,7 +74,16 @@ type WindowSpec struct {
 
 // Capture is what CapturePane read of a pane.
 type Capture struct {
-	Screen string // the visible text, one line per row
+	Screen string // the visible text, one line per row, no escape sequences
+	// Styled is the same capture with its escape sequences (capture-pane
+	// -e): the colors and attributes of each cell. Screen is Styled with
+	// them removed, so the two always show the same moment.
+	Styled string
+	// CursorX and CursorY are the pane's cursor, column and row from 0, as
+	// tmux reported it just before and just after the capture; CursorKnown
+	// is set only when both reports agree.
+	CursorX, CursorY int
+	CursorKnown      bool
 	// Synchronized is set when the pane's window has synchronize-panes on:
 	// keys sent to the pane then reach every pane of the window.
 	Synchronized bool
