@@ -10,11 +10,21 @@ func live(s model.Session) bool {
 	return s.State != model.StateEnded && s.State != model.StateStale
 }
 
-// Derive is the status shown for t (section 4.4). sessions are the ones
-// linked to t; openBlocking counts t's open blocking tickets.
-func Derive(t model.Task, sessions []model.Session, openBlocking int) model.TaskStatus {
+// Derive is the status shown for t. sessions are the ones linked to t;
+// openBlocking counts t's open blocking tickets; latest is the status of t's
+// newest review, "" when it has none. Order: stored dropped, a pending newest
+// review (review), an approved or merged one (done), then the sessions, then
+// the stored status. A newest review that is changes_requested or dropped
+// changes nothing.
+func Derive(t model.Task, sessions []model.Session, openBlocking int, latest model.ReviewStatus) model.TaskStatus {
 	if t.Status == model.TaskDropped {
 		return model.TaskDropped
+	}
+	switch latest {
+	case model.ReviewPending:
+		return model.TaskReview
+	case model.ReviewApproved, model.ReviewMerged:
+		return model.TaskDone
 	}
 	hasLive := false
 	needs := openBlocking > 0
@@ -42,6 +52,7 @@ type Card struct {
 	Status   model.TaskStatus
 	Sessions []model.Session // live linked sessions; the lead or solo session first, then by id
 	Pane     string          // the first session's pane, "" when none
+	Review   model.Review    // the newest review; zero when none
 }
 
 // columns is the order of the board's columns.
@@ -53,8 +64,8 @@ var columns = map[model.TaskStatus]int{
 
 // Cards derives every task's card. Order: by status as the board's columns
 // run (backlog, ready, running, needs_decision, review, done, dropped), then
-// by n.
-func Cards(tasks []model.Task, sessions []model.Session, openBlocking map[string]int) []Card {
+// by n. latest holds each task's newest review, by task id.
+func Cards(tasks []model.Task, sessions []model.Session, openBlocking map[string]int, latest map[string]model.Review) []Card {
 	by := map[string][]model.Session{}
 	for _, s := range sessions {
 		if s.TaskID != "" && live(s) {
@@ -71,7 +82,8 @@ func Cards(tasks []model.Task, sessions []model.Session, openBlocking map[string
 			}
 			return ss[i].ID < ss[j].ID
 		})
-		c := Card{Task: t, Status: Derive(t, ss, openBlocking[t.ID]), Sessions: ss}
+		rv := latest[t.ID]
+		c := Card{Task: t, Status: Derive(t, ss, openBlocking[t.ID], rv.Status), Sessions: ss, Review: rv}
 		if len(ss) > 0 {
 			c.Pane = ss[0].Pane
 		}
