@@ -1,0 +1,10 @@
+{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"claude-code","version":"2.1.325"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"request_decision","arguments":{"question":"Should a rotated refresh token keep the old token's expiry?","options":[{"key":"A","label":"Keep the old expiry"},{"key":"B","label":"Start a new 30-day expiry"}],"recommendation":"B","rationale":"A fresh expiry matches what the login route issues.","reversibility":"cheap","mode":"assume","assumption":"A rotated token gets a new 30-day expiry."}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"complete_task","arguments":{"summary":"<summary.txt>","tests_status":"passed","tests_detail":"go test ./auth/... (12 tests)"}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"request_decision","arguments":{"question":"Where should the rotated refresh tokens be recorded?","options":[{"key":"A","label":"Postgres table"},{"key":"B","label":"Redis stream"},{"key":"C","label":"In memory"}],"recommendation":"B","rationale":"Rotation is on the hot path; Redis keeps it fast.","reversibility":"costly","mode":"blocking"}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"request_decision","arguments":{"question":"Revoke every refresh token issued before the fix?","options":[{"key":"A","label":"Revoke them now"},{"key":"B","label":"Let them expire"}],"recommendation":"B","rationale":"Revoking logs every user out at once.","reversibility":"irreversible","mode":"blocking"}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"withdraw_decision","arguments":{"id":"D-3","reason":"Letting the old tokens expire needs no decision."}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"complete_task","arguments":{"summary":"Handled the empty token list as the review asked.","tests_status":"passed"}}}
