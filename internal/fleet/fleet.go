@@ -48,6 +48,15 @@ func Reconcile(ctx context.Context, st *store.Store, live []tmux.Pane, now time.
 	return windows, nil
 }
 
+// Gone reports whether session s, neither ended nor stale and in a pane,
+// has lost its pane on the tmux server whose panes are live: the pane is not
+// listed, or s started before that server did (a restarted or another
+// server numbers its panes from %0 again). It is Reconcile's rule, for
+// callers that must decide without writing.
+func Gone(live []tmux.Pane, s model.Session) bool {
+	return newServer(live).goneFrom(s, s.Pane)
+}
+
 // server is what Reconcile knows of the live tmux server.
 type server struct {
 	alive map[string]bool
@@ -147,9 +156,10 @@ func unseen(s model.Session) bool {
 }
 
 // Counts is what the badge shows: open blocking tickets, waiting sessions
-// and reviews.
+// and reviews, and whether auto-send has tripped off.
 type Counts struct {
 	Decisions, Undelivered, Waiting, Reviews int
+	AutoOff                                  bool
 }
 
 // Count counts the sessions waiting for input, whether or not they have
@@ -168,8 +178,9 @@ func Count(s []model.Session, openBlocking, undelivered int) Counts {
 }
 
 // Badge renders c as "D<n> Q<n> W<n> R<n>", leaving out zero parts; it is
-// the empty string when every count is zero. Q counts the answers not yet
-// delivered to their agent (Ruling 89).
+// the empty string when every count is zero. Q counts the answers and
+// instructions not yet delivered to their agent (Ruling 89). When AutoOff is
+// set the last part is "auto-off", alone when every count is zero.
 func Badge(c Counts) string {
 	var parts []string
 	for _, p := range []struct {
@@ -179,6 +190,9 @@ func Badge(c Counts) string {
 		if p.n != 0 {
 			parts = append(parts, fmt.Sprintf("%s%d", p.letter, p.n))
 		}
+	}
+	if c.AutoOff {
+		parts = append(parts, "auto-off")
 	}
 	return strings.Join(parts, " ")
 }

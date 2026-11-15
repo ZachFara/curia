@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -315,5 +316,33 @@ func TestLsLogsSettleFailure(t *testing.T) {
 	}
 	if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "settle") || !strings.Contains(log[0], "session a") {
 		t.Errorf("log = %q, want one line naming the session that failed to settle", log)
+	}
+}
+
+func TestLsJSONHasTaskAndTeamKeys(t *testing.T) {
+	sessions := []model.Session{
+		{
+			ID: "with", Agent: "claude", State: model.StateIdle,
+			TaskID: "T-7", Worktree: "/r/.curia-worktrees/t-7", TeamID: "team-a", TeamRole: "lead", TeamMember: "alice",
+		},
+		{ID: "without", Agent: "claude", State: model.StateIdle},
+	}
+	var buf bytes.Buffer
+	if err := printJSON(&buf, sessions); err != nil {
+		t.Fatal(err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{"task_id", "worktree", "team_id", "team_role", "team_member"}
+	wantWith := []string{"T-7", "/r/.curia-worktrees/t-7", "team-a", "lead", "alice"}
+	for i, k := range keys {
+		if got := rows[0][k]; got != wantWith[i] {
+			t.Errorf("with: %s = %v, want %q", k, got, wantWith[i])
+		}
+		if got, ok := rows[1][k]; !ok || got != "" {
+			t.Errorf("without: %s = %v (present %v), want empty string", k, got, ok)
+		}
 	}
 }

@@ -20,6 +20,7 @@ const (
 	colState column = iota
 	colWindow
 	colRepo
+	colTask
 	colModel
 	colContext
 	colSubagents
@@ -40,6 +41,7 @@ var specs = map[column]colSpec{
 	colState:     {title: ""},
 	colWindow:    {title: "SESSION:WINDOW", flex: true},
 	colRepo:      {title: "REPO@BRANCH", flex: true},
+	colTask:      {title: "TASK", flex: true},
 	colModel:     {title: "MODEL", flex: true},
 	colContext:   {title: "CTX", right: true},
 	colSubagents: {title: "SUB", right: true},
@@ -48,9 +50,24 @@ var specs = map[column]colSpec{
 	colAge:       {title: "AGE", right: true},
 }
 
+// The popup's columns by width (Plan 1 live-check defect 13): all of them
+// from fullWidth, without MODEL and SUB from midWidth, also without LAST
+// UPDATE from narrowWidth, and below it only state, window, TASK (the id
+// alone), DEC and AGE. The sidebar always has its four.
 var (
-	popupColumns   = []column{colState, colWindow, colRepo, colModel, colContext, colSubagents, colDecisions, colUpdate, colAge}
+	popupColumns = []column{
+		colState, colWindow, colRepo, colTask, colModel, colContext, colSubagents, colDecisions, colUpdate, colAge,
+	}
+	midColumns     = []column{colState, colWindow, colRepo, colTask, colContext, colDecisions, colUpdate, colAge}
+	narrowColumns  = []column{colState, colWindow, colRepo, colTask, colContext, colDecisions, colAge}
+	tinyColumns    = []column{colState, colWindow, colTask, colDecisions, colAge}
 	sidebarColumns = []column{colState, colWindow, colContext, colAge}
+)
+
+const (
+	fullWidth   = 120
+	midWidth    = 90
+	narrowWidth = 60
 )
 
 const (
@@ -117,17 +134,14 @@ func (m Model) View() string {
 	if m.child != nil {
 		return m.child.View()
 	}
-	cols, gap := popupColumns, 2
-	if m.mode == ModeSidebar {
-		cols, gap = sidebarColumns, 1
-	}
+	cols, gap := m.columns()
 	first, last := m.offset, len(m.rows)
 	if n := m.visibleRows(); n > 0 {
 		last = min(last, first+n)
 	}
 	cells := make([][]string, 0, last-first)
-	for _, s := range m.rows[first:last] {
-		cells = append(cells, m.cells(s, cols))
+	for _, r := range m.rows[first:last] {
+		cells = append(cells, m.cells(r, cols))
 	}
 	widths := fitWidths(cols, m.titles(cols), cells, m.width, gap)
 
@@ -151,6 +165,24 @@ func (m Model) View() string {
 	return strings.Join(lines, "\n")
 }
 
+// columns are the columns at the window's width and the gap between them;
+// an unknown width (0) gets every column.
+func (m Model) columns() ([]column, int) {
+	if m.mode == ModeSidebar {
+		return sidebarColumns, 1
+	}
+	switch w := m.width; {
+	case w <= 0 || w >= fullWidth:
+		return popupColumns, 2
+	case w >= midWidth:
+		return midColumns, 2
+	case w >= narrowWidth:
+		return narrowColumns, 2
+	default:
+		return tinyColumns, 2
+	}
+}
+
 // titles are the header cells of cols.
 func (m Model) titles(cols []column) []string {
 	out := make([]string, len(cols))
@@ -163,25 +195,82 @@ func (m Model) titles(cols []column) []string {
 	return out
 }
 
-// cells are the texts of s's columns. Session text is untrusted, so every
-// cell goes through Cell, except the DEC cell: a number of our own, empty
-// when zero.
-func (m Model) cells(s model.Session, cols []column) []string {
+// cells are the texts of r's columns. Session and task text is untrusted,
+// so every piece of it goes through Cell; the DEC cell is a number of our
+// own, empty when zero, and the TASK cell is empty without a task.
+func (m Model) cells(r row, cols []column) []string {
 	out := make([]string, len(cols))
 	for i, c := range cols {
-		if c == colDecisions {
-			out[i] = m.decText(s)
-			continue
+		switch c {
+		case colState:
+			out[i] = stateIcon(r.target().State)
+		case colWindow:
+			out[i] = m.windowCell(r)
+		case colTask:
+			out[i] = m.taskText(r.s)
+		case colDecisions:
+			out[i] = decText(m.rowCount(r))
+		default:
+			out[i] = Cell(m.cellText(r.s, c))
 		}
-		out[i] = Cell(m.cellText(s, c))
 	}
 	return out
 }
 
-// decText is the number of s's open tickets of both modes, then "Q<n>" for
-// its answers not yet delivered (Ruling 89), empty when there are neither.
-func (m Model) decText(s model.Session) string {
-	c := m.counts[s.ID]
+// windowCell is the window cell of r: a group row's is "▸ <lead's window>
+// +<teammates>", an expanded lead's "▾ <window>", and a teammate's its
+// member name (else its window) indented two cells.
+func (m Model) windowCell(r row) string {
+	w := Cell(m.windowText(r.s))
+	switch r.kind {
+	case rowGroup:
+		return "▸ " + w + " +" + strconv.Itoa(len(r.members)-1)
+	case rowLead:
+		return "▾ " + w
+	case rowMate:
+		if r.s.TeamMember != "" {
+			w = Cell(r.s.TeamMember)
+		}
+		return "  " + w
+	default:
+		return w
+	}
+}
+
+// taskText is the TASK cell of s: its task's id and title, the id alone
+// below narrowWidth or when the task is not known, and empty without one.
+func (m Model) taskText(s model.Session) string {
+	if s.TaskID == "" {
+		return ""
+	}
+	id := Cell(s.TaskID)
+	t, ok := m.tasks[s.TaskID]
+	if !ok || t.Title == "" || (m.width > 0 && m.width < narrowWidth) {
+		return id
+	}
+	return id + " " + Cell(t.Title)
+}
+
+// rowCount is the open tickets and undelivered answers of r's session, or
+// of all a group row's members together.
+func (m Model) rowCount(r row) model.OpenCount {
+	if r.kind != rowGroup {
+		return m.counts[r.s.ID]
+	}
+	var sum model.OpenCount
+	for _, s := range r.members {
+		c := m.counts[s.ID]
+		sum.Blocking += c.Blocking
+		sum.Assume += c.Assume
+		sum.Undelivered += c.Undelivered
+	}
+	return sum
+}
+
+// decText is the number of open tickets of both modes in c, then "Q<n>"
+// for its answers not yet delivered (Ruling 89), empty when there are
+// neither.
+func decText(c model.OpenCount) string {
 	var parts []string
 	if n := c.Blocking + c.Assume; n > 0 {
 		parts = append(parts, strconv.Itoa(n))
@@ -194,10 +283,6 @@ func (m Model) decText(s model.Session) string {
 
 func (m Model) cellText(s model.Session, c column) string {
 	switch c {
-	case colState:
-		return stateIcon(s.State)
-	case colWindow:
-		return m.windowText(s)
 	case colRepo:
 		return repoText(s)
 	case colModel:
@@ -288,11 +373,12 @@ func (m Model) renderHeader(cols []column, widths []int, gap int) string {
 	return headerStyle.Render(strings.Join(parts, strings.Repeat(" ", gap)))
 }
 
-// renderRow lays out one row: dim when stale, reversed when selected, the
-// context cell colored by its level.
-func (m Model) renderRow(s model.Session, cells []string, cols []column, widths []int, gap int, selected bool) string {
+// renderRow lays out one row: dim when its state is stale, reversed when
+// selected, the context cell colored by its level.
+func (m Model) renderRow(r row, cells []string, cols []column, widths []int, gap int, selected bool) string {
+	s := r.s
 	base := lipgloss.NewStyle()
-	if s.State == model.StateStale {
+	if r.target().State == model.StateStale {
 		base = staleStyle
 	}
 	if selected {
@@ -306,7 +392,7 @@ func (m Model) renderRow(s model.Session, cells []string, cols []column, widths 
 		case colContext:
 			st = levelStyle(level).Inherit(base)
 		case colDecisions:
-			st = decStyle(m.counts[s.ID]).Inherit(base)
+			st = decStyle(m.rowCount(r)).Inherit(base)
 		}
 		parts[i] = st.Render(fit(cells[i], widths[i], specs[c].right))
 	}
@@ -342,12 +428,12 @@ func (m Model) renderStatus() string {
 }
 
 func (m Model) helpText() string {
-	text := fmt.Sprintf("%d sessions", len(m.rows))
+	text := fmt.Sprintf("%d sessions", m.shownSessions())
 	if m.filter != "" {
-		text = fmt.Sprintf("%d of %d sessions match /%s", len(m.rows), len(m.sessions), m.filter)
+		text = fmt.Sprintf("%d of %d sessions match /%s", m.shownSessions(), len(m.sessions), m.filter)
 	}
 	if m.mode == ModePopup {
-		text += "  enter jump  d decisions  / filter  x kill  q quit"
+		text += "  enter jump  d decisions  t tasks  / filter  x kill  q quit"
 	}
 	return text
 }

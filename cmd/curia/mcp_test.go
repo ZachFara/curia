@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/mcp"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -262,7 +264,7 @@ func mcpHandshake(t *testing.T, p *mcpProc) {
 	for _, tool := range mcpAs[[]any](t, mcpAs[map[string]any](t, list["result"])["tools"]) {
 		names = append(names, mcpAs[string](t, mcpAs[map[string]any](t, tool)["name"]))
 	}
-	if want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision"}; !slices.Equal(names, want) {
+	if want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision", "check_messages"}; !slices.Equal(names, want) {
 		t.Errorf("tools = %v, want %v", names, want)
 	}
 }
@@ -669,4 +671,169 @@ func TestNotifyWithoutPaneLeavesSlot(t *testing.T) {
 	if want := []string{"Bell %3"}; !slices.Equal(fake.Calls, want) {
 		t.Errorf("tmux calls = %q, want %q: a ticket that rings nothing must not take the slot", fake.Calls, want)
 	}
+}
+
+func TestMCPOverPipesListsFiveTools(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	t.Setenv("CURIA_SESSION_ID", "S1")
+	for _, m := range []model.Message{
+		{Text: "use pnpm, not npm", Sender: model.SenderUser, TargetSession: "S1"},
+		{Text: "api tests are green", Sender: model.SenderAgent, TargetSession: "S1"},
+		{Text: "for someone else", Sender: model.SenderUser, TargetSession: "S2"},
+	} {
+		m.Kind, m.RoutedBy, m.Status, m.CreatedAt = model.KindInstruction, model.RoutedAddress, model.MsgQueued, time.Now()
+		if _, err := st.CreateMessage(context.Background(), m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := mcpStart(t)
+	mcpHandshake(t, p)
+	out, isErr := p.tool("check_messages", map[string]any{"session": "S2"})
+	msgs := mcpAs[[]any](t, out["messages"])
+	if isErr || len(msgs) != 2 || len(mcpAs[[]any](t, out["typed_earlier"])) != 0 {
+		t.Fatalf("check_messages = %v (isError %v), want M-1 and M-2", out, isErr)
+	}
+	for i, want := range [][2]string{{"M-1", "user"}, {"M-2", "agent"}} {
+		m := mcpAs[map[string]any](t, msgs[i])
+		if m["id"] != want[0] || m["from"] != want[1] {
+			t.Errorf("message %d = %v, want %s from %s", i, m, want[0], want[1])
+		}
+	}
+	if out, _ := p.tool("check_messages", map[string]any{}); len(mcpAs[[]any](t, out["messages"])) != 0 || out["instruction"] != "No messages." {
+		t.Errorf("second check_messages = %v, want none", out)
+	}
+	mcpQuietEnd(t, p)
+	if m, _, _ := st.GetMessage(context.Background(), "M-3"); m.Status != model.MsgQueued {
+		t.Errorf("S2's M-3 = %s, want queued", m.Status)
+	}
+}
+
+// mcpTeams points CLAUDE_CONFIG_DIR at a new directory and returns its
+// teams directory (not created).
+func mcpTeams(t *testing.T) string {
+	t.Helper()
+	claude := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claude)
+	return filepath.Join(claude, "teams")
+}
+
+// mcpCapturedTeam seeds the sessions of the captured team config (lead on
+// T-5 in %16, teammates alpha-s in %17 and beta-s in %18, solo in %19) and
+// writes that config, with no refresh run.
+func mcpCapturedTeam(t *testing.T, st *store.Store) string {
+	t.Helper()
+	for _, s := range teamsCapturedSessions() {
+		if err := st.UpsertSession(context.Background(), s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	teams := mcpTeams(t)
+	teamsWriteCaptured(t, teams)
+	return teams
+}
+
+// mcpResolve runs mcpCaller once, in-process, as curia mcp would.
+func mcpResolve(t *testing.T, st *store.Store) mcp.Caller {
+	t.Helper()
+	logger := slog.New(slog.DiscardHandler)
+	return mcpCaller(st, config.Default().LogPath, logger)(context.Background())
+}
+
+func TestCallerCarriesTaskAndTeamRole(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	mcpCapturedTeam(t, st)
+	for _, c := range []struct {
+		pane string
+		want mcp.Caller
+	}{
+		{"%16", mcp.Caller{SessionID: teamsCapturedLead, TaskID: "T-5", Pane: "%16", TeamRole: model.RoleLead}},
+		{"%17", mcp.Caller{SessionID: "alpha-s", TaskID: "T-5", Pane: "%17", TeamRole: model.RoleTeammate}},
+		{"%19", mcp.Caller{SessionID: "solo", Pane: "%19"}},
+	} {
+		t.Setenv("TMUX_PANE", c.pane)
+		got := mcpResolve(t, st)
+		got.Repo = "" // the captured sessions have none: the directory stands in
+		if got != c.want {
+			t.Errorf("pane %s: caller = %+v, want %+v", c.pane, got, c.want)
+		}
+	}
+	// The lead's ticket carries its task.
+	t.Setenv("TMUX_PANE", "%16")
+	if s, _ := mcpCallerOf(t, st, "Which queue for retries?"); s != teamsCapturedLead {
+		t.Fatalf("session = %q, want the lead", s)
+	}
+	if d, _, _ := st.GetDecision(context.Background(), "D-1"); d.TaskID != "T-5" {
+		t.Errorf("D-1 task = %q, want T-5", d.TaskID)
+	}
+}
+
+func TestTeammateTicketRefusedBeforeAnyView(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	mcpCapturedTeam(t, st)
+	t.Setenv("TMUX_PANE", "%17")
+	p := mcpStart(t)
+	out, isErr := p.tool("request_decision", mcpTicket("Store webhook events in Postgres or Redis?"))
+	e := mcpAs[map[string]any](t, out["error"])
+	if !isErr || e["code"] != "ask_lead" ||
+		e["message"] != "You are a teammate in an agent team: pass this question to your team lead, because only the lead raises Curia decision tickets." {
+		t.Errorf("teammate request_decision = %v (isError %v), want ask_lead", out, isErr)
+	}
+	if out, isErr := p.tool("check_messages", map[string]any{}); isErr || out["instruction"] != "No messages." {
+		t.Errorf("teammate check_messages = %v (isError %v)", out, isErr)
+	}
+	mcpQuietEnd(t, p)
+	if _, found, _ := st.GetDecision(context.Background(), "D-1"); found {
+		t.Error("a teammate's ticket was stored")
+	}
+}
+
+func TestCallerTeamRefreshFailureIsNotAnError(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	mcpPutSession(t, st, "S1", "%3", model.StateIdle, time.Now())
+	teams := mcpTeams(t)
+	if err := os.MkdirAll(teams, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(teams, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Empty, so t.TempDir's cleanup removes it whatever its mode.
+	t.Setenv("TMUX_PANE", "%3")
+	if s, _ := mcpCallerOf(t, st, "Which queue for retries?"); s != "S1" {
+		t.Errorf("session = %q, want S1", s)
+	}
+	if c := mcpResolve(t, st); c.SessionID != "S1" || c.TeamRole != "" {
+		t.Errorf("caller = %+v, want S1 as solo", c)
+	}
+}
+
+// With no teams directory a refresh costs one stat, but a row that still
+// names a team (the directory removed since the last refresh) is refreshed,
+// so a former teammate is not refused.
+func TestCallerTeamClearedWhenTeamsDirGone(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	teams := mcpCapturedTeam(t, st)
+	t.Setenv("TMUX_PANE", "%17")
+	if c := mcpResolve(t, st); c.TeamRole != model.RoleTeammate {
+		t.Fatalf("caller = %+v, want a teammate", c)
+	}
+	if err := os.RemoveAll(teams); err != nil {
+		t.Fatal(err)
+	}
+	// A caller with no team does not refresh: the others keep their rows.
+	t.Setenv("TMUX_PANE", "%19")
+	if c := mcpResolve(t, st); c.SessionID != "solo" || c.TeamRole != "" {
+		t.Errorf("caller = %+v, want solo", c)
+	}
+	teamsAssert(t, st, "alpha-s", [3]string{teamsCapturedDir, model.RoleTeammate, "alpha"})
+	t.Setenv("TMUX_PANE", "%17")
+	if c := mcpResolve(t, st); c.SessionID != "alpha-s" || c.TeamRole != "" {
+		t.Errorf("caller = %+v, want alpha-s with no team", c)
+	}
+	teamsAssert(t, st, "alpha-s", [3]string{})
 }

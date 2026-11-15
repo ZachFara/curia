@@ -348,3 +348,81 @@ func TestLineSeparatorsSeparate(t *testing.T) {
 		t.Errorf("Text(%q) = %q, want %q", in, got, "a\nb\nc\nd")
 	}
 }
+
+func TestBlockKeepsLayout(t *testing.T) {
+	in := "a\n\n\n    indented\n\tb  c  \r\n"
+	want := "a\n\n\n    indented\n\tb  c"
+	if got := Block(in, 0); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestBlockStripsEscapes(t *testing.T) {
+	if got := Block("\x1b[31mred\x1b[0m\n\x1b]0;t\x07x", 0); got != "red\nx" {
+		t.Errorf("got %q", got)
+	}
+	if got := Block("a\u202eb\x00c\x7fd\u0085e", 0); got != "abcde" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestBlockLineEndings(t *testing.T) {
+	if got := Block("a\rb\r\nc\rd", 0); got != "a\nb\nc\nd" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestBlockTrimsTrailing(t *testing.T) {
+	cases := map[string]string{
+		"a \t\nb\t \n\n \n\t\n": "a\nb",
+		"\n\n  x":               "\n\n  x",
+		" \t\n \n":              "",
+		"":                      "",
+	}
+	for in, want := range cases {
+		if got := Block(in, 0); got != want {
+			t.Errorf("Block(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestBlockLimitIsBytes(t *testing.T) {
+	if got := Block(strings.Repeat("é", 10), 5); got != "éé" {
+		t.Errorf("got %q", got)
+	}
+	if got := Block("abcdef", 3); got != "abc" {
+		t.Errorf("got %q", got)
+	}
+	// A cut that leaves trailing blanks is trimmed again.
+	if got := Block("ab  \n\n cd", 5); got != "ab" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestBlockIdempotent(t *testing.T) {
+	inputs := append([]string{"plain", "", "a\n\n\nb", "  x  \n\n", "é é é é é é"}, hostile...)
+	for _, limit := range []int{0, 1, 3, 5, 200} {
+		for _, in := range inputs {
+			a := Block(in, limit)
+			if b := Block(a, limit); a != b {
+				t.Errorf("Block not idempotent at limit %d for %.40q: %q then %q", limit, in, a, b)
+			}
+		}
+	}
+}
+
+func TestBlockInHostileCorpus(t *testing.T) {
+	for _, in := range hostile {
+		out := Block(in, 0)
+		if !utf8.ValidString(out) {
+			t.Errorf("invalid UTF-8 in %q", out)
+		}
+		for _, r := range out {
+			switch {
+			case r == '\n' || r == '\t':
+			case r < 0x20, r >= 0x7f && r <= 0x9f, r >= 0x202a && r <= 0x202e:
+				t.Errorf("forbidden rune %U in %.40q", r, out)
+			}
+		}
+	}
+}

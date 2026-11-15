@@ -41,8 +41,9 @@ const decideNoteLimit = 300
 
 func init() {
 	cmd := &cobra.Command{
-		Use:   "decide [<id>]",
-		Short: "Answer decision tickets (the user only)",
+		Use:         "decide [<id>]",
+		Short:       "Answer decision tickets (the user only)",
+		Annotations: userOnlyMark(),
 		Long: "With no id, opens the decision queue (run it in a tmux popup) to answer\n" +
 			"tickets one by one. With an id, answers that ticket with exactly one of\n" +
 			"--option, --accept (the recommendation) or --text, then delivers the\n" +
@@ -64,8 +65,8 @@ func init() {
 
 func runDecide(cmd *cobra.Command, args []string) error {
 	// No agent may answer a decision (spec section 7).
-	if refuseInsideAgent() != nil {
-		return errors.New("curia decide cannot run inside an agent session (CLAUDECODE is set): only the user may answer a decision")
+	if err := userOnly("decide", "answer a decision"); err != nil {
+		return err
 	}
 	if len(args) == 0 {
 		if decideOption != "" || decideAccept || decideText != "" || decideReason != "" || decideScope != "" || decideJSON {

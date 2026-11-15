@@ -1,0 +1,21 @@
+argc 1
+arg You are working on Curia task T-1 in your own git worktree, on branch curia/T-1-fix-the-auth-refresh (from main). Other agents work in other worktrees: stay inside this one.
+
+Rules for this session:
+- When you face a judgment call the user should make or confirm, use the curia MCP tools: call search_decisions first, then request_decision with options and your recommendation. Use mode "blocking" only for choices that are costly or impossible to undo.
+- Messages from the user may arrive while you work, as "Message M-<n> from the user". Follow them. If one says its wording was simplified, call check_messages.
+- Commit your work on this branch as you go. Do not push, merge or open a pull request unless the task says so.
+- When the task is finished, make sure everything is committed, then end your turn with a short summary: what you changed, how you tested it, and anything left open.
+
+Task T-1: Fix the auth refresh
+
+The refresh endpoint returns 500 once the access token has expired.
+Rotate the refresh token on every use and add a test for the expired case.
+cwd <worktree>
+task T-1
+argc 3
+arg --resume
+arg 00000001-0000-4000-8000-000000000001
+arg Curia paused this task and has now resumed it. The work that was uncommitted before the pause is in the commit "curia: WIP T-1 (paused)" at the tip of your branch, not in uncommitted files: look at git log and git status before you go on.
+cwd <worktree>
+task T-1

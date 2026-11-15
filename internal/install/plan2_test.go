@@ -550,10 +550,11 @@ func TestMCPAddCommandQuotesBin(t *testing.T) {
 	}
 }
 
-// wantToolRules are the four permission rules AllowTools adds.
+// wantToolRules are the five permission rules AllowTools adds.
 var wantToolRules = []string{
 	"mcp__curia__search_decisions", "mcp__curia__request_decision",
 	"mcp__curia__check_decision", "mcp__curia__withdraw_decision",
+	"mcp__curia__check_messages",
 }
 
 // readAllow returns settings["permissions"]["allow"] as strings.
@@ -578,7 +579,7 @@ func TestHooksAddNoPermissionRule(t *testing.T) {
 	}
 }
 
-func TestAllowToolsAddsFourOnce(t *testing.T) {
+func TestAllowToolsAddsFifthToAPlan2Install(t *testing.T) {
 	path := settingsIn(t)
 	writeFile(t, path, `{"model":"opus","permissions":{"allow":["Bash(ls:*)","mcp__curia__check_decision"],"deny":["Bash(rm:*)"]}}`)
 	if err := AllowTools(path, testNow); err != nil {
@@ -587,6 +588,7 @@ func TestAllowToolsAddsFourOnce(t *testing.T) {
 	want := []string{
 		"Bash(ls:*)", "mcp__curia__check_decision",
 		"mcp__curia__search_decisions", "mcp__curia__request_decision", "mcp__curia__withdraw_decision",
+		"mcp__curia__check_messages",
 	}
 	if got := readAllow(t, path); !slices.Equal(got, want) {
 		t.Errorf("allow = %q, want %q", got, want)
@@ -631,7 +633,7 @@ func TestAllowToolsCreatesMissingParts(t *testing.T) {
 
 func TestToolsAllowed(t *testing.T) {
 	all, _ := json.Marshal(append([]string{"Bash(ls:*)"}, wantToolRules...))
-	three, _ := json.Marshal(wantToolRules[:3])
+	three, _ := json.Marshal(wantToolRules[:4])
 	for content, want := range map[string]bool{
 		`{"permissions":{"allow":` + string(all) + `}}`:   true,
 		`{"permissions":{"allow":` + string(three) + `}}`: false,
@@ -653,7 +655,7 @@ func TestToolsAllowed(t *testing.T) {
 	}
 }
 
-func TestUnhooksRemovesTheFourToolRules(t *testing.T) {
+func TestUnhooksRemovesTheFiveToolRules(t *testing.T) {
 	path := settingsIn(t)
 	allow, _ := json.Marshal(append([]string{"Bash(ls:*)", "mcp__curia"}, wantToolRules...))
 	writeFile(t, path, `{"permissions":{"allow":`+string(allow)+`,"deny":["Bash(rm:*)"]}}`)

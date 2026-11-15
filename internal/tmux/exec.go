@@ -20,7 +20,7 @@ import (
 // paneFormat is the tmux format string that parsePanes expects. start_time
 // is the server's start in unix seconds. The window name comes last because
 // it may hold tabs.
-const paneFormat = "#{pane_id}\t#{session_name}\t#{window_id}\t#{start_time}\t#{window_name}"
+const paneFormat = "#{pane_id}\t#{session_name}\t#{window_id}\t#{start_time}\t#{pane_pid}\t#{window_name}"
 
 type execClient struct {
 	socket string
@@ -229,7 +229,10 @@ func (c *execClient) runFor(ctx context.Context, timeout time.Duration, args ...
 // syncFormat is what CapturePane asks about a pane before capturing it. The
 // pane id tells a real pane from an unknown target, which tmux expands to
 // empty fields.
-const syncFormat = "#{pane_id}\t#{synchronize-panes}"
+const syncFormat = "#{pane_id}\t#{synchronize-panes}\t#{cursor_x}\t#{cursor_y}"
+
+// cursorFormat is what CapturePane asks again after the capture.
+const cursorFormat = "#{pane_id}\t#{cursor_x}\t#{cursor_y}"
 
 func (c *execClient) CapturePane(ctx context.Context, pane string) (Capture, error) {
 	if !paneIDPattern.MatchString(pane) {
@@ -240,14 +243,217 @@ func (c *execClient) CapturePane(ctx context.Context, pane string) (Capture, err
 		return Capture{}, err
 	}
 	f := strings.Split(strings.TrimSuffix(out, "\n"), "\t")
-	if len(f) != 2 || f[0] != pane {
+	if len(f) != 4 || f[0] != pane {
 		return Capture{}, fmt.Errorf("tmux capture-pane: unexpected answer %q for %q", out, pane)
 	}
-	screen, err := c.run(ctx, "capture-pane", "-p", "-t", pane)
+	styled, err := c.run(ctx, "capture-pane", "-e", "-p", "-t", pane)
 	if err != nil {
 		return Capture{}, err
 	}
-	return Capture{Screen: screen, Synchronized: f[1] == "1"}, nil
+	capt := Capture{Screen: StripEscapes(styled), Styled: styled, Synchronized: f[1] == "1"}
+	after, err := c.run(ctx, "display-message", "-p", "-t", pane, cursorFormat)
+	if err != nil {
+		return Capture{}, err
+	}
+	g := strings.Split(strings.TrimSuffix(after, "\n"), "\t")
+	x, xerr := strconv.Atoi(f[2])
+	y, yerr := strconv.Atoi(f[3])
+	if xerr == nil && yerr == nil && len(g) == 3 && g[0] == pane && g[1] == f[2] && g[2] == f[3] {
+		capt.CursorX, capt.CursorY, capt.CursorKnown = x, y, true
+	}
+	return capt, nil
+}
+
+// StripEscapes removes the escape sequences capture-pane -e writes (CSI
+// sequences such as SGR, and OSC sequences such as hyperlinks) from s. Any
+// other escape character is removed alone.
+func StripEscapes(s string) string {
+	if !strings.ContainsRune(s, '\x1b') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] != '\x1b' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		i += escapeLen(s[i:])
+	}
+	return b.String()
+}
+
+// escapeLen is the length of the escape sequence at the start of s, which
+// starts with ESC: a CSI sequence ends at its final byte (0x40 to 0x7e), an
+// OSC one at BEL or ESC \ (or the end of the line); anything else is the
+// ESC alone.
+func escapeLen(s string) int {
+	if len(s) < 2 {
+		return len(s)
+	}
+	switch s[1] {
+	case '[':
+		for j := 2; j < len(s); j++ {
+			if s[j] >= 0x40 && s[j] <= 0x7e {
+				return j + 1
+			}
+			if s[j] == '\n' {
+				return j
+			}
+		}
+		return len(s)
+	case ']':
+		for j := 2; j < len(s); j++ {
+			switch {
+			case s[j] == '\a':
+				return j + 1
+			case s[j] == '\x1b' && j+1 < len(s) && s[j+1] == '\\':
+				return j + 2
+			case s[j] == '\n':
+				return j
+			}
+		}
+		return len(s)
+	}
+	return 1
+}
+
+// windowTimeout bounds NewWindow, all its tmux invocations together.
+const windowTimeout = 5 * time.Second
+
+// NewWindow's limits. tmux reads an argument equal to ";" or ending in ";" as
+// a command separator, so nothing NewWindow passes on may end in one.
+var (
+	windowNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`)
+	windowEnvPattern  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}=[A-Za-z0-9._/:@-]{0,256}$`)
+	// plainWordPattern is what a one-argument command must be: tmux runs a
+	// single argument with its default-shell's -c, which then reads a plain
+	// word, holding nothing a shell expands or splits, as a bare command.
+	plainWordPattern = regexp.MustCompile(`^[A-Za-z0-9._/@:+][A-Za-z0-9._/@:+-]*$`)
+)
+
+const (
+	maxWindowEnv  = 8
+	maxWindowArgs = 16
+	maxArgBytes   = 4096
+)
+
+// checkWindow refuses a WindowSpec NewWindow must never pass to tmux.
+func checkWindow(w WindowSpec) error {
+	if !windowNamePattern.MatchString(w.Session) {
+		return fmt.Errorf("tmux new-window: refusing session name %q", w.Session)
+	}
+	if !windowNamePattern.MatchString(w.Name) {
+		return fmt.Errorf("tmux new-window: refusing window name %q", w.Name)
+	}
+	if !filepath.IsAbs(w.Dir) || filepath.Clean(w.Dir) != w.Dir || !commandText(w.Dir) {
+		return fmt.Errorf("tmux new-window: refusing directory %q", w.Dir)
+	}
+	if len(w.Env) > maxWindowEnv {
+		return fmt.Errorf("tmux new-window: refusing %d environment entries (limit %d)", len(w.Env), maxWindowEnv)
+	}
+	for _, e := range w.Env {
+		if !windowEnvPattern.MatchString(e) {
+			return fmt.Errorf("tmux new-window: refusing environment entry %q", e)
+		}
+	}
+	return checkWindowCommand(w.Command)
+}
+
+// checkWindowCommand refuses a command NewWindow must never pass to tmux.
+func checkWindowCommand(command []string) error {
+	if n := len(command); n < 1 || n > maxWindowArgs {
+		return fmt.Errorf("tmux new-window: refusing a command of %d arguments", n)
+	}
+	for _, a := range command {
+		if a == "" || len(a) > maxArgBytes || !commandText(a) {
+			return fmt.Errorf("tmux new-window: refusing command argument %q", a)
+		}
+	}
+	if len(command) == 1 && !plainWordPattern.MatchString(command[0]) {
+		return fmt.Errorf("tmux new-window: refusing one-argument command %q: tmux would give it to a shell", command[0])
+	}
+	return nil
+}
+
+// commandText reports whether s may go on tmux's command line as one
+// argument: valid UTF-8, no rune below 0x20, not ending in ";".
+func commandText(s string) bool {
+	if !utf8.ValidString(s) || strings.HasSuffix(s, ";") {
+		return false
+	}
+	return !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 })
+}
+
+// formatEscaper doubles "#", which tmux expands as a format in -c.
+var formatEscaper = strings.NewReplacer("#", "##")
+
+// NewWindow opens a detached window running w.Command in w.Dir. It asks
+// has-session whether w.Session exists (an exact match) and runs new-window
+// in it or new-session to create it; a new-session that finds the session
+// created meanwhile by another process is retried once as new-window.
+func (c *execClient) NewWindow(ctx context.Context, w WindowSpec) (Pane, error) {
+	if err := checkWindow(w); err != nil {
+		return Pane{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, windowTimeout)
+	defer cancel()
+	tail := []string{"-n", w.Name, "-c", formatEscaper.Replace(w.Dir)}
+	for _, e := range w.Env {
+		tail = append(tail, "-e", e)
+	}
+	tail = append(append(tail, "--"), w.Command...)
+	newWindow := append([]string{"new-window", "-d", "-P", "-F", paneFormat, "-t", "=" + w.Session + ":"}, tail...)
+	var out string
+	var err error
+	if _, herr := c.run(ctx, "has-session", "-t", "="+w.Session); herr == nil {
+		out, err = c.run(ctx, newWindow...)
+	} else {
+		out, err = c.run(ctx, append([]string{"new-session", "-d", "-P", "-F", paneFormat, "-s", w.Session}, tail...)...)
+		if err != nil && strings.Contains(err.Error(), "duplicate session") {
+			out, err = c.run(ctx, newWindow...)
+		}
+	}
+	if err != nil {
+		return Pane{}, err
+	}
+	panes, err := parsePanes(out)
+	if err != nil {
+		return Pane{}, err
+	}
+	if len(panes) != 1 {
+		return Pane{}, fmt.Errorf("tmux new-window: got %d panes for window %q", len(panes), w.Name)
+	}
+	return panes[0], nil
+}
+
+// maxTailLines caps CaptureTail; it is tmux's default history-limit.
+const maxTailLines = 2000
+
+// CaptureTail captures the pane from lines rows up its history to the bottom
+// of the screen, with wrapped lines joined, drops the blank rows at the
+// bottom of the screen and returns the last lines rows, each ending in a
+// newline.
+func (c *execClient) CaptureTail(ctx context.Context, pane string, lines int) (string, error) {
+	if !paneIDPattern.MatchString(pane) {
+		return "", fmt.Errorf("tmux capture-pane: refusing target %q: not a pane id", pane)
+	}
+	if lines < 1 || lines > maxTailLines {
+		return "", fmt.Errorf("tmux capture-pane: refusing %d lines (1 to %d)", lines, maxTailLines)
+	}
+	out, err := c.run(ctx, "capture-pane", "-p", "-J", "-t", pane, "-S", "-"+strconv.Itoa(lines))
+	if err != nil {
+		return "", err
+	}
+	rows := strings.Split(out, "\n")
+	for len(rows) > 0 && strings.TrimSpace(rows[len(rows)-1]) == "" {
+		rows = rows[:len(rows)-1]
+	}
+	if len(rows) == 0 {
+		return "", nil
+	}
+	return strings.Join(rows[max(0, len(rows)-lines):], "\n") + "\n", nil
 }
 
 // ttyPattern matches a pane's tty as tmux reports it: a pty, named
@@ -325,17 +531,21 @@ func parsePanes(out string) ([]Pane, error) {
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, "\t", 5)
+		f := strings.SplitN(line, "\t", 6)
 		// An unknown -t target expands to empty fields, so an empty id is malformed too.
-		if len(f) != 5 || f[0] == "" {
+		if len(f) != 6 || f[0] == "" {
 			return nil, fmt.Errorf("tmux: malformed pane line %q", line)
 		}
 		start, err := strconv.ParseInt(f[3], 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("tmux: bad server start time in pane line %q", line)
 		}
+		pid, err := strconv.Atoi(f[4])
+		if err != nil {
+			return nil, fmt.Errorf("tmux: bad pane pid in pane line %q", line)
+		}
 		panes = append(panes, Pane{
-			ID: f[0], Session: f[1], WindowID: f[2], ServerStart: time.Unix(start, 0), WindowName: f[4],
+			ID: f[0], Session: f[1], WindowID: f[2], ServerStart: time.Unix(start, 0), PID: pid, WindowName: f[5],
 		})
 	}
 	return panes, nil

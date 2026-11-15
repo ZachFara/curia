@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/state"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/task"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -47,7 +49,7 @@ func init() {
 		Short: "Record one Claude Code hook event (run by Claude Code's hooks)",
 		Long: "Reads the hook payload on stdin and $TMUX_PANE, and records the event.\n" +
 			"Always exits 0 and prints nothing, except that a Stop which claims queued\n" +
-			"decision answers prints one JSON line blocking the stop with them;\n" +
+			"decision answers or messages prints one JSON line blocking the stop with them;\n" +
 			"errors go to the log file.",
 		Args: cobra.ArbitraryArgs,
 		// Every argument reaches runHook, so a bad one is logged, not printed.
@@ -58,7 +60,7 @@ func init() {
 
 // runHook records the event and exits 0 on every path, panics included.
 // Nothing is written to stderr, and nothing to stdout except the one line
-// hook.Run gives for a Stop that claimed queued answers: both belong to
+// hook.Run gives for a Stop that claimed queued answers or messages: both belong to
 // Claude Code. A watchdog exits after hookDeadline, logging it: stdin has
 // no deadline of its own, and the transcript is read inside the store's
 // write transaction.
@@ -184,10 +186,8 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	if len(res.Stdout) > 0 {
 		if eerr := emit(res.Stdout); eerr != nil {
 			logger.Error("hook output", "event", string(kind), "err", eerr.Error())
-		} else if len(res.Claimed) > 0 {
-			// M8: a "delivered (stop_hook)" that never reached Claude Code
-			// can be told from one that did.
-			logger.Info("hook Stop delivered answers", "ids", strings.Join(res.Claimed, " "))
+		} else {
+			hookLogDelivered(logger, res)
 		}
 	}
 	sess := res.Session
@@ -197,12 +197,27 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	sess = seenIfFocused(ctx, client, st, before, sess, logger)
 	for _, w := range markerWindows(before, sess) {
 		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
-		if aerr := attention.Apply(actx, client, st, w); aerr != nil {
+		// A window that is gone (a session's previous window after pause
+		// closed it, say) has no marker to set: not an error (live check B
+		// defect 8), as in reconcile.
+		if aerr := attention.Apply(actx, client, st, w); aerr != nil && !errors.Is(aerr, tmux.ErrNoWindow) {
 			logger.Error("hook attention marker", "window", w, "err", aerr.Error())
 		}
 		cancel()
 	}
 	return err
+}
+
+// hookLogDelivered logs, at INFO, the ids of the answers and of the
+// messages a Stop handed over (M8): a "delivered (stop_hook)" that never
+// reached Claude Code can be told from one that did.
+func hookLogDelivered(logger *slog.Logger, res hook.Result) {
+	if len(res.Claimed) > 0 {
+		logger.Info("hook Stop delivered answers", "ids", strings.Join(res.Claimed, " "))
+	}
+	if len(res.ClaimedMessages) > 0 {
+		logger.Info("hook Stop delivered messages", "ids", strings.Join(res.ClaimedMessages, " "))
+	}
 }
 
 // seenIfFocused marks sess's pane seen, and returns sess seen, when the event
@@ -314,12 +329,14 @@ func readPayload(r io.Reader) ([]byte, error) {
 	return b, nil
 }
 
-// hookEnv is the real environment: $TMUX_PANE, the wall clock, git, tmux.
+// hookEnv is the real environment: $TMUX_PANE, the wall clock, git, tmux,
+// and $CURIA_TASK_ID when it is a valid task id (it is untrusted).
 func hookEnv(ctx context.Context, client tmux.Client, logger *slog.Logger) hook.Env {
 	return hook.Env{
-		Pane: os.Getenv("TMUX_PANE"),
-		Now:  time.Now,
-		Git:  func(cwd string) (string, string) { return gitInfo(ctx, cwd, logger) },
+		Pane:   os.Getenv("TMUX_PANE"),
+		Now:    time.Now,
+		TaskID: hookTaskID(os.Getenv("CURIA_TASK_ID")),
+		Git:    func(cwd string) (string, string, string) { return gitInfo(ctx, cwd, logger) },
 		PaneInfo: func(pane string) (string, string) {
 			pctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 			defer cancel()
@@ -331,4 +348,12 @@ func hookEnv(ctx context.Context, client tmux.Client, logger *slog.Logger) hook.
 			return p.Session, p.WindowID
 		},
 	}
+}
+
+// hookTaskID returns id when task.ValidID accepts it, else "".
+func hookTaskID(id string) string {
+	if !task.ValidID(id) {
+		return ""
+	}
+	return id
 }

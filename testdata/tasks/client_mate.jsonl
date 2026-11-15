@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}
+{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"claude-code","version":"2.1.325"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"request_decision","arguments":{"question":"Mock the token store or use a real one in the tests?","options":[{"key":"A","label":"Mock it"},{"key":"B","label":"Real store"}],"recommendation":"B","rationale":"The store is SQLite and fast.","reversibility":"cheap","mode":"assume","assumption":"The tests use a real store."}}}

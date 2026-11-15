@@ -25,6 +25,7 @@ import (
 var guardUnset = []string{
 	"TMUX", "TMUX_PANE", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID",
 	"CLAUDE_PROJECT_DIR", "CLAUDE_CONFIG_DIR", "CURIA_SESSION_ID", "SSH_CONNECTION",
+	"CURIA_TASK_ID", "CURIA_ROUTER", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "EDITOR", "VISUAL",
 }
 
 var (
@@ -133,6 +134,14 @@ func (unreachableTmux) CapturePane(context.Context, string) (tmux.Capture, error
 }
 
 func (unreachableTmux) Bell(context.Context, string) error { return errTmuxUnreachable }
+
+func (unreachableTmux) NewWindow(context.Context, tmux.WindowSpec) (tmux.Pane, error) {
+	return tmux.Pane{}, errTmuxUnreachable
+}
+
+func (unreachableTmux) CaptureTail(context.Context, string, int) (string, error) {
+	return "", errTmuxUnreachable
+}
 
 func TestGuardIsolatesEnvironment(t *testing.T) {
 	home := os.Getenv("HOME")

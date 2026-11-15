@@ -38,7 +38,16 @@ type Session struct {
 	ContextUsed, ContextMax, SubagentsActive                                                       int
 	TranscriptOffset                                                                               int64
 	StartedAt, UpdatedAt, SeenAt                                                                   time.Time
+	// TaskID is the task whose agent this is; Worktree its worktree. TeamID,
+	// TeamRole and TeamMember place the session in an agent team.
+	TaskID, Worktree, TeamID, TeamRole, TeamMember string
 }
+
+// Team roles.
+const (
+	RoleLead     = "lead"
+	RoleTeammate = "teammate"
+)
 
 // Event is a parsed hook payload. NotificationType is a Notification's
 // notification_type (for example "permission_prompt" or "idle_prompt").
@@ -59,4 +68,6 @@ type Event struct {
 	StopBlocked, HelperAgent, BackgroundKnown                                             bool
 	RunningSubagents                                                                      int
 	At                                                                                    time.Time
+	// TaskID is the task named by the hook's environment (CURIA_TASK_ID).
+	TaskID string
 }

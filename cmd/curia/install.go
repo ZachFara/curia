@@ -44,7 +44,7 @@ func installRunClaude(ctx context.Context, args ...string) ([]byte, error) {
 
 // installToolsHint is what install prints when --no-allow-mcp-tools skipped
 // the rules.
-const installToolsHint = "MCP tools not allowed without a prompt; to allow the four curia tools, run curia install without --no-allow-mcp-tools"
+const installToolsHint = "MCP tools not allowed without a prompt; to allow the five curia tools, run curia install without --no-allow-mcp-tools"
 
 // installPaths are the user-owned files the install commands edit, and the
 // Claude config JSON they only read.
@@ -194,7 +194,7 @@ func tmuxKeys() (install.TmuxKeys, error) {
 	if err != nil {
 		return install.TmuxKeys{}, err
 	}
-	return install.TmuxKeys{Dashboard: cfg.KeyDashboard, Decisions: cfg.KeyDecisions, Next: cfg.KeyNext}, nil
+	return install.TmuxKeys{Dashboard: cfg.KeyDashboard, Decisions: cfg.KeyDecisions, Next: cfg.KeyNext, Message: cfg.KeyMessage}, nil
 }
 
 // installTmux writes the snippet and says, per key, whether the snippet binds
@@ -218,6 +218,9 @@ func installTmux(out io.Writer, p installPaths, bin string) error {
 			installSay(out, "  prefix %s (%s): already bound in %s, left alone; to use another key, set %s in %s "+
 				"and run curia install again, or add after the curia block: bind <key> %s",
 				k.Key, k.Name, p.tmuxConf, k.Option, p.config, k.Command)
+		case k.Default != "":
+			installSay(out, "  prefix %s (%s): bound by the snippet, in place of tmux's own %q (curia uninstall restores it)",
+				k.Key, k.Name, k.Default)
 		default:
 			installSay(out, "  prefix %s (%s): bound by the snippet", k.Key, k.Name)
 		}
@@ -232,26 +235,26 @@ func installTmux(out io.Writer, p installPaths, bin string) error {
 	return nil
 }
 
-// installTools adds the four tool rules unless --no-allow-mcp-tools was given
-// (Ruling 78); with the flag it says how to allow them, unless all four are
+// installTools adds the five tool rules unless --no-allow-mcp-tools was given
+// (Ruling 78); with the flag it says how to allow them, unless all five are
 // there already (Ruling 57).
 func installTools(out io.Writer, settings string) error {
 	if installNoAllowMCPTools {
 		if install.ToolsAllowed(settings) {
-			installSay(out, "MCP tools: the four curia tools are already allowed without a prompt in %s", settings)
+			installSay(out, "MCP tools: the five curia tools are already allowed without a prompt in %s", settings)
 		} else {
 			installSay(out, "%s", installToolsHint)
 		}
 		return nil
 	}
 	if install.ToolsAllowed(settings) {
-		installSay(out, "MCP tools: the four curia tools are already allowed without a prompt in %s", settings)
+		installSay(out, "MCP tools: the five curia tools are already allowed without a prompt in %s", settings)
 		return nil
 	}
 	if err := install.AllowTools(settings, time.Now()); err != nil {
 		return err
 	}
-	installSay(out, "MCP tools: the four curia tools are allowed without a prompt in %s; "+
+	installSay(out, "MCP tools: the five curia tools are allowed without a prompt in %s; "+
 		"to skip this step, run curia install --no-allow-mcp-tools", settings)
 	return nil
 }
@@ -329,7 +332,7 @@ func uninstallTmuxHint() string {
 	keys, err := tmuxKeys()
 	if err != nil {
 		d := config.Default()
-		keys = install.TmuxKeys{Dashboard: d.KeyDashboard, Decisions: d.KeyDecisions, Next: d.KeyNext}
+		keys = install.TmuxKeys{Dashboard: d.KeyDashboard, Decisions: d.KeyDecisions, Next: d.KeyNext, Message: d.KeyMessage}
 	}
 	var names []string
 	for _, k := range []string{keys.Dashboard, keys.Decisions, keys.Next} {
@@ -337,11 +340,22 @@ func uninstallTmuxHint() string {
 			names = append(names, k)
 		}
 	}
+	// Unlike the others, tmux binds the message key by default (marking a
+	// pane): while it is still Curia's, uninstall gives that binding back.
+	restore := keys.Message == install.MessageDefaultKey
+	if !restore && install.ValidKey(keys.Message) {
+		names = append(names, keys.Message)
+	}
 	hint := "Restart tmux to drop Curia's key bindings, hook and window marker, or run:\n" +
 		"  tmux set-hook -gu pane-focus-in; tmux set -gu @curia_marker_format"
 	if len(names) > 0 {
 		hint += "\n  for k in " + strings.Join(names, " ") + "; do " +
 			`tmux list-keys -T prefix "$k" 2>/dev/null | grep -q curia && tmux unbind "$k"; done`
+	}
+	if restore {
+		hint += "\n  tmux list-keys -T prefix " + keys.Message + " 2>/dev/null | grep -q curia && tmux bind " +
+			keys.Message + " " + install.MessageDefaultCommand +
+			"\n  (the last line gives prefix " + keys.Message + " back to tmux's own binding, which marks a pane)"
 	}
 	return hint
 }
@@ -388,20 +402,24 @@ func uninstallMCP(ctx context.Context, out io.Writer, config, bin string) error 
 
 func init() {
 	installCmd := &cobra.Command{
-		Use:   "install",
-		Short: "Register Curia's hooks, skill and MCP server with Claude Code and add the tmux snippet",
-		Args:  cobra.NoArgs,
-		RunE:  runInstall,
+		Use:         "install",
+		Short:       "Register Curia's hooks, skill and MCP server with Claude Code and add the tmux snippet",
+		Annotations: userOnlyMark(),
+		Args:        cobra.NoArgs,
+		// It rewrites the user's Claude Code settings and tmux configuration.
+		RunE: userOnlyRunE("install", "install Curia", runInstall),
 	}
 	installCmd.Flags().BoolVar(&installNoAllowMCPTools, "no-allow-mcp-tools", false,
-		"do not add the four curia MCP tools to Claude's permissions.allow (they are allowed by default)")
+		"do not add the five curia MCP tools to Claude's permissions.allow (they are allowed by default)")
 	rootCmd.AddCommand(
 		installCmd,
 		&cobra.Command{
-			Use:   "uninstall",
-			Short: "Remove what curia install added",
-			Args:  cobra.NoArgs,
-			RunE:  runUninstall,
+			Use:         "uninstall",
+			Short:       "Remove what curia install added",
+			Annotations: userOnlyMark(),
+			Args:        cobra.NoArgs,
+			// An agent removing Curia's hooks would switch its tracking off.
+			RunE: userOnlyRunE("uninstall", "uninstall Curia", runUninstall),
 		},
 	)
 }

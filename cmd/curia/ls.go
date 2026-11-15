@@ -73,6 +73,11 @@ type lsRow struct {
 	Cwd             string      `json:"cwd"`
 	Repo            string      `json:"repo"`
 	Branch          string      `json:"branch"`
+	TaskID          string      `json:"task_id"`
+	Worktree        string      `json:"worktree"`
+	TeamID          string      `json:"team_id"`
+	TeamRole        string      `json:"team_role"`
+	TeamMember      string      `json:"team_member"`
 	State           model.State `json:"state"`
 	Model           string      `json:"model"`
 	ContextUsed     int         `json:"context_used"`
@@ -99,7 +104,8 @@ func printJSON(w io.Writer, sessions []model.Session) error {
 	for _, s := range sessions {
 		rows = append(rows, lsRow{
 			ID: s.ID, Agent: s.Agent, TmuxPane: s.Pane, TmuxSession: s.TmuxSession, TmuxWindow: s.TmuxWindow,
-			Cwd: s.Cwd, Repo: s.Repo, Branch: s.Branch, State: s.State, Model: s.Model,
+			Cwd: s.Cwd, Repo: s.Repo, Branch: s.Branch,
+			TaskID: s.TaskID, Worktree: s.Worktree, TeamID: s.TeamID, TeamRole: s.TeamRole, TeamMember: s.TeamMember, State: s.State, Model: s.Model,
 			ContextUsed: s.ContextUsed, ContextMax: s.ContextMax, SubagentsActive: s.SubagentsActive,
 			LastUpdate: s.LastUpdate, SeenAt: jsonTime(s.SeenAt), TranscriptPath: s.TranscriptPath,
 			StartedAt: jsonTime(s.StartedAt), UpdatedAt: jsonTime(s.UpdatedAt),

@@ -477,6 +477,23 @@ func TestHookAppliesMarker(t *testing.T) {
 	}
 }
 
+func TestHookGoneWindowIsNotLogged(t *testing.T) {
+	hookHome(t)
+	gone := &goneWindowTmux{}
+	prevClient := newTmuxClient
+	newTmuxClient = func() tmux.Client { return gone }
+	prev := hookRun
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		return hook.Result{Session: model.Session{ID: "A", TmuxWindow: "@7", State: model.StateIdle, UpdatedAt: time.Now()}}, nil
+	}
+	t.Cleanup(func() { hookRun, newTmuxClient = prev, prevClient })
+	res := runHookCmd(t, strings.NewReader(`{}`), "hook", "SessionStart")
+	assertQuietExitZero(t, res)
+	if log := readLog(t); len(log) != 0 {
+		t.Errorf("log = %q, want nothing for a window that is gone", log)
+	}
+}
+
 func TestHookWithoutWindowAppliesNothing(t *testing.T) {
 	hookHome(t)
 	fake := useFakeTmux(t)
@@ -714,6 +731,137 @@ func TestHookExitsZeroAndSilentWhenDecisionQueryFails(t *testing.T) {
 	}
 }
 
+// hookQueueMessages stores a queued instruction from the user to session
+// for each of texts in the store at db, and returns their ids.
+func hookQueueMessages(t *testing.T, db, session string, texts ...string) []string {
+	t.Helper()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	var ids []string
+	for _, text := range texts {
+		m, err := st.CreateMessage(context.Background(), model.Message{
+			Text: text, Kind: model.KindInstruction, Sender: model.SenderUser, TargetSession: session,
+			RoutedBy: model.RoutedAddress, Status: model.MsgQueued, CreatedAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+// hookMessageStatus returns message id's status and delivery path.
+func hookMessageStatus(t *testing.T, db, id string) (model.MessageStatus, model.DeliveryVia) {
+	t.Helper()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	m, found, err := st.GetMessage(context.Background(), id)
+	if err != nil || !found {
+		t.Fatalf("GetMessage(%s) = found %v, err %v", id, found, err)
+	}
+	return m.Status, m.DeliveredVia
+}
+
+func TestStdoutOnlyOnBlockedStopWithMessages(t *testing.T) {
+	db := hookHome(t)
+	body := `{"session_id":"A","cwd":"` + t.TempDir() + `"}`
+	hookWantExitZero(t, hookRunStreams(t, strings.NewReader(body), "hook", "SessionStart"))
+	ids := hookQueueMessages(t, db, "A", "use pnpm, not npm", "then run the api tests")
+	for _, kind := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "SubagentStop"} {
+		res := hookRunStreams(t, strings.NewReader(body), "hook", kind)
+		hookWantExitZero(t, res)
+		if res.stdout != "" {
+			t.Errorf("%s with queued messages wrote %q, want nothing", kind, res.stdout)
+		}
+	}
+	if got, _ := hookMessageStatus(t, db, ids[0]); got != model.MsgQueued {
+		t.Fatalf("before Stop %s is %s, want queued", ids[0], got)
+	}
+
+	res := hookRunStreams(t, strings.NewReader(body), "hook", "Stop")
+	hookWantExitZero(t, res)
+	want := `{"decision":"block","reason":"Curia: messages for you.\nMessage M-1 from the user: use pnpm, not npm.\nMessage M-2 from the user: then run the api tests."}` + "\n"
+	if res.stdout != want {
+		t.Errorf("Stop wrote\n %q\nwant\n %q", res.stdout, want)
+	}
+	// M8: the log names the messages the Stop handed over.
+	if len(res.log) != 1 || !strings.Contains(res.log[0], `level=INFO msg="hook Stop delivered messages" ids="M-1 M-2"`) {
+		t.Errorf("log = %q, want one INFO line naming M-1 and M-2", res.log)
+	}
+	for _, id := range ids {
+		if got, via := hookMessageStatus(t, db, id); got != model.MsgDelivered || via != model.ViaStopHook {
+			t.Errorf("after Stop %s is %s via %q, want delivered via stop_hook", id, got, via)
+		}
+	}
+	res = hookRunStreams(t, strings.NewReader(body), "hook", "Stop")
+	hookWantExitZero(t, res)
+	if res.stdout != "" {
+		t.Errorf("Stop with nothing queued wrote %q, want nothing", res.stdout)
+	}
+}
+
+// Answers and messages at once: still one line, answers first, and one log
+// line for each kind.
+func TestHookStopPrintsAnswersThenMessages(t *testing.T) {
+	db := hookHome(t)
+	body := `{"session_id":"A","cwd":"` + t.TempDir() + `"}`
+	hookWantExitZero(t, hookRunStreams(t, strings.NewReader(body), "hook", "SessionStart"))
+	answer := hookQueueAnswer(t, db, "A")
+	ids := hookQueueMessages(t, db, "A", "and rebase on main")
+	res := hookRunStreams(t, strings.NewReader(body), "hook", "Stop")
+	hookWantExitZero(t, res)
+	if strings.Count(res.stdout, "\n") != 1 || !strings.HasPrefix(res.stdout, `{"decision":"block","reason":"Curia: decisions answered`) ||
+		!strings.Contains(res.stdout, `Continue.\nCuria: messages for you.\nMessage M-1 from the user: and rebase on main."}`) {
+		t.Errorf("Stop wrote %q, want one line with the answer, then the message", res.stdout)
+	}
+	if len(res.log) != 2 || !strings.Contains(res.log[0], `level=INFO msg="hook Stop delivered answers" ids=`+answer) ||
+		!strings.Contains(res.log[1], `level=INFO msg="hook Stop delivered messages" ids=`+ids[0]) {
+		t.Errorf("log = %q, want the answer line, then the message line", res.log)
+	}
+}
+
+// A message query that fails, the claim or the read before it, is logged;
+// the hook prints nothing, writes nothing to stderr and exits 0.
+func TestHookExitsZeroAndSilentWhenMessageQueryFails(t *testing.T) {
+	for _, tc := range []struct{ name, sql, want string }{
+		{"claim", `CREATE TRIGGER no_claim BEFORE UPDATE ON messages BEGIN SELECT RAISE(FAIL, 'boom'); END`, "boom"},
+		{"read", `ALTER TABLE messages RENAME TO messages_gone`, "no such table: messages"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := hookHome(t)
+			body := `{"session_id":"A","cwd":"` + t.TempDir() + `"}`
+			hookWantExitZero(t, hookRunStreams(t, strings.NewReader(body), "hook", "SessionStart"))
+			hookQueueMessages(t, db, "A", "use pnpm")
+			raw, err := sql.Open("sqlite", db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = raw.Close() }()
+			if _, err = raw.Exec(tc.sql); err != nil {
+				t.Fatal(err)
+			}
+			res := hookRunStreams(t, strings.NewReader(body), "hook", "Stop")
+			hookWantExitZero(t, res)
+			if res.stdout != "" {
+				t.Errorf("stdout = %q, want nothing", res.stdout)
+			}
+			if len(res.log) != 1 || !strings.Contains(res.log[0], "hook failed") || !strings.Contains(res.log[0], tc.want) {
+				t.Errorf("log = %q, want one line with %q", res.log, tc.want)
+			}
+			if s := getSession(t, db, "A"); s.State != model.StateIdle {
+				t.Errorf("A is %s, want idle: the Stop is still recorded", s.State)
+			}
+		})
+	}
+}
+
 // A claim that committed is delivered even when Run also reports an error
 // (a transcript it could not read): the answer is no longer queued.
 func TestHookEmitsBlockBesideAnError(t *testing.T) {
@@ -924,5 +1072,129 @@ func TestHookClosedStdoutChild(t *testing.T) {
 		// stdout is the closed pipe: report on stderr.
 		fmt.Fprintf(os.Stderr, "Execute = %v, exit code %d; want nil and 0\n", err, code)
 		t.Fail()
+	}
+}
+
+// hookLinkedWorktree makes a repository with one commit under a hermetic
+// git and a linked worktree of it on branch, and returns the main
+// repository's and the worktree's top levels as git prints them (symlinks
+// resolved).
+func hookLinkedWorktree(t *testing.T, branch string) (repo, worktree string) {
+	t.Helper()
+	dir := hermeticGit(t)
+	gitInit(t, dir, "main")
+	gitRun(t, dir, "commit", "-q", "--allow-empty", "-m", "first")
+	wt := filepath.Join(t.TempDir(), "wt")
+	gitRun(t, dir, "worktree", "add", "-q", "-b", branch, wt)
+	repo, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worktree, err = filepath.EvalSymlinks(wt); err != nil {
+		t.Fatal(err)
+	}
+	return repo, worktree
+}
+
+// hookLatency runs body n times (body(i) gives the i-th payload) through
+// hook.Run with the real hookEnv, and returns the sorted durations.
+func hookLatency(t *testing.T, st *store.Store, env hook.Env, kind model.EventKind, n int, body func(i int) []byte) []time.Duration {
+	t.Helper()
+	durations := make([]time.Duration, 0, n)
+	for i := range n {
+		b := body(i)
+		start := time.Now()
+		if _, err := hook.Run(context.Background(), kind, b, env, st, config.Default()); err != nil {
+			t.Fatal(err)
+		}
+		durations = append(durations, time.Since(start))
+	}
+	slices.Sort(durations)
+	return durations
+}
+
+// TestHookLatencyUnchanged is TestHookLatency's method and threshold (1000
+// in-process PostToolUse runs in one pass, p95 under 20 ms, Ruling 114)
+// through the real hookEnv, with CURIA_TASK_ID set and a linked worktree as
+// cwd. It also reports 200 SessionStarts, each a new session and so one real git process, without
+// gating them: a fork from the race-instrumented test binary on a host that
+// other worktrees' checks load varies by tens of milliseconds at p95, before
+// this change as after it. The whole-process gate covers SessionStart.
+func TestHookLatencyUnchanged(t *testing.T) {
+	_, wt := hookLinkedWorktree(t, "curia/T-7-x")
+	t.Setenv("CURIA_TASK_ID", "T-7")
+	db := filepath.Join(t.TempDir(), "curia.db")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	logger, buf := testLogger()
+	env := hookEnv(context.Background(), unreachableTmux{}, logger)
+	tr := filepath.Join(t.TempDir(), "t.jsonl")
+	const line = `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}` + "\n"
+	if err = os.WriteFile(tr, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	const starts, runs = 200, 1000 // reported only; gated (Ruling 114)
+	started := hookLatency(t, st, env, model.SessionStart, starts, func(i int) []byte {
+		return fmt.Appendf(nil, `{"session_id":"S%d","transcript_path":%q,"cwd":%q,"source":"startup"}`, i, tr, wt)
+	})
+	tools := hookLatency(t, st, env, model.PostToolUse, runs, func(int) []byte {
+		f, ferr := os.OpenFile(filepath.Clean(tr), os.O_APPEND|os.O_WRONLY, 0)
+		if ferr != nil {
+			t.Fatal(ferr)
+		}
+		if _, ferr = f.WriteString(line); ferr != nil {
+			t.Fatal(ferr)
+		}
+		_ = f.Close()
+		return fmt.Appendf(nil, `{"session_id":"S0","transcript_path":%q,"cwd":%q,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}}`, tr, wt)
+	})
+	for _, m := range []struct {
+		kind model.EventKind
+		d    []time.Duration
+	}{{model.SessionStart, started}, {model.PostToolUse, tools}} {
+		n := len(m.d)
+		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, n, m.d[n/2], m.d[n*95/100], m.d[n-1])
+	}
+	if p95 := tools[runs*95/100]; p95 >= 20*time.Millisecond {
+		t.Errorf("PostToolUse p95 = %v, want < 20ms", p95)
+	}
+	if s := getSession(t, db, "S0"); s.TaskID != "T-7" || s.Worktree != wt {
+		t.Errorf("S0: task %q worktree %q, want T-7 and %q", s.TaskID, s.Worktree, wt)
+	}
+	if lines := logLines(buf); lines != nil {
+		t.Errorf("log = %q, want none", lines)
+	}
+}
+
+// CURIA_TASK_ID is untrusted: only a well-formed task id is stored.
+func TestHookReadsTaskFromEnvironment(t *testing.T) {
+	db := hookHome(t)
+	for i, tc := range []struct{ env, want string }{
+		{"T-9", "T-9"},
+		{"T-123456789", "T-123456789"},
+		{"T-09", ""},
+		{"D-1", ""},
+		{"T-9;x", ""},
+		{"T-9\n", ""},
+		{" T-9", ""},
+		{"t-9", ""},
+		{"T-0", ""},
+		{"T-1234567890", ""},
+		{"", ""},
+	} {
+		t.Setenv("CURIA_TASK_ID", tc.env)
+		id := fmt.Sprintf("S%d", i)
+		body := `{"session_id":"` + id + `","cwd":"` + t.TempDir() + `","source":"startup"}`
+		assertQuietExitZero(t, runHookCmd(t, strings.NewReader(body), "hook", "SessionStart"))
+		if got := getSession(t, db, id).TaskID; got != tc.want {
+			t.Errorf("CURIA_TASK_ID=%q: stored task %q, want %q", tc.env, got, tc.want)
+		}
+	}
+	if log := readLog(t); log != nil {
+		t.Errorf("log = %q, want none", log)
 	}
 }

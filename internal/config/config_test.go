@@ -41,6 +41,9 @@ func TestDefaults(t *testing.T) {
 	if c.AssumeExpiry != 24*time.Hour || c.NotifyBell || c.NotifyMacOS {
 		t.Errorf("decision defaults = %v/%v/%v", c.AssumeExpiry, c.NotifyBell, c.NotifyMacOS)
 	}
+	if c.Routing.AutoSend || c.Routing.AutoThreshold != 0.9 || c.Routing.Aliases == nil || len(c.Routing.Aliases) != 0 {
+		t.Errorf("routing defaults = %+v", c.Routing)
+	}
 }
 
 func TestLoadMissingFileReturnsDefaults(t *testing.T) {
@@ -154,19 +157,127 @@ func TestNonPositiveAssumeExpiryRejected(t *testing.T) {
 	}
 }
 
-// The snippet's keys default to a, A and N; a file can change each one, and
+func TestRoutingDefaults(t *testing.T) {
+	r := config.Default().Routing
+	if r.AutoSend || r.AutoThreshold != 0.9 {
+		t.Errorf("routing = %+v", r)
+	}
+	if r.Aliases == nil || len(r.Aliases) != 0 {
+		t.Errorf("Aliases = %#v, want non-nil and empty", r.Aliases)
+	}
+}
+
+func TestLoadRoutingOverrides(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	body := "[routing]\nauto_send = true\nauto_threshold = 0.95\n[routing.aliases]\napi = \"api-server\"\n"
+	got, err := config.Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := got.Routing
+	if !r.AutoSend || r.AutoThreshold != 0.95 || !reflect.DeepEqual(r.Aliases, map[string]string{"api": "api-server"}) {
+		t.Errorf("routing = %+v", r)
+	}
+}
+
+func TestLoadRoutingPartialKeepsDefaults(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	got, err := config.Load(writeConfig(t, "[routing]\nauto_send = true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Routing.AutoThreshold != 0.9 || got.Routing.Aliases == nil {
+		t.Errorf("routing = %+v", got.Routing)
+	}
+}
+
+func TestBadRoutingRejected(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	long := strings.Repeat("x", 201)
+	cases := []struct{ name, body, key string }{
+		{"zero", "[routing]\nauto_threshold = 0\n", "routing.auto_threshold"},
+		{"high", "[routing]\nauto_threshold = 1.5\n", "routing.auto_threshold"},
+		{"negative", "[routing]\nauto_threshold = -1\n", "routing.auto_threshold"},
+		{"alias name space", "[routing.aliases]\n\"a b\" = \"x\"\n", "routing.aliases.a b"},
+		{"alias name empty", "[routing.aliases]\n\"\" = \"x\"\n", "routing.aliases."},
+		{"alias name long", "[routing.aliases]\n" + strings.Repeat("a", 65) + " = \"x\"\n", "routing.aliases." + strings.Repeat("a", 65)},
+		{"alias value empty", "[routing.aliases]\napi = \"\"\n", "routing.aliases.api"},
+		{"alias value long", "[routing.aliases]\napi = \"" + long + "\"\n", "routing.aliases.api"},
+	}
+	for _, tc := range cases {
+		_, err := config.Load(writeConfig(t, tc.body))
+		if err == nil || !strings.Contains(err.Error(), tc.key) {
+			t.Errorf("%s: err = %v, want mention of %q", tc.name, err, tc.key)
+		}
+	}
+}
+
+func TestRoutingBoundariesAccepted(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	body := "[routing]\nauto_threshold = 1\n[routing.aliases]\n" + strings.Repeat("a", 64) + " = \"" + strings.Repeat("x", 200) + "\"\n\"A.b_c-1\" = \"y\"\n"
+	if _, err := config.Load(writeConfig(t, body)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The snippet's keys default to a, A, N and m; a file can change each one, and
 // an empty value (binds no key) is kept, not replaced by the default.
 func TestTmuxKeys(t *testing.T) {
 	t.Setenv("CURIA_DB", "")
 	c := config.Default()
-	if c.KeyDashboard != "a" || c.KeyDecisions != "A" || c.KeyNext != "N" {
-		t.Errorf("default keys = %q %q %q, want a A N", c.KeyDashboard, c.KeyDecisions, c.KeyNext)
+	if c.KeyDashboard != "a" || c.KeyDecisions != "A" || c.KeyNext != "N" || c.KeyMessage != "m" {
+		t.Errorf("default keys = %q %q %q %q, want a A N m", c.KeyDashboard, c.KeyDecisions, c.KeyNext, c.KeyMessage)
 	}
-	got, err := config.Load(writeConfig(t, "key_dashboard = \"F5\"\nkey_decisions = \"\"\n"))
+	got, err := config.Load(writeConfig(t, "key_dashboard = \"F5\"\nkey_decisions = \"\"\nkey_message = \"C-m\"\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.KeyDashboard != "F5" || got.KeyDecisions != "" || got.KeyNext != "N" {
-		t.Errorf("loaded keys = %q %q %q, want F5, empty, N", got.KeyDashboard, got.KeyDecisions, got.KeyNext)
+	if got.KeyDashboard != "F5" || got.KeyDecisions != "" || got.KeyNext != "N" || got.KeyMessage != "C-m" {
+		t.Errorf("loaded keys = %q %q %q %q, want F5, empty, N, C-m", got.KeyDashboard, got.KeyDecisions, got.KeyNext, got.KeyMessage)
+	}
+}
+
+// editor defaults to empty (no editor); a set value is split on single
+// spaces into an argument vector, with no shell and no quoting.
+func TestEditorOption(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	if c := config.Default(); c.Editor != "" || c.EditorArgs() != nil {
+		t.Errorf("default editor = %q, args %q, want none", c.Editor, c.EditorArgs())
+	}
+	for value, want := range map[string][]string{
+		"/usr/bin/vim -f":  {"/usr/bin/vim", "-f"},
+		"code --wait":      {"code", "--wait"},
+		"nano":             {"nano"},
+		"/opt/é/ed -p ➜ x": {"/opt/é/ed", "-p", "➜", "x"},
+	} {
+		got, err := config.Load(writeConfig(t, "editor = \""+value+"\"\n"))
+		if err != nil {
+			t.Errorf("editor %q: %v", value, err)
+			continue
+		}
+		if got.Editor != value || !reflect.DeepEqual(got.EditorArgs(), want) {
+			t.Errorf("editor %q: %q, args %q, want args %q", value, got.Editor, got.EditorArgs(), want)
+		}
+	}
+}
+
+func TestBadEditorRejected(t *testing.T) {
+	t.Setenv("CURIA_DB", "")
+	for name, value := range map[string]string{
+		"leading space":  ` vim`,
+		"trailing space": `vim `,
+		"double space":   `vim  -f`,
+		"only spaces":    `   `,
+		"tab":            `vim\t-f`,
+		"escape":         `vim\u001b[31m`,
+		"newline":        `vim\n-f`,
+		"bidi override":  `vim\u202e`,
+		"relative path":  `./bin/vim`,
+		"too long":       "vim " + strings.Repeat("x", 1024),
+	} {
+		_, err := config.Load(writeConfig(t, "editor = \""+value+"\"\n"))
+		if err == nil || !strings.Contains(err.Error(), "editor") {
+			t.Errorf("%s: err = %v, want one naming editor", name, err)
+		}
 	}
 }

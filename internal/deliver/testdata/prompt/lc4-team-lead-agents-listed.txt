@@ -1,0 +1,49 @@
+  "probe" exists only as a label in the names and prompts,
+  not as a formal team object.
+
+
+› Message from @beta (ctrl+o to expand)
+
+› Message from @alpha (ctrl+o to expand)
+
+⏺ Both teammates have reported ready:
+
+  - alpha: ready
+  - beta: ready
+
+  I'm not shutting the team down. Waiting for your next
+  instruction.
+
+
+⏺ Teammate @alpha finished
+  I've replied "ready" to the team lead and am waiting for
+  further instructions. I haven't read or changed any files,
+  and I haven't run any commands.
+
+⏺ Teammate @beta finished
+  I've replied "ready" to team-lead and I'm waiting for
+  instructions. I haven't read or changed any files or run
+  any commands.
+
+⏺ Both teammates are idle and waiting. They report they've
+  only replied "ready" and haven't touched any files or run
+  commands. Nothing needs action from me.
+
+  The team is still running. I'm waiting for your next
+  instruction.
+
+────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ↓ to manage
+
+  ⏺ main
+  ◯ alpha  Teammate alpha: report ready                34s
+  ◯ beta   Teammate beta: report ready                 34s
+
+
+
+
+
+
+

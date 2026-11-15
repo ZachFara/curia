@@ -4,20 +4,30 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // Fake is an in-memory Client for tests of packages that use tmux. Set Panes
 // before use, Focused for PaneFocused's answer, SendKeysErr for SendKeys'
-// error and Screen, Synchronized and CaptureErr for CapturePane's answer;
+// error, Screen (or Styled, a capture with escape sequences), Synchronized,
+// CursorX, CursorY, CursorKnown and CaptureErr for CapturePane's answer,
+// NewWindowErr for NewWindow's error and Tail for CaptureTail's answer;
 // every call is appended to Calls as "Method arg arg ...".
 type Fake struct {
 	Panes        []Pane
 	Focused      bool
 	SendKeysErr  error
 	Screen       string
+	Styled       string
 	Synchronized bool
+	CursorX      int
+	CursorY      int
+	CursorKnown  bool
 	CaptureErr   error
+	NewWindowErr error
+	Tail         string
 	Calls        []string
+	windows      int // windows NewWindow has opened
 }
 
 var _ Client = (*Fake)(nil)
@@ -82,15 +92,42 @@ func (f *Fake) SendKeys(_ context.Context, pane, text string) error {
 	return f.SendKeysErr
 }
 
-// CapturePane records the call and returns Screen, Synchronized and
-// CaptureErr, for any pane.
+// CapturePane records the call and returns Screen (Styled when set, with
+// its escape sequences removed), Synchronized, the cursor and CaptureErr,
+// for any pane.
 func (f *Fake) CapturePane(_ context.Context, pane string) (Capture, error) {
 	f.record("CapturePane %s", pane)
-	return Capture{Screen: f.Screen, Synchronized: f.Synchronized}, f.CaptureErr
+	c := Capture{Screen: f.Screen, Styled: f.Screen, Synchronized: f.Synchronized}
+	if f.Styled != "" {
+		c.Screen, c.Styled = StripEscapes(f.Styled), f.Styled
+	}
+	c.CursorX, c.CursorY, c.CursorKnown = f.CursorX, f.CursorY, f.CursorKnown
+	return c, f.CaptureErr
 }
 
 // Bell records the call.
 func (f *Fake) Bell(_ context.Context, pane string) error {
 	f.record("Bell %s", pane)
 	return nil
+}
+
+// NewWindow records the call and returns NewWindowErr when it is set.
+// Otherwise it appends a pane %<100 + n>, n counting the windows it opened
+// before, with the window's session and name to Panes and returns it. It does
+// not check its argument.
+func (f *Fake) NewWindow(_ context.Context, w WindowSpec) (Pane, error) {
+	f.record("NewWindow %s %s %s %s %s", w.Session, w.Name, w.Dir, strings.Join(w.Env, ","), strings.Join(w.Command, " "))
+	if f.NewWindowErr != nil {
+		return Pane{}, f.NewWindowErr
+	}
+	p := Pane{ID: fmt.Sprintf("%%%d", 100+f.windows), Session: w.Session, WindowName: w.Name}
+	f.windows++
+	f.Panes = append(f.Panes, p)
+	return p, nil
+}
+
+// CaptureTail records the call and returns Tail, for any pane.
+func (f *Fake) CaptureTail(_ context.Context, pane string, lines int) (string, error) {
+	f.record("CaptureTail %s %d", pane, lines)
+	return f.Tail, nil
 }

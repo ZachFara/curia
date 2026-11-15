@@ -376,8 +376,8 @@ func TestMigrationOnPlan1Database(t *testing.T) {
 	db := plan1Database(t, path, at)
 
 	s := open(t, path)
-	if n := countMigrations(t, path); n != 3 {
-		t.Errorf("schema_migrations has %d rows, want 3", n)
+	if n := countMigrations(t, path); n != 5 {
+		t.Errorf("schema_migrations has %d rows, want 5", n)
 	}
 	sess := get(t, s, "old")
 	want := model.Session{
