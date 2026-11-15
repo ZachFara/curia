@@ -125,8 +125,8 @@ func TestMigrationAddsTasksAndMessages(t *testing.T) {
 			t.Errorf("sessions.%s = %s notnull=%d, want nullable TEXT", col, typ, notNull)
 		}
 	}
-	if n := countMigrations(t, path); n != 4 {
-		t.Errorf("schema_migrations has %d rows, want 4", n)
+	if n := countMigrations(t, path); n != 5 {
+		t.Errorf("schema_migrations has %d rows, want 5", n)
 	}
 }
 
@@ -271,8 +271,8 @@ func TestMigrationOnPlan2Database(t *testing.T) {
 
 	s := open(t, path)
 	if names := migrationNames(t, db); !reflect.DeepEqual(names,
-		[]string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql"}) {
-		t.Errorf("migrations = %v, want 0001 to 0004", names)
+		[]string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_send_limits.sql"}) {
+		t.Errorf("migrations = %v, want 0001 to 0005", names)
 	}
 	sess := get(t, s, "old")
 	want := model.Session{
@@ -673,7 +673,7 @@ func TestClaimLaunchOneWins(t *testing.T) {
 		wg.Go(func() {
 			<-start
 			errs[i] = retryBusy(func() error {
-				_, err := hs[i%len(hs)].ClaimLaunch(ctx, "T-1", now, launchHold)
+				_, err := hs[i%len(hs)].ClaimLaunch(ctx, "T-1", "", now, launchHold)
 				return err
 			}, busyAtBegin)
 		})
@@ -698,16 +698,61 @@ func TestClaimLaunchOneWins(t *testing.T) {
 		t.Errorf("launched_at = %v, want %v", got.LaunchedAt, now)
 	}
 
-	if _, err := hs[0].ClaimLaunch(ctx, "T-1", now.Add(launchHold-time.Nanosecond), launchHold); !errors.Is(err, store.ErrTaskBusy) {
+	if _, err := hs[0].ClaimLaunch(ctx, "T-1", "", now.Add(launchHold-time.Nanosecond), launchHold); !errors.Is(err, store.ErrTaskBusy) {
 		t.Errorf("claim just inside the hold: %v, want ErrTaskBusy", err)
 	}
 	later := now.Add(launchHold)
-	got, err := hs[0].ClaimLaunch(ctx, "T-1", later, launchHold)
+	got, err := hs[0].ClaimLaunch(ctx, "T-1", "", later, launchHold)
 	if err != nil || !got.LaunchedAt.Equal(later) {
 		t.Errorf("claim after the hold = %v, %v; want launched at %v", got.LaunchedAt, err, later)
 	}
-	if _, err := hs[0].ClaimLaunch(ctx, "T-2", now, launchHold); !errors.Is(err, store.ErrNoTask) {
+	if _, err := hs[0].ClaimLaunch(ctx, "T-2", "", now, launchHold); !errors.Is(err, store.ErrNoTask) {
 		t.Errorf("ClaimLaunch(T-2) = %v, want ErrNoTask", err)
+	}
+}
+
+// setPane records pane as task id's window, as spawn does once it opened one.
+func setPane(t *testing.T, s *store.Store, id, pane string) {
+	t.Helper()
+	if _, err := s.UpdateTask(context.Background(), id, func(tk model.Task) (model.Task, error) {
+		tk.Pane = pane
+		return tk, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaimLaunchAfterWindowOpened(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	createTask(t, s, newTask("Again"))
+	now := taskT0.Add(time.Minute)
+	got, err := s.ClaimLaunch(ctx, "T-1", "", now, launchHold)
+	if err != nil || got.Pane != "" {
+		t.Fatalf("first claim = %+v, %v", got, err)
+	}
+	// While the launch is under way (no window recorded yet) a claim is busy.
+	if _, err = s.ClaimLaunch(ctx, "T-1", "", now.Add(time.Second), launchHold); !errors.Is(err, store.ErrTaskBusy) {
+		t.Fatalf("claim during the launch = %v, want ErrTaskBusy", err)
+	}
+	// The spawn records its window: the launch is over, and a caller that saw
+	// that window (and found it gone) may claim again at once.
+	setPane(t, s, "T-1", "%7")
+	again := now.Add(2 * time.Second)
+	got, err = s.ClaimLaunch(ctx, "T-1", "%7", again, launchHold)
+	if err != nil || !got.LaunchedAt.Equal(again) || got.Pane != "" {
+		t.Fatalf("claim after the window = %+v, %v; want launched at %v with the pane cleared", got, err, again)
+	}
+	// A caller whose check saw another pane (or none) than the one stored
+	// raced with a spawn that recorded its window since: busy, nothing changed.
+	setPane(t, s, "T-1", "%8")
+	for _, seen := range []string{"", "%7"} {
+		if _, err = s.ClaimLaunch(ctx, "T-1", seen, again.Add(time.Second), launchHold); !errors.Is(err, store.ErrTaskBusy) {
+			t.Errorf("claim having seen %q while %%8 is stored = %v, want ErrTaskBusy", seen, err)
+		}
+	}
+	if cur := getTask(t, s, "T-1"); cur.Pane != "%8" || !cur.LaunchedAt.Equal(again) {
+		t.Errorf("after the refused claims: %+v, want pane %%8 and launched_at %v kept", cur, again)
 	}
 }
 

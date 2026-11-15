@@ -15,16 +15,16 @@ import (
 )
 
 func TestParseListPanes(t *testing.T) {
-	out := "%0\tmain\t@0\t1794437573\tzsh\n%1\tmain\t@1\t1794437573\tmy long window\n%2\twork\t@2\t1794437573\ta\tb\n"
+	out := "%0\tmain\t@0\t1794437573\t401\tzsh\n%1\tmain\t@1\t1794437573\t402\tmy long window\n%2\twork\t@2\t1794437573\t403\ta\tb\n"
 	got, err := parsePanes(out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	start := time.Unix(1794437573, 0)
 	want := []Pane{
-		{ID: "%0", Session: "main", WindowID: "@0", ServerStart: start, WindowName: "zsh"},
-		{ID: "%1", Session: "main", WindowID: "@1", ServerStart: start, WindowName: "my long window"},
-		{ID: "%2", Session: "work", WindowID: "@2", ServerStart: start, WindowName: "a\tb"},
+		{ID: "%0", Session: "main", WindowID: "@0", ServerStart: start, PID: 401, WindowName: "zsh"},
+		{ID: "%1", Session: "main", WindowID: "@1", ServerStart: start, PID: 402, WindowName: "my long window"},
+		{ID: "%2", Session: "work", WindowID: "@2", ServerStart: start, PID: 403, WindowName: "a\tb"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v want %+v", got, want)
@@ -39,7 +39,7 @@ func TestParsePanesMalformed(t *testing.T) {
 		t.Fatal("want error for empty pane id")
 	}
 	// The old four-field format, or a start time that is not unix seconds.
-	for _, line := range []string{"%0\tmain\t@0\tzsh\n", "%0\tmain\t@0\tsoon\tzsh\n", "%0\tmain\t@0\t\tzsh\n"} {
+	for _, line := range []string{"%0\tmain\t@0\tzsh\n", "%0\tmain\t@0\tsoon\t1\tzsh\n", "%0\tmain\t@0\t\t1\tzsh\n", "%0\tmain\t@0\t1794437573\tzsh\n"} {
 		if _, err := parsePanes(line); err == nil {
 			t.Errorf("parsePanes(%q): want error for a bad start time", line)
 		}
@@ -331,14 +331,16 @@ func paneID(t *testing.T, tm func(...string) (string, error), target string) str
 }
 
 // recorder is a runner for execClient that records each tmux invocation
-// instead of running it and answers each with out, except that call number
-// failAt (counting from 1; 0 for none) fails with err.
+// instead of running it and answers call number n (counting from 1) with
+// outs[n-1] when there is one and with out otherwise, except that call
+// number failAt (0 for none) fails with err.
 //
 // It is also Bell's tty opener: it records each path and opens it with
 // openFile, or refuses when openFile is nil.
 type recorder struct {
 	runs     [][]string
 	out      string
+	outs     []string
 	failAt   int
 	err      error
 	opened   []string
@@ -357,6 +359,9 @@ func (r *recorder) run(_ context.Context, args ...string) (string, error) {
 	r.runs = append(r.runs, slices.Clone(args))
 	if len(r.runs) == r.failAt {
 		return "", r.err
+	}
+	if n := len(r.runs); n <= len(r.outs) {
+		return r.outs[n-1], nil
 	}
 	return r.out, nil
 }
@@ -855,6 +860,52 @@ func TestCapturePaneRefusesBadPane(t *testing.T) {
 	}
 }
 
+// The cursor is read before and after the capture, and is known only when
+// both reads parse and agree (re-review B, m6). A failed read fails the
+// capture, so nothing is typed.
+func TestCapturePaneCursor(t *testing.T) {
+	const screen = "\x1b[39m❯\u00a0\x1b[2mpush it\x1b[0m\n"
+	for _, c := range []struct {
+		name          string
+		before, after string
+		known         bool
+	}{
+		{"both agree", "%5\t0\t2\t7\n", "%5\t2\t7\n", true},
+		{"moved along the line", "%5\t0\t2\t7\n", "%5\t9\t7\n", false},
+		{"moved to another row", "%5\t0\t2\t7\n", "%5\t2\t8\n", false},
+		{"second read for another pane", "%5\t0\t2\t7\n", "%6\t2\t7\n", false},
+		{"second read short", "%5\t0\t2\t7\n", "%5\t2\n", false},
+		{"second read empty", "%5\t0\t2\t7\n", "", false},
+		{"second read not numbers", "%5\t0\tx\t7\n", "%5\tx\t7\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cl, r := recordingClient()
+			r.outs = []string{c.before, screen, c.after}
+			capt, err := cl.CapturePane(context.Background(), "%5")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if capt.CursorKnown != c.known || (c.known && (capt.CursorX != 2 || capt.CursorY != 7)) {
+				t.Errorf("cursor = %d,%d known %v, want known %v", capt.CursorX, capt.CursorY, capt.CursorKnown, c.known)
+			}
+			if capt.Styled != screen || capt.Screen != "❯\u00a0push it\n" {
+				t.Errorf("capture = %q / %q", capt.Styled, capt.Screen)
+			}
+		})
+	}
+	t.Run("second read fails", func(t *testing.T) {
+		cl, r := recordingClient()
+		r.outs = []string{"%5\t0\t2\t7\n", screen}
+		r.failAt, r.err = 3, errors.New("can't find pane: %5")
+		if capt, err := cl.CapturePane(context.Background(), "%5"); !errors.Is(err, r.err) {
+			t.Errorf("CapturePane = %+v, %v; want the runner's error", capt, err)
+		}
+		if len(r.runs) != 3 {
+			t.Errorf("runs = %q, want three", r.runs)
+		}
+	})
+}
+
 func TestCapturePaneInRealTmux(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1037,7 +1088,7 @@ func TestNewWindowAcceptsLimits(t *testing.T) {
 		w.Command = append(w.Command, strings.Repeat("é", 2048))
 	}
 	c, r := recordingClient()
-	r.out = "%3\t" + w.Session + "\t@3\t1794437573\t" + w.Name + "\n"
+	r.out = "%3\t" + w.Session + "\t@3\t1794437573\t77\t" + w.Name + "\n"
 	if _, err := c.NewWindow(context.Background(), w); err != nil {
 		t.Fatalf("NewWindow at the limits: %v", err)
 	}
@@ -1050,7 +1101,7 @@ func TestNewWindowAcceptsLimits(t *testing.T) {
 	for _, one := range []string{"true", "/usr/bin/true", "a-b_c.d@e:f+g"} {
 		w.Command = []string{one}
 		c, r = recordingClient()
-		r.out = "%3\t" + w.Session + "\t@3\t1794437573\t" + w.Name + "\n"
+		r.out = "%3\t" + w.Session + "\t@3\t1794437573\t77\t" + w.Name + "\n"
 		if _, err := c.NewWindow(context.Background(), w); err != nil || len(r.runs) != 2 {
 			t.Errorf("NewWindow with command [%q] = %v after %d runs, want it accepted", one, err, len(r.runs))
 		}
@@ -1110,12 +1161,12 @@ func TestNewWindowInvocations(t *testing.T) {
 		{name: "new-session fails otherwise", errs: []error{absent, other}, want: [][]string{has, newSession}},
 		{name: "new-window fails", errs: []error{nil, other}, want: [][]string{has, newWindow}},
 	} {
-		r := &windowRunner{errs: tc.errs, out: "%7\tapi\t@4\t1794437573\tT-1\n"}
+		r := &windowRunner{errs: tc.errs, out: "%7\tapi\t@4\t1794437573\t77\tT-1\n"}
 		p, err := (&execClient{runner: r.run}).NewWindow(context.Background(), w)
 		if !reflect.DeepEqual(r.runs, tc.want) {
 			t.Errorf("%s: runs = %q\nwant %q", tc.name, r.runs, tc.want)
 		}
-		if tc.ok && (err != nil || p != (Pane{ID: "%7", Session: "api", WindowID: "@4", ServerStart: time.Unix(1794437573, 0), WindowName: "T-1"})) {
+		if tc.ok && (err != nil || p != (Pane{ID: "%7", Session: "api", WindowID: "@4", ServerStart: time.Unix(1794437573, 0), PID: 77, WindowName: "T-1"})) {
 			t.Errorf("%s: NewWindow = %+v, %v", tc.name, p, err)
 		}
 		if !tc.ok && err == nil {
@@ -1128,7 +1179,7 @@ func TestNewWindowInvocations(t *testing.T) {
 		}
 	}
 	// The printed line must be one pane.
-	for _, out := range []string{"", "\t\t\t\t\n", "%7\tapi\t@4\t1794437573\tT-1\n%8\tapi\t@5\t1794437573\tT-1\n"} {
+	for _, out := range []string{"", "\t\t\t\t\n", "%7\tapi\t@4\t1794437573\t77\tT-1\n%8\tapi\t@5\t1794437573\t78\tT-1\n"} {
 		r := &windowRunner{out: out}
 		if p, err := (&execClient{runner: r.run}).NewWindow(context.Background(), w); err == nil {
 			t.Errorf("printed %q: NewWindow = %+v, want an error", out, p)
@@ -1414,5 +1465,61 @@ func TestFakeRecordsNewWindowAndCaptureTail(t *testing.T) {
 	}
 	if !reflect.DeepEqual(f.Calls, want) {
 		t.Fatalf("Calls = %q\nwant %q", f.Calls, want)
+	}
+}
+
+// The capture carries the cells' attributes (-e) beside the plain text, and
+// the cursor, read before and after it.
+func TestCapturePaneStylesAndCursorInRealTmux(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	// A dim suggestion after the prompt mark, then the cursor put back on
+	// row 0, column 2 (1-based 1;3), where typed text would start.
+	id, err := tm("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "t:", "/bin/sh", "-c",
+		`printf '\033[2J\033[H❯ \033[2mpush it\033[0m\033[1;3H'; exec cat`)
+	if err != nil {
+		t.Fatalf("new-window: %v: %s", err, id)
+	}
+	pane := strings.TrimSpace(id)
+	c := NewExec(realSocket)
+	// Wait for the program's last step, the cursor move: a capture taken
+	// between the text and the move sees the cursor move and is not known.
+	var capt Capture
+	done := func() bool { return strings.Contains(capt.Screen, "push it") && capt.CursorKnown && capt.CursorX == 2 }
+	for deadline := time.Now().Add(5 * time.Second); !done(); time.Sleep(20 * time.Millisecond) {
+		if capt, err = c.CapturePane(ctx, pane); err != nil {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("CapturePane = %q, cursor %d,%d known %v: want the printed line and the cursor at 2,0",
+				capt.Screen, capt.CursorX, capt.CursorY, capt.CursorKnown)
+		}
+	}
+	first := strings.SplitN(capt.Styled, "\n", 2)[0]
+	if !strings.Contains(first, "\x1b[2m") || !strings.Contains(first, "push it") {
+		t.Errorf("Styled first line = %q, want the dim attribute before push it", first)
+	}
+	if line := strings.SplitN(capt.Screen, "\n", 2)[0]; line != "❯ push it" {
+		t.Errorf("Screen first line = %q, want the plain text", line)
+	}
+	if !capt.CursorKnown || capt.CursorX != 2 || capt.CursorY != 0 {
+		t.Errorf("cursor = %d,%d known %v, want 2,0 known", capt.CursorX, capt.CursorY, capt.CursorKnown)
+	}
+}
+
+func TestStripEscapes(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain":                                    "plain",
+		"\x1b[39m❯ \x1b[2mpush it\x1b[0m":          "❯ push it",
+		"\x1b[38;5;220m⏵⏵\x1b[39m on":              "⏵⏵ on",
+		"a\x1b]8;;http://x\x1b\\link\x1b]8;;\x07b": "alinkb",
+		"cut \x1b[38;5":                            "cut ",
+		"lone \x1bx":                               "lone x",
+		"two\x1b[1m\nlines\x1b[0m":                 "two\nlines",
+	} {
+		if got := StripEscapes(in); got != want {
+			t.Errorf("StripEscapes(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -27,10 +27,11 @@ func init() {
 	}
 	stats.Flags().BoolVar(&routingJSON, "json", false, "print a JSON object instead of text")
 	reset := &cobra.Command{
-		Use:   "reset",
-		Short: "Clear the earned and tripped flags (the user only)",
-		Args:  cobra.NoArgs,
-		RunE:  runRoutingReset,
+		Use:         "reset",
+		Short:       "Clear the earned and tripped flags (the user only)",
+		Annotations: userOnlyMark(),
+		Args:        cobra.NoArgs,
+		RunE:        runRoutingReset,
 	}
 	parent.AddCommand(stats, reset)
 	rootCmd.AddCommand(parent)
@@ -107,7 +108,7 @@ func routingYesNo(v bool, at *time.Time) string {
 }
 
 func runRoutingReset(cmd *cobra.Command, _ []string) error {
-	if err := refuseInsideAgent(); err != nil {
+	if err := userOnly("routing reset", "reset the router's flags"); err != nil {
 		return err
 	}
 	cfg, err := loadConfig()

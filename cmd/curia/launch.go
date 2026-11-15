@@ -29,9 +29,10 @@ var (
 
 // The flags of curia launch.
 var (
-	launchModel  string
-	launchTeam   bool
-	launchResume string
+	launchModel      string
+	launchTeam       bool
+	launchResume     string
+	launchAfterPause bool
 )
 
 // launchTeamVar is the variable that turns Claude Code's agent teams on.
@@ -53,6 +54,7 @@ func init() {
 	cmd.Flags().StringVar(&launchModel, "model", "", "the model the agent uses")
 	cmd.Flags().BoolVar(&launchTeam, "team", false, "let the agent lead an agent team")
 	cmd.Flags().StringVar(&launchResume, "resume", "", "resume this Claude Code session instead of starting with the brief")
+	cmd.Flags().BoolVar(&launchAfterPause, "after-pause", false, "tell the agent its work is in the pause's WIP commit")
 	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error { return launchFail(c, launchConfig(), err) })
 	rootCmd.AddCommand(cmd)
 }
@@ -111,7 +113,7 @@ func launchAgent(ctx context.Context, cfg config.Config, args []string) error {
 	if err != nil {
 		return err
 	}
-	argv, err := launchArgv(t, launchModel, launchTeam, launchResume)
+	argv, err := launchArgv(t, launchModel, launchTeam, launchResume, launchAfterPause)
 	if err != nil {
 		return err
 	}
@@ -143,11 +145,22 @@ func launchLoad(ctx context.Context, cfg config.Config, id string) (model.Task, 
 	return t, nil
 }
 
+// launchAfterPauseNote is what a resumed agent is told when its branch ends
+// in the pause's WIP commit (live check B, defect 6: the agent took its
+// committed work for uncommitted files). It is fixed text and the task id.
+func launchAfterPauseNote(id string) string {
+	return "Curia paused this task and has now resumed it. The work that was uncommitted before the pause is in the " +
+		"commit \"curia: WIP " + id + " (paused)\" at the tip of your branch, not in uncommitted files: " +
+		"look at git log and git status before you go on."
+}
+
 // launchArgv is claude's argument vector: the model, the team switch, then
-// the session to resume or the brief as the one positional argument. The
-// brief starts with fixed text, so claude never reads it as an option, and
-// it is never seen by a shell or by tmux. No permission flag is ever added.
-func launchArgv(t model.Task, modelName string, team bool, resume string) ([]string, error) {
+// the session to resume or the brief as the one positional argument; with
+// afterPause, the resumed session gets launchAfterPauseNote as its prompt
+// and the brief ends with it. The brief and the note start with fixed text,
+// so claude never reads them as an option, and they are never seen by a
+// shell or by tmux. No permission flag is ever added.
+func launchArgv(t model.Task, modelName string, team bool, resume string, afterPause bool) ([]string, error) {
 	argv := []string{"claude"}
 	if modelName != "" {
 		argv = append(argv, "--model", modelName)
@@ -156,7 +169,11 @@ func launchArgv(t model.Task, modelName string, team bool, resume string) ([]str
 		argv = append(argv, "--teammate-mode", "tmux")
 	}
 	if resume != "" {
-		return append(argv, "--resume", resume), nil
+		argv = append(argv, "--resume", resume)
+		if afterPause {
+			argv = append(argv, launchAfterPauseNote(t.ID))
+		}
+		return argv, nil
 	}
 	if !task.ValidBranch(t.Branch) || !task.ValidBranch(t.BaseBranch) {
 		return nil, errors.New(t.ID + " has no branch and base branch yet: start it with curia spawn " + t.ID)
@@ -165,7 +182,11 @@ func launchArgv(t model.Task, modelName string, team bool, resume string) ([]str
 	// keeps the rule that untrusted text is cleaned wherever it is sent.
 	t.Title = sanitize.Line(t.Title, task.MaxTitle)
 	t.Body = sanitize.Block(t.Body, task.MaxBody)
-	return append(argv, task.Brief(t, team)), nil
+	brief := task.Brief(t, team)
+	if afterPause {
+		brief += "\n\n" + launchAfterPauseNote(t.ID)
+	}
+	return append(argv, brief), nil
 }
 
 // launchEnv is env with CURIA_TASK_ID set to id and, with team, the agent

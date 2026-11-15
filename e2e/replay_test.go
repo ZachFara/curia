@@ -30,9 +30,10 @@ const (
 	timeToken = `"<time>"`
 	// p95Budget is the p95 wall time of one hook process, start included.
 	p95Budget = 50 * time.Millisecond
-	// minTimedRuns is how many hook processes the latency pass times at
-	// least, so its p95 rests on about 20 tail samples.
-	minTimedRuns = 400
+	// minTimedRuns is how many hook processes a latency pass times at least,
+	// in one contiguous pass, so its p95 rests on about 50 tail samples
+	// (Ruling 114: the same percentile and budget over more samples).
+	minTimedRuns = 1000
 	// startBudget is how soon a started session must be in the store.
 	startBudget = time.Second
 )

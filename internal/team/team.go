@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
@@ -154,17 +155,33 @@ func assignTeam(out map[string]Membership, live []model.Session, t Team) {
 		return
 	}
 	found[leadID] = Membership{t.ID, model.RoleLead, t.Members[lead].Name}
+	mates := withLead(live, leadID)
 	for i, m := range t.Members {
 		if i == lead {
 			continue
 		}
-		if id := match(live, m, taken); id != "" {
+		if id := match(mates, m, taken); id != "" {
 			found[id] = Membership{t.ID, model.RoleTeammate, m.Name}
 		}
 	}
 	for id, ms := range found {
 		out[id] = ms
 	}
+}
+
+// withLead keeps the sessions that can be the teammates of the lead leadID
+// (Ruling 115): in the lead's tmux window (teammates are splits of it), and
+// with no task or the lead's. A config file alone cannot make a session in
+// another window, or on another task, anyone's teammate.
+func withLead(live []model.Session, leadID string) []model.Session {
+	i := slices.IndexFunc(live, func(s model.Session) bool { return s.ID == leadID })
+	if i < 0 || live[i].TmuxWindow == "" {
+		return nil
+	}
+	l := live[i]
+	return slices.DeleteFunc(slices.Clone(live), func(s model.Session) bool {
+		return s.TmuxWindow != l.TmuxWindow || (s.TaskID != "" && s.TaskID != l.TaskID)
+	})
 }
 
 // match finds the live session of a member: by its session id when the

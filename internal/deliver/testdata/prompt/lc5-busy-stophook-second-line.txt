@@ -1,0 +1,24 @@
+✻ Cooked for 2s · done 6:33 PM
+
+❯ Run the shell command sleep 8, then reply with only SLEPT.
+
+⏺ Bash(sleep 8)
+  ⎿  (No output)
+  ⎿  Allowed by auto mode
+
+⏺ SLEPT
+
+⏺ Ran 1 stop hook (ctrl+o to expand)
+  ⎿  Stop hook error: Curia: messages for you.
+  Message M-126 from the user: Reply with only STOP-OK.
+
+✢ Transmogrifying… (10s · ↓ 261 tokens)
+  ⎿  Tip: Try the new fullscreen renderer — flicker-free output, mouse support,
+     auto-copy on select · /tui fullscreen
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt
+                                      Stop hook error occurred · ctrl+o to see
+

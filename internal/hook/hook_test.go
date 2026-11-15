@@ -859,7 +859,7 @@ func TestHookLatency(t *testing.T) {
 	run(t, st, env, model.SessionStart, payload("A", tr, ""))
 	body := payload("A", tr, `,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
 
-	const runs = 200
+	const runs = latencyGateRuns
 	durations := make([]time.Duration, 0, runs)
 	for range runs {
 		appendLine(t, tr, `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}`)
@@ -1509,7 +1509,7 @@ func TestStopLatencyWithDecisions(t *testing.T) {
 	}
 	stopOnce() // warm-up, untimed
 
-	const runs = 200
+	const runs = latencyGateRuns
 	durations := make([]time.Duration, 0, runs)
 	for range runs {
 		durations = append(durations, stopOnce())
@@ -2338,18 +2338,25 @@ func mustList(t *testing.T, st *store.Store) []model.Message {
 	return ms
 }
 
-// latencyRuns is how many samples TestStopLatencyWithMessages takes of
-// each row.
+// latencyGateRuns is how many samples a latency gate takes, in one
+// contiguous pass, before its p95 is read (Ruling 114): the same
+// percentile and threshold over five times the samples, so it fails as
+// surely for slow code and needs a noise episode five times longer to fail
+// for fast code.
+const latencyGateRuns = 1000
+
+// latencyRuns is how many samples TestStopLatencyWithMessages takes of a
+// row it only reports.
 const latencyRuns = 200
 
-// latency runs prep (untimed) and then op latencyRuns times after one
-// untimed warm-up, and returns op's durations, sorted.
-func latency(t *testing.T, prep func(), op func() hook.Result) []time.Duration {
+// latency runs prep (untimed) and then op n times after one untimed
+// warm-up, and returns op's durations, sorted.
+func latency(t *testing.T, n int, prep func(), op func() hook.Result) []time.Duration {
 	t.Helper()
 	prep()
 	op()
-	durations := make([]time.Duration, 0, latencyRuns)
-	for range latencyRuns {
+	durations := make([]time.Duration, 0, n)
+	for range n {
 		prep()
 		start := time.Now()
 		op()
@@ -2363,9 +2370,9 @@ func latency(t *testing.T, prep func(), op func() hook.Result) []time.Duration {
 // that also holds 500 messages and 200 tasks: a Stop with no message
 // queued, with one (claimed), and with 20 (eight claimed, then topped up),
 // and a PostToolUse and a UserPromptSubmit with and without a message
-// marker, 200 samples each after one warm-up. Stops with none and with
-// one queued are gated at p95 under 20 ms with no retry; every row is
-// reported.
+// marker, each after one warm-up. Stops with none and with one queued are
+// gated at p95 under 20 ms with no retry, over latencyGateRuns samples;
+// every other row is reported over latencyRuns.
 func TestStopLatencyWithMessages(t *testing.T) {
 	st := openStore(t)
 	tr := writeTranscript(t)
@@ -2405,20 +2412,20 @@ func TestStopLatencyWithMessages(t *testing.T) {
 			return res
 		}
 	}
-	const runs = latencyRuns
 	rows := []struct {
 		name string
 		gate bool
 		d    []time.Duration
 	}{
-		{"Stop, none queued", true, latency(t, topUp(0), hookOnce(model.Stop, stopBody, 0))},
-		{"Stop, 1 queued", true, latency(t, topUp(1), claim(hookOnce(model.Stop, stopBody, 1)))},
-		{"Stop, 20 queued", false, latency(t, topUp(20), claim(hookOnce(model.Stop, stopBody, message.MaxPerStop)))},
-		{"PostToolUse, 12 queued", false, latency(t, transcriptLine, hookOnce(model.PostToolUse, payload("A", tr, `,"tool_name":"Edit"`), 0))},
-		{"UserPromptSubmit", false, latency(t, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "go on"), 0))},
-		{"UserPromptSubmit naming a message", false, latency(t, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "Message M-1 from the user: x."), 0))},
+		{"Stop, none queued", true, latency(t, latencyGateRuns, topUp(0), hookOnce(model.Stop, stopBody, 0))},
+		{"Stop, 1 queued", true, latency(t, latencyGateRuns, topUp(1), claim(hookOnce(model.Stop, stopBody, 1)))},
+		{"Stop, 20 queued", false, latency(t, latencyRuns, topUp(20), claim(hookOnce(model.Stop, stopBody, message.MaxPerStop)))},
+		{"PostToolUse, 12 queued", false, latency(t, latencyRuns, transcriptLine, hookOnce(model.PostToolUse, payload("A", tr, `,"tool_name":"Edit"`), 0))},
+		{"UserPromptSubmit", false, latency(t, latencyRuns, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "go on"), 0))},
+		{"UserPromptSubmit naming a message", false, latency(t, latencyRuns, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "Message M-1 from the user: x."), 0))},
 	}
 	for _, r := range rows {
+		runs := len(r.d)
 		p50, p95, worst := r.d[runs/2], r.d[runs*95/100], r.d[runs-1]
 		t.Logf("%s, over %d runs: p50 %v, p95 %v, max %v", r.name, runs, p50, p95, worst)
 		if r.gate && p95 >= 20*time.Millisecond {

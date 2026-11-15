@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -26,26 +25,30 @@ const cleanLostShown = 50
 
 func init() {
 	cmd := &cobra.Command{
-		Use:   "clean <id>",
-		Short: "Remove a finished task's worktree and branch (the user only)",
+		Use:         "clean <id>",
+		Short:       "Remove a finished task's worktree and branch (the user only)",
+		Annotations: userOnlyMark(),
 		Long: "Removes the task's worktree (git worktree remove, never forced: a worktree\n" +
 			"with changes is left for you) and deletes its branch with git branch -d.\n" +
 			"The branch must be merged into the task's base branch; a squash or rebase\n" +
 			"merge looks unmerged to git, and then --force deletes it with -D after\n" +
-			"naming every commit that is in neither the base nor any remote. The task\n" +
-			"keeps its status. Refuses while an agent of the task runs, and inside an\n" +
-			"agent session.",
+			"naming every commit that is in neither the base nor any remote. A worktree\n" +
+			"holding ignored files (dependencies, .env) is removed with them only under\n" +
+			"--force, after they are named. The task is marked dropped, so the board\n" +
+			"no longer offers it (curia task edit <id> --status ready brings it back).\n" +
+			"Refuses while an agent of the task runs, and inside an agent session.",
 		Args: cobra.ExactArgs(1),
 		RunE: runClean,
 	}
-	cmd.Flags().BoolVar(&cleanForce, "force", false, "delete the branch even when git does not see it merged (names the commits lost)")
+	cmd.Flags().BoolVar(&cleanForce, "force", false,
+		"delete the branch even when git does not see it merged, and the worktree's ignored files (names what is lost)")
 	rootCmd.AddCommand(cmd)
 }
 
 func runClean(cmd *cobra.Command, args []string) error {
 	// No agent may delete a task's work (spec section 7).
-	if refuseInsideAgent() != nil {
-		return errors.New("curia clean cannot run inside an agent session (CLAUDECODE is set): only the user may clean a task")
+	if err := userOnly("clean", "clean a task"); err != nil {
+		return err
 	}
 	force := cleanForce
 	return lifecycleRunCmd(cmd, args[0], func(ctx context.Context, st *store.Store, cfg config.Config, out io.Writer) error {
@@ -64,6 +67,11 @@ func cleanTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.
 	exists, err := refExists(ctx, t.Repo, "refs/heads/"+t.Branch)
 	if err != nil {
 		return err
+	}
+	if onDisk {
+		if err = cleanCheckIgnored(ctx, t, path, force); err != nil {
+			return err
+		}
 	}
 	if exists {
 		if err = cleanCheckMerged(ctx, t, force, out); err != nil {
@@ -122,6 +130,20 @@ func cleanCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 			id, spawnWhere(panes, t.Pane))
 	}
 	return t, path, onDisk, nil
+}
+
+// cleanCheckIgnored refuses, unless force, to remove a worktree that holds
+// ignored files, which git worktree remove deletes without a word; it names
+// them. Under force cleanRemoveWorktree names them again as it removes them.
+func cleanCheckIgnored(ctx context.Context, t model.Task, path string, force bool) error {
+	n, names, err := lifecycleIgnored(ctx, path)
+	if err != nil || n == 0 || force {
+		return err
+	}
+	return fmt.Errorf("%s not cleaned: its worktree %s holds %s (%s), which removing it deletes. Nothing was removed. "+
+		"Move what you want to keep, then run curia clean %s again, or run curia clean %s --force to delete them with it "+
+		"(--force also deletes the branch when git does not see it merged, naming the commits that would be lost)",
+		t.ID, sanitize.Line(path, 300), lifecycleCount(n, "ignored entry", "ignored entries"), strings.Join(names, ", "), t.ID, t.ID)
 }
 
 // cleanCheckMerged refuses an unmerged branch unless force, naming the
@@ -236,18 +258,22 @@ func cleanDeleteBranch(ctx context.Context, t model.Task, force bool, out io.Wri
 }
 
 // cleanRecord clears the task's branch, worktree, pane, pause and launch
-// claim and sets cleaned_at; its stored status is not changed.
+// claim, sets cleaned_at and marks the task dropped (live check B, defect
+// 7): its work is merged or deleted, and dropped is the one stored status
+// the board neither shows nor spawns.
 func cleanRecord(ctx context.Context, st *store.Store, t model.Task, out io.Writer) error {
 	now := clock()
-	stored, err := st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
+	_, err := st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
 		cur.Branch, cur.Worktree, cur.Pane, cur.ResumeSession = "", "", "", ""
 		cur.PausedAt, cur.LaunchedAt, cur.CleanedAt, cur.UpdatedAt = time.Time{}, time.Time{}, now, now
+		cur.Status = model.TaskDropped // off the board: nothing spawns it again by accident
 		return cur, nil
 	})
 	if err != nil {
 		return fmt.Errorf("%s: the worktree and branch are gone, but recording it failed: %w. To finish: run curia clean %s again",
 			t.ID, err, t.ID)
 	}
-	_, _ = fmt.Fprintf(out, "Cleaned %s (its status stays %s)\n", t.ID, stored.Status)
+	_, _ = fmt.Fprintf(out, "Cleaned %s (marked dropped, so the board no longer offers it; curia task edit %s --status ready brings it back)\n",
+		t.ID, t.ID)
 	return nil
 }

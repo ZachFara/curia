@@ -11,4 +11,10 @@ const (
 const (
 	StopStateQuery   = stopState
 	BadgeExtrasQuery = badgeExtras
+	SendQueuedQuery  = sendQueued
+	SendRecentQuery  = sendRecent
+	SendSenderLive   = sendSenderLive
+	UnconfirmedQuery = unconfirmedQuery
+	CheckClaim       = checkClaimQuery
+	CheckConfirm     = checkConfirmQuery
 )

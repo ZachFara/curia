@@ -13,8 +13,9 @@ The refresh endpoint returns 500 once the access token has expired.
 Rotate the refresh token on every use and add a test for the expired case.
 cwd <worktree>
 task T-1
-argc 2
+argc 3
 arg --resume
 arg 00000001-0000-4000-8000-000000000001
+arg Curia paused this task and has now resumed it. The work that was uncommitted before the pause is in the commit "curia: WIP T-1 (paused)" at the tip of your branch, not in uncommitted files: look at git log and git status before you go on.
 cwd <worktree>
 task T-1

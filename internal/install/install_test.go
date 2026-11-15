@@ -666,7 +666,10 @@ func TestBoundKeys(t *testing.T) {
 		fenceEnd,
 	}, "\n")
 	got := boundKeys(conf)
-	want := map[string]bool{"a": true, "B": true, "F5": true, "C-y": true, "D": true, "H": true}
+	want := map[string]string{
+		"a": "display-popup -E recon", "B": "resize-pane -U", "F5": "run-shell x", "C-y": "next-window", "D": "detach",
+		"H": "kill-pane",
+	}
 	if !maps.Equal(got, want) {
 		t.Errorf("boundKeys = %v, want %v", got, want)
 	}

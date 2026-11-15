@@ -48,10 +48,11 @@ func init() {
 	ls.Flags().StringVar(&messagesStatus, "status", "open", "open, all, or one status")
 	ls.Flags().BoolVar(&messagesJSON, "json", false, "print a JSON array instead of a table")
 	cancel := &cobra.Command{
-		Use:   "cancel <id>",
-		Short: "Cancel a queued message (the user only)",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runMessagesCancel,
+		Use:         "cancel <id>",
+		Short:       "Cancel a queued message (the user only)",
+		Annotations: userOnlyMark(),
+		Args:        cobra.ExactArgs(1),
+		RunE:        runMessagesCancel,
 	}
 	parent.AddCommand(ls, cancel)
 	rootCmd.AddCommand(parent)
@@ -228,7 +229,7 @@ func messagesPrintTable(w io.Writer, ms []model.Message, states map[string]model
 }
 
 func runMessagesCancel(cmd *cobra.Command, args []string) error {
-	if err := refuseInsideAgent(); err != nil {
+	if err := userOnly("messages cancel", "cancel a message"); err != nil {
 		return err
 	}
 	id := args[0]

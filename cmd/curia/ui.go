@@ -69,15 +69,24 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 	client := newTmuxClient()
 	src := storeSource{st: st, tm: client, cfg: cfg}
 	m := ui.New(src, client, cfg, clock, mode)
+	// The dashboard's actions with a user's effect (the board's ready and
+	// spawn keys, d, x y) are the user-only commands' (spec section 7,
+	// re-review A, C1): the guard is asked once, and when it refuses each of
+	// those keys shows its reason and does nothing. Jumps and views stay.
+	refused := userOnly("ui", "change, spawn or kill from the dashboard, or answer decisions")
 	if mode == ui.ModePopup {
-		bsrc := boardSource{st: st, tm: client, cfg: cfg}
+		bsrc := boardSource{st: st, tm: client, cfg: cfg, refused: refused}
 		m = m.WithBoard(func() tea.Model { return ui.NewBoard(bsrc, client, clock, true) })
 	}
-	// d answers through curia decide's path, so it refuses inside an agent
-	// session as curia decide does (spec section 7): no factory is set,
-	// and the dashboard says why when d is pressed.
+	if refused != nil {
+		m = m.WithoutKill(refused.Error())
+		if mode == ui.ModePopup {
+			m = m.WithoutDecide(refused.Error())
+		}
+		return runProgram(m, opts...)
+	}
 	// T16: without its log file the dashboard still starts, without d.
-	if mode == ui.ModePopup && refuseInsideAgent() == nil {
+	if mode == ui.ModePopup {
 		logger, closeLog, err := openLog(cfg.LogPath)
 		if err != nil {
 			return runProgram(m.WithoutDecide("decisions cannot be answered here: the log file cannot be opened"), opts...)
@@ -141,6 +150,9 @@ type boardSource struct {
 	st  *store.Store
 	tm  tmux.Client
 	cfg config.Config
+	// refused is the user-only guard's refusal of the dashboard's caller, or
+	// nil: with it, the board's ready and spawn keys do nothing and say why.
+	refused error
 }
 
 // Cards reconciles with tmux, as the dashboard's refresh does (the board
@@ -157,6 +169,9 @@ func (b boardSource) Cards(ctx context.Context) ([]task.Card, error) {
 // transaction: any other status is refused, and so is a task that is no
 // longer in backlog or ready (dropped meanwhile).
 func (b boardSource) SetStatus(ctx context.Context, id string, to model.TaskStatus) error {
+	if b.refused != nil {
+		return b.refused
+	}
 	if !uiBacklogOrReady(to) {
 		return fmt.Errorf("the board moves a task only between backlog and ready, not to %q", sanitize.Line(string(to), 40))
 	}
@@ -184,8 +199,13 @@ func uiBacklogOrReady(s model.TaskStatus) bool {
 // script's), so a slow checkout or setup is not cut short. The board runs
 // it off its update loop and refuses another action until it returns.
 func (b boardSource) Spawn(ctx context.Context, id string) (string, error) {
+	if b.refused != nil {
+		return "", b.refused
+	}
 	var out bytes.Buffer
-	r, err := spawnTask(context.WithoutCancel(ctx), b.st, b.tm, b.cfg, id, spawnOptions{Wait: 0, Out: &out})
+	// ReadyOnly unless the guard passed (Ruling 113), should the source be
+	// wired without the refusal elsewhere.
+	r, err := spawnTask(context.WithoutCancel(ctx), b.st, b.tm, b.cfg, id, spawnOptions{Wait: 0, Out: &out, ReadyOnly: b.refused != nil})
 	if err != nil {
 		return "", err
 	}

@@ -6,9 +6,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -70,6 +72,7 @@ func sayWorld(t *testing.T, sessions ...model.Session) (string, *tmux.Fake, *dec
 		fake.Panes = append(fake.Panes, tmux.Pane{ID: s.Pane, Session: "work", WindowID: "@1", ServerStart: at(8, 0)})
 	}
 	fake.Screen = decideIdleScreen
+	userTerminalAs(t, true) // the user, at a terminal
 	c := &decideClock{t: sayNow}
 	prev := clock
 	clock = c.now
@@ -353,6 +356,61 @@ func TestSayTaskIdAddress(t *testing.T) {
 	})
 }
 
+// sayStaleSessions marks the sessions stale with no pane in fake, as
+// reconcile leaves them after their panes are gone.
+func sayStaleSessions(t *testing.T, db string, fake *tmux.Fake, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		s := getSession(t, db, id)
+		s.State = model.StateStale
+		seedSessions(t, db, s)
+		fake.Panes = slices.DeleteFunc(fake.Panes, func(p tmux.Pane) bool { return p.ID == s.Pane })
+	}
+}
+
+func TestSayTaskAddressSkipsStaleSessions(t *testing.T) {
+	var sessions []model.Session
+	for i, id := range []string{"A-OLD", "B-OLD", "C-LIVE"} {
+		s := saySession(id, fmt.Sprintf("%%%d", i+1), sayRepo, "curia/T-1-x")
+		s.TaskID = "T-1"
+		sessions = append(sessions, s)
+	}
+	db, fake, _ := sayWorld(t, sessions...)
+	sayStaleSessions(t, db, fake, "A-OLD", "B-OLD")
+	sayTasks(t, db, 1)
+	sayUseRouter(t, sayRouterNever(t))
+	out, _, err := sayRun(t, strings.NewReader(""), "T-1:", "stop", "and", "commit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := sayLast(t, db); m.TargetSession != "C-LIVE" || m.Status != model.MsgDelivered {
+		t.Errorf("message = %+v (output %q), want it delivered to the live session", m, out)
+	}
+	if sent := saySent(fake); len(sent) != 1 || !strings.HasPrefix(sent[0], "SendKeys %3 ") {
+		t.Errorf("typed %q, want one line into %%3", sent)
+	}
+	// a repository name names only the live session, so it is not ambiguous
+	if _, _, err := sayRun(t, strings.NewReader(""), "@api-server", "use", "pnpm"); err != nil {
+		t.Errorf("@api-server with one live and two stale sessions: %v", err)
+	}
+}
+
+func TestSayRepoRuleWithTwoAgentsIsStored(t *testing.T) {
+	db, fake, _ := sayWorld(t, saySession("S1", "%1", sayRepo, "main"), saySession("S2", "%2", sayRepo, "feat-x"))
+	sayUseRouter(t, sayRouterNever(t))
+	out, _, err := sayRun(t, strings.NewReader(""), "@api-server", "rule:", "always", "use", "pnpm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "M-1 stored as rule D-1 (repo api-server)\n" {
+		t.Errorf("output = %q, want the rule line", out)
+	}
+	sayWantRule(t, db)
+	if sent := saySent(fake); len(sent) != 0 {
+		t.Errorf("typed %q, want nothing", sent)
+	}
+}
+
 func TestSayTeamGoesToLead(t *testing.T) {
 	sessions := teamsCapturedSessions()[:3] // lead in %16, alpha-s in %17, beta-s in %18
 	branches := []string{"main", "feat-alpha", "feat-beta"}
@@ -391,6 +449,31 @@ func TestSayRuleBecomesPrecedent(t *testing.T) {
 	}
 	if sent := saySent(fake); len(sent) != 0 {
 		t.Errorf("typed %q, want nothing", sent)
+	}
+}
+
+func TestSayRuleNeedsTerminal(t *testing.T) {
+	db, fake, _ := sayWorld(t)
+	userTerminalAs(t, false) // every agent variable cleared, but no controlling terminal
+	calls := sayUseRouter(t, sayRouterNever(t))
+	for _, args := range [][]string{
+		{"@api-server", "rule:", "always", "use", "pnpm"},
+		{"@api-server", "use", "pnpm"},
+		{"T-1:", "stop"},
+	} {
+		_, _, err := sayRun(t, strings.NewReader(""), args...)
+		if err == nil || !strings.Contains(err.Error(), "curia say cannot run without a terminal") {
+			t.Errorf("say %q = %v, want the terminal refusal", args, err)
+		}
+	}
+	if _, found, gerr := sayOpen(t, db).GetDecision(context.Background(), "D-1"); gerr != nil || found {
+		t.Errorf("D-1 found %v (%v), want no rule stored", found, gerr)
+	}
+	if ms := sayMessages(t, db); len(ms) != 0 {
+		t.Errorf("messages = %+v, want none", ms)
+	}
+	if calls.Load() != 0 || len(saySent(fake)) != 0 {
+		t.Errorf("router calls %d, typed %q, want none", calls.Load(), saySent(fake))
 	}
 }
 
