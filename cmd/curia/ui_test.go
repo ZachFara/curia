@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -453,5 +454,110 @@ func TestUIGroupsTeamFromConfig(t *testing.T) {
 		if !strings.Contains(run.view, want) {
 			t.Errorf("expanded view lacks %q:\n%s", want, run.view)
 		}
+	}
+}
+
+// uiReviewStore seeds the store at db with tasks T-1 and T-2, each with a
+// pending review (R-1 and R-2), and then stores T-2 dropped.
+func uiReviewStore(t *testing.T, db string) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	for _, title := range []string{"Auth refactor", "Fix login"} {
+		tk, cerr := st.CreateTask(ctx, model.Task{Title: title, Repo: "/src/api", Status: model.TaskReady, CreatedAt: fleetNow})
+		if cerr != nil {
+			t.Fatal(cerr)
+		}
+		if _, _, err = st.CompleteTask(ctx, model.Review{
+			TaskID: tk.ID, Summary: "Done.", Tests: model.TestsNotRun, CreatedAt: fleetNow,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = st.UpdateTask(ctx, "T-2", func(cur model.Task) (model.Task, error) {
+		cur.Status = model.TaskDropped
+		return cur, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreSourceReviews(t *testing.T) {
+	db, fake := fleetHome(t, nil)
+	uiReviewStore(t, db)
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	got, err := storeSource{st: st, tm: fake, cfg: config.Default()}.Reviews(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"T-1": "R-1"}; !maps.Equal(got, want) {
+		t.Errorf("Reviews = %v, want %v (a dropped task's review absent)", got, want)
+	}
+}
+
+// uiReviewKeyCase is one run of TestDashboardOffersReviewInPopupOnly: the
+// command, CLAUDECODE, whether the log file can be opened, and what the
+// view shows after r.
+type uiReviewKeyCase struct {
+	name, cmd, claudecode string
+	noLog                 bool
+	want                  string
+}
+
+// The popup outside an agent session opens the review of the selected
+// session's task; the sidebar, the popup inside an agent session and the
+// popup without its log file say why not.
+func TestDashboardOffersReviewInPopupOnly(t *testing.T) {
+	for _, c := range []uiReviewKeyCase{
+		{name: "popup", cmd: "ui", want: "R-1"},
+		{name: "sidebar", cmd: "sidebar", want: "open the popup to review"},
+		{name: "agent", cmd: "ui", claudecode: "1", want: "reviews cannot be opened inside an agent session (CLAUDECODE is set)"},
+		{name: "no log", cmd: "ui", noLog: true, want: "reviews cannot be opened here: the log file cannot be opened"},
+	} {
+		t.Run(c.name, func(t *testing.T) { uiReviewKey(t, c) })
+	}
+}
+
+func uiReviewKey(t *testing.T, c uiReviewKeyCase) {
+	t.Helper()
+	sessions := dashboardSessions()
+	sessions[4].TaskID = "T-1" // "waiting", the first row
+	db, _ := fleetHome(t, []string{"%1", "%2"}, sessions...)
+	uiReviewStore(t, db)
+	t.Setenv("CLAUDECODE", c.claudecode)
+	if c.noLog {
+		if err := os.MkdirAll(config.Default().LogPath, 0o700); err != nil { // a directory cannot be opened for append
+			t.Fatal(err)
+		}
+	}
+	clk := &decideClock{t: fleetNow}
+	clock = clk.now // fleetHome restores it
+	var table string
+	run := uiDriveProgram(t, func(m tea.Model) tea.Model {
+		m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+		table = m.View()
+		clk.advance(500 * time.Millisecond) // past the dwell
+		m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+		return reviewPump(t, m, cmd)
+	})
+	if _, err := runRoot(t, c.cmd); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(table, "work:@1") {
+		t.Fatalf("the dashboard did not start:\n%s", table)
+	}
+	if !strings.Contains(run.view, c.want) {
+		t.Errorf("after r, view lacks %q:\n%s", c.want, run.view)
+	}
+	if opened := !strings.Contains(run.view, "work:@1"); opened != (c.name == "popup") {
+		t.Errorf("after r, the review view is shown: %v:\n%s", opened, run.view)
 	}
 }

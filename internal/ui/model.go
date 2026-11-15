@@ -9,7 +9,9 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,6 +44,9 @@ type Source interface {
 	// Tasks returns the tasks by id, for the TASK column; only the popup
 	// reads it.
 	Tasks(ctx context.Context) (map[string]model.Task, error)
+	// Reviews returns the id of the pending review of each task, by task
+	// id, for the r key; only the popup reads it.
+	Reviews(ctx context.Context) (map[string]string, error)
 }
 
 // Mode is how the dashboard is shown.
@@ -100,6 +105,7 @@ type Model struct {
 	sessions []model.Session            // the last good read, in Source order
 	counts   map[string]model.OpenCount // the last good OpenDecisions read; replaced, never mutated
 	tasks    map[string]model.Task      // the last good Tasks read; replaced, never mutated
+	reviews  map[string]string          // the last good Reviews read; replaced, never mutated
 	names    map[string]string          // window id to window name; replaced, never mutated
 	expanded map[string]bool            // team ids shown expanded; replaced, never mutated
 	rows     []row                      // the units that pass the filter, as rows
@@ -121,8 +127,14 @@ type Model struct {
 	open     func(sessionID string) tea.Model // builds the decide view; nil: d cannot answer
 	noAnswer string                           // why d cannot answer; "": inside an agent session
 	board    func() tea.Model                 // builds the task board; nil: t and n say why
-	child    tea.Model                        // the decide view or the board while it is shown
+	review   func(taskID string) tea.Model    // builds the review view; nil: r says why
+	noReview string                           // why r cannot open a review; "": inside an agent session
+	child    tea.Model                        // the decide view, the board or the review view while it is shown
 	childGen int                              // which child is (or was last) shown
+
+	rowFace  string        // the selected row and its task's pending review, as last drawn
+	rowSince time.Time     // when rowFace came, or an r too soon restarted the wait
+	rowWait  time.Duration // how long r waits from rowSince: dwell, then quietPeriod after an r too soon
 }
 
 // rowKind is what a row of the table stands for.
@@ -164,14 +176,16 @@ func (r row) target() model.Session {
 
 // refreshMsg is the result of one refresh of chain.
 type refreshMsg struct {
-	sessions  []model.Session
-	counts    map[string]model.OpenCount
-	tasks     map[string]model.Task
-	names     map[string]string
-	err       error
-	countsErr error
-	tasksErr  error
-	chain     int
+	sessions   []model.Session
+	counts     map[string]model.OpenCount
+	tasks      map[string]model.Task
+	reviews    map[string]string
+	names      map[string]string
+	err        error
+	countsErr  error
+	tasksErr   error
+	reviewsErr error
+	chain      int
 }
 
 // tickMsg starts the next refresh of chain.
@@ -195,6 +209,15 @@ const (
 	noticeNoBoard   = "the task board opens in the popup (curia ui)"
 	noticePickTask  = "pick a task, then n"
 	noticeKillGroup = "expand the team to kill one pane"
+)
+
+// Notices of the r key. noticeNoReview is said when the dashboard has no
+// review factory and no reason for it: curia ui sets none inside an agent
+// session (spec section 7).
+const (
+	noticeNoReview        = "reviews cannot be opened inside an agent session (CLAUDECODE is set)"
+	noticeNoReviewWaiting = "no review is waiting for this session"
+	noticeReviewSidebar   = "open the popup to review"
 )
 
 // New returns the dashboard over src. tm resolves window names and performs
@@ -226,13 +249,28 @@ func (m Model) WithBoard(open func() tea.Model) Model {
 	return m
 }
 
+// WithReview returns m with the r key enabled in the popup: on a row whose
+// task has a pending review, r shows the model open builds for that task's
+// id until it sends ReviewClosedMsg.
+func (m Model) WithReview(open func(taskID string) tea.Model) Model {
+	m.review = open
+	return m
+}
+
+// WithoutReview returns m with the r key disabled, saying why when pressed.
+func (m Model) WithoutReview(why string) Model {
+	m.review, m.noReview = nil, why
+	return m
+}
+
 // Init starts the first refresh.
 func (m Model) Init() tea.Cmd {
 	return m.refresh()
 }
 
 // refresh reads the Source and the window names off the event loop; the
-// popup also reads the open decision counts and the tasks.
+// popup also reads the open decision counts, the tasks and the pending
+// reviews.
 func (m Model) refresh() tea.Cmd {
 	src, tm, chain, popup := m.src, m.tm, m.chain, m.mode == ModePopup
 	return func() tea.Msg {
@@ -243,6 +281,7 @@ func (m Model) refresh() tea.Cmd {
 		if popup {
 			msg.counts, msg.countsErr = src.OpenDecisions(ctx)
 			msg.tasks, msg.tasksErr = src.Tasks(ctx)
+			msg.reviews, msg.reviewsErr = src.Reviews(ctx)
 		}
 		msg.names = windowNames(tm)
 		return msg
@@ -297,10 +336,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// applyRefresh keeps the last good sessions, counts and tasks when a read
-// fails, and shows the first error.
+// applyRefresh keeps the last good sessions, counts, tasks and reviews
+// when a read fails, and shows the first error.
 func (m Model) applyRefresh(msg refreshMsg) Model {
-	m.names, m.err = msg.names, cmp.Or(msg.err, msg.countsErr, msg.tasksErr)
+	m.names, m.err = msg.names, cmp.Or(msg.err, msg.countsErr, msg.tasksErr, msg.reviewsErr)
 	if msg.err == nil {
 		m.sessions = msg.sessions
 	}
@@ -309,6 +348,9 @@ func (m Model) applyRefresh(msg refreshMsg) Model {
 	}
 	if msg.tasksErr == nil {
 		m.tasks = msg.tasks
+	}
+	if msg.reviewsErr == nil {
+		m.reviews = msg.reviews
 	}
 	return m.reselect()
 }
@@ -336,6 +378,38 @@ func (m Model) openDecide() (Model, tea.Cmd) {
 	return m.showChild(m.open(r.s.ID))
 }
 
+// openReview shows the review view for the selected row's task: on a
+// group row the lead's. It says why not in the sidebar, which reads no
+// reviews, without a factory, and when the last good Reviews read has no
+// pending review for the task. It opens only once the row has been on
+// screen, as it is, for the dwell. An r too soon restarts the wait, now as
+// long as the quiet period, so the repeats of a held r that starts too
+// soon never open the view (a held key's first repeat comes 375 to 660 ms
+// after the press; Rulings 67, 88). From then on every key goes to the
+// view, whose own guards decide what acts.
+func (m Model) openReview() (Model, tea.Cmd) {
+	r, ok := m.current()
+	switch {
+	case m.mode != ModePopup:
+		m.notice = noticeReviewSidebar
+		return m, nil
+	case !ok:
+		return m, nil
+	case m.review == nil:
+		m.notice = cmp.Or(m.noReview, noticeNoReview)
+		return m, nil
+	}
+	if _, pending := m.reviews[r.s.TaskID]; r.s.TaskID == "" || !pending {
+		m.notice = noticeNoReviewWaiting
+		return m, nil
+	}
+	if now := m.now(); now.Sub(m.rowSince) < max(m.rowWait, dwell) {
+		m.rowSince, m.rowWait, m.notice = now, quietPeriod, noticeTooSoon
+		return m, nil
+	}
+	return m.showChild(m.review(r.s.TaskID))
+}
+
 // openBoard shows the task board, with notice on its status line when it
 // is not empty, or says why there is none.
 func (m Model) openBoard(notice string) (Model, tea.Cmd) {
@@ -350,7 +424,8 @@ func (m Model) openBoard(notice string) (Model, tea.Cmd) {
 	return m.showChild(child)
 }
 
-// showChild shows child, the decide view or the board, until it closes.
+// showChild shows child, the decide view, the board or the review view,
+// until it closes.
 // It gets the window size, and its commands are wrapped as child gen.
 func (m Model) showChild(child tea.Model) (Model, tea.Cmd) {
 	m.childGen++
@@ -364,14 +439,16 @@ func (m Model) showChild(child tea.Model) (Model, tea.Cmd) {
 	return m, wrapChild(m.childGen, tea.Batch(cmds...))
 }
 
-// updateChild handles a message while the decide view or the board is
-// shown, and a child's wrapped message at any time. A wrapped message of a
-// child that is no longer shown is dropped, which also ends that child's
-// tick chain. DecideClosedMsg or BoardClosedMsg (also sent after the
-// board's jump) closes the child and starts a new refresh chain, so a tick
-// of the chain that ran before d or t (which the child got and ignored)
-// never doubles it. Any other message goes to the child, a window size
-// also to the dashboard, which keeps its layout for when the child closes.
+// updateChild handles a message while a child (the decide view, the board
+// or the review view) is shown, and a child's wrapped message at any time.
+// A wrapped message of a child that is no longer shown is dropped, which
+// also ends that child's tick chain. DecideClosedMsg, BoardClosedMsg (also
+// sent after the board's jump) or ReviewClosedMsg closes the child and
+// starts a new refresh chain, so a tick of the chain that ran before d, t
+// or r (which the child got and ignored) never doubles it; the table is
+// back on screen, so r's dwell starts again. Any other message goes to the
+// child, a window size also to the dashboard, which keeps its layout for
+// when the child closes.
 func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if cm, ok := msg.(childMsg); ok {
 		if m.child == nil || cm.gen != m.childGen {
@@ -380,8 +457,8 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 		msg = cm.msg
 	}
 	switch msg := msg.(type) {
-	case DecideClosedMsg, BoardClosedMsg:
-		m.child, m.notice = nil, ""
+	case DecideClosedMsg, BoardClosedMsg, ReviewClosedMsg:
+		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
 		m.chain++
 		return m, m.refresh()
 	case tea.WindowSizeMsg:
@@ -393,10 +470,17 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, wrapChild(m.childGen, cmd)
 }
 
+// teaPath is Bubble Tea's import path. A message of a type it defines is
+// one its runtime acts on and never hands to the model: tea.Quit (ctrl+c),
+// the exec of tea.ExecProcess (the review view's diff tool), the screen
+// and mouse modes.
+var teaPath = reflect.TypeFor[tea.QuitMsg]().PkgPath()
+
 // wrapChild wraps the messages cmd sends as child gen's. A batch is
-// wrapped command by command and tea.Quit (ctrl+c) passes through, so the
-// program still runs and quits as the child asks; the decide view and the
-// board use no other runtime command.
+// wrapped command by command, and a runtime message of Bubble Tea's own
+// (see teaPath) passes through, so the program still quits and runs the
+// diff tool as the child asks. A sequence would pass through unwrapped;
+// no child uses one.
 func wrapChild(gen int, cmd tea.Cmd) tea.Cmd {
 	if cmd == nil {
 		return nil
@@ -405,8 +489,6 @@ func wrapChild(gen int, cmd tea.Cmd) tea.Cmd {
 		switch msg := cmd().(type) {
 		case nil:
 			return nil
-		case tea.QuitMsg:
-			return msg
 		case tea.BatchMsg:
 			out := make(tea.BatchMsg, len(msg))
 			for i, c := range msg {
@@ -414,6 +496,9 @@ func wrapChild(gen int, cmd tea.Cmd) tea.Cmd {
 			}
 			return out
 		default:
+			if reflect.TypeOf(msg).PkgPath() == teaPath {
+				return msg
+			}
 			return childMsg{gen: gen, msg: msg}
 		}
 	}
@@ -509,12 +594,19 @@ func matches(s model.Session, filter string) bool {
 }
 
 // moveTo selects row i, clamped to the rows, and scrolls it into view.
+// When the selected row, or whether its task's review is waiting, differs
+// from before, r's dwell starts again.
 func (m Model) moveTo(i int) Model {
 	m.cursor = max(min(i, len(m.rows)-1), 0)
 	m.selected, m.selTeam = rowKey{}, ""
+	face := ""
 	if len(m.rows) > 0 {
 		r := m.rows[m.cursor]
 		m.selected, m.selTeam = r.key(), r.team
+		face = field(r.s.ID) + strconv.FormatBool(r.kind == rowGroup) + field(r.s.TaskID) + field(m.reviews[r.s.TaskID])
+	}
+	if face != m.rowFace {
+		m.rowFace, m.rowSince, m.rowWait = face, m.now(), dwell
 	}
 	if n := m.visibleRows(); n > 0 {
 		m.offset = min(m.offset, m.cursor)
@@ -572,9 +664,8 @@ func (m Model) toggleTeam() Model {
 
 // updateRunes handles keys typed faster than the program reads them, which
 // arrive as one message with several runes, one rune at a time; a "/"
-// among them sends the rest into the filter. A "d", "t" or "n" that opens
-// the decide view or the board drops the rest: the user has not seen the
-// view yet.
+// among them sends the rest into the filter. A "d", "t", "n" or "r" that
+// opens a view drops the rest: the user has not seen the view yet.
 func (m Model) updateRunes(msg tea.KeyMsg) (Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	for _, r := range msg.Runes {
@@ -626,6 +717,8 @@ func (m Model) commandKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.openBoard("")
 	case "n":
 		return m.openBoard(noticePickTask)
+	case "r":
+		return m.openReview()
 	}
 	return m, nil
 }
