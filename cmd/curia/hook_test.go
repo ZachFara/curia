@@ -477,6 +477,23 @@ func TestHookAppliesMarker(t *testing.T) {
 	}
 }
 
+func TestHookGoneWindowIsNotLogged(t *testing.T) {
+	hookHome(t)
+	gone := &goneWindowTmux{}
+	prevClient := newTmuxClient
+	newTmuxClient = func() tmux.Client { return gone }
+	prev := hookRun
+	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
+		return hook.Result{Session: model.Session{ID: "A", TmuxWindow: "@7", State: model.StateIdle, UpdatedAt: time.Now()}}, nil
+	}
+	t.Cleanup(func() { hookRun, newTmuxClient = prev, prevClient })
+	res := runHookCmd(t, strings.NewReader(`{}`), "hook", "SessionStart")
+	assertQuietExitZero(t, res)
+	if log := readLog(t); len(log) != 0 {
+		t.Errorf("log = %q, want nothing for a window that is gone", log)
+	}
+}
+
 func TestHookWithoutWindowAppliesNothing(t *testing.T) {
 	hookHome(t)
 	fake := useFakeTmux(t)

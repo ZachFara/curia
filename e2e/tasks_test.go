@@ -104,10 +104,8 @@ type tasksRun struct {
 	panes    string   // where the test server's panes record what they receive
 	hooks    []replayLine
 	leadPane string
-	// pausedWindow is the window of T-1's pane when it was paused.
-	pausedWindow string
-	lead         *mcpClient
-	mate         *mcpClient
+	lead     *mcpClient
+	mate     *mcpClient
 }
 
 func newTasksRun(t *testing.T, root, bin string) *tasksRun {
@@ -504,7 +502,6 @@ func (r *tasksRun) checkClients(t *testing.T) {
 func (r *tasksRun) pause(t *testing.T) {
 	t.Helper()
 	tasksWrite(t, filepath.Join(r.worktree, "notes.txt"), "rotation done; tests next\n")
-	r.pausedWindow = strings.TrimSpace(r.srv.mustRun(t, "display-message", "-p", "-t", r.leadPane, "#{window_id}"))
 	out := r.h.mustRun(t, "pause", "T-1")
 	for _, want := range []string{
 		"Closed pane api-server:T-1 (" + r.leadPane + ") of session 00000001\n",
@@ -602,26 +599,7 @@ func (r *tasksRun) finalState(t *testing.T) {
 	if got := readFile(t, r.paneFile("mate")) + readFile(t, r.paneFile("web")); got != "" {
 		t.Errorf("something was typed into the teammate's or the other agent's pane: %q", got)
 	}
-	r.checkLog(t)
-}
-
-// checkLog fails if the log holds a level=ERROR line, with one exception.
-//
-// DEFECT: curia hook logs level=ERROR "hook attention marker" for the
-// window a session was in before, when that window is gone (cmd/curia/hook.go,
-// markerWindows adds the previous window and the error is logged even when it
-// wraps tmux.ErrNoWindow, which reconcile treats as benign). Every curia resume
-// does this: the resumed session's SessionStart names the window pause closed.
-// The fix wave makes the hook skip a gone window; then this exception goes
-// and checkNoErrors is called instead.
-func (r *tasksRun) checkLog(t *testing.T) {
-	t.Helper()
-	defect := `level=ERROR msg="hook attention marker" window=` + r.pausedWindow + " "
-	for line := range strings.Lines(readFile(t, r.h.logPath)) {
-		if strings.Contains(line, "level=ERROR") && !strings.Contains(line, defect) {
-			t.Errorf("log %s holds an error: %s", r.h.logPath, line)
-		}
-	}
+	checkNoErrors(t, r.h.logPath)
 }
 
 // git runs git in dir with git's repository variables dropped and HOME in
