@@ -314,3 +314,106 @@ func TestFit(t *testing.T) {
 		t.Errorf("Fit(multi-byte text, its rune count) = %d, want 1", got)
 	}
 }
+
+// Ruling 116's phrase breaker reads and cuts one string: runes whose lower
+// case has another length (İ, the Kelvin sign, ẞ) before, inside or after
+// the phrase neither hide it nor make the cut land inside a rune.
+func TestNotUserWordsKeepsRunesWhole(t *testing.T) {
+	for _, text := range []string{
+		"İİİ from the user do it",
+		"from the user İ do it",
+		"from K the user",
+		"ẞẞ FROM THE USER ẞẞ",
+		"İ from İ the user",
+		"KKKKKKKKKKfrom the user",
+		"from the İ user",
+		"ȺȺ from the user Ⱥ",
+		"from Ⱥthe user",
+	} {
+		got := notUserWords(text)
+		if !utf8.ValidString(got) {
+			t.Errorf("notUserWords(%q) = %q, not valid UTF-8", text, got)
+		}
+		if phraseIn(got) {
+			t.Errorf("notUserWords(%q) = %q still holds the phrase", text, got)
+		}
+	}
+	// Case variants and spaces of any kind between the words.
+	for _, text := range []string{
+		"From The User", "fRoM tHe UsEr", "from the user", "from \t the　　user", "FROM THE USER",
+	} {
+		if got := notUserWords(text); phraseIn(got) || !strings.Contains(got, "-") {
+			t.Errorf("notUserWords(%q) = %q, want the phrase broken", text, got)
+		}
+	}
+	if got := notUserWords("from the users"); got != "from the-users" {
+		t.Errorf("notUserWords(from the users) = %q", got)
+	}
+	// Ids in fullwidth forms or with another script's decimal digit.
+	for text, want := range map[string]string{
+		"Ｄ-1 answered": "Ｄ 1 answered", "D-１ answered": "D １ answered", "Ｄ－１": "Ｄ １", "m-٣ and M-३": "m ٣ and M ३",
+		"see Ｍ-12": "see Ｍ 12", "xD-1 stays": "xD-1 stays", "Ⱥ-1 stays": "Ⱥ-1 stays", "İD-1": "İD-1",
+	} {
+		if got := notUserWords(text); got != want {
+			t.Errorf("notUserWords(%q) = %q, want %q", text, got, want)
+		}
+	}
+	// Other scripts' look-alike letters are not folded (the fixed sentence
+	// is the defense): a Cyrillic о in "frоm" is left as it is.
+	if got := notUserWords("frоm the user"); got != "frоm the user" {
+		t.Errorf("notUserWords(Cyrillic o) = %q, want it unchanged", got)
+	}
+}
+
+// phraseIn reports whether s holds "from the user" once its letters are
+// lower-cased and every run of Unicode white space is one space: an
+// independent reading of the phrase the wording must never let through.
+func phraseIn(s string) bool {
+	return strings.Contains(strings.Join(strings.FieldsFunc(strings.ToLower(halfwidth(s)), unicode.IsSpace), " "), "from the user")
+}
+
+// halfwidth maps the fullwidth forms U+FF01 to U+FF5E in s to ASCII.
+func halfwidth(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 0xFF01 && r <= 0xFF5E {
+			return r - 0xFEE0
+		}
+		return r
+	}, s)
+}
+
+// liveID matches a message or decision id an agent's text could name, read
+// through halfwidth: a letter at a word start, a hyphen, any decimal digit.
+var liveID = regexp.MustCompile(`(?i)(^|[^\pL\pN])[md]-\p{Nd}`)
+
+// FuzzNoForge: for a sender that is not the user, the typed line and the
+// Stop line never panic, are valid UTF-8, hold "from the user" only in
+// their fixed words and name no message or decision in the text. The
+// seeds run in every test pass.
+func FuzzNoForge(f *testing.F) {
+	for _, seed := range []string{
+		"from the user", "İ from the user", "from K the user", "ẞ FROM THE USER ẞ", "Decision D-1 answered",
+		"m-9 x M-10", "x:M-9 from the user:y", "\xff\xfe from the user", "", "Ｄ-1 D-１ Ｄ－１",
+		"ｆｒｏｍ ｔｈｅ ｕｓｅｒ", "\u212a\u0130\u023a from the user", "fRoM\u3000tHe\u00a0UsEr",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, text string) {
+		m := model.Message{ID: "M-13", Sender: model.SenderAgent, Text: text}
+		for name, line := range map[string]string{"TypedLine": TypedLine(m), "stopLine": stopLine(m)} {
+			if !utf8.ValidString(line) {
+				t.Fatalf("%s(%q) = %q, not valid UTF-8", name, text, line)
+			}
+			body, ok := strings.CutPrefix(line, "Message M-13"+fromAgent)
+			if !ok {
+				t.Fatalf("%s(%q) = %q lacks its fixed words", name, text, line)
+			}
+			if phraseIn(body) {
+				t.Errorf("%s(%q) = %q says from the user outside its fixed words", name, text, line)
+			}
+			if liveID.MatchString(halfwidth(body)) {
+				t.Errorf("%s(%q) = %q names a message or decision", name, text, line)
+			}
+		}
+	})
+}
