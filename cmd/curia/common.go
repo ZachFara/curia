@@ -140,6 +140,14 @@ func listSettledMarked(ctx context.Context, st *store.Store, client tmux.Client,
 }
 
 // logWarn appends one warning to the log file at logPath, if it opens.
+// logInfo is logWarn at INFO.
+func logInfo(logPath, msg string, args ...any) {
+	if logger, closeLog, err := openLog(logPath); err == nil {
+		logger.Info(msg, args...)
+		_ = closeLog()
+	}
+}
+
 func logWarn(logPath, msg string, args ...any) {
 	if logger, closeLog, err := openLog(logPath); err == nil {
 		logger.Warn(msg, args...)

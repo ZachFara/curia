@@ -182,8 +182,9 @@ func isClaudeCode(p userProc) bool {
 // does not (Ruling 119): walking from the parent to pid 1, a process is
 // Claude Code (isClaudeCode) or the first process of the pane of a live
 // tracked session (agentPanePIDs). It fails closed: an ancestry it cannot
-// read, one deeper than userAncestryLimit, or live agents' panes it cannot
-// see are an agent's. Curia records no process id for a session, so only
+// read, one deeper than userAncestryLimit, or a store it cannot read are an
+// agent's; with no readable pane list it relies on the Claude Code ancestor
+// alone (Ruling 123). Curia records no process id for a session, so only
 // these are checked.
 func agentAncestor() string {
 	panes, why := agentPanePIDs()
@@ -247,11 +248,14 @@ func ancestorSession() (id string, ok bool) {
 
 // agentPanePIDs maps the pid of the first process of each pane holding a
 // live tracked session (neither ended nor stale) to that session's id, or
-// says why it cannot, and then the caller is refused: the store
-// cannot be read, or it has live sessions with panes and the tmux server
-// cannot list its panes or shows none of them (the caller's TMUX or
-// TMUX_TMPDIR may name another server). With no store yet, or no live
-// session in a pane, the map is empty.
+// says why it cannot when the store cannot be read, and then the caller is
+// refused. When the tmux pane list cannot be read, or the server the
+// caller's TMUX reaches shows none of the live agents' panes, the pane
+// check is skipped (Ruling 123): the map is empty, one INFO line says why,
+// and the guard decides on the Claude Code ancestor, the terminal and the
+// environment alone, so a tmux server that is down or restarted does not
+// lock the user out. With no store yet, or no live session in a pane, the
+// map is empty.
 func agentPanePIDs() (map[int]string, string) {
 	out := map[int]string{}
 	cfg, err := loadConfig()
@@ -280,8 +284,8 @@ func agentPanePIDs() (map[int]string, string) {
 	}
 	panes, err := newTmuxClient().ListPanes(ctx)
 	if err != nil {
-		return nil, "tmux cannot list the panes of the live agents, so Curia cannot tell whether this runs in one " +
-			"(curia ls marks the sessions whose panes are gone)"
+		logInfo(cfg.LogPath, "user check: agent pane check skipped: tmux cannot list its panes", "err", sanitize.Line(err.Error(), 200))
+		return out, ""
 	}
 	shown := false
 	for _, s := range sessions {
@@ -296,8 +300,7 @@ func agentPanePIDs() (map[int]string, string) {
 		}
 	}
 	if !shown {
-		return nil, "the tmux server reached shows none of the live agents' panes, so Curia cannot tell whether this " +
-			"runs in one (curia ls marks the sessions whose panes are gone)"
+		logInfo(cfg.LogPath, "user check: agent pane check skipped: the tmux server reached shows none of the live agents' panes")
 	}
 	return out, ""
 }

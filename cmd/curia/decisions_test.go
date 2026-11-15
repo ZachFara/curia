@@ -794,27 +794,53 @@ func TestUserAncestry(t *testing.T) {
 	})
 }
 
-// The pane check fails closed (Ruling 119): with live agents in panes, a
-// tmux server that cannot list its panes, or one showing none of theirs
-// (the caller's TMUX may name another), or a store that cannot be read,
-// refuses; with no live agent in a pane there is nothing to check.
-func TestUserAncestryPaneCheckFailsClosed(t *testing.T) {
+// The pane check is skipped, not failed, when the pane list cannot be read
+// (Ruling 123): the user at a terminal is not locked out while tmux is down
+// or restarted with sessions still recorded live, and a Claude Code
+// ancestor, read from the process table alone, still refuses; a store that
+// cannot be read refuses.
+func TestUserAncestryWithoutPaneList(t *testing.T) {
 	me := os.Getppid()
 	shell := map[int]userProc{me: {1, "-zsh", ""}}
-	t.Run("tmux unreachable", func(t *testing.T) {
+	underClaude := map[int]userProc{me: {600, "/bin/zsh", ""}, 600: {601, "claude", ""}, 601: {1, "tmux", ""}} // 600 is claude
+	unreachable := func(t *testing.T) {
+		t.Helper()
 		db := hookHome(t) // the guard's tmux: unreachable
 		seedSessions(t, db, readSession("agent-1", model.StateIdle, "%1"))
-		userProcessesAs(t, shell)
-		if got := agentAncestor(); !strings.Contains(got, "tmux cannot list the panes of the live agents") {
-			t.Errorf("agentAncestor = %q, want the refusal", got)
-		}
-	})
-	t.Run("another server", func(t *testing.T) {
+	}
+	otherServer := func(t *testing.T) {
+		t.Helper()
 		_, fake := readHome(t, []string{"%1"}, readSession("agent-1", model.StateIdle, "%1"))
 		fake.Panes = []tmux.Pane{{ID: "%7", PID: 700, ServerStart: at(8, 0)}} // not the agent's pane
+	}
+	for _, c := range []struct {
+		name  string
+		world func(*testing.T)
+		table map[int]userProc
+		want  string // "" is the user
+	}{
+		{"tmux unreachable, the user's terminal", unreachable, shell, ""},
+		{"tmux unreachable, under Claude Code", unreachable, underClaude, "runs under Claude Code (process 600)"},
+		{"another server, the user's terminal", otherServer, shell, ""},
+		{"another server, under Claude Code", otherServer, underClaude, "runs under Claude Code (process 600)"},
+		{"process table unreadable", unreachable, map[int]userProc{me: {610, "sh", ""}}, "cannot be read"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.world(t)
+			userProcessesAs(t, c.table)
+			if got := agentAncestor(); (c.want == "" && got != "") || !strings.Contains(got, c.want) {
+				t.Errorf("agentAncestor = %q, want %q", got, c.want)
+			}
+		})
+	}
+	t.Run("the skip is logged", func(t *testing.T) {
+		unreachable(t)
 		userProcessesAs(t, shell)
-		if got := agentAncestor(); !strings.Contains(got, "shows none of the live agents' panes") {
-			t.Errorf("agentAncestor = %q, want the refusal", got)
+		if got := agentAncestor(); got != "" {
+			t.Fatalf("agentAncestor = %q, want none", got)
+		}
+		if log := strings.Join(readLog(t), "\n"); !strings.Contains(log, "level=INFO") || !strings.Contains(log, "agent pane check skipped") {
+			t.Errorf("log = %q, want one INFO line saying the pane check was skipped", log)
 		}
 	})
 	t.Run("store unreadable", func(t *testing.T) {
@@ -835,6 +861,19 @@ func TestUserAncestryPaneCheckFailsClosed(t *testing.T) {
 			t.Errorf("agentAncestor = %q, want none", got)
 		}
 	})
+}
+
+// The user at a terminal decides while tmux is down and the asking session
+// is still recorded live (Ruling 123: no lockout).
+func TestDecideWhileTmuxIsDown(t *testing.T) {
+	db, _ := decideHome(t, decideOpenSpecs()...)
+	useDownTmux(t)
+	if _, _, err := decideRun(t, strings.NewReader(""), "D-1", "--option", "A", "--reason", "r"); err != nil {
+		t.Fatalf("decide with tmux down = %v, want the answer stored", err)
+	}
+	if d := decisionsGet(t, db, "D-1"); d.Status != model.StatusAnswered {
+		t.Errorf("D-1 = %s, want answered", d.Status)
+	}
 }
 
 // The review's reproduction: an agent wraps its send in a pseudo-terminal
