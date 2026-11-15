@@ -1,0 +1,9 @@
+{
+  "currentProject": {
+    "branches": [
+      {"branch": "main", "spend": {"requests": 3, "cost": {"input": 1, "output": 1, "cacheWrite": 1, "cacheRead": 1}}},
+      {"branch": "curia/T-1-fix", "spend": {"requests": 9, "lastActive": "2026-11-15T10:00:00Z", "cost": {"input": 0.5, "output": 1.25, "cacheWrite": 2, "cacheRead": 1.28}}},
+      {"branch": "curia/T-2-other", "spend": {"requests": 1, "cost": {"input": 0.1, "output": 0.1, "cacheWrite": 0.1, "cacheRead": 0.1}}}
+    ]
+  }
+}

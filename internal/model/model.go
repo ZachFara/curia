@@ -56,6 +56,9 @@ type Session struct {
 	CostKnown       bool
 	CacheExpiresAt  time.Time
 	CacheRebuildUSD float64
+	// CacheRecacheTokens is what a cold cache would have to re-read, as a
+	// count of tokens (Curia keeps no price table, Ruling P5-R2); 0 unknown.
+	CacheRecacheTokens int64
 }
 
 // Team roles.
