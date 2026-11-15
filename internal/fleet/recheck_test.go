@@ -41,6 +41,10 @@ func TestMarkStaleRechecksTheStoredRow(t *testing.T) {
 			s.State = model.StateEnded
 			return s
 		}, false},
+		{"recorded on another server", nil, func(s model.Session) model.Session {
+			s.Socket = "/tmp/a"
+			return s
+		}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,8 +60,47 @@ func TestMarkStaleRechecksTheStoredRow(t *testing.T) {
 	}
 }
 
+// TestReconcileRecheckHonoursSocket: the row gains a server's socket between
+// the list pass and the update, as the first event of a session on another
+// server would write it. Another server's socket keeps it from being marked
+// stale; this server's own socket does not.
+func TestReconcileRecheckHonoursSocket(t *testing.T) {
+	t0 := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	serverStart := t0.Add(-30 * time.Minute)
+	for _, tc := range []struct {
+		name, listedSocket, storedSocket string
+		live                             []string
+		wantStale                        bool
+	}{
+		{"unknown, then another server", "", "/tmp/a", nil, false},
+		{"unknown, then another server reusing the pane id", "", "/tmp/a", []string{"%1"}, false},
+		{"unknown, then this server", "", markStaleSocket, nil, true},
+		{"this server throughout", markStaleSocket, markStaleSocket, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listed := model.Session{
+				ID: "a", Agent: "claude", State: model.StateIdle, Pane: "%1", Socket: tc.listedSocket,
+				StartedAt: t0.Add(-2 * time.Hour), UpdatedAt: t0.Add(-time.Hour),
+			}
+			stored := listed
+			stored.Socket = tc.storedSocket
+			want := stored
+			if tc.wantStale {
+				want.State, want.UpdatedAt = model.StateStale, t0
+			}
+			if got := markStaleAfter(t, listed, stored, tc.live, serverStart, t0); got != want {
+				t.Errorf("got  %+v\nwant %+v", got, want)
+			}
+		})
+	}
+}
+
+// markStaleSocket is the socket of the server markStaleAfter's panes are on.
+const markStaleSocket = "/tmp/b"
+
 // markStaleAfter stores stored, runs markStale for listed against a server
-// started at serverStart with the live panes plus %2, and returns the row.
+// (socket markStaleSocket) started at serverStart with the live panes plus
+// %2, and returns the row.
 func markStaleAfter(t *testing.T, listed, stored model.Session, live []string, serverStart, now time.Time) model.Session {
 	t.Helper()
 	ctx := context.Background()
@@ -71,7 +114,7 @@ func markStaleAfter(t *testing.T, listed, stored model.Session, live []string, s
 	}
 	var panes []tmux.Pane
 	for _, id := range append(live, "%2") {
-		panes = append(panes, tmux.Pane{ID: id, ServerStart: serverStart})
+		panes = append(panes, tmux.Pane{ID: id, ServerStart: serverStart, Socket: markStaleSocket})
 	}
 	if _, err = markStale(ctx, st, listed, newServer(panes), now); err != nil {
 		t.Fatal(err)

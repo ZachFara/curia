@@ -425,7 +425,7 @@ func TestTmuxFenceAddedOnceAndRemoved(t *testing.T) {
 		`if-shell '[ -n "$TMUX" ] && tmux show -g status >/dev/null 2>&1 && ! tmux list-keys -T prefix N 2>/dev/null | grep -qv curia' ` +
 			`"bind N run-shell '` + testBin + ` next'"` + "\n",
 		`set-hook -g pane-focus-in "run-shell -b '` + testBin + ` seen #{pane_id}'"` + "\n",
-		"set -g @curia_marker_format '#{?#{==:#{@curia_marker},red},#[fg=red] ●,}'\n",
+		"set -g @curia_marker_format '#{?#{==:#{@curia_marker},red},#[fg=red] ●,#{?#{==:#{@curia_marker},blue},#[fg=blue] ●,}}'\n",
 		`if -F '#{m:*@curia_marker*,#{window-status-current-format}}' '' "set -ag window-status-current-format '#{E:@curia_marker_format}'"` + "\n",
 	} {
 		if !strings.Contains(snip, want) {
