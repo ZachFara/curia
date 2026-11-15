@@ -50,11 +50,17 @@ func teamsSession(id, pane string) model.Session {
 }
 
 // teamsCapturedSessions are the lead and both teammates of the captured
-// config, and a solo session.
+// config, in one tmux window (teammates are splits of the lead's window,
+// probe P5), and a solo session in another window.
 func teamsCapturedSessions() []model.Session {
-	lead := teamsSession(teamsCapturedLead, "%16")
-	lead.TaskID = "T-5"
-	return []model.Session{lead, teamsSession("alpha-s", "%17"), teamsSession("beta-s", "%18"), teamsSession("solo", "%19")}
+	out := []model.Session{teamsSession(teamsCapturedLead, "%16"), teamsSession("alpha-s", "%17"), teamsSession("beta-s", "%18")}
+	for i := range out {
+		out[i].TmuxWindow = "@4"
+	}
+	out[0].TaskID = "T-5"
+	solo := teamsSession("solo", "%19")
+	solo.TmuxWindow = "@5"
+	return append(out, solo)
 }
 
 // teamsCaptured is the captured config's content.
@@ -128,6 +134,21 @@ func TestRefreshTeamsAssignsFromCapturedConfig(t *testing.T) {
 	}
 	if log := readLog(t); len(log) != 0 {
 		t.Errorf("log = %q, want nothing", log)
+	}
+}
+
+func TestRefreshTeamsRefusesMemberOfAnotherWindowOrTask(t *testing.T) {
+	sessions := teamsCapturedSessions()
+	sessions[1].TmuxWindow = "@9"          // alpha-s: the config names its pane, but it is elsewhere
+	sessions[2].TaskID = "T-3"             // beta-s: in the lead's window, on another task
+	st, teams := teamsHome(t, sessions...) // a config file alone must not make them teammates
+	teamsWriteCaptured(t, teams)
+	teamsRefresh(t, st)
+	teamsAssert(t, st, teamsCapturedLead, [3]string{teamsCapturedDir, model.RoleLead, "team-lead"})
+	teamsAssert(t, st, "alpha-s", [3]string{})
+	teamsAssert(t, st, "beta-s", [3]string{})
+	if s, _, _ := st.GetSession(context.Background(), "beta-s"); s.TaskID != "T-3" {
+		t.Errorf("beta-s task = %q, want its own T-3", s.TaskID)
 	}
 }
 

@@ -49,11 +49,11 @@ func lifecycleWithLead(t *testing.T) *spawnFixture {
 }
 
 // lifecycleSession links session id, in pane and state, to T-1, started at
-// the launch and updated at updated.
+// the launch and updated at updated, in T-1's window (@1).
 func lifecycleSession(f *spawnFixture, id, pane string, state model.State, updated time.Time) {
 	f.t.Helper()
 	s := model.Session{
-		ID: id, Agent: "claude", State: state, Pane: pane, TaskID: "T-1",
+		ID: id, Agent: "claude", State: state, Pane: pane, TaskID: "T-1", TmuxWindow: "@1",
 		StartedAt: f.start, UpdatedAt: updated,
 	}
 	if err := f.st.UpsertSession(context.Background(), s); err != nil {

@@ -93,8 +93,10 @@ func TestParseHostile(t *testing.T) {
 	}
 }
 
+// sess is session id in pane, in tmux window @1 (where a lead's teammates
+// are: splits of its window), with no task.
 func sess(id, pane string, st model.State) model.Session {
-	return model.Session{ID: id, Pane: pane, State: st}
+	return model.Session{ID: id, Pane: pane, State: st, TmuxWindow: "@1"}
 }
 
 func tm(id, lead string, ms ...Member) Team {
@@ -160,5 +162,54 @@ func TestAssignFirstTeamWins(t *testing.T) {
 	got := Assign([]model.Session{sess("l1", "%1", model.StateIdle), sess("l2", "%3", model.StateIdle), sess("w", "%2", model.StateIdle)}, []Team{a, b})
 	if got["w"] != (Membership{"a", model.RoleTeammate, "aw"}) || got["l2"].TeamID != "b" {
 		t.Errorf("got = %+v", got)
+	}
+}
+
+func TestAssignRefusesOtherWindow(t *testing.T) {
+	team := tm("t", "L", Member{Name: "boss", AgentType: LeadAgentType, Pane: LeaderPane},
+		Member{Name: "w", Pane: "%2"}, Member{Name: "x", SessionID: "X"})
+	other := sess("B", "%2", model.StateIdle)
+	other.TmuxWindow = "@9"
+	byID := sess("X", "%5", model.StateIdle)
+	byID.TmuxWindow = "@9"
+	noWindow := sess("L", "%1", model.StateIdle)
+	got := Assign([]model.Session{sess("L", "%1", model.StateIdle), other, byID}, []Team{team})
+	if got["L"].Role != model.RoleLead || len(got) != 1 {
+		t.Errorf("got = %+v, want the lead alone: B and X are in another window", got)
+	}
+	// a lead outside tmux has no window, so it gets no teammates by pane
+	noWindow.TmuxWindow = ""
+	mate := sess("M", "%2", model.StateIdle)
+	mate.TmuxWindow = ""
+	if got = Assign([]model.Session{noWindow, mate}, []Team{team}); len(got) != 1 || got["M"].Role != "" {
+		t.Errorf("got = %+v, want no teammate of a lead with no window", got)
+	}
+	// in the lead's window the same member is a teammate
+	other.TmuxWindow = "@1"
+	if got = Assign([]model.Session{sess("L", "%1", model.StateIdle), other}, []Team{team}); got["B"].Role != model.RoleTeammate {
+		t.Errorf("got = %+v, want B a teammate in the lead's window", got)
+	}
+}
+
+func TestAssignRefusesOtherTask(t *testing.T) {
+	team := tm("t", "L", Member{Name: "boss", AgentType: LeadAgentType, Pane: LeaderPane},
+		Member{Name: "w", Pane: "%2"}, Member{Name: "v", Pane: "%3"})
+	lead := sess("L", "%1", model.StateIdle)
+	lead.TaskID = "T-1"
+	theirs := sess("B", "%2", model.StateIdle)
+	theirs.TaskID = "T-3"
+	same := sess("C", "%3", model.StateIdle)
+	same.TaskID = "T-1"
+	got := Assign([]model.Session{lead, theirs, same}, []Team{team})
+	if _, ok := got["B"]; ok {
+		t.Errorf("B (task T-3) = %+v, want no membership in T-1's lead's team", got["B"])
+	}
+	if got["C"].Role != model.RoleTeammate || got["L"].Role != model.RoleLead {
+		t.Errorf("got = %+v, want L the lead and C (same task) its teammate", got)
+	}
+	// a session with no task can be the teammate of a lead with one
+	none := sess("D", "%2", model.StateIdle)
+	if got = Assign([]model.Session{lead, none}, []Team{team}); got["D"].Role != model.RoleTeammate {
+		t.Errorf("got = %+v, want D (no task) a teammate", got)
 	}
 }

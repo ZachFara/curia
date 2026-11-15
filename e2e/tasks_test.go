@@ -448,6 +448,10 @@ func (r *tasksRun) routedByModel(t *testing.T) {
 // only the lead raises a ticket.
 func (r *tasksRun) team(t *testing.T) {
 	t.Helper()
+	// The teammate's pane is a split of the lead's window, as Claude Code
+	// makes it (probe P5): a team config names a session in another window,
+	// or on another task, nobody's teammate (Ruling 115).
+	r.srv.mustRun(t, "join-pane", "-d", "-s", "%0", "-t", r.leadPane)
 	r.quietHook(t, "SessionStart", "%0")
 	dir := filepath.Join(r.tmp, "claude", "teams", tasksTeam)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -504,7 +508,7 @@ func (r *tasksRun) pause(t *testing.T) {
 	out := r.h.mustRun(t, "pause", "T-1")
 	for _, want := range []string{
 		"Closed pane api-server:T-1 (" + r.leadPane + ") of session 00000001\n",
-		"Closed pane curia:", ") of session 88888888\n",
+		"Closed pane api-server:T-1 (%0) of session 88888888\n",
 		`"curia: WIP T-1 (paused)" on ` + tasksBranch + "\n",
 		"Removed worktree " + r.worktree + " (branch " + tasksBranch + " kept)\n",
 		"Paused T-1: curia resume T-1 brings it back (it continues session 00000001)\n",
