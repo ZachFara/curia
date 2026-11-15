@@ -1610,3 +1610,201 @@ func TestCacheColumnsSurviveSessionUpsert(t *testing.T) {
 		t.Errorf("state = %s, want waiting", got)
 	}
 }
+
+func exportIDs(t *testing.T, s *store.Store, all bool, limit int) []string {
+	t.Helper()
+	got, err := s.ExportQueue(context.Background(), all, limit)
+	if err != nil {
+		t.Fatalf("ExportQueue(%v, %d): %v", all, limit, err)
+	}
+	ids := make([]string, 0, len(got))
+	for _, d := range got {
+		ids = append(ids, d.ID)
+	}
+	return ids
+}
+
+// wantDue requires ExportQueue(all, limit) to return exactly want.
+func wantDue(t *testing.T, s *store.Store, all bool, limit int, what string, want ...string) {
+	t.Helper()
+	if got := exportIDs(t, s, all, limit); !slices.Equal(got, want) {
+		t.Errorf("%s = %v, want %v", what, got, want)
+	}
+}
+
+func mark(t *testing.T, s *store.Store, id string, at time.Time) {
+	t.Helper()
+	if err := s.MarkExported(context.Background(), id, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExportQueueDue(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	now := t0.Add(time.Hour)
+	var ids []string
+	for i := range 8 {
+		mode := model.ModeBlocking
+		if i == 2 {
+			mode = model.ModeAssume
+		}
+		ids = append(ids, create(t, s, ticket(t, fmt.Sprintf("Export question %d?", i), mode, "s1", t0)).ID)
+	}
+	withdrawn, answered, marked, superseded, plain := ids[1], ids[3], ids[4], ids[5], ids[6]
+	if _, err := s.WithdrawDecision(ctx, withdrawn, "s1", "No longer needed.", "", now); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.ExpireDecisions(ctx, t0.Add(assumeExpiry)); err != nil || n != 1 {
+		t.Fatalf("ExpireDecisions = %d, %v", n, err)
+	}
+	for _, id := range []string{answered, marked, superseded, plain} {
+		answer(t, s, id, keyA, now)
+	}
+	rule := createRule(t, s, globalRule("Never export the kumquat secrets."), now)
+
+	// Open, withdrawn and expired tickets are never due.
+	wantDue(t, s, false, 0, "due", answered, marked, superseded, plain, rule.ID)
+	mark(t, s, marked, now.Add(time.Minute))
+	mark(t, s, superseded, now.Add(time.Minute))
+	wantDue(t, s, false, 0, "due after marking", answered, plain, rule.ID)
+	if _, err := s.EditDecision(ctx, superseded, model.DecisionEdit{Supersede: true}, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	wantDue(t, s, false, 0, "due after superseding an exported one", answered, superseded, plain, rule.ID)
+	mark(t, s, superseded, now.Add(2*time.Hour)) // exported after the supersession
+	wantDue(t, s, false, 0, "due once exported after the supersession", answered, plain, rule.ID)
+	wantDue(t, s, true, 0, "all", answered, marked, superseded, plain, rule.ID)
+	wantDue(t, s, true, 2, "all, limit 2", answered, marked)
+	wantDue(t, s, false, 2, "due, limit 2", answered, plain)
+}
+
+func TestExportQueueRescopeIsDueAgain(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	now := t0.Add(time.Hour)
+	d := create(t, s, ticket(t, "Rescoped after export?", model.ModeBlocking, "s1", t0))
+	answer(t, s, d.ID, keyA, now)
+	if err := s.MarkExported(ctx, d.ID, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	// Editing nothing that changes the note leaves it exported.
+	if _, err := s.EditDecision(ctx, d.ID, model.DecisionEdit{Scope: d.Scope}, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := exportIDs(t, s, false, 0); len(got) != 0 {
+		t.Fatalf("same scope made it due: %v", got)
+	}
+	if _, err := s.EditDecision(ctx, d.ID, model.DecisionEdit{Scope: model.ScopeGlobal}, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := exportIDs(t, s, false, 0); !slices.Equal(got, []string{d.ID}) {
+		t.Errorf("after a rescope = %v, want [%s]", got, d.ID)
+	}
+}
+
+func TestMarkExported(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 14, 8, 0, 0, 987_654_321, time.UTC)
+	d := create(t, s, ticket(t, "Mark me?", model.ModeBlocking, "s1", t0))
+	answer(t, s, d.ID, keyA, t0.Add(time.Hour))
+	if got := getDecision(t, s, d.ID); !got.ExportedAt.IsZero() {
+		t.Fatalf("ExportedAt before = %v, want zero", got.ExportedAt)
+	}
+	if err := s.MarkExported(ctx, d.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	if got := getDecision(t, s, d.ID); !got.ExportedAt.Equal(at) {
+		t.Errorf("ExportedAt = %v, want %v", got.ExportedAt, at)
+	}
+	listed, err := s.ListDecisions(ctx, store.DecisionFilter{})
+	if err != nil || len(listed) != 1 || !listed[0].ExportedAt.Equal(at) {
+		t.Errorf("ListDecisions carries ExportedAt: %v, %v", listed, err)
+	}
+	if err := s.MarkExported(ctx, "D-99", at); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("MarkExported(unknown) = %v, want ErrNotFound", err)
+	}
+	if err := ftsIntegrity(rawDB(t, path)); err != nil {
+		t.Errorf("integrity-check: %v", err)
+	}
+	// An older binary's answer statement never names exported_at.
+	if got := getDecision(t, s, d.ID); got.Status != model.StatusAnswered {
+		t.Errorf("status = %s", got.Status)
+	}
+}
+
+func TestMarkExportedRacesAnswer(t *testing.T) {
+	path := dbPath(t)
+	hs := handles(t, path, 2)
+	ctx := context.Background()
+	now := t0.Add(time.Hour)
+	const rounds = 20
+	for i := range rounds {
+		d := create(t, hs[0], ticket(t, fmt.Sprintf("Raced export %d?", i), model.ModeBlocking, "s1", t0))
+		answer(t, hs[0], d.ID, keyA, now)
+		at := now.Add(time.Minute)
+		sup := now.Add(2 * time.Minute)
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		start := make(chan struct{})
+		wg.Go(func() {
+			<-start
+			errs[0] = retryBusy(func() error { return hs[0].MarkExported(ctx, d.ID, at) }, busyAtBegin)
+		})
+		wg.Go(func() {
+			<-start
+			errs[1] = retryBusy(func() error {
+				_, err := hs[1].EditDecision(ctx, d.ID, model.DecisionEdit{Supersede: true}, sup)
+				return err
+			}, busyAtBegin)
+		})
+		close(start)
+		wg.Wait()
+		if errs[0] != nil || errs[1] != nil {
+			t.Fatalf("round %d: MarkExported %v, EditDecision %v", i, errs[0], errs[1])
+		}
+		got := getDecision(t, hs[0], d.ID)
+		if !got.ExportedAt.Equal(at) || !got.SupersededAt.Equal(sup) {
+			t.Fatalf("round %d: exported %v superseded %v, want both applied (%v, %v)", i, got.ExportedAt, got.SupersededAt, at, sup)
+		}
+	}
+	if err := ftsIntegrity(rawDB(t, path)); err != nil {
+		t.Errorf("integrity-check: %v", err)
+	}
+}
+
+func TestExportMarkSurvivesOlderWrites(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	now := t0.Add(time.Hour)
+	at := now.Add(time.Minute)
+	d := create(t, s, ticket(t, "Older binary writes?", model.ModeBlocking, "s1", t0))
+	answer(t, s, d.ID, keyA, now)
+	if err := s.MarkExported(context.Background(), d.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	// The statements of Plans 2 to 4 never name exported_at.
+	rawExec(t, path, `UPDATE decisions SET delivery = 'delivered', delivered_via = 'stop_hook', delivered_at = ?,
+  confirmed_at = ?, scope = scope, superseded_at = NULL, superseded_by = '' WHERE id = ?`,
+		"2026-11-12T11:00:00.000000000Z", "2026-11-12T11:00:00.000000000Z", d.ID)
+	if got := getDecision(t, s, d.ID); !got.ExportedAt.Equal(at) {
+		t.Errorf("ExportedAt after an older binary's UPDATE = %v, want %v", got.ExportedAt, at)
+	}
+	if got := exportIDs(t, s, false, 0); len(got) != 0 {
+		t.Errorf("due after an older write = %v, want none", got)
+	}
+}
+
+func TestExportQueuePlan(t *testing.T) {
+	path := dbPath(t)
+	open(t, path)
+	db := rawDB(t, path)
+	plan := queryPlan(t, db, `SELECT n FROM decisions d WHERE d.status IN ('answered','confirmed','overridden')
+AND (0 OR d.exported_at IS NULL OR d.exported_at < d.answered_at OR d.exported_at < d.superseded_at) ORDER BY d.n LIMIT 500`)
+	t.Log(plan)
+	if !strings.Contains(plan, "USING INDEX decisions_status_created") || strings.Contains(plan, "SCAN") {
+		t.Errorf("ExportQueue's query does not use the status index:\n%s", plan)
+	}
+}
