@@ -9,6 +9,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -75,12 +79,14 @@ const userOnlyAnnotation = "curia-user-only"
 // userOnlyMark is the Annotations value that marks a command user-only.
 func userOnlyMark() map[string]string { return map[string]string{userOnlyAnnotation: "yes"} }
 
-// userOnly is the one guard of the commands only the user may run (Ruling
-// 112): it refuses when the caller looks like an agent (agentSign) or has
-// no controlling terminal (userAtTerminal), saying which, as "curia
-// <command> cannot run …: only the user may <what>". An agent's tool shell
-// has no controlling terminal, so clearing its variables is not enough; a
-// script or cron job cannot act as the user either.
+// userOnly is the one guard of the commands only the user may run (Rulings
+// 112 and 119): it refuses when the caller looks like an agent (agentSign),
+// has no controlling terminal, or descends from an agent (agentAncestor),
+// saying which, as "curia <command> cannot run …: only the user may
+// <what>". An agent's tool shell has no controlling terminal, so clearing
+// its variables is not enough, and a pseudo-terminal of its own (script,
+// expect) does not change whose child it is; a script or cron job cannot
+// act as the user either.
 func userOnly(command, what string) error {
 	if sign := agentSign(); sign != "" {
 		return fmt.Errorf("curia %s cannot run inside an agent session (%s): only the user may %s", command, sign, what)
@@ -89,7 +95,105 @@ func userOnly(command, what string) error {
 		return fmt.Errorf("curia %s cannot run without a terminal (no controlling terminal: %s): only the user may %s, at a terminal",
 			command, sanitize.Line(err.Error(), 120), what)
 	}
+	if why := agentAncestor(); why != "" {
+		return fmt.Errorf("curia %s cannot run inside an agent session (%s): only the user may %s", command, why, what)
+	}
 	return nil
+}
+
+// userAncestryLimit bounds the walk up the parent processes.
+const userAncestryLimit = 64
+
+// userProcess reads one process's parent pid and command name (ps's comm:
+// the executable, as a path or a base name). Tests replace it with a
+// process table; the test default fails a test that has not set one.
+var userProcess = psProcess
+
+// psProcess is userProcess from `ps -o ppid=,comm= -p <pid>`, run by
+// absolute path, with fixed arguments and a short timeout.
+func psProcess(pid int) (int, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), subprocessTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/bin/ps", "-o", "ppid=,comm=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0, "", fmt.Errorf("ps -p %d: %w", pid, err)
+	}
+	ppid, comm, ok := strings.Cut(strings.TrimSpace(string(out)), " ")
+	n, err := strconv.Atoi(ppid)
+	if !ok || err != nil || n < 0 {
+		return 0, "", fmt.Errorf("ps -p %d printed %q", pid, sanitize.Line(string(out), 80))
+	}
+	return n, strings.TrimSpace(comm), nil
+}
+
+// agentAncestor says why the caller descends from an agent, or "" when it
+// does not (Ruling 119): walking from the parent to pid 1, a process is
+// Claude Code (an executable named claude) or the first process of the
+// pane of a live tracked session (agentPanePIDs). It fails closed: an
+// ancestry it cannot read, or one deeper than userAncestryLimit, is an
+// agent's. Curia records no process id for a session, so only these two
+// are checked.
+func agentAncestor() string {
+	panes := agentPanePIDs()
+	pid := os.Getppid()
+	for range userAncestryLimit {
+		if pid <= 1 {
+			return ""
+		}
+		ppid, comm, err := userProcess(pid)
+		if err != nil {
+			return "its parent processes cannot be read: " + sanitize.Line(err.Error(), 120)
+		}
+		switch {
+		case filepath.Base(comm) == "claude":
+			return fmt.Sprintf("it runs under Claude Code (process %d)", pid)
+		case panes[pid] != "":
+			return fmt.Sprintf("it runs under the pane of agent session %s (process %d)", panes[pid], pid)
+		}
+		pid = ppid
+	}
+	return fmt.Sprintf("its parent processes are more than %d deep", userAncestryLimit)
+}
+
+// agentPanePIDs maps the pid of the first process of each pane holding a
+// live tracked session (neither ended nor stale) to that session's short
+// id. With no store yet, or tmux unreachable, it is empty: the Claude Code
+// check still applies.
+func agentPanePIDs() map[int]string {
+	out := map[int]string{}
+	cfg, err := loadConfig()
+	if err != nil {
+		return out
+	}
+	if _, err = os.Stat(cfg.DBPath); err != nil {
+		return out
+	}
+	st, err := openStore(cfg)
+	if err != nil {
+		return out
+	}
+	defer func() { _ = st.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*subprocessTimeout)
+	defer cancel()
+	sessions, err := st.ListSessions(ctx, store.ListFilter{})
+	if err != nil {
+		return out
+	}
+	panes, err := newTmuxClient().ListPanes(ctx)
+	if err != nil {
+		return out
+	}
+	for _, s := range sessions {
+		if s.Pane == "" || s.State == model.StateEnded || s.State == model.StateStale {
+			continue
+		}
+		for _, p := range panes {
+			if p.ID == s.Pane && p.PID > 1 {
+				out[p.PID] = spawnShortID(s.ID)
+			}
+		}
+	}
+	return out
 }
 
 // userOnlyRunE is run behind userOnly, as a cobra RunE.
@@ -173,12 +277,10 @@ var userTerminalOpen = func() error {
 }
 
 // userAtTerminal reports whether the caller is the user at a terminal
-// (Ruling 112): nothing marks it an agent (agentSign) and a controlling
-// terminal can be opened. An agent's tool shell has no controlling
-// terminal; a script, a cron job or a command with its terminal taken away
-// is not the user either. A tmux popup has one.
+// (Rulings 112 and 119): userOnly would let it run. A tmux popup or
+// run-shell job descends from the tmux server, not from an agent.
 func userAtTerminal() bool {
-	return agentSign() == "" && userTerminalOpen() == nil
+	return userOnly("", "") == nil
 }
 
 // decisionsStatuses maps a --status value to the statuses it lists; nil

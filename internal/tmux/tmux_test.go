@@ -15,16 +15,16 @@ import (
 )
 
 func TestParseListPanes(t *testing.T) {
-	out := "%0\tmain\t@0\t1794437573\tzsh\n%1\tmain\t@1\t1794437573\tmy long window\n%2\twork\t@2\t1794437573\ta\tb\n"
+	out := "%0\tmain\t@0\t1794437573\t401\tzsh\n%1\tmain\t@1\t1794437573\t402\tmy long window\n%2\twork\t@2\t1794437573\t403\ta\tb\n"
 	got, err := parsePanes(out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	start := time.Unix(1794437573, 0)
 	want := []Pane{
-		{ID: "%0", Session: "main", WindowID: "@0", ServerStart: start, WindowName: "zsh"},
-		{ID: "%1", Session: "main", WindowID: "@1", ServerStart: start, WindowName: "my long window"},
-		{ID: "%2", Session: "work", WindowID: "@2", ServerStart: start, WindowName: "a\tb"},
+		{ID: "%0", Session: "main", WindowID: "@0", ServerStart: start, PID: 401, WindowName: "zsh"},
+		{ID: "%1", Session: "main", WindowID: "@1", ServerStart: start, PID: 402, WindowName: "my long window"},
+		{ID: "%2", Session: "work", WindowID: "@2", ServerStart: start, PID: 403, WindowName: "a\tb"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v want %+v", got, want)
@@ -39,7 +39,7 @@ func TestParsePanesMalformed(t *testing.T) {
 		t.Fatal("want error for empty pane id")
 	}
 	// The old four-field format, or a start time that is not unix seconds.
-	for _, line := range []string{"%0\tmain\t@0\tzsh\n", "%0\tmain\t@0\tsoon\tzsh\n", "%0\tmain\t@0\t\tzsh\n"} {
+	for _, line := range []string{"%0\tmain\t@0\tzsh\n", "%0\tmain\t@0\tsoon\t1\tzsh\n", "%0\tmain\t@0\t\t1\tzsh\n", "%0\tmain\t@0\t1794437573\tzsh\n"} {
 		if _, err := parsePanes(line); err == nil {
 			t.Errorf("parsePanes(%q): want error for a bad start time", line)
 		}
@@ -1037,7 +1037,7 @@ func TestNewWindowAcceptsLimits(t *testing.T) {
 		w.Command = append(w.Command, strings.Repeat("é", 2048))
 	}
 	c, r := recordingClient()
-	r.out = "%3\t" + w.Session + "\t@3\t1794437573\t" + w.Name + "\n"
+	r.out = "%3\t" + w.Session + "\t@3\t1794437573\t77\t" + w.Name + "\n"
 	if _, err := c.NewWindow(context.Background(), w); err != nil {
 		t.Fatalf("NewWindow at the limits: %v", err)
 	}
@@ -1050,7 +1050,7 @@ func TestNewWindowAcceptsLimits(t *testing.T) {
 	for _, one := range []string{"true", "/usr/bin/true", "a-b_c.d@e:f+g"} {
 		w.Command = []string{one}
 		c, r = recordingClient()
-		r.out = "%3\t" + w.Session + "\t@3\t1794437573\t" + w.Name + "\n"
+		r.out = "%3\t" + w.Session + "\t@3\t1794437573\t77\t" + w.Name + "\n"
 		if _, err := c.NewWindow(context.Background(), w); err != nil || len(r.runs) != 2 {
 			t.Errorf("NewWindow with command [%q] = %v after %d runs, want it accepted", one, err, len(r.runs))
 		}
@@ -1110,12 +1110,12 @@ func TestNewWindowInvocations(t *testing.T) {
 		{name: "new-session fails otherwise", errs: []error{absent, other}, want: [][]string{has, newSession}},
 		{name: "new-window fails", errs: []error{nil, other}, want: [][]string{has, newWindow}},
 	} {
-		r := &windowRunner{errs: tc.errs, out: "%7\tapi\t@4\t1794437573\tT-1\n"}
+		r := &windowRunner{errs: tc.errs, out: "%7\tapi\t@4\t1794437573\t77\tT-1\n"}
 		p, err := (&execClient{runner: r.run}).NewWindow(context.Background(), w)
 		if !reflect.DeepEqual(r.runs, tc.want) {
 			t.Errorf("%s: runs = %q\nwant %q", tc.name, r.runs, tc.want)
 		}
-		if tc.ok && (err != nil || p != (Pane{ID: "%7", Session: "api", WindowID: "@4", ServerStart: time.Unix(1794437573, 0), WindowName: "T-1"})) {
+		if tc.ok && (err != nil || p != (Pane{ID: "%7", Session: "api", WindowID: "@4", ServerStart: time.Unix(1794437573, 0), PID: 77, WindowName: "T-1"})) {
 			t.Errorf("%s: NewWindow = %+v, %v", tc.name, p, err)
 		}
 		if !tc.ok && err == nil {
@@ -1128,7 +1128,7 @@ func TestNewWindowInvocations(t *testing.T) {
 		}
 	}
 	// The printed line must be one pane.
-	for _, out := range []string{"", "\t\t\t\t\n", "%7\tapi\t@4\t1794437573\tT-1\n%8\tapi\t@5\t1794437573\tT-1\n"} {
+	for _, out := range []string{"", "\t\t\t\t\n", "%7\tapi\t@4\t1794437573\t77\tT-1\n%8\tapi\t@5\t1794437573\t78\tT-1\n"} {
 		r := &windowRunner{out: out}
 		if p, err := (&execClient{runner: r.run}).NewWindow(context.Background(), w); err == nil {
 			t.Errorf("printed %q: NewWindow = %+v, want an error", out, p)

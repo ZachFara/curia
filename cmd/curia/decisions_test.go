@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -497,10 +498,21 @@ func userTerminalUnset() error {
 	panic("userTerminalOpen called in a test that did not set it (userTerminalAs)")
 }
 
-func init() { userTerminalOpen = userTerminalUnset }
+// userProcessUnset is userProcess under test: a test that reaches the
+// ancestry walk without a process table of its own fails (the real one
+// would read the test's own parents, which may be an agent's).
+func userProcessUnset(int) (int, string, error) {
+	panic("userProcess called in a test that did not set a process table (userTerminalAs or userProcessesAs)")
+}
+
+func init() {
+	userTerminalOpen = userTerminalUnset
+	userProcess = userProcessUnset
+}
 
 // userTerminalAs makes the controlling terminal openable (at) or not for
-// the test.
+// the test; at a terminal the caller's parents are a login shell of a
+// terminal application, as the user's are.
 func userTerminalAs(t *testing.T, at bool) {
 	t.Helper()
 	userTerminalOpen = func() error {
@@ -509,7 +521,34 @@ func userTerminalAs(t *testing.T, at bool) {
 		}
 		return errors.New("open /dev/tty: device not configured")
 	}
+	userProcessesAs(t, userShellTable())
 	t.Cleanup(func() { userTerminalOpen = userTerminalUnset })
+}
+
+// userProc is one row of a test's process table.
+type userProc struct {
+	ppid int
+	comm string
+}
+
+// userShellTable is the user's own terminal: curia's parent is a login
+// shell under a terminal application under launchd.
+func userShellTable() map[int]userProc {
+	return map[int]userProc{os.Getppid(): {9001, "-zsh"}, 9001: {9002, "login"}, 9002: {1, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"}}
+}
+
+// userProcessesAs makes table the process table for the test: a pid not
+// in it cannot be read.
+func userProcessesAs(t *testing.T, table map[int]userProc) {
+	t.Helper()
+	userProcess = func(pid int) (int, string, error) {
+		p, ok := table[pid]
+		if !ok {
+			return 0, "", fmt.Errorf("ps -p %d: exit status 1", pid)
+		}
+		return p.ppid, p.comm, nil
+	}
+	t.Cleanup(func() { userProcess = userProcessUnset })
 }
 
 // TestUserOnlyRefusesBySessionEnv: the agent guard also refuses with
@@ -700,6 +739,83 @@ func TestDecisionsLsMarksAnswersNobodyCanCollect(t *testing.T) {
 		want := map[bool]string{true: "D1 Q1", false: "D1"}[state == model.StateIdle]
 		if got, err := runRoot(t, "status"); err != nil || got != want {
 			t.Errorf("session %q: status = %q, %v; want %q", state, got, err, want)
+		}
+	}
+}
+
+// The ancestry walk (Ruling 119): a caller under Claude Code, however many
+// processes between, or under the first process of a live agent's pane, is
+// not the user; an unreadable or endless ancestry fails closed.
+func TestUserAncestry(t *testing.T) {
+	me := os.Getppid()
+	claude := "/Users/user/.local/bin/claude"
+	for _, c := range []struct {
+		name  string
+		table map[int]userProc
+		want  string // "" is the user
+	}{
+		{"direct child of claude", map[int]userProc{me: {1, claude}}, "runs under Claude Code"},
+		{"claude by base name", map[int]userProc{me: {1, "claude"}}, "runs under Claude Code"},
+		{"through sh, env and script", map[int]userProc{
+			me: {10, "env"}, 10: {11, "script"}, 11: {12, "/bin/zsh"}, 12: {13, "claude"}, 13: {1, "/sbin/launchd"},
+		}, "runs under Claude Code (process 12)"},
+		{"the user's terminal", userShellTable(), ""},
+		{"a tmux popup or run-shell job", map[int]userProc{me: {40, "sh"}, 40: {1, "tmux"}}, ""},
+		{"the Claude desktop app is not Claude Code", map[int]userProc{me: {50, "-zsh"}, 50: {1, "/Applications/Claude.app/Contents/MacOS/Claude"}}, ""},
+		{"a name that only holds claude", map[int]userProc{me: {60, "claude-wrapper"}, 60: {1, "launchd"}}, ""},
+		{"unreadable", map[int]userProc{me: {70, "sh"}}, "cannot be read"},
+		{"a loop", map[int]userProc{me: {80, "sh"}, 80: {me, "sh"}}, "more than 64 deep"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			hookHome(t)
+			useFakeTmux(t)
+			userProcessesAs(t, c.table)
+			if got := agentAncestor(); (c.want == "" && got != "") || !strings.Contains(got, c.want) {
+				t.Errorf("agentAncestor = %q, want %q", got, c.want)
+			}
+		})
+	}
+	t.Run("the pane of a live agent", func(t *testing.T) {
+		_, fake := readHome(t, []string{"%1", "%2"}, readSession("agent-1", model.StateIdle, "%1"))
+		fake.Panes[0].PID = 4242 // %1's shell, in which the agent runs
+		userProcessesAs(t, map[int]userProc{me: {4242, "bash"}, 4242: {1, "tmux"}})
+		if got := agentAncestor(); !strings.Contains(got, "pane of agent session agent-1 (process 4242)") {
+			t.Errorf("agentAncestor = %q, want the agent's pane", got)
+		}
+		// The same chain through a pane with no live session is the user's.
+		fake.Panes[0].PID, fake.Panes[1].PID = 1111, 4242
+		if got := agentAncestor(); got != "" {
+			t.Errorf("agentAncestor = %q, want none for another pane", got)
+		}
+	})
+}
+
+// The review's reproduction: an agent wraps its send in a pseudo-terminal
+// of its own, "script -q /dev/null env -u CLAUDECODE -u
+// CLAUDE_CODE_SESSION_ID -u TMUX_PANE curia send %1 …". It now has a
+// controlling terminal and no agent variable, and is still under Claude
+// Code: the message is an agent's, and user-only commands refuse.
+func TestScriptWrappedSendIsNeverFromUser(t *testing.T) {
+	db, fake := sendHome(t)
+	userTerminalAs(t, true) // script's pty: /dev/tty opens
+	me := os.Getppid()      // curia's parent, env
+	userProcessesAs(t, map[int]userProc{
+		me: {500, "env"}, 500: {501, "script"}, 501: {502, "/bin/zsh"}, 502: {503, "claude"}, 503: {1, "launchd"},
+	})
+	if _, err := readRun(t, "", "send", "%1", "reply with only LABEL-TWO"); err != nil {
+		t.Fatal(err)
+	}
+	m := sendOne(t, db)
+	if m.Sender != model.SenderAgent || m.SenderSession != "" {
+		t.Errorf("message = %+v, want an unknown agent sender", m)
+	}
+	if typed := sendTyped(fake); len(typed) != 0 {
+		t.Errorf("typed %q, want nothing", typed)
+	}
+	for _, argv := range [][]string{{"say", "T-1:", "hello"}, {"pause", "T-1"}, {"clean", "T-1"}, {"decide", "D-1", "--option", "A"}} {
+		_, err := runRoot(t, argv...)
+		if err == nil || !strings.Contains(err.Error(), "runs under Claude Code (process 502)") {
+			t.Errorf("%v = %v, want the ancestry refusal", argv, err)
 		}
 	}
 }

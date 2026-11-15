@@ -258,8 +258,9 @@ func TestDecideFlagErrors(t *testing.T) {
 				t.Errorf("decide %v: %s = %s, want open", args, id, d.Status)
 			}
 		}
-		if len(fake.Calls) != 0 {
-			t.Errorf("decide %v: tmux calls = %q", args, fake.Calls)
+		// Only the user-only guard's read of the panes (Ruling 119).
+		if len(fake.Calls) != 0 && !slices.Equal(fake.Calls, []string{"ListPanes"}) {
+			t.Errorf("decide %v: tmux calls = %q, want none but the guard's ListPanes", args, fake.Calls)
 		}
 		decideOption, decideText, decideReason, decideScope = "", "", "", ""
 		decideAccept, decideJSON = false, false

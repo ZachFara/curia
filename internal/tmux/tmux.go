@@ -17,7 +17,10 @@ type Pane struct {
 	// second. A restarted server numbers its panes from %0 again, so a pane
 	// id names the same pane only for sessions started after this.
 	ServerStart time.Time
-	WindowName  string
+	// PID is the process id of the pane's first process (#{pane_pid}): the
+	// shell or program tmux started in it.
+	PID        int
+	WindowName string
 }
 
 // Client is everything Curia needs from tmux.
