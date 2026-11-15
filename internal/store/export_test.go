@@ -14,4 +14,8 @@ const (
 	SendQueuedQuery  = sendQueued
 	SendRecentQuery  = sendRecent
 	SendSenderLive   = sendSenderLive
+	UnconfirmedQuery = unconfirmedQuery
+	CheckPending     = checkPendingQuery
+	CheckClaim       = checkClaimQuery
+	CheckConfirm     = checkConfirmQuery
 )

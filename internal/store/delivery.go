@@ -74,21 +74,24 @@ func typingRefusal(sess model.Session) TypingRefusal {
 // lost, and a second line of either kind would be glued to it (Ruling 81).
 func unconfirmed(ctx context.Context, tx *sql.Tx, sess model.Session) (string, error) {
 	var id string
-	err := tx.QueryRowContext(ctx, `
-SELECT id FROM (
-  SELECT id, delivered_at, 0 AS kind, n FROM decisions
-  WHERE session_id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL
-  UNION ALL
-  SELECT id, delivered_at, 1 AS kind, n FROM messages
-  WHERE target_session = ? AND `+msgTyped+`
-)
-ORDER BY delivered_at, kind, n LIMIT 1`,
-		sess.ID, sess.ID).Scan(&id)
+	err := tx.QueryRowContext(ctx, unconfirmedQuery, sess.ID, sess.ID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return id, err
 }
+
+// unconfirmedQuery is unconfirmed's statement. msgUndelivered, word for
+// word, lets SQLite read the partial index messages_undelivered.
+const unconfirmedQuery = `
+SELECT id FROM (
+  SELECT id, delivered_at, 0 AS kind, n FROM decisions
+  WHERE session_id = ? AND delivery = 'delivered' AND delivered_via = 'send_keys' AND confirmed_at IS NULL
+  UNION ALL
+  SELECT id, delivered_at, 1 AS kind, n FROM messages
+  WHERE target_session = ? AND ` + msgUndelivered + ` AND ` + msgTyped + `
+)
+ORDER BY delivered_at, kind, n LIMIT 1`
 
 // sharesPane reports whether a session row other than sess is bound to
 // sess's pane in a state other than ended or stale (a row with no state

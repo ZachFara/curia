@@ -578,3 +578,56 @@ func TestClaimMessagesConcurrentStopsDeliverEachOnce(t *testing.T) {
 		}
 	}
 }
+
+// The typing claim's unconfirmed-line check and check_messages' reads and
+// writes use the partial index too, so they read only the rows not yet
+// delivered (ledger, Task 18 and Task 26).
+func TestTypingAndCheckMessagesUseTheIndex(t *testing.T) {
+	path := dbPath(t)
+	open(t, path)
+	db := rawDB(t, path)
+	for _, q := range []struct {
+		name, sql string
+		args      []any
+	}{
+		{"unconfirmed", store.UnconfirmedQuery, []any{"s1", "s1"}},
+		{"check pending", store.CheckPending, []any{"s1"}},
+		{"check claim", store.CheckClaim, []any{"x", "x", "s1"}},
+		{"check confirm", store.CheckConfirm, []any{"x", "s1"}},
+	} {
+		if plan := queryPlan(t, db, q.sql, q.args...); !strings.Contains(plan, "messages_undelivered") {
+			t.Errorf("%s does not use messages_undelivered:\n%s", q.name, plan)
+		}
+	}
+}
+
+// check_messages with nothing to claim or confirm takes no write lock: it
+// answers at once while another process holds one.
+func TestCheckMessagesWithNothingPendingReadsOnly(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	ctx := context.Background()
+	m := queuedMessage(t, s, "typed earlier", "s1")
+	liveSession(t, s, "s1", "%5", model.StateIdle)
+	claimMessageTyping(t, s, m.ID, t0)
+	if _, err := s.CheckMessages(ctx, "s1", t0); err != nil { // confirms the typed line
+		t.Fatal(err)
+	}
+	lock, err := rawDB(t, path).Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Close() }()
+	if _, err = lock.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = lock.ExecContext(ctx, "ROLLBACK") }()
+	start := time.Now()
+	got, err := s.CheckMessages(ctx, "s1", t0.Add(time.Minute))
+	if took := time.Since(start); err != nil || took > 500*time.Millisecond {
+		t.Fatalf("CheckMessages under another writer's lock: %v after %v, want an answer at once", err, took)
+	}
+	if len(got) != 1 || got[0].ID != m.ID {
+		t.Errorf("CheckMessages = %+v, want the line typed earlier", got)
+	}
+}
