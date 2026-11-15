@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ZachFara/curia/internal/attention"
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/mcp"
 	"github.com/ZachFara/curia/internal/model"
@@ -48,10 +49,11 @@ func init() {
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "mcp",
 		Short: "Serve the decision and message tools over stdio (run by Claude Code)",
-		Long: "A stdio MCP server, one per agent session, with five tools: search_decisions,\n" +
-			"request_decision, check_decision, withdraw_decision and check_messages. None of\n" +
-			"them answers a ticket or sends a message. Stdout carries protocol messages only;\n" +
-			"errors go to the log file.",
+		Long: "A stdio MCP server, one per agent session, with six tools: search_decisions,\n" +
+			"request_decision, check_decision, withdraw_decision, check_messages and\n" +
+			"complete_task. None of them answers a ticket, sends a message or approves a\n" +
+			"review. With [ntfy] configured it also sends the queued phone pushes. Stdout\n" +
+			"carries protocol messages only; errors go to the log file.",
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, _ []string) {
 			if code := mcpServe(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout()); code != 0 {
@@ -84,12 +86,16 @@ func mcpServe(ctx context.Context, in io.Reader, out io.Writer) int {
 	}
 	defer func() { _ = st.Close() }()
 	mcpPrune(ctx, st, clock(), logger)
+	kick, stopPush := pushStart(ctx, st, cfg, logger)
+	defer stopPush() // before the store closes
+	tm := newTmuxClient()
 	srv := &mcp.Server{
 		Name: "curia", Version: version, Instructions: mcp.Instructions, Log: logger,
 		Tools: mcp.Tools(mcp.Deps{
 			Store: st, Cfg: cfg, Now: clock, Log: logger,
-			Caller: mcpCaller(st, cfg.LogPath, logger),
-			Notify: mcpNotify(st, cfg, newTmuxClient(), logger),
+			Caller:   mcpCaller(st, cfg.LogPath, logger),
+			Notify:   mcpNotify(st, cfg, tm, logger, kick),
+			Reviewed: mcpReviewed(st, cfg, tm, logger, kick),
 		}),
 	}
 	if err := srv.Serve(ctx, in, out); err != nil {
@@ -238,13 +244,20 @@ func mcpRepo() string {
 	return resolved
 }
 
-// mcpNotify alerts the user to a new blocking ticket: nothing when nothing
+// mcpNotify alerts the user to a new blocking ticket. First, whatever the
+// bell does, it queues the ticket's phone pushes (pushEnqueue, nothing
+// without ntfy) and kicks the push loop. Then: nothing when nothing
 // would be sent (bell off or no pane, and macOS off or not darwin);
 // otherwise, when this process wins the shared rate
 // limit slot, a bell in pane and a macOS notification, bounded by
 // mcpNotifyTimeout. Errors are logged, never returned.
-func mcpNotify(st *store.Store, cfg config.Config, tm tmux.Client, logger *slog.Logger) func(context.Context, model.Decision, string) {
+func mcpNotify(st *store.Store, cfg config.Config, tm tmux.Client, logger *slog.Logger, kick func()) func(context.Context, model.Decision, string) {
 	return func(ctx context.Context, d model.Decision, pane string) {
+		if err := pushEnqueue(ctx, st, cfg, model.PushDecision, d.ID, clock()); err != nil {
+			logger.Warn("mcp: queue push", "decision", d.ID, "err", err.Error())
+		} else {
+			kick()
+		}
 		// Claim the shared slot only when something will be sent, so a
 		// ticket that rings nothing cannot silence the next one.
 		bell := cfg.NotifyBell && pane != ""
@@ -265,5 +278,38 @@ func mcpNotify(st *store.Store, cfg config.Config, tm tmux.Client, logger *slog.
 		if err := notify.Blocking(nctx, tm, mcpRun, mcpGOOS, cfg, d, pane); err != nil {
 			logger.Warn("mcp: notify", "decision", d.ID, "err", err.Error())
 		}
+	}
+}
+
+// mcpReviewed follows a new review: it re-applies the window marker of the
+// session that opened it (whether or not ntfy is configured), then queues
+// the review's phone pushes and kicks the push loop. Errors are logged,
+// never returned to the tool.
+func mcpReviewed(st *store.Store, cfg config.Config, tm tmux.Client, logger *slog.Logger, kick func()) func(context.Context, model.Review, string) {
+	return func(ctx context.Context, r model.Review, _ string) {
+		mcpMarkWindow(ctx, st, tm, logger, r.SessionID)
+		if err := pushEnqueue(ctx, st, cfg, model.PushReview, r.ID, clock()); err != nil {
+			logger.Warn("mcp: queue push", "review", r.ID, "err", err.Error())
+			return
+		}
+		kick()
+	}
+}
+
+// mcpMarkWindow re-applies the attention marker of session's window,
+// bounded by subprocessTimeout; a session with no window is skipped.
+func mcpMarkWindow(ctx context.Context, st *store.Store, tm tmux.Client, logger *slog.Logger, session string) {
+	sess, found, err := st.GetSession(ctx, session)
+	if err != nil {
+		logger.Warn("mcp: marker", "err", err.Error())
+		return
+	}
+	if !found || sess.TmuxWindow == "" {
+		return
+	}
+	actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
+	defer cancel()
+	if err := attention.Apply(actx, tm, st, sess.TmuxWindow); err != nil && !errors.Is(err, tmux.ErrNoWindow) {
+		logger.Warn("mcp: marker", "window", sess.TmuxWindow, "err", err.Error())
 	}
 }
