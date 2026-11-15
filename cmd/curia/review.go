@@ -46,6 +46,13 @@ const reviewWhat = "review work"
 // reviewLineMax bounds a printed outcome line, in runes.
 const reviewLineMax = 600
 
+// reviewIntentHold is how long the intent an approval records before it runs
+// git (store.ClaimReviewIntent) refuses another approval, a change request
+// and a drop of the same review: longer than an approval can run (the
+// view's six minutes at most), so it outlives only an approval whose process
+// was killed.
+const reviewIntentHold = 10 * time.Minute
+
 // reviewFlightWait bounds how long a command waits, before it exits, for
 // the review actions still in flight: each is bounded by its own limits (the
 // view's six minutes at most).
@@ -438,7 +445,10 @@ func reviewPending(ctx context.Context, st *store.Store, id string) (model.Revie
 //
 // reviewApprove approves pending review reviewID as how says ("" takes review.approve): a merge, or a pull
 // request. seen is the branch head the user was shown (the view's), or "" for the flag form, where the head
-// taken by the checks is the one approved. A refusal or failure leaves the review pending.
+// taken by the checks is the one approved. Before git runs, the approval's intent (how, the head, the stat) is
+// recorded on the review, which is also its claim: a second approval is refused while it stands. An intent
+// to merge whose head is already in the base, left by an approval that was killed after git merged, is
+// recorded as merged. A refusal or failure leaves the review pending.
 func reviewApprove(ctx context.Context, st *store.Store, cfg config.Config, reviewID string, how model.ApproveHow,
 	seen string, via model.AnsweredVia, now time.Time,
 ) (string, error) {
@@ -458,6 +468,9 @@ func reviewApprove(ctx context.Context, st *store.Store, cfg config.Config, revi
 	if how != model.ApproveMerge && how != model.ApprovePR {
 		return "", fmt.Errorf("unknown approve method %q: want merge or pr", sanitize.Line(string(how), 20))
 	}
+	if line, done, ferr := reviewFoundDone(ctx, st, r, t, seen, via, now); done {
+		return line, ferr
+	}
 	stat, head, err := reviewCheck(ctx, st, t)
 	if err != nil {
 		return "", err
@@ -465,41 +478,121 @@ func reviewApprove(ctx context.Context, st *store.Store, cfg config.Config, revi
 	if seen != "" && seen != head {
 		return "", errReviewBranchChanged
 	}
+	if r, err = st.ClaimReviewIntent(ctx, r.ID, store.ReviewIntent{How: how, Head: head, DiffStat: stat}, now, reviewIntentHold); err != nil {
+		return "", reviewBusyError(r, err)
+	}
 	if how == model.ApproveMerge {
 		return reviewApproveMerge(ctx, st, r, t, stat, head, via, now)
 	}
 	return reviewApprovePR(ctx, st, cfg, r, t, stat, head, via, now)
 }
 
-// reviewApproveMerge merges and records the review merged.
+// reviewBusyError says that review r is being approved elsewhere when err is
+// store.ErrReviewBusy, else is err.
+func reviewBusyError(r model.Review, err error) error {
+	if !errors.Is(err, store.ErrReviewBusy) {
+		return err
+	}
+	since := r.IntentAt.Local()
+	return fmt.Errorf("%s is being approved (%s at %s) by another curia since %s: wait for it to finish. "+
+		"If that curia was killed, approve again after %s", r.ID, sanitize.Line(string(r.ApprovedHow), 10),
+		sanitize.Line(reviewShort(r.Head), 10), since.Format("15:04:05"), since.Add(reviewIntentHold).Format("15:04:05"))
+}
+
+// reviewBusyNow is reviewBusyError with review r read again, so that the
+// refusal names the approval in flight as it is stored now.
+func reviewBusyNow(ctx context.Context, st *store.Store, r model.Review, err error) error {
+	if errors.Is(err, store.ErrReviewBusy) {
+		if cur, found, gerr := st.GetReview(ctx, r.ID); gerr == nil && found {
+			r = cur
+		}
+	}
+	return reviewBusyError(r, err)
+}
+
+// reviewFoundDone records review r merged, and reports done, when an approval recorded the intent to merge
+// r's head, the branch is still at that head (and it is seen, when seen is given), and the base already
+// contains it: an approval whose process was killed after git merged. Otherwise it does nothing.
+func reviewFoundDone(ctx context.Context, st *store.Store, r model.Review, t model.Task, seen string,
+	via model.AnsweredVia, now time.Time,
+) (line string, done bool, err error) {
+	if r.IntentAt.IsZero() || r.ApprovedHow != model.ApproveMerge || !reviewHeadPattern.MatchString(r.Head) ||
+		(seen != "" && seen != r.Head) || !reviewInBase(ctx, t, r.Head) {
+		return "", false, nil
+	}
+	what := fmt.Sprintf("%s (%s) is already merged into %s; recorded", t.Branch, reviewShort(r.Head), t.BaseBranch)
+	_, expired, err := st.CloseReview(ctx, r.ID, store.ReviewClose{
+		Status: model.ReviewMerged, How: model.ApproveMerge, DiffStat: r.DiffStat, Head: r.Head, Via: via,
+	}, now)
+	if err != nil {
+		return "", true, reviewRecordError(ctx, st, r, what, r.Head, err)
+	}
+	return fmt.Sprintf("%s approved: %s.%s Remove the worktree and branch with: curia clean %s",
+		r.ID, what, reviewExpired(expired), t.ID), true, nil
+}
+
+// reviewInBase reports whether t's branch is at head and t's base contains
+// it. Anything it cannot read is false.
+func reviewInBase(ctx context.Context, t model.Task, head string) bool {
+	if reviewCheckNames(t) != nil {
+		return false
+	}
+	cur, err := reviewHead(ctx, t)
+	if err != nil || cur != head {
+		return false
+	}
+	n, err := reviewAhead(ctx, t, head)
+	return err == nil && n == 0
+}
+
+// reviewApproveMerge merges and records the review merged. When the merge fails its intent is cleared, unless
+// the base holds the head after all, so that approving again records it.
 func reviewApproveMerge(ctx context.Context, st *store.Store, r model.Review, t model.Task, stat, head string,
 	via model.AnsweredVia, now time.Time,
 ) (string, error) {
 	if err := reviewMerge(ctx, t, head); err != nil {
-		return "", err
+		return "", reviewMergeRelease(ctx, st, r, t, head, err)
 	}
 	what := fmt.Sprintf("merged %s into %s (%s)", t.Branch, t.BaseBranch, reviewShort(head))
 	_, expired, err := st.CloseReview(ctx, r.ID, store.ReviewClose{
 		Status: model.ReviewMerged, How: model.ApproveMerge, DiffStat: stat, Head: head, Via: via,
 	}, now)
 	if err != nil {
-		return "", reviewRecordError(r, what, err)
+		return "", reviewRecordError(ctx, st, r, what, head, err)
 	}
 	return fmt.Sprintf("%s approved: %s.%s Remove the worktree and branch with: curia clean %s",
 		r.ID, what, reviewExpired(expired), t.ID), nil
 }
 
-// reviewApprovePR opens the pull request and records the review approved.
+// reviewMergeRelease follows a failed merge of head: it keeps r's intent when the base contains head after
+// all (and says to approve again to record it), else clears it, and returns the merge's error.
+func reviewMergeRelease(ctx context.Context, st *store.Store, r model.Review, t model.Task, head string, failed error) error {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), worktreeGitLimit)
+	defer cancel()
+	if n, err := reviewAhead(actx, t, head); err == nil && n == 0 {
+		return fmt.Errorf("%w. %s holds %s all the same: record it with curia review %s --approve --head %s",
+			failed, t.BaseBranch, reviewShort(head), r.ID, head)
+	}
+	if err := st.ReleaseReviewIntent(actx, r.ID, r.IntentAt); err != nil {
+		return fmt.Errorf("%w (and clearing the approval's claim failed: %s)", failed, sanitize.Line(err.Error(), reviewGitErrMax))
+	}
+	return failed
+}
+
+// reviewApprovePR opens the pull request and records the review approved; on a failure its intent is cleared.
 func reviewApprovePR(ctx context.Context, st *store.Store, cfg config.Config, r model.Review, t model.Task, stat, head string,
 	via model.AnsweredVia, now time.Time,
 ) (string, error) {
 	ds, err := st.TaskDecisions(ctx, t.ID)
-	if err != nil {
-		return "", err
+	var url string
+	if err == nil {
+		_, _, decided := reviewSplit(ds, now)
+		url, err = reviewOpenPR(ctx, t, r, decided, cfg.Review.Remote, head)
 	}
-	_, _, decided := reviewSplit(ds, now)
-	url, err := reviewOpenPR(ctx, t, r, decided, cfg.Review.Remote, head)
 	if err != nil {
+		if rerr := st.ReleaseReviewIntent(context.WithoutCancel(ctx), r.ID, r.IntentAt); rerr != nil {
+			err = fmt.Errorf("%w (and clearing the approval's claim failed: %s)", err, sanitize.Line(rerr.Error(), reviewGitErrMax))
+		}
 		return "", err
 	}
 	what := "pull request " + url + " opened for " + t.Branch
@@ -510,19 +603,25 @@ func reviewApprovePR(ctx context.Context, st *store.Store, cfg config.Config, r 
 		Status: model.ReviewApproved, How: model.ApprovePR, DiffStat: stat, Head: head, PRURL: url, Via: via,
 	}, now)
 	if err != nil {
-		return "", reviewRecordError(r, what, err)
+		return "", reviewRecordError(ctx, st, r, what, head, err)
 	}
 	return fmt.Sprintf("%s approved: %s.%s", r.ID, what, reviewExpired(expired)), nil
 }
 
-// reviewRecordError says that the git work was done but closing the review
-// failed.
-func reviewRecordError(r model.Review, what string, err error) error {
+// reviewRecordError says that the git work (what, at head) was done but closing review r failed. It never
+// advises dropping the task: the intent stays recorded, and approving again records the work. When someone
+// else closed the review meanwhile, it says how.
+func reviewRecordError(ctx context.Context, st *store.Store, r model.Review, what, head string, err error) error {
 	if errors.Is(err, store.ErrReviewClosed) {
-		return fmt.Errorf("%s: %s, but the review was closed by someone else meanwhile, so it is not recorded as approved", r.ID, what)
+		now, found, gerr := st.GetReview(context.WithoutCancel(ctx), r.ID)
+		if gerr == nil && found && (now.Status == model.ReviewMerged || now.Status == model.ReviewApproved) && now.Head == head {
+			return fmt.Errorf("%s: %s, and another curia recorded it meanwhile (%s)", r.ID, what, reviewStatusWord(now.Status))
+		}
+		return fmt.Errorf("%s: %s, but the review was closed by someone else meanwhile, so it is not recorded as approved",
+			r.ID, what)
 	}
-	return fmt.Errorf("%s: %s, but recording the approval failed (%w): the review stays pending; drop it with curia review %s --drop",
-		r.ID, what, err, r.ID)
+	return fmt.Errorf("%s: %s, but recording it failed (%w): the review stays pending; run curia review %s --approve --head %s "+
+		"again to record it", r.ID, what, err, r.ID, head)
 }
 
 // reviewExpired is the sentence about the assumptions an approval expired.
@@ -557,8 +656,10 @@ func reviewRequestChanges(ctx context.Context, st *store.Store, tm tmux.Client, 
 	if err != nil {
 		return "", err
 	}
-	if _, _, err = st.CloseReview(ctx, r.ID, store.ReviewClose{Status: model.ReviewChanges, Notes: note, Via: via}, now); err != nil {
-		return "", err
+	if _, _, err = st.CloseReview(ctx, r.ID, store.ReviewClose{
+		Status: model.ReviewChanges, Notes: note, Via: via, IntentHold: reviewIntentHold,
+	}, now); err != nil {
+		return "", reviewBusyNow(ctx, st, r, err)
 	}
 	done := r.ID + ": changes requested; "
 	if target == "" {
@@ -607,8 +708,8 @@ func reviewDrop(ctx context.Context, st *store.Store, reviewID string, via model
 	if err != nil {
 		return "", err
 	}
-	if _, _, err = st.CloseReview(ctx, r.ID, store.ReviewClose{Status: model.ReviewDropped, Via: via}, now); err != nil {
-		return "", err
+	if _, _, err = st.CloseReview(ctx, r.ID, store.ReviewClose{Status: model.ReviewDropped, Via: via, IntentHold: reviewIntentHold}, now); err != nil {
+		return "", reviewBusyNow(ctx, st, r, err)
 	}
 	return fmt.Sprintf("%s dropped; %s is dropped. Its agent is not stopped.", r.ID, r.TaskID), nil
 }
