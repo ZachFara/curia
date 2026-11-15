@@ -1173,7 +1173,7 @@ func TestApproveFlagRefusesMovedBranch(t *testing.T) {
 	f := reviewNew(t)
 	shown, before := f.head(f.wt, "HEAD"), f.head(f.repo, "HEAD")
 	f.commitOnBranch("evil.go", "package auth // added after the developer looked\n", "sneak")
-	for _, h := range []string{shown, shown[:7], shown[:12]} {
+	for _, h := range []string{shown} {
 		_, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", h)
 		if err == nil || !strings.Contains(err.Error(), "the branch changed since you looked: "+reviewBranch+" is now at ") {
 			t.Errorf("--head %s: %v, want the changed-branch refusal", h, err)
@@ -1188,25 +1188,30 @@ func TestApproveFlagRefusesMovedBranch(t *testing.T) {
 	f.wantPending()
 }
 
-// TestApproveFlagAcceptsPrefix: --head may be the whole id or a prefix of at
-// least 7 hex digits of the branch's head; anything else is refused before
-// git runs a merge.
-func TestApproveFlagAcceptsPrefix(t *testing.T) {
+// TestApproveFlagRefusesPrefix: --head must be the branch head's full commit
+// id, of the length the repository's object format gives; a prefix, however
+// unique, and anything else are refused before git merges, with the full head
+// shown. The full id merges.
+func TestApproveFlagRefusesPrefix(t *testing.T) {
 	f := reviewNew(t)
 	head := f.head(f.wt, "HEAD")
-	for _, bad := range []string{head[:6], "ABCDEF" + head[6:7], "HEAD", "main", "-x", "--upload-pack=x", head + "0", "g" + head[:7]} {
-		if _, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", bad); err == nil ||
-			!strings.Contains(err.Error(), "give the commit id you looked at, 7 to 64 lower-case hex digits") {
-			t.Errorf("--head %q: %v, want the refusal", bad, err)
+	for _, bad := range []string{
+		head[:7], head[:12], head[:39], "ABCDEF" + head[6:], "HEAD", "main", "-x", "--upload-pack=x", head + "0",
+		"g" + head[1:], head + strings.Repeat("0", 24),
+	} {
+		_, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", bad)
+		if err == nil || !strings.Contains(err.Error(), "give the full commit id you looked at (40 lower-case hex digits; a prefix is not enough)") ||
+			!strings.Contains(err.Error(), reviewBranch+" is at "+head) {
+			t.Errorf("--head %q: %v, want the refusal showing the full head", bad, err)
 		}
 	}
 	other := f.head(f.repo, "main")
-	if _, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", other[:7]); err == nil ||
+	if _, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", other); err == nil ||
 		!strings.Contains(err.Error(), "the branch changed since you looked") {
 		t.Errorf("--head of another commit: %v", err)
 	}
 	f.wantPending()
-	stdout, stderr, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", head[:7])
+	stdout, stderr, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", head)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, stderr)
 	}

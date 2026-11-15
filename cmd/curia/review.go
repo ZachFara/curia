@@ -151,12 +151,13 @@ func init() {
 			"--approve merges the task's branch into its base in your checkout (git merge\n" +
 			"--no-ff, which must have the base checked out), or with --pr pushes it and\n" +
 			"opens a pull request with gh; the default is review.approve. It needs --head\n" +
-			"<commit>, the branch head you looked at (curia review <id> --json prints it;\n" +
-			"at least 7 hex digits), and refuses when the branch is no longer there.\n" +
-			"Without --head it prints the head and the command to run. --request-changes\n" +
-			"--note <text> (or - for stdin) sends the note to the task's agent as a\n" +
-			"message. --drop drops the task; its agent is not stopped. --json prints the\n" +
-			"review's detail and acts on nothing. Refuses to run inside an agent session.",
+			"<commit>, the full id of the branch head you looked at (curia review <id>\n" +
+			"--json prints it; a prefix is refused), and refuses when the branch is no\n" +
+			"longer there. Without --head it prints the head and the command to run.\n" +
+			"--request-changes --note <text> (or - for stdin) sends the note to the task's\n" +
+			"agent as a message. --drop drops the task; its agent is not stopped. --json\n" +
+			"prints the review's detail and acts on nothing. Refuses to run inside an\n" +
+			"agent session.",
 		Annotations: userOnlyMark(),
 		Args:        cobra.MaximumNArgs(1),
 		RunE:        runReview,
@@ -165,7 +166,7 @@ func init() {
 	f.BoolVar(&reviewApproveFlag, "approve", false, "approve the review: merge, or open a pull request")
 	f.BoolVar(&reviewMergeFlag, "merge", false, "with --approve: merge into the base branch in your checkout")
 	f.BoolVar(&reviewPRFlag, "pr", false, "with --approve: push the branch and open a pull request")
-	f.StringVar(&reviewHeadFlag, "head", "", "with --approve: the branch head you looked at (a commit id, 7 to 64 hex digits)")
+	f.StringVar(&reviewHeadFlag, "head", "", "with --approve: the full commit id of the branch head you looked at")
 	f.BoolVar(&reviewChangesFlag, "request-changes", false, "send the task back to its agent with --note")
 	f.StringVar(&reviewNoteFlag, "note", "", "the change request (- reads it from stdin)")
 	f.BoolVar(&reviewDropFlag, "drop", false, "drop the task (its agent is not stopped)")

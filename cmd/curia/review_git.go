@@ -40,9 +40,6 @@ const (
 var (
 	// reviewHeadPattern is a full commit id: SHA-1 or SHA-256.
 	reviewHeadPattern = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
-	// reviewPrefixPattern is what --head takes: a commit id, or a prefix of
-	// one of at least 7 hex digits.
-	reviewPrefixPattern = regexp.MustCompile(`^(?:[0-9a-f]{7,40}|[0-9a-f]{64})$`)
 	// reviewRemotePattern is the only form of remote name pushed to.
 	reviewRemotePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 	// reviewURLPattern is the only form of pull-request URL kept from gh.
@@ -117,35 +114,46 @@ func reviewHead(ctx context.Context, t model.Task) (string, error) {
 	return "", worktreeGitError(res, worktreeGitLimit)
 }
 
-// reviewResolveHead is the full commit id of t's branch head when given (--head) names it: the whole id,
-// or a prefix of at least 7 hex digits that no other object in the repository shares (git rev-parse
-// --disambiguate, which reads object names only, never a ref). Anything else is refused, before any git
-// call for a malformed value; a commit that is not the branch's head now is "the branch changed since you
-// looked".
+// reviewResolveHead is t's branch head when given (--head) is exactly its full commit id: lower-case hex of
+// the length the repository's object format gives (40 for SHA-1, 64 for SHA-256, asked of git). A prefix is
+// refused, however unique: being unique now does not prove it names the commit the user looked at. Any other
+// value is refused with the full head and the command to run; a full id that is not the branch's head now is
+// "the branch changed since you looked".
 func reviewResolveHead(ctx context.Context, t model.Task, given string) (string, error) {
-	if !reviewPrefixPattern.MatchString(given) {
-		return "", fmt.Errorf("--head %q: give the commit id you looked at, 7 to 64 lower-case hex digits", sanitize.Line(given, 80))
-	}
 	head, err := reviewHead(ctx, t)
 	switch {
 	case err != nil:
 		return "", err
 	case head == "":
 		return "", fmt.Errorf("branch %s does not exist in %s", t.Branch, sanitize.Line(t.Repo, 300))
-	case !strings.HasPrefix(head, given):
-		return "", fmt.Errorf("the branch changed since you looked: %s is now at %s, not %s. Look at it again with curia review %s",
-			t.Branch, reviewShort(head), given, t.ID)
-	case len(given) == len(head):
-		return head, nil
 	}
-	out, err := worktreeRun(ctx, worktreeGitLimit, t.Repo, "rev-parse", "--disambiguate="+given)
+	size, err := reviewObjectIDLen(ctx, t.Repo)
 	if err != nil {
 		return "", err
 	}
-	if n := len(strings.Fields(out)); n != 1 {
-		return "", fmt.Errorf("--head %s names %d objects in %s: give more of the commit id", given, n, sanitize.Line(t.Repo, 300))
+	if len(given) != size || strings.Trim(given, "0123456789abcdef") != "" {
+		return "", fmt.Errorf("--head %q: give the full commit id you looked at (%d lower-case hex digits; a prefix is not "+
+			"enough): %s is at %s", sanitize.Line(given, 80), size, t.Branch, head)
+	}
+	if given != head {
+		return "", fmt.Errorf("the branch changed since you looked: %s is now at %s, not %s. Look at it again with curia review %s",
+			t.Branch, head, given, t.ID)
 	}
 	return head, nil
+}
+
+// reviewObjectIDLen is the length, in hex digits, of a commit id in repo: git rev-parse --show-object-format.
+func reviewObjectIDLen(ctx context.Context, repo string) (int, error) {
+	format, err := worktreeRun(ctx, worktreeGitLimit, repo, "rev-parse", "--show-object-format")
+	switch {
+	case err != nil:
+		return 0, err
+	case format == "sha1":
+		return 40, nil
+	case format == "sha256":
+		return 64, nil
+	}
+	return 0, fmt.Errorf("git rev-parse --show-object-format printed %q", sanitize.Line(format, 40))
 }
 
 // reviewShort is the short form of commit id head.
