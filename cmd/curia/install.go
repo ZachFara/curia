@@ -20,6 +20,9 @@ import (
 // installNoAllowMCPTools is curia install's --no-allow-mcp-tools flag.
 var installNoAllowMCPTools bool
 
+// installNoStatusLine is curia install's --no-statusline flag.
+var installNoStatusLine bool
+
 // claudeRunner runs the claude CLI for curia install and uninstall; tests
 // replace it, and no test runs the real claude.
 var claudeRunner install.Runner = installRunClaude
@@ -172,6 +175,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	if err = installTools(out, p.settings); err != nil {
 		return err
 	}
+	if err = installStatusLine(out, p.settings, bin); err != nil {
+		return err
+	}
 	if err = installTmux(out, p, bin); err != nil {
 		return err
 	}
@@ -259,6 +265,33 @@ func installTools(out io.Writer, settings string) error {
 	return nil
 }
 
+// installStatusLine registers Curia's status-line command unless
+// --no-statusline was given, and says what it found; a status line of the
+// user's own is left as it is, with the command that would feed Curia from it.
+func installStatusLine(out io.Writer, settings, bin string) error {
+	if installNoStatusLine {
+		installSay(out, "status line: not registered (--no-statusline); cost and usage numbers are missing without it; "+
+			"to register it, run curia install without --no-statusline")
+		return nil
+	}
+	state, err := install.StatusLine(settings, bin, time.Now())
+	if err != nil {
+		return err
+	}
+	switch state {
+	case install.StatusLineAdded:
+		installSay(out, "status line: registered curia statusline (cost and usage for the badge; skip with --no-statusline)")
+	case install.StatusLineOurs:
+		installSay(out, "status line: already registered")
+	case install.StatusLineUpdated:
+		installSay(out, "status line: re-registered curia statusline with %s (the entry named another path for this binary)", bin)
+	case install.StatusLineForeign:
+		installSay(out, "status line: you have your own, left as it is; to feed Curia from it, make its command: %s "+
+			"(until then, cost and usage numbers are missing)", install.StatusLineChain(bin))
+	}
+	return nil
+}
+
 // installSkill writes the skill; a SKILL.md that is not Curia's is reported
 // and left alone.
 func installSkill(out io.Writer, skills string) error {
@@ -305,6 +338,13 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	bin := target.path
 	if err = install.Unhooks(p.settings, bin); err != nil {
 		return err
+	}
+	removed, err := install.RemoveStatusLine(p.settings, bin)
+	if err != nil {
+		return err
+	}
+	if removed {
+		installSay(cmd.OutOrStdout(), "status line: removed")
 	}
 	if err = install.RemoveTmux(p.tmuxConf); err != nil {
 		return err
@@ -411,6 +451,8 @@ func init() {
 	}
 	installCmd.Flags().BoolVar(&installNoAllowMCPTools, "no-allow-mcp-tools", false,
 		"do not add the six curia MCP tools to Claude's permissions.allow (they are allowed by default)")
+	installCmd.Flags().BoolVar(&installNoStatusLine, "no-statusline", false,
+		"do not register curia statusline as Claude Code's status line (it is registered by default when you have none)")
 	rootCmd.AddCommand(
 		installCmd,
 		&cobra.Command{
