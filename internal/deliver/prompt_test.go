@@ -323,6 +323,18 @@ func TestPromptPlaceholder(t *testing.T) {
 		{"cursor after the text", "❯ \x1b[2mpush it\x1b[0m", 9, false},
 		{"cursor on the mark", "❯ \x1b[2mpush it\x1b[0m", 0, false},
 		{"control character", "❯ \x1b[2mpush\x07it", at, false},
+		// A paste's or an image's placeholder is the user's draft, dim or
+		// not, with the cursor at the input's start or after it.
+		{"dim pasted text", "❯ \x1b[2m[Pasted text #1 +12 lines]\x1b[0m", at, false},
+		{"dim pasted text, cursor at the end", "❯ \x1b[2m[Pasted text #1 +12 lines]\x1b[0m", 28, false},
+		{"plain pasted text", "❯ [Pasted text #2 +3 lines]", at, false},
+		{"plain pasted text, cursor at the end", "❯ [Pasted text #2 +3 lines]", 27, false},
+		{"dim image", "❯ \x1b[2m[Image #1]\x1b[0m", at, false},
+		{"dim image, cursor at the end", "❯ \x1b[2m[Image #1]\x1b[0m", 12, false},
+		{"plain image", "❯ [Image #3]", at, false},
+		{"dim truncated text", "❯ \x1b[2m[...Truncated text #1 +400 lines...]\x1b[0m", at, false},
+		{"dim placeholder after a suggestion", "❯ \x1b[2mlook at [Image #1]\x1b[0m", at, false},
+		{"a suggestion that names an image", "❯ \x1b[2mopen the image\x1b[0m", at, true},
 	} {
 		if got := promptPlaceholder(c.line, c.cursor); got != c.want {
 			t.Errorf("%s: promptPlaceholder(%q, %d) = %v, want %v", c.name, c.line, c.cursor, got, c.want)

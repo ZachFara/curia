@@ -141,6 +141,17 @@ func readCapture(capt tmux.Capture) promptState {
 	})
 }
 
+// cursorOnlyDraft reports whether capt, which readCapture reads as a draft,
+// would read as empty with the cursor just after "❯ ": its input is drawn
+// as a dim suggestion and only the cursor refused it (re-review B, m1).
+// The pane then shows a suggestion or a draft, and which cannot be told.
+func cursorOnlyDraft(capt tmux.Capture) bool {
+	styled := strings.Split(capt.Styled, "\n")
+	return readScreen(capt.Screen, func(row int) bool {
+		return row < len(styled) && promptPlaceholder(styled[row], placeholderColumn)
+	}) == promptEmpty
+}
+
 // readScreen says what screen, a plain capture of an agent's pane, shows
 // about typing into it. It is strict: the input box must be the last thing
 // on screen, empty, with only a known idle footer under it. placeholder,
@@ -328,6 +339,12 @@ func waitingForSubagents(above []string) bool {
 	return false
 }
 
+// pastedPlaceholder matches what Claude Code puts in the input in place of
+// a long paste or an image, "[Pasted text #1 +12 lines]", "[Image #1]",
+// "[...Truncated text #1 ...]". It is the user's draft, whether drawn dim or
+// not, and is never read as a suggestion (re-review B).
+var pastedPlaceholder = regexp.MustCompile(`\[(Pasted text|Image|\.\.\.Truncated text) #[0-9]+`)
+
 // placeholderColumn is the cursor column of an empty input: after "❯" and
 // the no-break space that follows it, where typed text starts.
 const placeholderColumn = 2
@@ -342,8 +359,9 @@ const placeholderColumn = 2
 // and there must be one; the cursor must be at placeholderColumn; and every
 // escape sequence must be an SGR this function knows, read as a state
 // machine (the numbers after 38;5, 38;2, 48;5 and 48;2 are colors, not
-// attributes). Anything else, an unknown attribute or sequence included,
-// is false.
+// attributes); and the text must not hold a paste's or an image's
+// placeholder (pastedPlaceholder). Anything else, an unknown attribute or
+// sequence included, is false.
 func promptPlaceholder(line string, cursorX int) bool {
 	if cursorX != placeholderColumn {
 		return false
@@ -357,6 +375,7 @@ func promptPlaceholder(line string, cursorX int) bool {
 		return false
 	}
 	dim, cells := false, 0
+	var text strings.Builder
 	for rest != "" {
 		if rest[0] == '\x1b' {
 			n, d, known := sgr(rest, dim)
@@ -368,6 +387,7 @@ func promptPlaceholder(line string, cursorX int) bool {
 		}
 		r, n := utf8.DecodeRuneInString(rest)
 		rest = rest[n:]
+		text.WriteRune(r)
 		if unicode.IsSpace(r) {
 			continue
 		}
@@ -376,7 +396,7 @@ func promptPlaceholder(line string, cursorX int) bool {
 		}
 		cells++
 	}
-	return cells > 0
+	return cells > 0 && !pastedPlaceholder.MatchString(text.String())
 }
 
 // skipSGR skips the known SGR sequences at the start of s; false when one

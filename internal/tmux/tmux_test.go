@@ -331,14 +331,16 @@ func paneID(t *testing.T, tm func(...string) (string, error), target string) str
 }
 
 // recorder is a runner for execClient that records each tmux invocation
-// instead of running it and answers each with out, except that call number
-// failAt (counting from 1; 0 for none) fails with err.
+// instead of running it and answers call number n (counting from 1) with
+// outs[n-1] when there is one and with out otherwise, except that call
+// number failAt (0 for none) fails with err.
 //
 // It is also Bell's tty opener: it records each path and opens it with
 // openFile, or refuses when openFile is nil.
 type recorder struct {
 	runs     [][]string
 	out      string
+	outs     []string
 	failAt   int
 	err      error
 	opened   []string
@@ -357,6 +359,9 @@ func (r *recorder) run(_ context.Context, args ...string) (string, error) {
 	r.runs = append(r.runs, slices.Clone(args))
 	if len(r.runs) == r.failAt {
 		return "", r.err
+	}
+	if n := len(r.runs); n <= len(r.outs) {
+		return r.outs[n-1], nil
 	}
 	return r.out, nil
 }
@@ -853,6 +858,52 @@ func TestCapturePaneRefusesBadPane(t *testing.T) {
 			t.Errorf("CapturePane(%q) ran tmux: %v", pane, r.runs)
 		}
 	}
+}
+
+// The cursor is read before and after the capture, and is known only when
+// both reads parse and agree (re-review B, m6). A failed read fails the
+// capture, so nothing is typed.
+func TestCapturePaneCursor(t *testing.T) {
+	const screen = "\x1b[39m❯\u00a0\x1b[2mpush it\x1b[0m\n"
+	for _, c := range []struct {
+		name          string
+		before, after string
+		known         bool
+	}{
+		{"both agree", "%5\t0\t2\t7\n", "%5\t2\t7\n", true},
+		{"moved along the line", "%5\t0\t2\t7\n", "%5\t9\t7\n", false},
+		{"moved to another row", "%5\t0\t2\t7\n", "%5\t2\t8\n", false},
+		{"second read for another pane", "%5\t0\t2\t7\n", "%6\t2\t7\n", false},
+		{"second read short", "%5\t0\t2\t7\n", "%5\t2\n", false},
+		{"second read empty", "%5\t0\t2\t7\n", "", false},
+		{"second read not numbers", "%5\t0\tx\t7\n", "%5\tx\t7\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cl, r := recordingClient()
+			r.outs = []string{c.before, screen, c.after}
+			capt, err := cl.CapturePane(context.Background(), "%5")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if capt.CursorKnown != c.known || (c.known && (capt.CursorX != 2 || capt.CursorY != 7)) {
+				t.Errorf("cursor = %d,%d known %v, want known %v", capt.CursorX, capt.CursorY, capt.CursorKnown, c.known)
+			}
+			if capt.Styled != screen || capt.Screen != "❯\u00a0push it\n" {
+				t.Errorf("capture = %q / %q", capt.Styled, capt.Screen)
+			}
+		})
+	}
+	t.Run("second read fails", func(t *testing.T) {
+		cl, r := recordingClient()
+		r.outs = []string{"%5\t0\t2\t7\n", screen}
+		r.failAt, r.err = 3, errors.New("can't find pane: %5")
+		if capt, err := cl.CapturePane(context.Background(), "%5"); !errors.Is(err, r.err) {
+			t.Errorf("CapturePane = %+v, %v; want the runner's error", capt, err)
+		}
+		if len(r.runs) != 3 {
+			t.Errorf("runs = %q, want three", r.runs)
+		}
+	})
 }
 
 func TestCapturePaneInRealTmux(t *testing.T) {

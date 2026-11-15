@@ -309,6 +309,11 @@ var promptNotes = map[promptState]string{
 		"nothing typed",
 }
 
+// noteSuggestionOrDraft is the refusal for an input that would read as a
+// dim suggestion but for the cursor (re-review B, m1): it may be either.
+const noteSuggestionOrDraft = "the agent's prompt shows a suggestion or a draft " +
+	"(the cursor is not where an empty prompt has it); nothing typed"
+
 // noteTeamLead is the refusal for a team lead whose teammates are listed
 // under its prompt (live check B, defect 3).
 const noteTeamLead = "the agent leads a team whose teammates are alive, and nothing is typed to a team lead then; " +
@@ -339,8 +344,11 @@ func (r *delivery) paneRefusal(ctx context.Context, id string, sess model.Sessio
 		return ""
 	}
 	note := promptNotes[state]
-	if state == promptManage && sess.TeamRole == model.RoleLead {
+	switch {
+	case state == promptManage && sess.TeamRole == model.RoleLead:
 		note = noteTeamLead
+	case state == promptDraft && cursorOnlyDraft(capt):
+		note = noteSuggestionOrDraft
 	}
 	r.log.Info("deliver: not typing into the agent's pane", "id", id, "pane", sess.Pane, "why", note)
 	return note
