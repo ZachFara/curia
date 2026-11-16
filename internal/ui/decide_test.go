@@ -1813,3 +1813,60 @@ func TestDefect4HabitTextAfterAnswerActsOnNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestIrreversibleConfirmRefusesYAndEnterTogether: a paste the terminal does
+// not bracket delivers "y" and a line break as two keys 1 ms apart. The "y"
+// is refused (the burst rule), the irreversible ticket is not answered and
+// the confirmation stays open with its wait restarted; a "y" alone after the
+// dwell then sends the answer.
+func TestIrreversibleConfirmRefusesYAndEnterTogether(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(ticket(9, model.ModeAssume, model.ReversIrreversible))
+	m := newDecide(t, src, popup)
+	m = dpress(t, m, "1")
+	decideClock.advance(keyGap)
+	m, wait := m.Update(dkey("y"))
+	decideClock.advance(time.Millisecond)
+	m = send(t, m, dkey("enter"))
+	m = drive(t, m, wait) // the y's wait ends after the Enter came: it sends nothing
+	wantCalls(t, src)
+	if s := lastLine(m); s != "answer D-9 with A? y sends, any other key cancels" {
+		t.Errorf("status line = %q, want the confirmation still asked", s)
+	}
+	dpress(t, m, "y")
+	wantCalls(t, src, answerCall{"D-9", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+}
+
+// TestIrreversibleConfirmAcceptsYAlone: a "y" on its own after the dwell
+// sends the answer once the burst gap has passed with no other key: not at
+// the key itself, but by the wait it starts.
+func TestIrreversibleConfirmAcceptsYAlone(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(ticket(9, model.ModeAssume, model.ReversIrreversible))
+	m := newDecide(t, src, popup)
+	m = dpress(t, m, "1")
+	decideClock.advance(keyGap)
+	m, wait := m.Update(dkey("y"))
+	wantCalls(t, src)
+	if wait == nil {
+		t.Fatal("y started no wait")
+	}
+	drive(t, m, wait)
+	wantCalls(t, src, answerCall{"D-9", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+}
+
+// TestIrreversibleConfirmActedBeforeLaterKey: what is intended for a "y"
+// followed 200 ms later by an unrelated key: the answer has been sent on the
+// "y" (two presses, not one paste), also when the y's wait message is late and
+// the key comes first; the later key acts on nothing.
+func TestIrreversibleConfirmActedBeforeLaterKey(t *testing.T) {
+	src := &fakeDecideSource{}
+	src.set(ticket(9, model.ModeAssume, model.ReversIrreversible), ticket(8, model.ModeAssume, model.ReversIrreversible))
+	m := newDecide(t, src, popup)
+	m = dpress(t, m, "1")
+	decideClock.advance(keyGap)
+	m, _ = m.Update(dkey("y")) // its wait message never comes
+	decideClock.advance(200 * time.Millisecond)
+	send(t, m, dkey("2"))
+	wantCalls(t, src, answerCall{"D-9", model.Answer{Key: "A", Via: model.AnsweredPopup}})
+}

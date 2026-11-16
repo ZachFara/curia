@@ -122,7 +122,11 @@ type DecideModel struct {
 	quietUntil   time.Time     // keys before this are ignored (see quietPeriod, answeredQuiet)
 	quietFor     time.Duration // the length of the running quiet period, which a refused key restarts
 	shownSince   time.Time     // when the selected ticket, as it is now, came on screen
-	promptSince  time.Time     // when the confirmation opened
+	promptSince  time.Time     // when the confirmation opened, or a "y" in a burst restarted its wait
+	keyAt        time.Time     // when the last key came, acted on or not
+	prevKeyAt    time.Time     // when the key before it came
+	confirmAt    time.Time     // when a "y" was taken, waiting out burstGap before it sends; zero when none
+	confirmSeq   int           // the decideConfirmMsg the taken "y" waits for
 	inputSince   time.Time     // when the input opened, or last refused a too early Enter
 	inputByEnter bool          // an Enter opened the reasoning input
 	lastEnter    time.Time     // when the last Enter came, acted on or not
@@ -159,6 +163,10 @@ type decideRefreshMsg struct {
 
 // decideTickMsg starts the next refresh of the chain.
 type decideTickMsg struct{}
+
+// decideConfirmMsg sends the answer of the "y" taken as seq once burstGap
+// has passed with no other key.
+type decideConfirmMsg struct{ seq int }
 
 // decideAnsweredMsg is the result of one answer.
 type decideAnsweredMsg struct {
@@ -209,10 +217,16 @@ func (m DecideModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.refresh(true)
 	case decideAnsweredMsg:
 		return m.applyAnswer(msg)
+	case decideConfirmMsg:
+		return m.applyConfirm(msg)
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m.moveTo(m.cursor), nil
 	case tea.KeyMsg:
+		m.prevKeyAt, m.keyAt = m.keyAt, m.now()
+		if !m.confirmAt.IsZero() {
+			return m.keyAfterConfirm()
+		}
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste {
 			return m.updateRunes(msg)
 		}
@@ -697,17 +711,51 @@ func (m DecideModel) proceed(p pendingAnswer) (DecideModel, tea.Cmd) {
 	return m.send(p)
 }
 
-// confirmKey sends the pending answer on a "y" that arrived as a message of
-// its own, the dwell after the prompt opened; any other key, a paste, a "y"
-// within a burst of keys and a "y" too soon cancel it.
+// confirmKey takes a "y" that arrived as a message of its own, the dwell after the prompt opened, and sends
+// the pending answer once burstGap has passed with no other key (applyConfirm); any other key, a paste, a
+// "y" within a burst of one read and a "y" too soon cancel it. A "y" within burstGap after another key (the
+// burst rule's time half, inBurst: a paste the terminal did not bracket, "y" and a line break) is refused
+// and the wait restarts, the prompt still open.
 func (m DecideModel) confirmKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cmd) {
-	p := m.pending
-	m.pending, m.confirming = pendingAnswer{}, false
-	early := m.now().Sub(m.promptSince) < dwell
-	if split || early || msg.Paste || msg.String() != "y" {
+	now := m.now()
+	if split || now.Sub(m.promptSince) < dwell || msg.Paste || msg.String() != "y" {
+		m.pending, m.confirming = pendingAnswer{}, false
 		m.notice = "answer canceled"
 		return m, nil
 	}
+	if inBurst(now, m.prevKeyAt) {
+		m.promptSince, m.notice = now, noticeTooSoon
+		return m, nil
+	}
+	m.confirmAt, m.confirmSeq = now, m.confirmSeq+1
+	seq := m.confirmSeq
+	return m, tea.Tick(burstGap, func(time.Time) tea.Msg { return decideConfirmMsg{seq: seq} })
+}
+
+// keyAfterConfirm handles a key that came while a taken "y" waits out burstGap. Within burstGap of the "y"
+// it arrived with it: the "y" is refused and the wait restarts, the prompt still open. Later (the wait's
+// message is late) the answer is sent and the key is ignored.
+func (m DecideModel) keyAfterConfirm() (DecideModel, tea.Cmd) {
+	if inBurst(m.keyAt, m.confirmAt) {
+		m.confirmAt = time.Time{}
+		m.promptSince, m.notice = m.keyAt, noticeTooSoon
+		return m, nil
+	}
+	return m.confirmed()
+}
+
+// applyConfirm sends the answer of the "y" msg waited for, when it still waits.
+func (m DecideModel) applyConfirm(msg decideConfirmMsg) (DecideModel, tea.Cmd) {
+	if msg.seq != m.confirmSeq || m.confirmAt.IsZero() {
+		return m, nil
+	}
+	return m.confirmed()
+}
+
+// confirmed closes the confirmation and sends its answer.
+func (m DecideModel) confirmed() (DecideModel, tea.Cmd) {
+	p := m.pending
+	m.pending, m.confirming, m.confirmAt = pendingAnswer{}, false, time.Time{}
 	return m.send(p)
 }
 
