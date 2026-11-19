@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/usage"
 )
 
 // column is one column of the table.
@@ -25,6 +26,8 @@ const (
 	colContext
 	colSubagents
 	colDecisions
+	colCost
+	colCache
 	colUpdate
 	colAge
 )
@@ -46,17 +49,23 @@ var specs = map[column]colSpec{
 	colContext:   {title: "CTX", right: true},
 	colSubagents: {title: "SUB", right: true},
 	colDecisions: {title: "DEC", right: true},
+	colCost:      {title: "COST", right: true},
+	colCache:     {title: "CACHE"},
 	colUpdate:    {title: "LAST UPDATE", flex: true},
 	colAge:       {title: "AGE", right: true},
 }
 
 // The popup's columns by width (Plan 1 live-check defect 13): all of them
-// from fullWidth, without MODEL and SUB from midWidth, also without LAST
-// UPDATE from narrowWidth, and below it only state, window, TASK (the id
-// alone), DEC and AGE. The sidebar always has its four.
+// from fullWidth, without MODEL and SUB from costWidth, also without COST
+// and CACHE from midWidth (Plan 3's columns), also without LAST UPDATE from
+// narrowWidth, and below it only state, window, TASK (the id alone), DEC
+// and AGE. The sidebar always has its four.
 var (
 	popupColumns = []column{
-		colState, colWindow, colRepo, colTask, colModel, colContext, colSubagents, colDecisions, colUpdate, colAge,
+		colState, colWindow, colRepo, colTask, colModel, colContext, colSubagents, colDecisions, colCost, colCache, colUpdate, colAge,
+	}
+	costColumns = []column{
+		colState, colWindow, colRepo, colTask, colContext, colDecisions, colCost, colCache, colUpdate, colAge,
 	}
 	midColumns     = []column{colState, colWindow, colRepo, colTask, colContext, colDecisions, colUpdate, colAge}
 	narrowColumns  = []column{colState, colWindow, colRepo, colTask, colContext, colDecisions, colAge}
@@ -66,6 +75,7 @@ var (
 
 const (
 	fullWidth   = 120
+	costWidth   = 100
 	midWidth    = 90
 	narrowWidth = 60
 )
@@ -84,6 +94,12 @@ var (
 	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	reviewStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 )
+
+// cacheWarnLeft is how little warm cache time the CACHE cell shows yellow.
+const cacheWarnLeft = 5 * time.Minute
+
+// burnNote ends the header while the burn sort is on.
+const burnNote = "sorted by burn (b)"
 
 // reviewReady reports whether s is review-ready: idle, with its task's
 // review waiting.
@@ -132,6 +148,22 @@ func decStyle(c model.OpenCount) lipgloss.Style {
 	return lipgloss.NewStyle()
 }
 
+// cacheStyle colors a CACHE cell by the expiry it shows at now: yellow
+// while warm with less than cacheWarnLeft left, dim once cold, plain when
+// warm for longer or unknown (a zero expiry).
+func cacheStyle(expires, now time.Time) lipgloss.Style {
+	switch left := expires.Sub(now); {
+	case expires.IsZero():
+		return lipgloss.NewStyle()
+	case left <= 0:
+		return lipgloss.NewStyle().Faint(true)
+	case left < cacheWarnLeft:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	default:
+		return lipgloss.NewStyle()
+	}
+}
+
 // stateIcon is the one-cell icon of a state.
 func stateIcon(s model.State) string {
 	switch s {
@@ -158,23 +190,13 @@ func (m Model) View() string {
 	if m.child != nil {
 		return m.child.View()
 	}
-	cols, gap := m.columns()
-	first, last := m.offset, len(m.rows)
-	if n := m.visibleRows(); n > 0 {
-		last = min(last, first+n)
-	}
-	cells := make([][]string, 0, last-first)
-	for _, r := range m.rows[first:last] {
-		cells = append(cells, m.cells(r, cols))
-	}
-	widths := fitWidths(cols, m.titles(cols), cells, m.width, gap)
-
-	lines := []string{m.renderHeader(cols, widths, gap)}
+	lay := m.layout(m.now())
+	lines := []string{m.renderHeader(lay)}
 	if len(m.rows) == 0 {
 		lines = append(lines, m.emptyText())
 	}
-	for i, c := range cells {
-		lines = append(lines, m.renderRow(m.rows[first+i], c, cols, widths, gap, first+i == m.cursor))
+	for i, c := range lay.cells {
+		lines = append(lines, m.renderRow(m.rows[lay.first+i], c, lay, lay.first+i == m.cursor))
 	}
 	for m.height > 0 && len(lines) < m.height-1 {
 		lines = append(lines, "")
@@ -189,6 +211,41 @@ func (m Model) View() string {
 	return strings.Join(lines, "\n")
 }
 
+// tableLayout is how View lays out the table at now.
+type tableLayout struct {
+	now    time.Time
+	cols   []column
+	widths []int      // each column's width, in cells
+	gap    int        // the cells between two columns
+	first  int        // the index of the first row on screen
+	cells  [][]string // the cells of the rows on screen
+	note   string     // what the header shows after its titles: burnNote or ""
+}
+
+// layout lays out the rows on screen at now. With the burn sort on, the
+// columns leave room for burnNote at the header's end, so the note is seen
+// at any width the columns can shrink to.
+func (m Model) layout(now time.Time) tableLayout {
+	cols, gap := m.columns()
+	first, last := m.offset, len(m.rows)
+	if n := m.visibleRows(); n > 0 {
+		last = min(last, first+n)
+	}
+	cells := make([][]string, 0, last-first)
+	for _, r := range m.rows[first:last] {
+		cells = append(cells, m.cells(r, cols, now))
+	}
+	width, note := m.width, ""
+	if m.burnSort {
+		note = burnNote
+		if width > 0 {
+			width = max(width-gap-lipgloss.Width(note), 1)
+		}
+	}
+	widths := fitWidths(cols, m.titles(cols), cells, width, gap)
+	return tableLayout{now: now, cols: cols, widths: widths, gap: gap, first: first, cells: cells, note: note}
+}
+
 // columns are the columns at the window's width and the gap between them;
 // an unknown width (0) gets every column.
 func (m Model) columns() ([]column, int) {
@@ -198,6 +255,8 @@ func (m Model) columns() ([]column, int) {
 	switch w := m.width; {
 	case w <= 0 || w >= fullWidth:
 		return popupColumns, 2
+	case w >= costWidth:
+		return costColumns, 2
 	case w >= midWidth:
 		return midColumns, 2
 	case w >= narrowWidth:
@@ -219,10 +278,11 @@ func (m Model) titles(cols []column) []string {
 	return out
 }
 
-// cells are the texts of r's columns. Session and task text is untrusted,
-// so every piece of it goes through Cell; the DEC cell is a number of our
-// own, empty when zero, and the TASK cell is empty without a task.
-func (m Model) cells(r row, cols []column) []string {
+// cells are the texts of r's columns at now. Session and task text is
+// untrusted, so every piece of it goes through Cell; the DEC, COST and
+// CACHE cells are Curia's own text, empty when there is nothing to show,
+// and the TASK cell is empty without a task.
+func (m Model) cells(r row, cols []column, now time.Time) []string {
 	out := make([]string, len(cols))
 	for i, c := range cols {
 		switch c {
@@ -234,6 +294,10 @@ func (m Model) cells(r row, cols []column) []string {
 			out[i] = m.taskText(r.s)
 		case colDecisions:
 			out[i] = decText(m.rowCount(r))
+		case colCost:
+			out[i] = costText(r)
+		case colCache:
+			out[i], _ = cacheText(r, now)
 		default:
 			out[i] = Cell(m.cellText(r.s, c))
 		}
@@ -289,6 +353,35 @@ func (m Model) rowCount(r row) model.OpenCount {
 		sum.Undelivered += c.Undelivered
 	}
 	return sum
+}
+
+// costText is the COST cell of r: a group row's members' known costs
+// summed (fleet.Unit.Cost), else the session's own; blank when unknown.
+func costText(r row) string {
+	if r.kind == rowGroup {
+		return usage.CostCell(r.unit().Cost())
+	}
+	return usage.CostCell(r.s.CostUSD, r.s.CostKnown)
+}
+
+// cacheText is the CACHE cell of r at now and the expiry its style is
+// judged by. A session's own row shows usage.CacheCell. A group row shows
+// the cache fleet.Unit.CacheOf picks: the soonest warm expiry among its
+// idle, waiting and needs_decision members, else "cold" when a member's
+// cache is cold (in any state), else blank.
+func cacheText(r row, now time.Time) (string, time.Time) {
+	if r.kind != rowGroup {
+		return usage.CacheCell(r.s, now), r.s.CacheExpiresAt
+	}
+	s, ok := r.unit().CacheOf(now)
+	switch {
+	case !ok:
+		return "", time.Time{}
+	case s.CacheExpiresAt.After(now):
+		return usage.CacheCell(s, now), s.CacheExpiresAt
+	default:
+		return "cold", s.CacheExpiresAt
+	}
 }
 
 // decText is the number of open tickets of both modes in c, then "Q<n>"
@@ -388,19 +481,24 @@ func fitWidths(cols []column, titles []string, rows [][]string, width, gap int) 
 	return w
 }
 
-func (m Model) renderHeader(cols []column, widths []int, gap int) string {
-	titles := m.titles(cols)
-	parts := make([]string, len(cols))
-	for i, c := range cols {
-		parts[i] = fit(titles[i], widths[i], specs[c].right)
+// renderHeader is the titles, then the layout's note, if any.
+func (m Model) renderHeader(lay tableLayout) string {
+	titles := m.titles(lay.cols)
+	parts := make([]string, len(lay.cols))
+	for i, c := range lay.cols {
+		parts[i] = fit(titles[i], lay.widths[i], specs[c].right)
 	}
-	return headerStyle.Render(strings.Join(parts, strings.Repeat(" ", gap)))
+	if lay.note != "" {
+		parts = append(parts, lay.note)
+	}
+	return headerStyle.Render(strings.Join(parts, strings.Repeat(" ", lay.gap)))
 }
 
 // renderRow lays out one row: dim when its state is stale, reversed when
 // selected, the state cell blue when review-ready, the context cell
-// colored by its level.
-func (m Model) renderRow(r row, cells []string, cols []column, widths []int, gap int, selected bool) string {
+// colored by its level, a shown cache cell by its expiry.
+func (m Model) renderRow(r row, cells []string, lay tableLayout, selected bool) string {
+	cols, widths, gap := lay.cols, lay.widths, lay.gap
 	s := r.s
 	base := lipgloss.NewStyle()
 	if r.target().State == model.StateStale {
@@ -420,6 +518,11 @@ func (m Model) renderRow(r row, cells []string, cols []column, widths []int, gap
 			st = levelStyle(level).Inherit(base)
 		case colDecisions:
 			st = decStyle(m.rowCount(r)).Inherit(base)
+		case colCache:
+			if cells[i] != "" {
+				_, expires := cacheText(r, lay.now)
+				st = cacheStyle(expires, lay.now).Inherit(base)
+			}
 		}
 		parts[i] = st.Render(fit(cells[i], widths[i], specs[c].right))
 	}
@@ -434,7 +537,8 @@ func (m Model) emptyText() string {
 }
 
 // renderStatus is the bottom line: a pending kill, the filter being typed,
-// the last key's notice, the last refresh error, or help.
+// the last key's notice, the last refresh error, or help, after the
+// budget's status when there is one.
 func (m Model) renderStatus() string {
 	style, text := helpStyle, m.helpText()
 	switch {
@@ -446,6 +550,8 @@ func (m Model) renderStatus() string {
 		style, text = lipgloss.NewStyle(), m.notice
 	case m.err != nil:
 		style, text = errorStyle, "refresh failed: "+m.err.Error()
+	case m.budget.Status != "":
+		return m.budgetStatus(text)
 	}
 	text = clean(text)
 	if m.width > 0 {
@@ -454,13 +560,25 @@ func (m Model) renderStatus() string {
 	return style.Render(text)
 }
 
+// budgetStatus is the budget's status, then help: the status first, so a
+// narrow window cuts the help. The status comes from the Source, so it is
+// cleaned as untrusted text is.
+func (m Model) budgetStatus(help string) string {
+	status, rest := clean(m.budget.Status), "  "+clean(help)
+	if m.width > 0 {
+		status = truncate(status, m.width)
+		rest = truncate(rest, m.width-lipgloss.Width(status))
+	}
+	return lipgloss.NewStyle().Render(status) + helpStyle.Render(rest)
+}
+
 func (m Model) helpText() string {
 	text := fmt.Sprintf("%d sessions", m.shownSessions())
 	if m.filter != "" {
 		text = fmt.Sprintf("%d of %d sessions match /%s", m.shownSessions(), len(m.sessions), m.filter)
 	}
 	if m.mode == ModePopup {
-		text += "  enter jump  d decisions  r review  t tasks  / filter  x kill  q quit"
+		text += "  enter jump  d decisions  r review  t tasks  b burn  / filter  x kill  q quit"
 	}
 	return text
 }
@@ -477,6 +595,10 @@ func fit(s string, w int, right bool) string {
 }
 
 // truncate cuts s to at most w cells, ending it with an ellipsis when cut.
+// The kept part is measured whole, as lipgloss.Width measures the cell: a
+// character's width can depend on the one after it (a variation selector
+// turns a one-cell character into a two-cell emoji), so summing the runes'
+// own widths would draw a cell wider than its column.
 func truncate(s string, w int) string {
 	if lipgloss.Width(s) <= w {
 		return s
@@ -484,17 +606,15 @@ func truncate(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	var b strings.Builder
-	used := 0
+	kept := ""
 	for _, r := range s {
-		rw := lipgloss.Width(string(r))
-		if used+rw > w-1 {
+		next := kept + string(r)
+		if lipgloss.Width(next) > w-1 {
 			break
 		}
-		b.WriteRune(r)
-		used += rw
+		kept = next
 	}
-	return b.String() + ellipsis
+	return kept + ellipsis
 }
 
 // Cell makes untrusted text safe to print as one table cell: clean(s), or
