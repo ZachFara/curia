@@ -21,11 +21,13 @@ import (
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
 	"github.com/ZachFara/curia/internal/tmux"
+	"github.com/ZachFara/curia/internal/usage"
 )
 
 // spawnOptions are the choices of one spawn.
 type spawnOptions struct {
-	Model  string        // --model; "" uses the task's stored model, if any
+	Agent  string        // --agent: claude, codex, or empty: the task's own, claude for a task never spawned
+	Model  string        // --model; "" uses the task's stored model, if any, or spawnModel's default
 	Team   bool          // --team
 	Resume string        // a session id: curia resume
 	Wait   time.Duration // how long to wait for the agent's first hook; 0: do not wait
@@ -45,6 +47,9 @@ type spawnResult struct {
 	Task    model.Task
 	Pane    tmux.Pane
 	Session model.Session // zero when the agent had not reported within Wait
+	// Note is the cheaper-model note (spawnModel), "" when none; spawnTask
+	// also prints it to Out before anything else.
+	Note string
 }
 
 var (
@@ -62,14 +67,15 @@ const (
 	spawnPoll = 250 * time.Millisecond // its poll interval
 )
 
-// spawnSessionID is the form of a Claude Code session id (--resume).
+// spawnSessionID is the form of an agent session id (--resume): Claude
+// Code's, and the UUID codex resume takes.
 var spawnSessionID = regexp.MustCompile(`^[0-9a-f-]{36}$`)
 
 // The flags of curia spawn.
 var (
-	spawnAgent = "claude"
-	spawnModel string
-	spawnTeam  bool
+	spawnAgent     string
+	spawnFlagModel string
+	spawnTeam      bool
 )
 
 func init() {
@@ -81,20 +87,20 @@ func init() {
 			"worktree's .curia/setup.sh if you approved its exact content (curia setup\n" +
 			"approve; output in the setup log), opens\n" +
 			"a tmux window named after the task in the repository's session and starts\n" +
-			"claude there with the task's brief. Waits up to 20 s for the agent to report.",
+			"the agent there with the task's brief (claude, or codex with --agent codex;\n" +
+			"without --agent, the task's own). Under a limit forecast a Claude Code agent\n" +
+			"with no model starts on usage.cheaper_model; --model always wins.\n" +
+			"Waits up to 20 s for the agent to report.",
 		Args: cobra.ExactArgs(1),
 		RunE: runSpawn,
 	}
-	cmd.Flags().StringVar(&spawnAgent, "agent", "claude", "the agent to start (only claude)")
-	cmd.Flags().StringVar(&spawnModel, "model", "", "the model the agent uses")
+	cmd.Flags().StringVar(&spawnAgent, "agent", "", "the agent to start: claude or codex (default: the task's own, claude for a new task)")
+	cmd.Flags().StringVar(&spawnFlagModel, "model", "", "the model the agent uses")
 	cmd.Flags().BoolVar(&spawnTeam, "team", false, "let the agent lead an agent team")
 	rootCmd.AddCommand(cmd)
 }
 
 func runSpawn(cmd *cobra.Command, args []string) error {
-	if spawnAgent != "claude" {
-		return fmt.Errorf("--agent %q is not supported: only claude", sanitize.Line(spawnAgent, 40))
-	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -108,7 +114,7 @@ func runSpawn(cmd *cobra.Command, args []string) error {
 	// An agent (anything but the user at a terminal) may spawn only what the
 	// user marked ready (Ruling 113).
 	r, err := spawnTask(cmd.Context(), st, newTmuxClient(), cfg, args[0],
-		spawnOptions{Model: spawnModel, Team: spawnTeam, Wait: spawnWait, Out: out, ReadyOnly: !userAtTerminal()})
+		spawnOptions{Agent: spawnAgent, Model: spawnFlagModel, Team: spawnTeam, Wait: spawnWait, Out: out, ReadyOnly: !userAtTerminal()})
 	if err != nil {
 		return err
 	}
@@ -125,7 +131,7 @@ func spawnTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.
 	if o.Out == nil {
 		o.Out = io.Discard
 	}
-	t, err := spawnCheck(ctx, st, tm, cfg, id, &o)
+	t, note, err := spawnCheck(ctx, st, tm, cfg, id, &o)
 	if err != nil {
 		return spawnResult{}, err
 	}
@@ -133,33 +139,116 @@ func spawnTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.
 	if err != nil {
 		return spawnResult{}, err
 	}
+	if note != "" {
+		_, _ = fmt.Fprintln(o.Out, note)
+	}
 	r, err := spawnStart(ctx, st, tm, cfg, claimed, o)
+	r.Note = note
 	if err != nil {
 		return r, spawnRelease(ctx, st, claimed, err)
 	}
 	return r, nil
 }
 
-// spawnCheckOptions refuses an id, model or session id that is not of the
-// form Curia accepts, before anything else happens.
+// spawnCheckOptions refuses an id, agent, model or session id that is not
+// of the form Curia accepts, before anything else happens. The agent is
+// one of two fixed names; a model or session id that starts with a dash
+// would reach the agent's arguments as an option, and is refused.
 func spawnCheckOptions(id string, o spawnOptions) error {
 	switch {
 	case !task.ValidID(id):
 		return fmt.Errorf("%q is not a task id (T-<n>)", sanitize.Line(id, 40))
-	case o.Model != "" && !task.ValidModel(o.Model):
-		return fmt.Errorf("model %q: must be 1 to 64 of A-Z, a-z, 0-9, ., _, [, ] and -", sanitize.Line(o.Model, 70))
-	case o.Resume != "" && !spawnSessionID.MatchString(o.Resume):
-		return fmt.Errorf("session id %q is not a Claude Code session id", sanitize.Line(o.Resume, 40))
+	case o.Agent != "" && o.Agent != model.AgentClaude && o.Agent != model.AgentCodex:
+		return fmt.Errorf("--agent %q is not supported: claude or codex", sanitize.Line(o.Agent, 40))
+	case o.Model != "" && !spawnValidModel(o.Model):
+		return fmt.Errorf("model %q: must be 1 to 64 of A-Z, a-z, 0-9, ., _, [, ] and -, not starting with -", sanitize.Line(o.Model, 70))
+	case o.Resume != "" && (!spawnSessionID.MatchString(o.Resume) || strings.HasPrefix(o.Resume, "-")):
+		return fmt.Errorf("session id %q is not a session id", sanitize.Line(o.Resume, 40))
 	}
 	return nil
+}
+
+// spawnValidModel is task.ValidModel, and not starting with a dash.
+func spawnValidModel(m string) bool {
+	return task.ValidModel(m) && !strings.HasPrefix(m, "-")
+}
+
+// spawnAgentOf is the agent a spawn of t with o starts: the task's stored
+// agent on a resume or without --agent (claude when none is stored), else
+// o.Agent.
+func spawnAgentOf(t model.Task, o spawnOptions) string {
+	if o.Resume == "" && o.Agent != "" {
+		return o.Agent
+	}
+	if t.Agent == "" {
+		return model.AgentClaude
+	}
+	return t.Agent
+}
+
+// spawnCheckAgent sets o.Agent to the agent this spawn starts and refuses
+// an agent team for codex.
+func spawnCheckAgent(t model.Task, o *spawnOptions) error {
+	o.Agent = spawnAgentOf(t, *o)
+	if o.Agent == model.AgentCodex && o.Team {
+		return fmt.Errorf("agent teams are Claude Code's; spawn %s without --team or without --agent codex", t.ID)
+	}
+	return nil
+}
+
+// spawnModel is section 4.4's cheaper-model rule: o.Model when set, else
+// the task's stored model, else, for Claude Code on a new start (no
+// resume) while a limit forecast warns, the configured cheaper model and
+// the note saying so; otherwise no model. A failed usage read, or a
+// cheaper model that is not a model name, gives no model and no note
+// (logged): nothing automatic stops a spawn.
+func spawnModel(ctx context.Context, st *store.Store, cfg config.Config, t model.Task, o spawnOptions, now time.Time) (modelName, note string) {
+	switch {
+	case o.Model != "":
+		return o.Model, ""
+	case t.AgentModel != "":
+		return t.AgentModel, ""
+	case o.Resume != "" || spawnAgentOf(t, o) != model.AgentClaude || cfg.Usage.CheaperModel == "":
+		return "", ""
+	}
+	cheaper := cfg.Usage.CheaperModel
+	if !spawnValidModel(cheaper) {
+		logWarn(cfg.LogPath, "spawn: usage.cheaper_model is not a model name; the limit forecast default is off", "task", t.ID)
+		return "", ""
+	}
+	samples, err := st.UsageSince(ctx, now.Add(-usage.BurnWindow))
+	if err != nil {
+		logWarn(cfg.LogPath, "spawn: the limit forecast could not read usage", "task", t.ID, "err", err.Error())
+		return "", ""
+	}
+	w, ok := usage.Warning(usage.Forecasts(samples, now), now)
+	if !ok {
+		return "", ""
+	}
+	return cheaper, fmt.Sprintf("limit forecast (%s): starting %s on %s; pass --model to choose", usage.BadgeText(w, now), t.ID, cheaper)
 }
 
 // spawnCheck is step 1 before the claim: the options are valid, the task
 // exists, is not dropped, is not paused (unless this is curia resume) and
 // is not running; for an agent (ReadyOnly) it is stored ready and, by its
-// newest review, neither in review nor done (I7). o.Model becomes the
-// task's stored model when not given.
-func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.Config, id string, o *spawnOptions) (model.Task, error) {
+// newest review, neither in review nor done (I7). o.Agent becomes the
+// agent this spawn starts and o.Model spawnModel's model; the note is
+// spawnModel's.
+func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.Config, id string, o *spawnOptions) (model.Task, string, error) {
+	t, err := spawnCheckTask(ctx, st, id, o)
+	if err != nil {
+		return model.Task{}, "", err
+	}
+	var note string
+	o.Model, note = spawnModel(ctx, st, cfg, t, *o, clock())
+	if err = spawnCheckOptions(id, *o); err != nil {
+		return model.Task{}, "", err
+	}
+	return t, note, spawnCheckIdle(ctx, st, tm, cfg, t)
+}
+
+// spawnCheckTask is spawnCheck's checks of the options and the task.
+func spawnCheckTask(ctx context.Context, st *store.Store, id string, o *spawnOptions) (model.Task, error) {
 	if err := spawnCheckOptions(id, *o); err != nil {
 		return model.Task{}, err
 	}
@@ -182,13 +271,7 @@ func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 			return model.Task{}, err
 		}
 	}
-	if o.Model == "" {
-		o.Model = t.AgentModel
-	}
-	if err = spawnCheckOptions(id, *o); err != nil {
-		return model.Task{}, err
-	}
-	return t, spawnCheckIdle(ctx, st, tm, cfg, t)
+	return t, spawnCheckAgent(t, o)
 }
 
 // spawnCheckReviewed refuses a task whose newest review makes it review or
@@ -309,6 +392,9 @@ func spawnStart(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 	if err = setupStep(ctx, st, cfg, t, o.Out); err != nil {
 		return spawnResult{Task: t}, fmt.Errorf("%w%s", err, stays)
 	}
+	if t, err = spawnStoreAgent(ctx, st, t, o.Agent); err != nil {
+		return spawnResult{Task: t}, fmt.Errorf("%w%s", err, stays)
+	}
 	pane, err := spawnWindow(ctx, tm, t, o)
 	if err != nil {
 		return spawnResult{Task: t}, fmt.Errorf("%w%s", err, stays)
@@ -403,6 +489,19 @@ func spawnAddWorktree(ctx context.Context, t model.Task, path, branch string) er
 	return worktreeAdd(ctx, t.Repo, path, branch, t.BaseBranch)
 }
 
+// spawnStoreAgent stores the agent on the task before the window opens:
+// curia launch, which the window runs at once, reads it from the store to
+// choose the binary, so the window's command carries no agent name.
+func spawnStoreAgent(ctx context.Context, st *store.Store, t model.Task, agent string) (model.Task, error) {
+	if agent == "" || agent == t.Agent {
+		return t, nil
+	}
+	return st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
+		cur.Agent, cur.UpdatedAt = agent, clock()
+		return cur, nil
+	})
+}
+
 // spawnCommand is the window's command: curia launch with the task id and
 // the options, nothing taken from the task's text.
 func spawnCommand(bin, id string, o spawnOptions) []string {
@@ -451,12 +550,15 @@ func spawnWindow(ctx context.Context, tm tmux.Client, t model.Task, o spawnOptio
 	return pane, nil
 }
 
-// spawnLink is step 6's write: the pane, team and model are stored and a
+// spawnLink is step 6's write: the pane, agent, team and model are stored and a
 // backlog task becomes ready. If that fails, the window just opened is
 // closed again, so nothing runs that the task does not record.
 func spawnLink(ctx context.Context, st *store.Store, tm tmux.Client, t model.Task, pane tmux.Pane, o spawnOptions) (model.Task, error) {
 	stored, err := st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
 		cur.Pane, cur.Team, cur.AgentModel, cur.UpdatedAt = pane.ID, o.Team, o.Model, clock()
+		if o.Agent != "" {
+			cur.Agent = o.Agent
+		}
 		if cur.Status == model.TaskBacklog {
 			cur.Status = model.TaskReady
 		}
