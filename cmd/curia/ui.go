@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -44,7 +45,10 @@ func init() {
 			"update and member name, x then y kills the pane, q or Esc quits. From 100\n" +
 			"columns COST and CACHE show each session's cost and prompt cache; b sorts\n" +
 			"by burn (dollars an hour) and back, and the status line shows a usage\n" +
-			"limit warning or, on the API, the spend projected for the next two hours.",
+			"limit warning or, on the API, the spend projected for the next two hours.\n" +
+			"While the limit is forecast to land before the reset, a line suggests the\n" +
+			"running task to pause (the lowest priority, then the highest burn): P then\n" +
+			"y pauses it as curia pause does (not inside an agent session).",
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			return runDashboard(ui.ModePopup, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -73,22 +77,25 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 	}
 	defer func() { _ = st.Close() }()
 	client := newTmuxClient()
-	src := storeSource{st: st, tm: client, cfg: cfg}
-	m := ui.New(src, client, cfg, clock, mode)
 	// The dashboard's actions with a user's effect (the board's ready and
-	// spawn keys, d, x y, and the review view's a, c and x) are the
+	// spawn keys, d, x y, P y, and the review view's a, c and x) are the
 	// user-only commands' (spec section 7, re-review A, C1): the guard is
 	// asked once, and when it refuses each of those keys shows its reason
 	// and does nothing. Jumps and views stay.
-	refused := userOnly("ui", "change, spawn or kill from the dashboard, or answer decisions and reviews")
+	refused := userOnly("ui", "change, spawn, pause or kill from the dashboard, or answer decisions and reviews")
+	src := storeSource{st: st, tm: client, cfg: cfg, refused: refused}
+	m := ui.New(src, client, cfg, clock, mode)
 	if mode == ui.ModePopup {
 		bsrc := boardSource{st: st, tm: client, cfg: cfg, refused: refused}
 		m = m.WithBoard(func() tea.Model { return ui.NewBoard(bsrc, client, clock, true) })
+		if refused == nil {
+			m = m.WithPause()
+		}
 	}
 	if refused != nil {
 		m = m.WithoutKill(refused.Error())
 		if mode == ui.ModePopup {
-			m = m.WithoutDecide(refused.Error())
+			m = m.WithoutDecide(refused.Error()).WithoutPause(refused.Error())
 		}
 	}
 	// d answers through curia decide's path, so it opens only for the user
@@ -143,6 +150,9 @@ type storeSource struct {
 	st  *store.Store
 	tm  tmux.Client
 	cfg config.Config
+	// refused is the user-only guard's refusal of the dashboard's caller, or
+	// nil: with it, Pause does nothing and says why.
+	refused error
 }
 
 // Sessions reconciles and settles, then returns every session that has not
@@ -192,6 +202,8 @@ func (s storeSource) Reviews(ctx context.Context) (map[string]string, error) {
 // the forecast warning's badge text, else in API mode (no usage sample in
 // the window) the projection of the live sessions' spend, and Burn each
 // session's burn; a zero Budget when nothing was ingested in the window.
+// While a warning is in force the pause suggestion is curia usage's
+// (usageBuild), computed nowhere else.
 func (s storeSource) Budget(ctx context.Context) (ui.Budget, error) {
 	now := clock()
 	since := now.Add(-usage.BurnWindow)
@@ -209,7 +221,7 @@ func (s storeSource) Budget(ctx context.Context) (ui.Budget, error) {
 	}
 	if w, ok := usage.Warning(usage.Forecasts(samples, now), now); ok {
 		b.Status = usage.BadgeText(w, now)
-		return b, nil
+		return b, uiSuggestPause(ctx, s.st, &b, now)
 	}
 	if len(cost) == 0 {
 		return b, nil
@@ -222,6 +234,53 @@ func (s storeSource) Budget(ctx context.Context) (ui.Budget, error) {
 		b.Status = "next 2h ≈ " + usage.CostCell(usd, true) + " at the current rate"
 	}
 	return b, nil
+}
+
+// uiSuggestPause fills b's pause suggestion from usageBuild, when its
+// warning is in force and a task qualifies.
+func uiSuggestPause(ctx context.Context, st *store.Store, b *ui.Budget, now time.Time) error {
+	rep, err := usageBuild(ctx, st, now)
+	if err != nil || !rep.Warn || rep.PauseTask == "" {
+		return err
+	}
+	b.PauseTask, b.PauseLabel, b.PauseTitle = rep.PauseTask, rep.PauseLabel, rep.PauseTitle
+	b.PauseLimit = "at limit"
+	if rep.Warning.LimitAt.After(now) {
+		b.PauseLimit = "limit ~" + usage.Short(rep.Warning.LimitAt.Sub(now))
+	}
+	return nil
+}
+
+// Pause pauses task id as curia pause does, without --force, and returns
+// the pause's last line. Only the task usageBuild suggests at this moment
+// is paused: the dashboard's prompt named the suggestion of its last
+// refresh, and anything else is refused with what is suggested now. The
+// pause runs to its own limits (git's, the repository's hooks), not cut
+// short by the view, and counts as an action in flight (reviewFlight), so
+// curia ui waits for it to finish and be recorded before it exits.
+func (s storeSource) Pause(ctx context.Context, id string) (string, error) {
+	if s.refused != nil {
+		return "", s.refused
+	}
+	defer reviewFlight.begin()()
+	ctx = context.WithoutCancel(ctx)
+	rep, err := usageBuild(ctx, s.st, clock())
+	if err != nil {
+		return "", err
+	}
+	if rep.PauseTask != id {
+		now := "nothing is suggested now"
+		if rep.PauseTask != "" {
+			now = "the suggestion is now " + rep.PauseLabel
+		}
+		return "", fmt.Errorf("%s not paused: the suggestion changed; %s. Nothing was done", sanitize.Line(id, 40), now)
+	}
+	var out bytes.Buffer
+	if err = pauseTask(ctx, s.st, s.tm, s.cfg, id, pauseOptions{}, &out); err != nil {
+		return "", err
+	}
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	return lines[len(lines)-1], nil
 }
 
 // uiLiveSessions are the ids of the sessions that have not ended.

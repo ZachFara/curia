@@ -49,14 +49,37 @@ type Source interface {
 	// id, for the r key; only the popup reads it.
 	Reviews(ctx context.Context) (map[string]string, error)
 	// Budget returns what the dashboard shows about usage, for the status
-	// line and the b key; only the popup reads it.
+	// line, the b key and the pause suggestion; only the popup reads it.
 	Budget(ctx context.Context) (Budget, error)
+	// Pause pauses task taskID as curia pause does, without --force, and
+	// returns the pause's last line. The popup calls it only after P and a
+	// confirming y, for the task the prompt named (spec section 7).
+	Pause(ctx context.Context, taskID string) (line string, err error)
 }
 
 // Budget is what the dashboard shows about usage. Every string in it is already rendered by Curia.
 type Budget struct {
 	Status string             // the forecast warning or the API projection; "" when there is none
 	Burn   map[string]float64 // USD per hour by session id; nil when unknown
+
+	// The pause suggestion (section 4.4), only while a limit forecast is in
+	// force; PauseTask is "" when there is none.
+	PauseTask  string // "T-7"
+	PauseLabel string // "T-7 (P3) api-server"
+	PauseTitle string // the task's title
+	PauseLimit string // when the limit lands: "limit ~48m" or "at limit"
+}
+
+// pauseSuggestion is what a pause prompt names: the suggestion as the
+// notice showed it when P was pressed. The zero value is no prompt.
+type pauseSuggestion struct{ task, label, title string }
+
+// suggestion is b's pause suggestion as a prompt names it; zero when none.
+func (b Budget) suggestion() pauseSuggestion {
+	if b.PauseTask == "" {
+		return pauseSuggestion{}
+	}
+	return pauseSuggestion{task: b.PauseTask, label: b.PauseLabel, title: b.PauseTitle}
 }
 
 // Mode is how the dashboard is shown.
@@ -149,6 +172,17 @@ type Model struct {
 	rowFace  string        // the selected row and its task's pending review, as last drawn
 	rowSince time.Time     // when rowFace came, or an r too soon restarted the wait
 	rowWait  time.Duration // how long r waits from rowSince: dwell, then quietPeriod after an r too soon
+
+	pauseOn    bool            // WithPause: P can pause the suggested task
+	noPause    string          // why P cannot pause; "": noticeNoPause
+	pauseAsk   pauseSuggestion // what the open pause prompt names; zero: no prompt
+	pauseSince time.Time       // when the prompt opened, or a y too soon restarted its wait
+	pauseWait  time.Duration   // how long y waits from pauseSince: dwell, then quietPeriod after a y too soon
+	keyAt      time.Time       // when the last key came, acted on or not
+	prevKeyAt  time.Time       // when the key before it came
+	confirmAt  time.Time       // when a y was taken, waiting out burstGap before it pauses; zero when none
+	confirmSeq int             // the pauseConfirmMsg the taken y waits for
+	pausing    string          // the task a pause in flight is for; "" when none
 }
 
 // rowKind is what a row of the table stands for.
@@ -216,6 +250,29 @@ type refreshMsg struct {
 
 // tickMsg starts the next refresh of chain.
 type tickMsg struct{ chain int }
+
+// pauseConfirmMsg pauses the task of the y taken as seq once burstGap has
+// passed with no other key.
+type pauseConfirmMsg struct{ seq int }
+
+// pausedMsg is the result of one pause.
+type pausedMsg struct {
+	line string
+	err  error
+}
+
+// pauseTimeout bounds one call of Source.Pause; the store's runs a pause to
+// its own limits (git's, the repository's hooks).
+const pauseTimeout = 6 * time.Minute
+
+// Notices of the P key.
+const (
+	noticeNoPause         = "pausing is not available here"
+	noticeNothingToPause  = "nothing to pause: no limit forecast"
+	noticePauseCanceled   = "pause canceled"
+	noticePausing         = "a pause is running; wait for its result"
+	noticeSuggestionMoved = "the suggestion changed"
+)
 
 // childMsg is a message of the decide view shown as child gen. Every
 // message a child's commands send comes back wrapped in one, so a closed
@@ -296,6 +353,21 @@ func (m Model) WithoutReview(why string) Model {
 	return m
 }
 
+// WithPause returns m with the P key enabled in the popup: while the
+// Budget suggests a task to pause, a notice line offers it, P asks to
+// confirm and a y pauses it through Source.Pause. Without it, P says why
+// not.
+func (m Model) WithPause() Model {
+	m.pauseOn, m.noPause = true, ""
+	return m
+}
+
+// WithoutPause returns m with the P key disabled, saying why when pressed.
+func (m Model) WithoutPause(why string) Model {
+	m.pauseOn, m.noPause = false, why
+	return m
+}
+
 // Init starts the first refresh.
 func (m Model) Init() tea.Cmd {
 	return m.refresh()
@@ -342,6 +414,9 @@ func windowNames(tm tmux.Client) (map[string]string, []tmux.Pane) {
 // Update handles one message. While the decide view or the board is shown,
 // every message goes to it (updateChild).
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if pm, ok := msg.(pausedMsg); ok { // a pause's result, whatever is shown
+		return m.applyPaused(pm), nil
+	}
 	if _, ok := msg.(childMsg); ok || m.child != nil {
 		return m.updateChild(msg)
 	}
@@ -361,14 +436,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		return m.reselect(), nil
 	case tea.KeyMsg:
-		if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste {
-			return m.updateRunes(msg)
-		}
-		return m.updateKey(msg)
+		return m.keyMsg(msg)
 	case tea.MouseMsg:
 		return m.updateMouse(msg)
+	case pauseConfirmMsg:
+		return m.applyPauseConfirm(msg)
 	}
 	return m, nil
+}
+
+// keyMsg handles a key message: the time it came is recorded for the burst
+// rule (inBurst), a key while a pause's "y" waits out burstGap is
+// keyAfterPauseConfirm's, and several runes of one read are taken one by
+// one.
+func (m Model) keyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.prevKeyAt, m.keyAt = m.keyAt, m.now()
+	if !m.confirmAt.IsZero() {
+		return m.keyAfterPauseConfirm()
+	}
+	if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste {
+		return m.updateRunes(msg)
+	}
+	return m.updateKey(msg)
 }
 
 // applyRefresh keeps the last good sessions, counts, tasks, reviews and
@@ -390,6 +479,9 @@ func (m Model) applyRefresh(msg refreshMsg) Model {
 	}
 	if msg.budgetErr == nil {
 		m.budget = msg.budget
+		if m.pauseAsk != (pauseSuggestion{}) && m.budget.suggestion() != m.pauseAsk {
+			m = m.cancelPause(m.suggestionMoved())
+		}
 	}
 	return m.reselect()
 }
@@ -697,11 +789,15 @@ func (m Model) moveTo(i int) Model {
 	return m
 }
 
-// visibleRows is how many rows fit between the header and the status line;
-// 0 means no limit (the height is not known yet).
+// visibleRows is how many rows fit between the header and the status line,
+// and the pause notice line when it is shown; 0 means no limit (the height
+// is not known yet).
 func (m Model) visibleRows() int {
 	if m.height <= 0 {
 		return 0
+	}
+	if m.pauseNotice() != "" {
+		return max(m.height-3, 1)
 	}
 	return max(m.height-2, 1)
 }
@@ -746,14 +842,20 @@ func (m Model) toggleTeam() Model {
 // updateRunes handles keys typed faster than the program reads them, which
 // arrive as one message with several runes, one rune at a time; a "/"
 // among them sends the rest into the filter. A "d", "t", "n" or "r" that
-// opens a view drops the rest: the user has not seen the view yet.
+// opens a view, and a "P" that opens the pause prompt, drop the rest: the
+// user has not seen the view or the prompt yet. Into an open pause prompt
+// such a read cancels it: a y in a burst never confirms.
 func (m Model) updateRunes(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if m.pauseAsk != (pauseSuggestion{}) && m.pausing == "" {
+		m.notice = ""
+		return m.cancelPause(noticePauseCanceled), nil
+	}
 	var cmds []tea.Cmd
 	for _, r := range msg.Runes {
 		var cmd tea.Cmd
 		m, cmd = m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}, Alt: msg.Alt})
 		cmds = append(cmds, cmd)
-		if m.child != nil {
+		if m.child != nil || m.pauseAsk != (pauseSuggestion{}) {
 			break
 		}
 	}
@@ -765,8 +867,13 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch {
 	case msg.Type == tea.KeyCtrlC:
 		return m, tea.Quit
+	case m.pausing != "":
+		m.notice = noticePausing
+		return m, nil
 	case m.killPane != "":
 		return m.confirmKill(msg), nil
+	case m.pauseAsk != (pauseSuggestion{}):
+		return m.pauseKey(msg)
 	case m.filtering:
 		return m.filterKey(msg), nil
 	case msg.Paste: // pasted text is never a command
@@ -802,6 +909,8 @@ func (m Model) commandKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.openReview()
 	case "b":
 		return m.toggleBurn(), nil
+	case "P":
+		return m.askPause(), nil
 	}
 	return m, nil
 }
@@ -932,7 +1041,13 @@ func (m Model) updateMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.notice = ""
-	if m.killPane != "" {
+	switch {
+	case m.pausing != "":
+		m.notice = noticePausing
+		return m, nil
+	case m.pauseAsk != (pauseSuggestion{}):
+		return m.cancelPause(noticePauseCanceled), nil
+	case m.killPane != "":
 		m.killPane, m.notice = "", "kill canceled"
 		return m, nil
 	}
@@ -941,4 +1056,101 @@ func (m Model) updateMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.moveTo(i).jump()
+}
+
+// askPause opens the prompt to pause the suggested task, as the notice line
+// names it now. It says why not in the sidebar, without WithPause (the
+// guard refused: read-only) and when nothing is suggested.
+func (m Model) askPause() Model {
+	switch {
+	case m.mode != ModePopup || !m.pauseOn:
+		m.notice = cmp.Or(m.noPause, noticeNoPause)
+	case m.budget.PauseTask == "":
+		m.notice = noticeNothingToPause
+	default:
+		m.pauseAsk, m.pauseSince, m.pauseWait = m.budget.suggestion(), m.now(), dwell
+	}
+	return m
+}
+
+// pauseKey takes a "y" that came as a key of its own, the wait after the
+// prompt opened; it pauses once burstGap has passed with no other key
+// (applyPauseConfirm). A "y" too soon, or within burstGap after another key
+// (the burst rule, inBurst), is ignored and restarts the wait, now as long
+// as the quiet period, so the repeats of a held key and a "y" pasted
+// without bracketing never confirm. Any other key and a paste cancel.
+func (m Model) pauseKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if msg.Paste || msg.String() != "y" {
+		return m.cancelPause(noticePauseCanceled), nil
+	}
+	if now := m.now(); now.Sub(m.pauseSince) < m.pauseWait || inBurst(now, m.prevKeyAt) {
+		m.pauseSince, m.pauseWait, m.notice = now, quietPeriod, noticeTooSoon
+		return m, nil
+	}
+	m.confirmAt, m.confirmSeq = m.now(), m.confirmSeq+1
+	seq := m.confirmSeq
+	return m, tea.Tick(burstGap, func(time.Time) tea.Msg { return pauseConfirmMsg{seq: seq} })
+}
+
+// keyAfterPauseConfirm handles a key that came while a taken "y" waits out
+// burstGap. Within burstGap of the "y" it arrived with it (the burst rule):
+// the "y" is refused and the prompt's wait restarts, the prompt still open.
+// Later (the wait's message is late) the pause starts and the key is
+// ignored.
+func (m Model) keyAfterPauseConfirm() (Model, tea.Cmd) {
+	if inBurst(m.keyAt, m.confirmAt) {
+		m.confirmAt = time.Time{}
+		m.pauseSince, m.pauseWait, m.notice = m.keyAt, quietPeriod, noticeTooSoon
+		return m, nil
+	}
+	return m.startPause()
+}
+
+// applyPauseConfirm starts the pause of the "y" msg waited for, when it
+// still waits.
+func (m Model) applyPauseConfirm(msg pauseConfirmMsg) (Model, tea.Cmd) {
+	if msg.seq != m.confirmSeq || m.confirmAt.IsZero() {
+		return m, nil
+	}
+	return m.startPause()
+}
+
+// startPause closes the prompt and pauses the task it named, off the update
+// loop. A refresh that changed the suggestion has closed the prompt already
+// (applyRefresh), and the store's Pause checks it again.
+func (m Model) startPause() (Model, tea.Cmd) {
+	ask := m.pauseAsk
+	m.confirmAt, m.pauseAsk = time.Time{}, pauseSuggestion{}
+	m.pausing = ask.task
+	src := m.src
+	return m, call(pauseTimeout, func(ctx context.Context) tea.Msg {
+		line, err := src.Pause(ctx, ask.task)
+		return pausedMsg{line: line, err: err}
+	})
+}
+
+// applyPaused shows a pause's line, or its error, as the notice; nothing
+// else in the view changes.
+func (m Model) applyPaused(msg pausedMsg) Model {
+	m.pausing, m.notice = "", msg.line
+	if msg.err != nil {
+		m.notice = msg.err.Error()
+	}
+	return m
+}
+
+// cancelPause closes the pause prompt, and a "y" waiting with it, with
+// notice.
+func (m Model) cancelPause(notice string) Model {
+	m.pauseAsk, m.confirmAt, m.notice = pauseSuggestion{}, time.Time{}, notice
+	return m
+}
+
+// suggestionMoved is the notice of a prompt canceled because the
+// suggestion changed: what is suggested now, if anything.
+func (m Model) suggestionMoved() string {
+	if m.budget.PauseTask == "" {
+		return noticeSuggestionMoved + ": nothing to pause now"
+	}
+	return noticeSuggestionMoved + ": now " + m.budget.PauseLabel
 }

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"cmp"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -93,6 +94,7 @@ var (
 	helpStyle   = lipgloss.NewStyle().Faint(true)
 	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	reviewStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	pauseStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 )
 
 // cacheWarnLeft is how little warm cache time the CACHE cell shows yellow.
@@ -198,8 +200,16 @@ func (m Model) View() string {
 	for i, c := range lay.cells {
 		lines = append(lines, m.renderRow(m.rows[lay.first+i], c, lay, lay.first+i == m.cursor))
 	}
-	for m.height > 0 && len(lines) < m.height-1 {
+	notice := m.pauseNotice()
+	bottom := 1
+	if notice != "" {
+		bottom = 2
+	}
+	for m.height > 0 && len(lines) < m.height-bottom {
 		lines = append(lines, "")
+	}
+	if notice != "" {
+		lines = append(lines, pauseStyle.Render(m.fitLine(notice)))
 	}
 	lines = append(lines, m.renderStatus())
 	if m.width > 0 {
@@ -544,6 +554,8 @@ func (m Model) renderStatus() string {
 	switch {
 	case m.killPane != "":
 		style, text = lipgloss.NewStyle(), "kill pane "+m.killPane+"? y kills, any other key cancels"
+	case m.pauseAsk != (pauseSuggestion{}):
+		style, text = lipgloss.NewStyle(), m.pausePrompt()
 	case m.filtering:
 		style, text = lipgloss.NewStyle(), "/"+m.filter
 	case m.notice != "":
@@ -553,11 +565,39 @@ func (m Model) renderStatus() string {
 	case m.budget.Status != "":
 		return m.budgetStatus(text)
 	}
+	return style.Render(m.fitLine(text))
+}
+
+// fitLine is untrusted text cleaned and cut to the window's width.
+func (m Model) fitLine(text string) string {
 	text = clean(text)
 	if m.width > 0 {
 		text = truncate(text, m.width)
 	}
-	return style.Render(text)
+	return text
+}
+
+// pauseNotice is the notice line of the pause suggestion (section 4.5),
+// shown in the popup above the status line while the Budget suggests a
+// task and P can pause it; "" otherwise. Its parts come from the Source and
+// are cleaned when drawn.
+func (m Model) pauseNotice() string {
+	if m.mode != ModePopup || !m.pauseOn || m.budget.PauseTask == "" {
+		return ""
+	}
+	return cmp.Or(m.budget.PauseLimit, "limit") + " before reset: P pauses " + m.budget.PauseLabel
+}
+
+// pausePrompt asks to confirm the pause the prompt names. The title is cut
+// first, so the question and y/N fit whenever the window allows.
+func (m Model) pausePrompt() string {
+	head := "pause " + clean(m.pauseAsk.task) + ` "`
+	tail := `"? it commits work in progress and closes its pane  y/N`
+	title := clean(m.pauseAsk.title)
+	if m.width > 0 {
+		title = truncate(title, max(m.width-lipgloss.Width(head)-lipgloss.Width(tail), 0))
+	}
+	return head + title + tail
 }
 
 // budgetStatus is the budget's status, then help: the status first, so a
