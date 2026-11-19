@@ -252,13 +252,18 @@ func groupRead(f *os.File) string {
 // runGitGroup is runGit through runGroup: git -C cwd args, in a process
 // group of its own, stopped with SIGTERM and then killed when ctx ends.
 func runGitGroup(ctx context.Context, cwd string, args ...string) gitResult {
+	return runGitGroupEnv(ctx, cwd, nil, args...)
+}
+
+// runGitGroupEnv is runGitGroup with extra added to git's environment.
+func runGitGroupEnv(ctx context.Context, cwd string, extra []string, args ...string) gitResult {
 	res := gitResult{args: args}
 	path, err := exec.LookPath("git")
 	if err != nil {
 		res.err = err
 		return res
 	}
-	res.out, res.stderr, res.err = runGroup(ctx, "", gitEnv(), path, append([]string{"-C", cwd}, args...)...)
+	res.out, res.stderr, res.err = runGroup(ctx, "", append(gitEnv(), extra...), path, append([]string{"-C", cwd}, args...)...)
 	res.timedOut = ctx.Err() != nil
 	return res
 }

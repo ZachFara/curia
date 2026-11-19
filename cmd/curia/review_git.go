@@ -365,12 +365,58 @@ func reviewMerge(ctx context.Context, t model.Task, head string) error {
 	}
 	mctx, cancel := context.WithTimeout(ctx, reviewMergeLimit)
 	defer cancel()
-	res := runGitGroup(mctx, t.Repo, "merge", "--no-ff", "--no-edit", "--no-autostash",
+	res := runGitGroupEnv(mctx, t.Repo, reviewMergeEnv(t, tree), "merge", "--no-ff", "--commit", "--no-edit", "--no-autostash",
 		"-m", "Merge branch '"+t.Branch+"' into "+t.BaseBranch, head)
 	if res.err == nil {
-		return nil
+		return reviewMergeDone(ctx, t, head, before)
 	}
 	return reviewMergeFailed(ctx, t, res, before, tree)
+}
+
+// reviewMergeEnv is the configuration the approval's git merge runs with, given in the environment (as git -c
+// would, read after every config file; git 2.31 or later) so that the developer's merge configuration cannot
+// make it a different merge (C-1): branch.<base>.mergeOptions emptied (--no-commit, --squash, -s, -X and the
+// rest are not applied), and, when git merge-tree computed the merge's tree (git 2.38 or later, whose default
+// strategy is ort), pull.twohead set to ort, the strategy merge-tree uses. The command line adds --no-ff and
+// --commit, which win over merge.ff and any --no-commit.
+func reviewMergeEnv(t model.Task, tree string) []string {
+	env := []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=branch." + t.BaseBranch + ".mergeOptions", "GIT_CONFIG_VALUE_0="}
+	if tree != "" {
+		env[0] = "GIT_CONFIG_COUNT=2"
+		env = append(env, "GIT_CONFIG_KEY_1=pull.twohead", "GIT_CONFIG_VALUE_1=ort")
+	}
+	return env
+}
+
+// reviewMergeDone is the check after git merge exited 0: the base must then contain head, or the merge is not
+// recorded (C-1). On a context detached from the caller's; when the base does not contain head, Curia runs
+// nothing and the error, wrapping errReviewLeft, says what is there and what the user can run.
+func reviewMergeDone(ctx context.Context, t model.Task, head string, before reviewState) error {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 4*worktreeGitLimit)
+	defer cancel()
+	n, err := reviewAhead(actx, t, head)
+	if err == nil && n == 0 {
+		return nil
+	}
+	repo := sanitize.Line(t.Repo, 300)
+	found := "its commits could not be counted: " + sanitize.Line(fmt.Sprint(err), 200)
+	if err == nil {
+		after, serr := reviewRepoState(actx, t.Repo)
+		found = reviewStateDiff(before, after)
+		switch {
+		case serr != nil:
+			found = "git status could not be read"
+		case found == "":
+			found = "git status as before"
+		}
+		if sit, ierr := reviewInspect(actx, t.Repo); ierr == nil && sit.underWay {
+			found += "; a merge is under way (MERGE_HEAD)"
+		}
+	}
+	return fmt.Errorf("git merge reported success, but %s does not contain %s (%s): nothing is recorded merged and Curia ran "+
+		"nothing there. Look with git -C %s status and git -C %s log; while a merge is under way there, git -C %s commit "+
+		"completes it (approving again then records it) and git -C %s merge --abort ends it. The review stays pending: %w",
+		t.BaseBranch, reviewShort(head), found, repo, repo, repo, repo, errReviewLeft)
 }
 
 // reviewConflictsShown bounds the conflicting paths a refusal names.

@@ -1482,3 +1482,54 @@ func TestBaseTagDoesNotShadowBranch(t *testing.T) {
 		t.Errorf("R-1 = %+v, want merged with the real stat", r)
 	}
 }
+
+// TestMergeIgnoresMergeOptions: the developer's merge configuration cannot
+// turn the approval's merge into something else (C-1): with
+// branch.main.mergeOptions --no-commit git would stop before committing and
+// exit 0, with --squash refuse, with -s ours (or pull.twohead ours) make a
+// merge commit without the branch's change. Each approval merges the approved
+// head with its content, and records it merged.
+func TestMergeIgnoresMergeOptions(t *testing.T) {
+	for _, c := range []struct{ key, value string }{
+		{"branch.main.mergeOptions", "--no-commit"},
+		{"branch.main.mergeOptions", "--squash"},
+		{"branch.main.mergeOptions", "-s ours"},
+		{"pull.twohead", "ours"},
+		{"merge.ff", "only"},
+	} {
+		t.Run(c.key+"="+c.value, func(t *testing.T) {
+			f := reviewNew(t)
+			gitRun(t, f.repo, "config", c.key, c.value)
+			head := f.head(f.wt, "HEAD")
+			line, err := f.approve(model.ApproveMerge, "")
+			if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main") {
+				t.Fatalf("approve = %q, %v; want the merge", line, err)
+			}
+			f.wantMerged(head)
+			if got := worktreeGit(t, f.repo, "show", "main:auth.go"); got != "package auth" {
+				t.Errorf("main:auth.go = %q, want the branch's change merged", got)
+			}
+		})
+	}
+}
+
+// TestMergeReportedDoneButNotInBase: git merge exits 0 but the base does not
+// hold the approved head afterwards (here a post-merge hook resets it). Curia
+// records nothing merged, says what it found and what to run, and keeps the
+// review pending with its intent.
+func TestMergeReportedDoneButNotInBase(t *testing.T) {
+	f := reviewNew(t)
+	lifecycleHooks(f.spawnFixture, "post-merge", "#!/bin/sh\ngit reset -q --hard HEAD^\n")
+	before := f.head(f.repo, "HEAD")
+	line, err := f.approve(model.ApproveMerge, "")
+	if err == nil || !strings.Contains(err.Error(), "git merge reported success, but main does not contain "+reviewShort(f.head(f.wt, "HEAD"))) ||
+		!strings.Contains(err.Error(), "git -C "+f.repo+" log") || !strings.Contains(err.Error(), "The review stays pending") {
+		t.Fatalf("approve = %q, %v; want the missing merge reported", line, err)
+	}
+	if r := f.review(); r.Status != model.ReviewPending || r.IntentAt.IsZero() {
+		t.Errorf("R-1 = %+v, want pending with its intent kept", r)
+	}
+	if got := f.head(f.repo, "HEAD"); got != before {
+		t.Errorf("HEAD = %s, want the hook's reset to %s", got, before)
+	}
+}
