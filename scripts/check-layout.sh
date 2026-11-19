@@ -87,6 +87,24 @@ while IFS= read -r -d '' path; do
 	fi
 done < <(git ls-files -z --cached --others --exclude-standard)
 
+# Go refuses to build a module zip (so `go install ...@version` fails for every
+# user) when a tracked path has a character or shape that
+# golang.org/x/mod/module.CheckFilePath rejects. Check tracked paths only.
+bad_chars='["'"'"'*<>?`|\\:]'
+while IFS= read -r -d '' path; do
+	if ! printf '%s' "$path" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+		violations+=("$path: path is not valid UTF-8 (Go module zips reject it)")
+		continue
+	fi
+	if printf '%s' "$path" | grep -q "$bad_chars"; then
+		violations+=("$path: path has a character Go module zips reject (one of \" ' * < > ? \` | \\ :)")
+	fi
+	# A path element with a leading or trailing space, or a trailing dot.
+	if printf '%s' "$path" | grep -Eq '(^|/)( [^/]*|[^/]* |[^/]*\.)(/|$)'; then
+		violations+=("$path: path element has a leading or trailing space or a trailing dot (Go module zips reject it)")
+	fi
+done < <(git ls-files -z)
+
 if ((${#violations[@]} > 0)); then
 	echo "layout check failed:" >&2
 	printf '  %s\n' "${violations[@]}" >&2
