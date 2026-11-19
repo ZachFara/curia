@@ -1533,3 +1533,73 @@ func TestMergeReportedDoneButNotInBase(t *testing.T) {
 		t.Errorf("HEAD = %s, want the hook's reset to %s", got, before)
 	}
 }
+
+// TestOrphanMergeRefusesEveryClaim: while an earlier approval's intent to
+// merge stands and its orphaned git still runs (its pre-merge-commit hook
+// longer than the hold, the merge's result staged), no other outcome may
+// claim the review (C-2): a merge approval, a pull request approval, a drop
+// and a change request are each refused with the same explanation, and the
+// intent stays exactly as it was. Once the orphan has made the merge commit,
+// approving (here with a pull request) records the review merged.
+func TestOrphanMergeRefusesEveryClaim(t *testing.T) {
+	f := reviewNew(t)
+	gh := reviewUseGH(t, "https://github.com/o/r/pull/7\n")
+	in, release := reviewHookAt(f, "pre-merge-commit", 0)
+	head := f.head(f.wt, "HEAD")
+	ctx := context.Background()
+	if _, err := f.st.ClaimReviewIntent(ctx, "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head, DiffStat: " auth.go | 1 +"},
+		f.now, reviewIntentHold); err != nil {
+		t.Fatal(err)
+	}
+	orphan := make(chan gitResult, 1)
+	go func() {
+		orphan <- runGitGroup(ctx, f.repo, "merge", "--no-ff", "--no-edit", "--no-autostash", "-m", "Merge", head)
+	}()
+	reviewWaitFile(t, in)
+	later := f.now.Add(11 * time.Minute)
+	for _, c := range []struct {
+		name, again string
+		act         func() (string, error)
+	}{
+		{"merge approval", "approve again", func() (string, error) {
+			return reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, later)
+		}},
+		{"pull request approval", "approve again", func() (string, error) {
+			return reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApprovePR, head, model.AnsweredCLI, later)
+		}},
+		{"drop", "drop again", func() (string, error) { return reviewDrop(ctx, f.st, "R-1", model.AnsweredCLI, later) }},
+		{"change request", "request changes again", func() (string, error) {
+			return reviewRequestChanges(ctx, f.st, f.fake, testLoggerOnly(), "R-1", "more", model.AnsweredCLI, later)
+		}},
+	} {
+		line, err := c.act()
+		f.wantOrphanRefusal(c.name, c.again, head, line, err)
+	}
+	if len(gh.calls) != 0 {
+		t.Errorf("gh ran: %+v", gh.calls)
+	}
+	worktreeWrite(t, release, "")
+	if res := <-orphan; res.err != nil {
+		t.Fatalf("the orphaned merge: %v %s", res.err, res.stderr)
+	}
+	line, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApprovePR, head, model.AnsweredCLI, later.Add(time.Minute))
+	if err != nil || !strings.Contains(line, "is already merged into main; recorded") {
+		t.Fatalf("approve after the orphan merged = %q, %v; want it recorded", line, err)
+	}
+	f.wantMerged(head)
+}
+
+// wantOrphanRefusal checks that action name was refused, naming the earlier
+// approval of head (intent at f.now) and saying to act again (again), and
+// that the earlier intent is untouched.
+func (f *reviewFixture) wantOrphanRefusal(name, again, head, line string, err error) {
+	f.t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "an earlier approval of R-1 (merge at "+head[:7]+", since ") ||
+		!strings.Contains(err.Error(), "may still be running git there") || !strings.Contains(err.Error(), "then "+again) {
+		f.t.Errorf("%s during the orphan's hook = %q, %v; want the refusal naming the earlier approval", name, line, err)
+	}
+	if r := f.review(); r.Status != model.ReviewPending || !r.IntentAt.Equal(f.now) || r.Head != head ||
+		r.ApprovedHow != model.ApproveMerge || r.DiffStat != " auth.go | 1 +" {
+		f.t.Errorf("after the %s: R-1 = %+v, want the earlier intent, untouched", name, r)
+	}
+}
