@@ -1,0 +1,3 @@
+Rotated the refresh token on every use and added a test for the expired case.
+Tested with go test ./auth/..., which passes.
+Left open: tokens issued before the fix are not revoked.

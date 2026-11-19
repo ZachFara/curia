@@ -5,7 +5,7 @@ Rules for this session:
 - When you face a judgment call the user should make or confirm, use the curia MCP tools: call search_decisions first, then request_decision with options and your recommendation. Use mode "blocking" only for choices that are costly or impossible to undo.
 - Messages from the user may arrive while you work, as "Message M-<n> from the user". Follow them. If one says its wording was simplified, call check_messages.
 - Commit your work on this branch as you go. Do not push, merge or open a pull request unless the task says so.
-- When the task is finished, make sure everything is committed, then end your turn with a short summary: what you changed, how you tested it, and anything left open.
+- When the task is finished, make sure everything is committed, then call the curia MCP tool complete_task with a short summary (what you changed, how you tested it, anything left open) and the state of the tests, and end your turn. The user reviews the work; if they ask for changes, their note arrives as a message.
 
 Task T-1: Fix the auth refresh
 

@@ -11,19 +11,25 @@ import (
 )
 
 const (
-	// boardWideMin is the narrowest window that shows four columns; below
-	// it the board is one list under status headings.
+	// boardWideMin is the narrowest window that shows the board as
+	// columns; below it the board is one list under status headings.
 	boardWideMin = 100
+	// boardDoneMin is the narrowest window that shows six columns, done
+	// included; below it a board showing done is the list.
+	boardDoneMin = 120
 	// boardGap is the space between columns.
 	boardGap = 2
 	// boardEmpty is shown when no task is on the board.
 	boardEmpty = "no tasks; add one with curia task add"
+	// boardAllDone is shown when every task on the board is done and done
+	// is hidden.
+	boardAllDone = "every task is done; D shows them"
 	// boardHelp is the status line when there is nothing else to say.
-	boardHelp = "h/l column  j/k move  enter jump  r ready/backlog  n spawn  t back"
+	boardHelp = "h/l column  j/k move  enter jump  r ready/backlog  n spawn  D done  t back"
 )
 
 // boardHeadings are the columns' headings, in boardStatuses order.
-var boardHeadings = [boardColumns]string{"BACKLOG", "READY", "RUNNING", "NEEDS DECISION"}
+var boardHeadings = [boardColumns]string{"BACKLOG", "READY", "RUNNING", "NEEDS DECISION", "REVIEW", "DONE"}
 
 var selectedStyle = lipgloss.NewStyle().Reverse(true)
 
@@ -35,6 +41,8 @@ func (m BoardModel) View() string {
 	var lines []string
 	switch {
 	case !m.loaded:
+	case m.empty() && len(m.cols[doneColumn]) > 0:
+		lines = []string{boardAllDone}
 	case m.empty():
 		lines = []string{boardEmpty}
 	case m.wide():
@@ -61,14 +69,18 @@ func (m BoardModel) textWidth() int {
 	return defaultWidth
 }
 
-// wide reports whether the board is drawn as four columns.
+// wide reports whether the board is drawn as columns: five from
+// boardWideMin, six, done included, from boardDoneMin.
 func (m BoardModel) wide() bool {
+	if m.showDone {
+		return m.textWidth() >= boardDoneMin
+	}
 	return m.textWidth() >= boardWideMin
 }
 
-// empty reports whether no card is on the board.
+// empty reports whether no card is shown.
 func (m BoardModel) empty() bool {
-	for _, col := range m.cols {
+	for _, col := range m.cols[:m.shown()] {
 		if len(col) > 0 {
 			return false
 		}
@@ -90,18 +102,20 @@ func (m BoardModel) heading(c int) string {
 	return fmt.Sprintf("%s (%d)", boardHeadings[c], len(m.cols[c]))
 }
 
-// columnsView is the heading line and the cards, four columns side by side.
+// columnsView is the heading line and the cards, the shown columns side by
+// side.
 func (m BoardModel) columnsView(w int) []string {
-	cw := max((w-boardGap*(boardColumns-1))/boardColumns, 1)
+	n := m.shown()
+	cw := max((w-boardGap*(n-1))/n, 1)
 	gap := strings.Repeat(" ", boardGap)
 	room := 0
-	if n := m.bodyRows(); n > 0 {
-		room = max(n-1, 1) // below the heading line
+	if r := m.bodyRows(); r > 0 {
+		room = max(r-1, 1) // below the heading line
 	}
 	var cells [boardColumns][]string
-	head := make([]string, boardColumns)
+	head := make([]string, n)
 	rows := 0
-	for c := range boardColumns {
+	for c := range n {
 		head[c] = headerStyle.Render(fit(m.heading(c), cw, false))
 		cells[c] = m.columnCells(c, cw, room)
 		rows = max(rows, len(cells[c]))
@@ -109,8 +123,8 @@ func (m BoardModel) columnsView(w int) []string {
 	lines := []string{strings.Join(head, gap)}
 	blank := strings.Repeat(" ", cw)
 	for i := range rows {
-		parts := make([]string, boardColumns)
-		for c := range boardColumns {
+		parts := make([]string, n)
+		for c := range n {
 			parts[c] = blank
 			if i < len(cells[c]) {
 				parts[c] = cells[c][i]
@@ -140,11 +154,12 @@ func (m BoardModel) columnCells(c, cw, room int) []string {
 	return out
 }
 
-// listView is one list: each column's heading, then its cards with their
-// repository, scrolled to keep the selected card on screen.
+// listView is one list: each shown column's heading, then its cards with
+// their repository, scrolled to keep the selected card on screen.
 func (m BoardModel) listView(w int) []string {
+	shown := m.cols[:m.shown()]
 	idW, repoW := 0, 0
-	for _, col := range m.cols {
+	for _, col := range shown {
 		for _, c := range col {
 			idW = max(idW, lipgloss.Width(cardID(c)))
 			repoW = max(repoW, lipgloss.Width(cardRepo(c)))
@@ -153,7 +168,7 @@ func (m BoardModel) listView(w int) []string {
 	repoW = min(repoW, max(w/5, minFlex))
 	var lines []string
 	sel := 0
-	for ci, col := range m.cols {
+	for ci, col := range shown {
 		lines = append(lines, headerStyle.Render(truncate(m.heading(ci), w)))
 		for i, c := range col {
 			selected := ci == m.col && i == m.row

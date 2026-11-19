@@ -290,7 +290,11 @@ func taskCards(ctx context.Context, st *store.Store, now time.Time) ([]task.Card
 	if err != nil {
 		return nil, err
 	}
-	return task.Cards(tasks, sessions, blocking), nil
+	latest, err := st.LatestReviews(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return task.Cards(tasks, sessions, blocking, latest), nil
 }
 
 // taskStatusFilter reports which derived statuses --status lists.

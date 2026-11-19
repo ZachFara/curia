@@ -1,0 +1,10 @@
+POST /v1/answer HTTP/1.1
+Host: 127.0.0.1:56841
+User-Agent: curl/8.7.1
+Accept: */*
+Authorization: Bearer TOKEN
+Content-Type: application/json
+Content-Length: 28
+
+{"decision":"D-1","key":"A"}
+=====END-REQUEST=====

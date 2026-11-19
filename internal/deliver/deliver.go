@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/ZachFara/curia/internal/decision"
 	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
 )
@@ -191,6 +193,9 @@ type delivery struct {
 	// windows are the tmux windows whose attention marker may be out of
 	// date: those Reconcile marked a session stale in.
 	windows []string
+	// live are the panes listed in step 2, of the server the tmux client
+	// reaches: the server a session must be recorded on to be typed into.
+	live []tmux.Pane
 }
 
 // Answer answers ticket id with a at now and delivers the answer. A store
@@ -203,9 +208,12 @@ type delivery struct {
 // An answer is typed only into the pane of a session that, after
 // reconciling with the live panes and inside store.ClaimTyping's
 // transaction, is idle or needs_decision with no subagent running and no
-// earlier typed line (answer or message) unconfirmed, and then only when a
-// capture of the pane taken just before typing shows Claude Code's empty
-// input prompt (Ruling 85); the only text typed is decision.TypedMessage.
+// earlier typed line (answer or message) unconfirmed, that is not recorded
+// on another tmux server than the one tm reaches (pane ids are reused across
+// servers; checked after the claim and again after the capture), and then
+// only when a capture of the pane taken just before typing shows Claude
+// Code's empty input prompt (Ruling 85); the only text typed is
+// decision.TypedMessage.
 // A SendKeys error wrapping tmux.ErrPartialSend leaves the claim in place,
 // since the line may be in the prompt; any other SendKeys error requeues the
 // answer. Then the attention markers of the asking session's window and of
@@ -285,6 +293,7 @@ func (r *delivery) reconcile(ctx context.Context, it item) string {
 		r.log.Warn("deliver: tmux unreachable, "+it.noun()+" left queued", "id", it.id, "err", err.Error())
 		return "tmux unreachable"
 	}
+	r.live = panes
 	r.windows, err = fleet.Reconcile(ctx, r.st, panes, r.now)
 	if err != nil {
 		r.log.Warn("deliver: reconcile failed, "+it.noun()+" left queued", "id", it.id, "err", err.Error())
@@ -322,6 +331,21 @@ const noteTeamLead = "the agent leads a team whose teammates are alive, and noth
 // noteSynchronized is the refusal for a window with synchronize-panes on.
 const noteSynchronized = "the agent's window has synchronize-panes on, so typing would reach every pane in it; nothing typed"
 
+// serverRefusal says why sess, as just read, must not be typed into because
+// it is recorded on another tmux server than the one whose panes step 2
+// listed (fleet.OtherServer, plan section 4.9), or "". The pane with its
+// pane id on this server is another pane: pane ids are reused across
+// servers. Its note names the last element of the session's socket, which
+// came from the store and is cleaned.
+func (r *delivery) serverRefusal(id string, sess model.Session) string {
+	if !fleet.OtherServer(r.live, sess) {
+		return ""
+	}
+	name := sanitize.Line(filepath.Base(sess.Socket), 40)
+	r.log.Info("deliver: the agent is on another tmux server; not typing", "id", id, "pane", sess.Pane, "server", name)
+	return "the agent is on another tmux server (" + name + "); nothing typed"
+}
+
 // paneRefusal captures the pane of sess just before typing the line id and
 // returns why it must not be typed into, or "" when it shows Claude Code's
 // empty input prompt (Ruling 85).
@@ -354,11 +378,16 @@ func (r *delivery) paneRefusal(ctx context.Context, id string, sess model.Sessio
 	return note
 }
 
-// typeLine types claimed item it into the pane of sess, once a capture of
-// the pane shows an empty input prompt and the session, read again, may
-// still be typed into (steps 4 to 6 of the typing path). It returns the
-// outcome's note: "" when typed.
+// typeLine types claimed item it into the pane of sess, once sess (as the
+// claim read it) is not on another tmux server, a capture of the pane shows
+// an empty input prompt and the session, read again, may still be typed
+// into (steps 3a to 6 of the typing path). It returns the outcome's note:
+// "" when typed.
 func (r *delivery) typeLine(ctx context.Context, it item, sess model.Session) string {
+	if why := r.serverRefusal(it.id, sess); why != "" {
+		// Before the capture: the pane with this id is not the agent's.
+		return r.requeue(ctx, it, why, why+"; "+it.ask())
+	}
 	if why := r.paneRefusal(ctx, it.id, sess); why != "" {
 		return r.requeue(ctx, it, why, it.queuedNote(why))
 	}
@@ -379,15 +408,29 @@ func (r *delivery) typeLine(ctx context.Context, it item, sess model.Session) st
 	return r.requeue(ctx, it, "typing failed", it.queuedNote("typing failed"))
 }
 
+// noteRecheckFailed is why nothing was typed when the re-read failed.
+const noteRecheckFailed = "could not check the session again; nothing typed"
+
 // recheck is step 5: m3, a hook event may have landed while the pane was
-// captured, so the session is read again (store.StillTypable), then the
-// item's own guard runs. It returns why not to type and the note, or "".
+// captured, so the session is read again: its server (a SessionStart may
+// have recorded it on another one, whose pane can have the same id), then
+// store.StillTypable, then the item's own guard. It returns why not to type
+// and the note, or "".
 func (r *delivery) recheck(ctx context.Context, it item, sess model.Session) (why, note string) {
+	// A missing row reads as a zero session, with no socket: StillTypable
+	// refuses it.
+	cur, _, err := r.st.GetSession(ctx, sess.ID)
+	if err != nil {
+		r.log.Warn("deliver: recheck before typing failed; not typing", "id", it.id, "err", err.Error())
+		return noteRecheckFailed, it.queuedNote(noteRecheckFailed)
+	}
+	if why := r.serverRefusal(it.id, cur); why != "" {
+		return why, why + "; " + it.ask()
+	}
 	switch why, err := r.st.StillTypable(ctx, sess.ID, sess.Pane); {
 	case err != nil:
 		r.log.Warn("deliver: recheck before typing failed; not typing", "id", it.id, "err", err.Error())
-		const what = "could not check the session again; nothing typed"
-		return what, it.queuedNote(what)
+		return noteRecheckFailed, it.queuedNote(noteRecheckFailed)
 	case why != store.TypingClaimed:
 		r.log.Info("deliver: the session changed while its pane was read; not typing", "id", it.id, "why", int(why))
 		return "the session changed while its pane was read", refusalNote(it, why, "", false)
@@ -452,7 +495,7 @@ func (r *delivery) mark(ctx context.Context, sessionID string) {
 	}
 	for _, w := range windows {
 		actx, cancel := settled(ctx, tmuxTimeout)
-		if err := attention.Apply(actx, r.tm, r.st, w); err != nil && !errors.Is(err, tmux.ErrNoWindow) {
+		if err := attention.Apply(actx, r.tm, r.st, w, fleet.Socket(r.live)); err != nil && !errors.Is(err, tmux.ErrNoWindow) {
 			r.log.Warn("deliver: attention marker", "window", w, "err", err.Error())
 		}
 		cancel()

@@ -16,6 +16,8 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"modernc.org/sqlite" // also registers the pure-Go "sqlite" driver
@@ -31,6 +33,11 @@ var migrations embed.FS
 // and several Stores (in one or many processes) may share one file.
 type Store struct {
 	db *sql.DB
+
+	// restoreMu guards restoreClaim, the meta value of the restore claim
+	// this Store holds ("" for none), which ReleaseRestore gives up.
+	restoreMu    sync.Mutex
+	restoreClaim string
 }
 
 // ListFilter selects which sessions ListSessions returns.
@@ -232,15 +239,17 @@ func (s *Store) UpdateSession(ctx context.Context, id string, fn func(s model.Se
 
 // upsert is the single INSERT ... ON CONFLICT statement behind UpsertSession
 // and UpdateSession. It names the columns it writes, so the team columns
-// (written only by SetTeams) and Plan 2's cache columns survive it. An
-// empty task id or worktree is stored as NULL, like the pane.
+// (written only by SetTeams) and Plan 2's cache columns survive it, and an
+// older binary's upsert, which names neither tmux_socket nor end_reason,
+// leaves those columns alone. An empty task id, worktree or socket is
+// stored as NULL, like the pane; the end reason as endReason says.
 func upsert(ctx context.Context, e dbtx, sess model.Session) error {
 	_, err := e.ExecContext(ctx, `
 INSERT INTO sessions (
   id, agent, tmux_pane, tmux_session, tmux_window, cwd, repo, branch, state, model,
   context_used, context_max, subagents_active, last_update, seen_at, transcript_path,
-  started_at, updated_at, transcript_offset, task_id, worktree
-) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))
+  started_at, updated_at, transcript_offset, task_id, worktree, tmux_socket, end_reason
+) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)
 ON CONFLICT(id) DO UPDATE SET
   agent = excluded.agent, tmux_pane = excluded.tmux_pane,
   tmux_session = excluded.tmux_session, tmux_window = excluded.tmux_window,
@@ -251,12 +260,34 @@ ON CONFLICT(id) DO UPDATE SET
   seen_at = excluded.seen_at, transcript_path = excluded.transcript_path,
   started_at = excluded.started_at, updated_at = excluded.updated_at,
   transcript_offset = excluded.transcript_offset,
-  task_id = excluded.task_id, worktree = excluded.worktree`,
+  task_id = excluded.task_id, worktree = excluded.worktree, tmux_socket = excluded.tmux_socket,
+  end_reason = excluded.end_reason`,
 		sess.ID, sess.Agent, sess.Pane, sess.TmuxSession, sess.TmuxWindow, sess.Cwd, sess.Repo, sess.Branch,
 		sess.State, sess.Model, sess.ContextUsed, sess.ContextMax, sess.SubagentsActive, sess.LastUpdate,
 		formatTime(sess.SeenAt), sess.TranscriptPath, formatTime(sess.StartedAt), formatTime(sess.UpdatedAt),
-		sess.TranscriptOffset, sess.TaskID, sess.Worktree)
+		sess.TranscriptOffset, sess.TaskID, sess.Worktree, sess.Socket, endReason(sess))
 	return err
+}
+
+// maxEndReason bounds a stored end reason, in bytes (Ruling 117).
+const maxEndReason = 64
+
+// endReason is what upsert stores as sess's end_reason (Ruling 117). The
+// reason comes from a hook payload, so it is untrusted: 1 to maxEndReason
+// bytes of [a-z0-9_] are kept, anything else becomes "other". It is NULL
+// when the reason is empty and whenever the session is not ended, so a
+// session that leaves ended (Ruling 27: the state machine keeps every
+// other field) or goes stale loses it.
+func endReason(sess model.Session) any {
+	r := sess.EndReason
+	if sess.State != model.StateEnded || r == "" {
+		return nil
+	}
+	bad := func(c rune) bool { return (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' }
+	if len(r) > maxEndReason || strings.ContainsFunc(r, bad) {
+		return "other"
+	}
+	return r
 }
 
 // selectSessions reads every column Session maps to. Each nullable column is
@@ -268,7 +299,8 @@ SELECT COALESCE(id, ''), COALESCE(agent, ''), COALESCE(tmux_pane, ''), COALESCE(
   COALESCE(state, ''), COALESCE(model, ''), COALESCE(context_used, 0), COALESCE(context_max, 0),
   COALESCE(subagents_active, 0), COALESCE(last_update, ''), seen_at, COALESCE(transcript_path, ''),
   started_at, updated_at, transcript_offset, COALESCE(task_id, ''), COALESCE(worktree, ''),
-  COALESCE(team_id, ''), COALESCE(team_role, ''), COALESCE(team_member, '')
+  COALESCE(team_id, ''), COALESCE(team_role, ''), COALESCE(team_member, ''), COALESCE(tmux_socket, ''),
+  COALESCE(end_reason, '')
 FROM sessions`
 
 // GetSession returns the session with the given id, and false if there is none.
@@ -328,7 +360,8 @@ func scanSession(sc scanner) (model.Session, error) {
 	err := sc.Scan(&sess.ID, &sess.Agent, &sess.Pane, &sess.TmuxSession, &sess.TmuxWindow, &sess.Cwd,
 		&sess.Repo, &sess.Branch, &sess.State, &sess.Model, &sess.ContextUsed, &sess.ContextMax,
 		&sess.SubagentsActive, &sess.LastUpdate, &seen, &sess.TranscriptPath, &started, &updated,
-		&sess.TranscriptOffset, &sess.TaskID, &sess.Worktree, &sess.TeamID, &sess.TeamRole, &sess.TeamMember)
+		&sess.TranscriptOffset, &sess.TaskID, &sess.Worktree, &sess.TeamID, &sess.TeamRole, &sess.TeamMember,
+		&sess.Socket, &sess.EndReason)
 	if err != nil {
 		return model.Session{}, err
 	}
@@ -359,21 +392,27 @@ func (s *Store) AppendEvent(ctx context.Context, ev model.Event, raw []byte) err
 }
 
 // MarkSeen sets SeenAt to at on every non-ended session in pane.
-func (s *Store) MarkSeen(ctx context.Context, pane string, at time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET seen_at = ? WHERE tmux_pane = ? AND state != ?`,
-		formatTime(at), pane, model.StateEnded)
+func (s *Store) MarkSeen(ctx context.Context, pane, socket string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET seen_at = ? WHERE tmux_pane = ? AND state != ?`+sameServer,
+		formatTime(at), pane, model.StateEnded, socket, socket)
 	if err != nil {
 		return fmt.Errorf("store: mark pane %s seen: %w", pane, err)
 	}
 	return nil
 }
 
-// EndOthersInPane sets every non-ended session in pane other than keepID to
-// ended, with UpdatedAt at.
-func (s *Store) EndOthersInPane(ctx context.Context, pane, keepID string, at time.Time) error {
+// sameServer is fleet.OtherSocket's rule in SQL, negated: the row is on the
+// tmux server whose socket is the two parameters that follow, or either
+// socket is unknown (NULL or ""). A pane id names a pane of one server only.
+const sameServer = ` AND (COALESCE(tmux_socket, '') = '' OR ? = '' OR tmux_socket = ?)`
+
+// EndOthersInPane sets every non-ended session in pane of the tmux server
+// at socket ("" when unknown) other than keepID to ended, with UpdatedAt
+// at. A session recorded on another server is left alone.
+func (s *Store) EndOthersInPane(ctx context.Context, pane, socket, keepID string, at time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET state = ?, updated_at = ? WHERE tmux_pane = ? AND id != ? AND state != ?`,
-		model.StateEnded, formatTime(at), pane, keepID, model.StateEnded)
+		`UPDATE sessions SET state = ?, updated_at = ? WHERE tmux_pane = ? AND id != ? AND state != ?`+sameServer,
+		model.StateEnded, formatTime(at), pane, keepID, model.StateEnded, socket, socket)
 	if err != nil {
 		return fmt.Errorf("store: end sessions in pane %s other than %s: %w", pane, keepID, err)
 	}

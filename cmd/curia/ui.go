@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -36,9 +37,10 @@ func init() {
 			"team is one row, which Space expands. j/k or the arrows move, Enter or a\n" +
 			"click jumps to the session's pane (a team's: the member most in need of you)\n" +
 			"and closes the popup, d opens the session's decisions to answer them (not\n" +
-			"inside an agent session), t opens the task board (n there spawns a task), /\n" +
-			"filters on repo, branch, last update and member name, x then y kills the\n" +
-			"pane, q or Esc quits.",
+			"inside an agent session) and r the review waiting for its task (read-only\n" +
+			"inside an agent session), t opens\n" +
+			"the task board (n there spawns a task), / filters on repo, branch, last\n" +
+			"update and member name, x then y kills the pane, q or Esc quits.",
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			return runDashboard(ui.ModePopup, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -70,10 +72,11 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 	src := storeSource{st: st, tm: client, cfg: cfg}
 	m := ui.New(src, client, cfg, clock, mode)
 	// The dashboard's actions with a user's effect (the board's ready and
-	// spawn keys, d, x y) are the user-only commands' (spec section 7,
-	// re-review A, C1): the guard is asked once, and when it refuses each of
-	// those keys shows its reason and does nothing. Jumps and views stay.
-	refused := userOnly("ui", "change, spawn or kill from the dashboard, or answer decisions")
+	// spawn keys, d, x y, and the review view's a, c and x) are the
+	// user-only commands' (spec section 7, re-review A, C1): the guard is
+	// asked once, and when it refuses each of those keys shows its reason
+	// and does nothing. Jumps and views stay.
+	refused := userOnly("ui", "change, spawn or kill from the dashboard, or answer decisions and reviews")
 	if mode == ui.ModePopup {
 		bsrc := boardSource{st: st, tm: client, cfg: cfg, refused: refused}
 		m = m.WithBoard(func() tea.Model { return ui.NewBoard(bsrc, client, clock, true) })
@@ -83,21 +86,51 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 		if mode == ui.ModePopup {
 			m = m.WithoutDecide(refused.Error())
 		}
-		return runProgram(m, opts...)
 	}
-	// T16: without its log file the dashboard still starts, without d.
+	// d answers through curia decide's path, so it opens only for the user
+	// (above). r opens the review view for anyone, read-only when the guard
+	// refuses: its approve, change request and drop return the guard's
+	// reason (reviewSource.refused), as the board's keys do.
 	if mode == ui.ModePopup {
-		logger, closeLog, err := openLog(cfg.LogPath)
-		if err != nil {
-			return runProgram(m.WithoutDecide("decisions cannot be answered here: the log file cannot be opened"), opts...)
-		}
+		var closeLog func() error
+		m, closeLog = dashboardPopupViews(m, st, client, cfg, refused)
 		defer func() { _ = closeLog() }()
-		dsrc, via := newDecideSource(st, client, logger), decideVia()
+	}
+	// A hang-up or SIGTERM ends the dashboard, but an approval (or another
+	// review action) in flight finishes and is recorded first (C1).
+	sig, stop := reviewHoldSignals(false)
+	defer stop()
+	err = reviewProgramErr(sig, runProgram(m, append(opts, tea.WithContext(sig))...))
+	if werr := reviewAfterProgram(sig, os.Stderr); err == nil {
+		err = werr
+	}
+	return err
+}
+
+// dashboardPopupViews gives the popup's m its decide view (only when the
+// guard let the caller through: refused is nil) and its review view
+// (read-only when refused is set), over the log file, and returns the
+// function that closes the log. T16: without its log file the dashboard
+// still starts, without d or r.
+func dashboardPopupViews(m ui.Model, st *store.Store, client tmux.Client, cfg config.Config, refused error) (ui.Model, func() error) {
+	logger, closeLog, err := openLog(cfg.LogPath)
+	if err != nil {
+		if refused == nil {
+			m = m.WithoutDecide("decisions cannot be answered here: the log file cannot be opened")
+		}
+		return m.WithoutReview("reviews cannot be opened here: the log file cannot be opened"), func() error { return nil }
+	}
+	dsrc, via := newDecideSource(st, client, logger), decideVia()
+	if refused == nil {
 		m = m.WithDecide(func(id string) tea.Model {
 			return ui.NewDecide(dsrc, clock, ui.DecideOptions{SessionID: id, Embedded: true, Via: via})
 		})
 	}
-	return runProgram(m, opts...)
+	rsrc := newReviewSource(st, client, cfg, logger, via, refused)
+	m = m.WithReview(func(id string) tea.Model {
+		return ui.NewReview(rsrc, clock, ui.ReviewOptions{TaskID: id, Embedded: true})
+	})
+	return m, closeLog
 }
 
 // storeSource is the dashboard's ui.Source: on every read it reconciles
@@ -143,6 +176,12 @@ func (s storeSource) Tasks(ctx context.Context) (map[string]model.Task, error) {
 		out[t.ID] = t
 	}
 	return out, nil
+}
+
+// Reviews returns the id of the pending review of each task not stored
+// dropped, by task id, for the r key.
+func (s storeSource) Reviews(ctx context.Context) (map[string]string, error) {
+	return s.st.PendingReviewTasks(ctx)
 }
 
 // boardSource is the task board's ui.BoardSource over the store.

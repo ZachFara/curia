@@ -264,3 +264,90 @@ func TestStatusStillSilentOnMessageQueryError(t *testing.T) {
 		t.Errorf("status with a broken messages table = %q, %v, want empty output and exit 0", out, err)
 	}
 }
+
+// statusReviewTask creates a task and opens a pending review for it, and
+// returns the task id.
+func statusReviewTask(t *testing.T, db, title string) string {
+	t.Helper()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	task, err := st.CreateTask(ctx, model.Task{
+		Title: title, Repo: "/src/curia", Status: model.TaskReady, Source: model.SourceLocal, CreatedAt: at(9, 0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.CompleteTask(ctx, model.Review{
+		TaskID: task.ID, SessionID: "s-" + task.ID, Summary: "done " + title, Tests: model.TestsPassed, CreatedAt: at(10, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return task.ID
+}
+
+// statusExec runs one statement on the database behind db.
+func statusExec(t *testing.T, db, stmt string, args ...any) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.Exec(stmt, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStatusCountsPendingReviews(t *testing.T) {
+	db := decisionsHome(t)
+	statusReviewTask(t, db, "one")
+	statusReviewTask(t, db, "two")
+	if out, err := runRoot(t, "status"); err != nil || out != "R2" {
+		t.Errorf("status = %q, %v, want \"R2\"", out, err)
+	}
+}
+
+func TestStatusCountsReviewsAfterDecisions(t *testing.T) {
+	db := decisionsHome(t, decisionsSpec{"first", model.ModeBlocking, "2026-11-11T08:00:00.000000000Z", "", decisionsEnd{}})
+	seedSessions(t, db, statusSession(model.StateWorking))
+	statusReviewTask(t, db, "one")
+	statusReviewTask(t, db, "two")
+	if out, err := runRoot(t, "status"); err != nil || out != "D1 R2" {
+		t.Errorf("status = %q, %v, want \"D1 R2\"", out, err)
+	}
+}
+
+func TestStatusIgnoresClosedAndDroppedReviews(t *testing.T) {
+	db := decisionsHome(t)
+	closed := statusReviewTask(t, db, "closed")
+	dropped := statusReviewTask(t, db, "dropped")
+	statusReviewTask(t, db, "open")
+	statusExec(t, db, "UPDATE reviews SET status = 'merged', closed_at = ? WHERE task_id = ?", "2026-11-11T10:30:00.000000000Z", closed)
+	statusExec(t, db, "UPDATE tasks SET status = 'dropped' WHERE id = ?", dropped)
+	if out, err := runRoot(t, "status"); err != nil || out != "R1" {
+		t.Errorf("status = %q, %v, want \"R1\"", out, err)
+	}
+}
+
+func TestStatusStillSilentOnReviewQueryError(t *testing.T) {
+	db, _ := fleetHome(t, nil, model.Session{ID: "a", Agent: "claude", State: model.StateWaiting, Pane: "%1"})
+	statusExec(t, db, "DROP TABLE reviews")
+	if out, err := runRoot(t, "status"); err != nil || out != "" {
+		t.Errorf("status with a broken reviews table = %q, %v, want empty output and exit 0", out, err)
+	}
+}
+
+func TestStatusDoesNotCallTmuxForReviews(t *testing.T) {
+	db, fake := fleetHome(t, []string{"%1"})
+	statusReviewTask(t, db, "one")
+	if out, err := runRoot(t, "status"); err != nil || out != "R1" {
+		t.Errorf("status = %q, %v, want \"R1\"", out, err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("tmux calls = %q, want none", fake.Calls)
+	}
+}

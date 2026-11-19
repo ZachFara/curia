@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/task"
@@ -18,15 +19,18 @@ import (
 // spawn, which returns once the agent's window is started.
 const boardActionTimeout = 5 * time.Second
 
-// boardStatuses are the statuses of the board's four columns, in order.
-// Dropped tasks are not shown; review and done are not produced in Plan 3
-// and are not shown either.
+// boardStatuses are the statuses of the board's columns, in order. Dropped
+// tasks are not shown; done tasks, the last column, only after D.
 var boardStatuses = [...]model.TaskStatus{
 	model.TaskBacklog, model.TaskReady, model.TaskRunning, model.TaskNeedsDecision,
+	model.TaskReview, model.TaskDone,
 }
 
-// boardColumns is the number of columns.
+// boardColumns is the number of columns, done included.
 const boardColumns = len(boardStatuses)
+
+// doneColumn is the done tasks' column, the last one.
+const doneColumn = boardColumns - 1
 
 // noticeBoardTyped is shown when typed or pasted text that is no command
 // is ignored; it starts the quiet period, so the rest of it cannot act.
@@ -50,9 +54,12 @@ type BoardModel struct {
 	embedded bool
 
 	cols     [boardColumns][]task.Card // the last good read, by column, in source order
-	col, row int                       // the selected card's place
+	col, row int                       // the selected card's place, always in a shown column
 	selected string                    // id of the selected card, kept across refreshes
 	loaded   bool                      // a read has succeeded
+
+	showDone    bool      // the done column is shown (D)
+	doneToggled time.Time // when D last toggled it, or last came too soon
 
 	shownSince time.Time     // when the selected card, as it is now, came on screen
 	quietUntil time.Time     // keys but q and Esc before this are ignored
@@ -196,7 +203,7 @@ func (m BoardModel) find(id string) (task.Card, bool) {
 // reselect puts the selection back on the selected task or, when it is
 // gone, on the card nearest its old place.
 func (m BoardModel) reselect() BoardModel {
-	for ci, col := range m.cols {
+	for ci, col := range m.cols[:m.shown()] {
 		if i := slices.IndexFunc(col, func(c task.Card) bool { return c.Task.ID == m.selected }); i >= 0 {
 			m.col, m.row = ci, i
 			return m.place(ci, i)
@@ -205,17 +212,28 @@ func (m BoardModel) reselect() BoardModel {
 	return m.place(m.nearestColumn(m.col), m.row)
 }
 
-// nearestColumn is the column with cards nearest col, col itself first and
-// the left one first at equal distance; col when every column is empty.
+// nearestColumn is the shown column with cards nearest col, col itself
+// first and the left one first at equal distance; col, or the last shown
+// column when col is hidden, when every shown column is empty.
 func (m BoardModel) nearestColumn(col int) int {
-	for d := range boardColumns {
+	n := m.shown()
+	col = min(col, n-1)
+	for d := range n {
 		for _, c := range []int{col - d, col + d} {
-			if c >= 0 && c < boardColumns && len(m.cols[c]) > 0 {
+			if c >= 0 && c < n && len(m.cols[c]) > 0 {
 				return c
 			}
 		}
 	}
 	return col
+}
+
+// shown is the number of columns shown: done, the last, only after D.
+func (m BoardModel) shown() int {
+	if m.showDone {
+		return boardColumns
+	}
+	return boardColumns - 1
 }
 
 // place selects row of column col, clamped to the column.
@@ -231,7 +249,7 @@ func (m BoardModel) place(col, row int) BoardModel {
 
 // current returns the selected card, and false when there is none.
 func (m BoardModel) current() (task.Card, bool) {
-	if m.row >= len(m.cols[m.col]) {
+	if m.col >= m.shown() || m.row >= len(m.cols[m.col]) {
 		return task.Card{}, false
 	}
 	return m.cols[m.col][m.row], true
@@ -263,17 +281,17 @@ func (m BoardModel) markShown(before task.Card, had bool) BoardModel {
 
 // updateRunes handles keys typed faster than the program reads them, which
 // arrive as one message with several runes, one rune at a time. A rune
-// that opens or closes a prompt, acts or closes the board drops the rest:
-// the user has not seen what it did. A move restarts the dwell, so a key
-// after it in the burst cannot act.
+// that opens or closes a prompt, shows or hides done, acts or closes the
+// board drops the rest: the user has not seen what it did. A move restarts
+// the dwell, so a key after it in the burst cannot act.
 func (m BoardModel) updateRunes(msg tea.KeyMsg) (BoardModel, tea.Cmd) {
 	var cmds []tea.Cmd
 	for _, r := range msg.Runes {
-		was := m.confirming
+		was, wasDone := m.confirming, m.showDone
 		var cmd tea.Cmd
 		m, cmd = m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}, Alt: msg.Alt})
 		cmds = append(cmds, cmd)
-		if cmd != nil || m.confirming != was {
+		if cmd != nil || m.confirming != was || m.showDone != wasDone {
 			break
 		}
 	}
@@ -311,25 +329,34 @@ func (m BoardModel) commandKey(msg tea.KeyMsg) (BoardModel, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.close()
-	case "h", "left":
-		return m.moveColumn(-1), nil
-	case "l", "right":
-		return m.moveColumn(1), nil
-	case "j", "down":
-		return m.moveRow(1), nil
-	case "k", "up":
-		return m.moveRow(-1), nil
+	case "h", "left", "l", "right", "j", "down", "k", "up":
+		return m.moveKey(k), nil
 	case "enter":
 		return m.jump()
 	case "r":
 		return m.toggleReady()
 	case "n":
 		return m.askSpawn(), nil
+	case "D":
+		return m.toggleDone(), nil
 	}
 	if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
 		return m.typedText(), nil
 	}
 	return m, nil
+}
+
+// moveKey moves the selection for one of the move keys.
+func (m BoardModel) moveKey(k string) BoardModel {
+	switch k {
+	case "h", "left":
+		return m.moveColumn(-1)
+	case "l", "right":
+		return m.moveColumn(1)
+	case "j", "down":
+		return m.moveRow(1)
+	}
+	return m.moveRow(-1)
 }
 
 // typedText ignores text that is no command, as when the user types into
@@ -370,7 +397,7 @@ func (m BoardModel) close() tea.Cmd {
 // moveColumn selects the next column with cards in direction dir, keeping
 // the row where the column has it.
 func (m BoardModel) moveColumn(dir int) BoardModel {
-	for c := m.col + dir; c >= 0 && c < boardColumns; c += dir {
+	for c := m.col + dir; c >= 0 && c < m.shown(); c += dir {
 		if len(m.cols[c]) > 0 {
 			return m.moveTo(c, m.row)
 		}
@@ -389,7 +416,7 @@ func (m BoardModel) moveRow(dir int) BoardModel {
 	if m.wide() {
 		return m
 	}
-	for c := m.col + dir; c >= 0 && c < boardColumns; c += dir {
+	for c := m.col + dir; c >= 0 && c < m.shown(); c += dir {
 		if n := len(m.cols[c]); n > 0 {
 			if dir < 0 {
 				return m.moveTo(c, n-1)
@@ -397,6 +424,23 @@ func (m BoardModel) moveRow(dir int) BoardModel {
 			return m.moveTo(c, 0)
 		}
 	}
+	return m
+}
+
+// toggleDone shows or hides the done column. The selection stays on its
+// card, or leaves a card that is hidden for the nearest shown one. Either
+// way the layout moved under the cursor, so the card's dwell starts again.
+// A D within the quiet period of the last toggle is ignored and restarts
+// that wait, so a held D toggles once.
+func (m BoardModel) toggleDone() BoardModel {
+	now := m.now()
+	if !m.doneToggled.IsZero() && now.Sub(m.doneToggled) < quietPeriod {
+		m.doneToggled = now
+		return m.tooSoon()
+	}
+	m.showDone, m.doneToggled = !m.showDone, now
+	m = m.reselect()
+	m.shownSince = now
 	return m
 }
 
@@ -437,6 +481,12 @@ func (m BoardModel) jump() (BoardModel, tea.Cmd) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxTimeout)
 	defer cancel()
+	// The card's pane is its first session's; on another tmux server that id
+	// names another pane here (fleet.OtherServer).
+	if live, err := m.tm.ListPanes(ctx); err == nil && len(c.Sessions) > 0 && fleet.OtherServer(live, c.Sessions[0]) {
+		m.notice = cardID(c) + " is " + noticeOtherServer
+		return m, nil
+	}
 	if err := m.tm.SwitchTo(ctx, c.Pane); err != nil {
 		m.notice, m.noticeErr = "jump failed: "+err.Error(), true
 		return m, nil
@@ -448,6 +498,10 @@ func (m BoardModel) jump() (BoardModel, tea.Cmd) {
 func (m BoardModel) toggleReady() (BoardModel, tea.Cmd) {
 	c, ok := m.current()
 	if !ok {
+		return m, nil
+	}
+	if why, closed := closedNotice(c); closed {
+		m.notice = why
 		return m, nil
 	}
 	to := model.TaskReady
@@ -473,6 +527,10 @@ func (m BoardModel) toggleReady() (BoardModel, tea.Cmd) {
 func (m BoardModel) askSpawn() BoardModel {
 	c, ok := m.current()
 	if !ok {
+		return m
+	}
+	if why, closed := closedNotice(c); closed {
+		m.notice = why
 		return m
 	}
 	if c.Status != model.TaskBacklog && c.Status != model.TaskReady {
@@ -558,6 +616,18 @@ func (m BoardModel) applyActed(msg boardActedMsg) (BoardModel, tea.Cmd) {
 // cardID is c's id as drawn.
 func cardID(c task.Card) string {
 	return sanitize.Line(c.Task.ID, maxIDCells)
+}
+
+// closedNotice says why r and n do nothing on a card waiting for review or
+// done, and reports whether c is one.
+func closedNotice(c task.Card) (string, bool) {
+	switch c.Status {
+	case model.TaskReview:
+		return cardID(c) + " is waiting for review: curia review " + cardID(c), true
+	case model.TaskDone:
+		return cardID(c) + " is done", true
+	}
+	return "", false
 }
 
 // statusPhrase says what a task shown as s is, after its id.

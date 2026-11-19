@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"os/exec"
 	"reflect"
 	"regexp"
 	"slices"
@@ -37,6 +38,18 @@ type fakeSource struct {
 	tasks     map[string]model.Task
 	tasksErr  error
 	taskRead  int // calls of Tasks
+
+	reviews    map[string]string
+	reviewsErr error
+	reviewRead int // calls of Reviews
+}
+
+func (f *fakeSource) Reviews(context.Context) (map[string]string, error) {
+	f.reviewRead++
+	if f.reviewsErr != nil {
+		return nil, f.reviewsErr
+	}
+	return maps.Clone(f.reviews), nil
 }
 
 func (f *fakeSource) Tasks(context.Context) (map[string]model.Task, error) {
@@ -808,12 +821,14 @@ func TestPopupHelpNamesDKey(t *testing.T) {
 }
 
 // fakeChild stands in for the decide view (or, with board set, the task
-// board): it records every message it gets, starts with a childPing and
-// closes on "q" with DecideClosedMsg (BoardClosedMsg for a board).
+// board; with closeWith set, the review view): it records every message it
+// gets, starts with a childPing and closes on "q" with DecideClosedMsg
+// (BoardClosedMsg for a board, closeWith when set).
 type fakeChild struct {
-	id    string
-	got   *[]tea.Msg
-	board bool
+	id        string
+	got       *[]tea.Msg
+	board     bool
+	closeWith tea.Msg
 }
 
 // childPing is the message a fakeChild's Init sends.
@@ -824,6 +839,9 @@ func (c fakeChild) Init() tea.Cmd { return func() tea.Msg { return childPing{c.i
 func (c fakeChild) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	*c.got = append(*c.got, msg)
 	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "q" {
+		if c.closeWith != nil {
+			return c, func() tea.Msg { return c.closeWith }
+		}
 		if c.board {
 			return c, func() tea.Msg { return BoardClosedMsg{} }
 		}
@@ -833,6 +851,9 @@ func (c fakeChild) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (c fakeChild) View() string {
+	if c.closeWith != nil {
+		return "review view of " + c.id
+	}
 	if c.board {
 		return "board view " + c.id
 	}
@@ -1762,4 +1783,701 @@ func TestDashboardFitsEveryWidth(t *testing.T) {
 			}
 		}
 	}
+}
+
+// revSessions: S1 is review-ready (idle, and its task T-41 has review R-1
+// waiting), S2 works on T-42, which has no review, and S3 has no task.
+func revSessions() []model.Session {
+	s := decSessions()
+	s[0].TaskID, s[0].ReviewPending = "T-41", true
+	s[1].TaskID, s[1].State = "T-42", model.StateWorking
+	return s
+}
+
+// revReviews is the Reviews read of revSessions: T-41's review R-1.
+func revReviews() map[string]string { return map[string]string{"T-41": "R-1"} }
+
+// newRevTest returns the dashboard over sessions and reviews in mode on the
+// clock clk, set up by setup when it is not nil, after its first refresh.
+func newRevTest(t *testing.T, mode Mode, clk *sayClock, sessions []model.Session, reviews map[string]string,
+	setup func(Model) Model,
+) (tea.Model, *fakeSource) {
+	t.Helper()
+	src := &fakeSource{sessions: sessions, reviews: reviews}
+	m := New(src, &tmux.Fake{}, config.Default(), clk.now, mode)
+	if setup != nil {
+		m = setup(m)
+	}
+	return refresh(t, m), src
+}
+
+// reviewFactory returns a review factory of fakeChilds that close with
+// ReviewClosedMsg, the task ids it was called with and the messages the
+// children got.
+func reviewFactory() (func(string) tea.Model, *[]string, *[]tea.Msg) {
+	var opened []string
+	var got []tea.Msg
+	return func(id string) tea.Model {
+		opened = append(opened, id)
+		return fakeChild{id: id, got: &got, closeWith: ReviewClosedMsg{}}
+	}, &opened, &got
+}
+
+// withReview is a newRevTest setup that sets open as the review factory.
+func withReview(open func(string) tea.Model) func(Model) Model {
+	return func(m Model) Model { return m.WithReview(open) }
+}
+
+func TestRKeyOpensReviewForRowsTask(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	open, opened, got := reviewFactory()
+	m, _ := newRevTest(t, ModePopup, clk, revSessions(), revReviews(), withReview(open))
+	clk.advance(time.Second)
+	m, cmd := press(m, "r")
+	if !slices.Equal(*opened, []string{"T-41"}) {
+		t.Fatalf("factory called with %q, want [T-41]", *opened)
+	}
+	if v := m.View(); v != "review view of T-41" {
+		t.Errorf("view = %q, want the child's", v)
+	}
+	m = feed(m, cmd) // the child's Init
+	m, _ = press(m, "a", "y", "r")
+	want := []tea.Msg{childPing{"T-41"}, key("a"), key("y"), key("r")}
+	if !reflect.DeepEqual(*got, want) {
+		t.Errorf("child got %#v, want %#v (every key, the dashboard reads none)", *got, want)
+	}
+	if len(*opened) != 1 || m.View() != "review view of T-41" {
+		t.Errorf("an r inside the review view opened another (%q) or changed the view: %q", *opened, m.View())
+	}
+}
+
+// On a team's group row the lead's task counts, not a teammate's.
+func TestRKeyOnGroupRowUsesLeadTask(t *testing.T) {
+	sessions := teamSessions() // the lead L and its teammates on T-42
+	for i := range sessions {
+		if sessions[i].TeamRole == model.RoleTeammate {
+			sessions[i].TaskID = "T-43"
+		}
+	}
+	for _, c := range []struct {
+		reviews map[string]string
+		opened  []string
+		notice  string
+	}{
+		{reviews: map[string]string{"T-42": "R-1"}, opened: []string{"T-42"}},
+		{reviews: map[string]string{"T-43": "R-2"}, notice: noticeNoReviewWaiting},
+	} {
+		clk := &sayClock{t: testNow}
+		open, opened, _ := reviewFactory()
+		m, _ := newRevTest(t, ModePopup, clk, sessions, c.reviews, withReview(open))
+		if rows := bodyLines(m); !strings.Contains(rows[0], "▸ ") {
+			t.Fatalf("first row %q is not the team's group row", rows[0])
+		}
+		clk.advance(time.Second)
+		m, _ = press(m, "r")
+		if !slices.Equal(*opened, c.opened) {
+			t.Errorf("reviews %v: factory called with %q, want %q", c.reviews, *opened, c.opened)
+		}
+		if c.notice != "" && statusLine(m) != c.notice {
+			t.Errorf("reviews %v: status line = %q, want %q", c.reviews, statusLine(m), c.notice)
+		}
+	}
+}
+
+func TestRKeyWithoutPendingReview(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	open, opened, _ := reviewFactory()
+	m, _ := newRevTest(t, ModePopup, clk, revSessions(), revReviews(), withReview(open))
+	for _, moves := range [][]string{{"j"}, {"j", "j"}} { // S2: a task without a review; S3: no task
+		m2, _ := press(m, moves...)
+		clk.advance(time.Second)
+		m2, cmd := press(m2, "r")
+		if s := statusLine(m2); s != "no review is waiting for this session" {
+			t.Errorf("after %q: status line = %q, want the notice", moves, s)
+		}
+		if cmd != nil || !strings.Contains(m2.View(), "model-S1") {
+			t.Errorf("after %q: r started a command or left the table:\n%s", moves, m2.View())
+		}
+	}
+	m, _ = newRevTest(t, ModePopup, clk, nil, revReviews(), withReview(open))
+	clk.advance(time.Second)
+	if _, cmd := press(m, "r"); cmd != nil {
+		t.Error("r with no rows started a command")
+	}
+	if len(*opened) != 0 {
+		t.Errorf("factory called with %q, want never", *opened)
+	}
+}
+
+// Without a factory r says why: the reason given, or, with none given (curia
+// ui inside an agent session), that reviews are not opened there.
+func TestRKeyWithoutFactory(t *testing.T) {
+	const why = "reviews cannot be opened here: the log file cannot be opened"
+	for _, c := range []struct {
+		setup func(Model) Model
+		want  string
+	}{
+		{setup: func(m Model) Model { return m.WithoutReview(why) }, want: why},
+		{setup: nil, want: "reviews cannot be opened inside an agent session (CLAUDECODE is set)"},
+		{setup: func(m Model) Model {
+			return m.WithReview(func(string) tea.Model { panic("opened") }).WithoutReview(why)
+		}, want: why},
+	} {
+		clk := &sayClock{t: testNow}
+		m, _ := newRevTest(t, ModePopup, clk, revSessions(), revReviews(), c.setup)
+		clk.advance(time.Second)
+		m, cmd := press(m, "r")
+		if s := statusLine(m); s != c.want {
+			t.Errorf("status line = %q, want %q", s, c.want)
+		}
+		if cmd != nil || !strings.Contains(m.View(), "model-S1") {
+			t.Errorf("r without a factory started a command or left the table:\n%s", m.View())
+		}
+	}
+}
+
+func TestRKeyDisabledInSidebar(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	open, opened, _ := reviewFactory()
+	m, src := newRevTest(t, ModeSidebar, clk, revSessions(), revReviews(), withReview(open))
+	clk.advance(time.Second)
+	m, cmd := press(m, "r")
+	if s := statusLine(m); s != "open the popup to review" {
+		t.Errorf("status line = %q, want the sidebar notice", s)
+	}
+	if cmd != nil || len(*opened) != 0 {
+		t.Errorf("r in the sidebar opened %q", *opened)
+	}
+	if src.reviewRead != 0 {
+		t.Errorf("sidebar read Reviews %d times, want never", src.reviewRead)
+	}
+}
+
+func TestReviewClosedReturnsToDashboard(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	open, opened, got := reviewFactory()
+	m, src := newRevTest(t, ModePopup, clk, revSessions(), revReviews(), withReview(open))
+	clk.advance(time.Second)
+	m, first := press(m, "r")
+	m, closeCmd := press(m, "q")
+	if closeCmd == nil {
+		t.Fatal("q in the child sent nothing")
+	}
+	reads := src.reviewRead
+	m, restart := m.Update(closeCmd()) // the child's ReviewClosedMsg
+	if !strings.Contains(m.View(), "model-S1") {
+		t.Fatalf("view after close is not the dashboard:\n%s", m.View())
+	}
+	if restart == nil {
+		t.Fatal("close started no refresh")
+	}
+	if _, ok := restart().(refreshMsg); !ok || src.reviewRead != reads+1 {
+		t.Errorf("close's command is not a refresh (Reviews reads %d, want %d)", src.reviewRead, reads+1)
+	}
+	// The table is back on screen: r waits the dwell again.
+	m, _ = press(m, "r")
+	if s := statusLine(m); s != noticeTooSoon || len(*opened) != 1 {
+		t.Errorf("r at once after the close: status %q, opened %q; want too soon", s, *opened)
+	}
+	clk.advance(time.Second)
+	m, _ = press(m, "r")
+	*got = nil
+	if _, cmd := m.Update(first()); cmd != nil || len(*got) != 0 {
+		t.Errorf("the closed child's late message reached the new one: %#v", *got)
+	}
+	// A bare ReviewClosedMsg closes too.
+	if m, _ = m.Update(ReviewClosedMsg{}); !strings.Contains(m.View(), "model-S1") {
+		t.Errorf("view after a bare close is not the dashboard:\n%s", m.View())
+	}
+}
+
+func TestPastedRIsNotACommand(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	open, opened, _ := reviewFactory()
+	m, _ := newRevTest(t, ModePopup, clk, revSessions(), revReviews(), withReview(open))
+	clk.advance(time.Second)
+	for _, p := range []string{"r", "ra", "ry", "jr"} {
+		m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(p), Paste: true})
+		if cmd != nil || len(*opened) != 0 || !strings.Contains(m2.View(), "model-S1") {
+			t.Errorf("pasted %q: command %v, opened %q, view:\n%s", p, cmd != nil, *opened, m2.View())
+		}
+	}
+}
+
+func TestReviewReadyRowIcon(t *testing.T) {
+	s := revSessions()
+	working := s[0] // T-41's review is waiting, but the session works on
+	working.ID, working.Model, working.Pane, working.State = "S4", "model-S4", "%4", model.StateWorking
+	asking := s[2]
+	asking.ID, asking.Model, asking.Pane, asking.State = "S5", "model-S5", "%5", model.StateNeedsDecision
+	clk := &sayClock{t: testNow}
+	m, _ := newRevTest(t, ModePopup, clk, append(s, working, asking), revReviews(), nil)
+	view := m.View()
+	for name, icon := range map[string]string{"model-S1": "◆", "model-S4": "◐", "model-S2": "◐", "model-S3": "○", "model-S5": "◆"} {
+		if row := rowOf(t, view, name); !strings.HasPrefix(row, icon+" ") {
+			t.Errorf("row %q, want the state icon %s", row, icon)
+		}
+	}
+	if got := stateStyle(s[0]).GetForeground(); got != lipgloss.Color("4") {
+		t.Errorf("review-ready icon color = %v, want blue (4)", got)
+	}
+	for _, other := range []model.Session{working, asking, s[1], s[2]} {
+		if got := stateStyle(other).GetForeground(); got != (lipgloss.NoColor{}) {
+			t.Errorf("%s's icon color = %v, want plain", other.ID, got)
+		}
+	}
+}
+
+func TestReviewsErrorKeepsLastMap(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	open, opened, _ := reviewFactory()
+	m, src := newRevTest(t, ModePopup, clk, revSessions(), revReviews(), withReview(open))
+	src.reviews, src.reviewsErr = nil, errors.New("database is locked")
+	m = refresh(t, m)
+	if s := statusLine(m); !strings.Contains(s, "refresh failed: database is locked") {
+		t.Errorf("status line = %q, want the error", s)
+	}
+	clk.advance(time.Second)
+	if m2, _ := press(m, "r"); !slices.Equal(*opened, []string{"T-41"}) {
+		t.Errorf("after a failed read r opened %q, want T-41 from the last good map:\n%s", *opened, m2.View())
+	}
+	src.reviewsErr = nil
+	m = refresh(t, m)
+	clk.advance(time.Second)
+	m, _ = press(m, "r")
+	if s := statusLine(m); s != noticeNoReviewWaiting || len(*opened) != 1 {
+		t.Errorf("after a good empty read: status %q, opened %q", s, *opened)
+	}
+}
+
+func TestHelpLineNamesReview(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	m, src := newRevTest(t, ModePopup, clk, revSessions(), revReviews(), nil)
+	if s := statusLine(m); !strings.Contains(s, "  r review  ") {
+		t.Errorf("popup help = %q, want r review", s)
+	}
+	if src.reviewRead != 1 {
+		t.Errorf("popup refresh read Reviews %d times, want 1", src.reviewRead)
+	}
+	m, _ = newRevTest(t, ModeSidebar, clk, revSessions(), revReviews(), nil)
+	if s := statusLine(m); strings.Contains(s, "review") {
+		t.Errorf("sidebar help = %q, want no r key", s)
+	}
+}
+
+// r waits the dashboard's dwell: the selected row (and whether its task's
+// review is waiting) must have been on screen for it. A refused r restarts
+// it, so a held r that starts too soon never opens the view.
+func TestRKeyWaitsForDwell(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	open, opened, _ := reviewFactory()
+	m, src := newRevTest(t, ModePopup, clk, revSessions(), revReviews(), withReview(open))
+	m, _ = press(m, "r") // at once: the table has just been drawn
+	if s := statusLine(m); s != noticeTooSoon || len(*opened) != 0 {
+		t.Fatalf("r at once: status %q, opened %q; want too soon", s, *opened)
+	}
+	// Held from there: the first repeat 375 to 660 ms after, then one every
+	// 30 ms, never opens it.
+	for _, first := range []time.Duration{375 * time.Millisecond, 500 * time.Millisecond, 660 * time.Millisecond} {
+		clk.advance(time.Second)
+		m, _ = press(m, "j", "k") // the row anew: the dwell starts
+		m, _ = press(m, "r")
+		clk.advance(first)
+		for held := time.Duration(0); held < 3*time.Second; held += 30 * time.Millisecond {
+			m, _ = press(m, "r")
+			clk.advance(30 * time.Millisecond)
+		}
+		if len(*opened) != 0 {
+			t.Fatalf("an r held from the dwell, first repeat at %v, opened %q", first, *opened)
+		}
+	}
+	clk.advance(time.Second) // let go, pause
+	if m, _ = press(m, "r"); !slices.Equal(*opened, []string{"T-41"}) {
+		t.Fatalf("r after a pause opened %q, want T-41:\n%s", *opened, m.View())
+	}
+
+	// Moving onto the row restarts the dwell.
+	*opened = nil
+	src.reviews = map[string]string{"T-41": "R-1", "T-42": "R-2"}
+	m, _ = newRevTest(t, ModePopup, clk, revSessions(), src.reviews, withReview(open))
+	clk.advance(time.Second)
+	m, _ = press(m, "j")
+	clk.advance(100 * time.Millisecond)
+	if m, _ = press(m, "r"); len(*opened) != 0 || statusLine(m) != noticeTooSoon {
+		t.Errorf("r 100 ms after j opened %q", *opened)
+	}
+	// A burst that moves and opens: the r is too soon, and nothing after it acts.
+	clk.advance(time.Second)
+	if _, _ = m.Update(key("kr")); len(*opened) != 0 {
+		t.Errorf("the burst kr opened %q", *opened)
+	}
+
+	// A review appearing on the selected row restarts the dwell too.
+	sessions := revSessions()
+	sessions[0].ReviewPending = false
+	m, src = newRevTest(t, ModePopup, clk, sessions, nil, withReview(open))
+	clk.advance(time.Second)
+	src.reviews = revReviews()
+	m = refresh(t, m)
+	clk.advance(100 * time.Millisecond)
+	if m, _ = press(m, "r"); len(*opened) != 0 || statusLine(m) != noticeTooSoon {
+		t.Errorf("r 100 ms after the review appeared opened %q (%q)", *opened, statusLine(m))
+	}
+	clk.advance(time.Second)
+	if _, _ = press(m, "r"); !slices.Equal(*opened, []string{"T-41"}) {
+		t.Errorf("r after the dwell opened %q, want T-41", *opened)
+	}
+}
+
+// dashPump runs commands as the program would, feeding each message to the
+// dashboard and running what it starts. A refresh's result is fed without
+// running the one-second tick it schedules; a message of Bubble Tea's own
+// runtime (the diff tool's exec) is recorded instead of fed, as the program
+// acts on it and never gives it to the model.
+type dashPump struct {
+	t       *testing.T
+	m       tea.Model
+	quit    bool
+	runtime []tea.Msg
+}
+
+func (p *dashPump) run(cmd tea.Cmd) {
+	p.t.Helper()
+	teaPath := reflect.TypeFor[tea.QuitMsg]().PkgPath()
+	pending := []tea.Cmd{cmd}
+	for steps := 0; len(pending) > 0; steps++ {
+		if steps > 200 {
+			p.t.Fatal("commands did not settle")
+		}
+		c := pending[0]
+		pending = pending[1:]
+		if c == nil {
+			continue
+		}
+		switch msg := c().(type) {
+		case nil:
+		case tea.BatchMsg:
+			pending = append(pending, msg...)
+		case tea.QuitMsg:
+			p.quit = true
+		case refreshMsg:
+			p.m, _ = p.m.Update(msg)
+		default:
+			if reflect.TypeOf(msg).PkgPath() == teaPath {
+				p.runtime = append(p.runtime, msg)
+				continue
+			}
+			var next tea.Cmd
+			p.m, next = p.m.Update(msg)
+			pending = append(pending, next)
+		}
+	}
+}
+
+// key sends k and runs what it starts.
+func (p *dashPump) key(k tea.KeyMsg) {
+	p.t.Helper()
+	p.run(p.step(k))
+}
+
+// step sends k and returns what it starts without running it.
+func (p *dashPump) step(k tea.KeyMsg) tea.Cmd {
+	var cmd tea.Cmd
+	p.m, cmd = p.m.Update(k)
+	return cmd
+}
+
+// stepConfirm sends y and returns the action its confirmation starts, once
+// burstGap has passed with no other key, without running it.
+func (p *dashPump) stepConfirm() tea.Cmd {
+	p.t.Helper()
+	wait := p.step(key("y"))
+	if wait == nil {
+		return nil
+	}
+	var cmd tea.Cmd
+	p.m, cmd = p.m.Update(wait())
+	return cmd
+}
+
+// child is the review view the dashboard shows, or fails.
+func (p *dashPump) child() ReviewModel {
+	p.t.Helper()
+	dm, ok := p.m.(Model)
+	if !ok {
+		p.t.Fatalf("model is a %T, want Model", p.m)
+	}
+	rm, ok := dm.child.(ReviewModel)
+	if !ok {
+		p.t.Fatalf("the dashboard shows %T, want the review view:\n%s", dm.child, p.m.View())
+	}
+	return rm
+}
+
+// realReviewFactory returns a factory of real, embedded review views over
+// src on now, with their refresh ticks off, and the task ids it was called
+// with.
+func realReviewFactory(src ReviewSource, now func() time.Time) (func(string) tea.Model, *[]string) {
+	var opened []string
+	return func(id string) tea.Model {
+		opened = append(opened, id)
+		rm := NewReview(src, now, ReviewOptions{TaskID: id, Embedded: true})
+		rm.tick = func(_ time.Duration, msg tea.Msg) tea.Cmd {
+			if c, ok := msg.(reviewConfirmMsg); ok { // burstGap passes with no other key
+				return func() tea.Msg { return c }
+			}
+			return nil
+		}
+		return rm
+	}, &opened
+}
+
+// newRealReviewDash returns the popup over revSessions with real review
+// views over rsrc, 120 x 40, on clk, past the dwell.
+func newRealReviewDash(t *testing.T, clk *sayClock, rsrc *fakeReviews) (*dashPump, *[]string) {
+	t.Helper()
+	open, opened := realReviewFactory(rsrc, clk.now)
+	m, _ := newRevTest(t, ModePopup, clk, revSessions(), revReviews(), withReview(open))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	clk.advance(time.Second)
+	return &dashPump{t: t, m: m}, opened
+}
+
+// An r in a burst with a following a and y opens the review and nothing
+// more; an a and a y right behind it, as keys of their own, reach the view,
+// whose own guards refuse them.
+func TestRKeyBurstDoesNotApprove(t *testing.T) {
+	for _, burst := range []string{"ray", "ra", "ry"} {
+		clk := &sayClock{t: testNow}
+		rsrc := &fakeReviews{}
+		rsrc.set(rvDetail(1))
+		p, opened := newRealReviewDash(t, clk, rsrc)
+		p.key(key(burst))
+		if !slices.Equal(*opened, []string{"T-41"}) || !strings.Contains(p.m.View(), "R-1") {
+			t.Fatalf("burst %q: opened %q, view:\n%s", burst, *opened, p.m.View())
+		}
+		for _, k := range []string{"a", "y", "a", "y"} {
+			clk.advance(10 * time.Millisecond)
+			p.key(key(k))
+		}
+		if p.child().mode != reviewBrowse {
+			t.Errorf("burst %q: a prompt is open:\n%s", burst, p.m.View())
+		}
+		wantActions(t, rsrc)
+	}
+	// r, then a and y as fast as one types, each a key of its own.
+	clk := &sayClock{t: testNow}
+	rsrc := &fakeReviews{}
+	rsrc.set(rvDetail(1))
+	p, _ := newRealReviewDash(t, clk, rsrc)
+	for _, k := range []string{"r", "a", "y"} {
+		p.key(key(k))
+		clk.advance(reviewTyping)
+	}
+	wantActions(t, rsrc)
+}
+
+// A held r opens the review once; its repeats go to the view, which takes
+// them as typing and acts on nothing. Once let go, the view works.
+func TestRKeyHeldOpensOnce(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	rsrc := &fakeReviews{}
+	rsrc.set(rvDetail(1))
+	p, opened := newRealReviewDash(t, clk, rsrc)
+	p.key(key("r"))
+	clk.advance(500 * time.Millisecond)
+	for held := time.Duration(0); held < 3*time.Second; held += reviewRepeat {
+		p.key(key("r"))
+		clk.advance(reviewRepeat)
+	}
+	if len(*opened) != 1 {
+		t.Errorf("a held r opened %d views, want 1", len(*opened))
+	}
+	wantActions(t, rsrc)
+	_ = p.child()
+	clk.advance(reviewGap)
+	p.key(key("a"))
+	clk.advance(time.Second)
+	p.key(key("y"))
+	wantActions(t, rsrc, "Approve R-1")
+}
+
+// The dashboard's last read says T-41's review is waiting, but it closed
+// before r: the view opened for the task says so, and nothing can act.
+func TestRKeyOnReviewClosedSinceRefresh(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	rsrc := &fakeReviews{} // R-1 was closed meanwhile
+	p, opened := newRealReviewDash(t, clk, rsrc)
+	p.key(key("r"))
+	if !slices.Equal(*opened, []string{"T-41"}) || !strings.Contains(p.m.View(), "T-41 has no review waiting") {
+		t.Fatalf("opened %q, view:\n%s", *opened, p.m.View())
+	}
+	for _, k := range []string{"a", "y", "x", "y", "c"} {
+		clk.advance(reviewGap)
+		p.key(key(k))
+	}
+	wantActions(t, rsrc)
+	if p.child().mode != reviewBrowse {
+		t.Errorf("a prompt opened on no review:\n%s", p.m.View())
+	}
+	clk.advance(reviewGap)
+	p.key(key("q"))
+	if !strings.Contains(p.m.View(), "model-S1") {
+		t.Errorf("q did not return to the dashboard:\n%s", p.m.View())
+	}
+}
+
+// An approval runs off the update loop and shows progress; while it runs a
+// second action is refused and nothing closes the view or the dashboard,
+// which says why.
+func TestEmbeddedReviewApproveInFlight(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	rsrc := &fakeReviews{line: "R-1 approved: merged"}
+	rsrc.set(rvDetail(1))
+	p, _ := newRealReviewDash(t, clk, rsrc)
+	p.key(key("r"))
+	clk.advance(reviewGap)
+	p.key(key("a"))
+	clk.advance(time.Second)
+	approve := p.stepConfirm()
+	if approve == nil {
+		t.Fatal("y started nothing")
+	}
+	wantActions(t, rsrc) // not on the update loop
+	if s := statusLine(p.m); !strings.Contains(s, "working…") {
+		t.Errorf("status line while approving = %q, want progress", s)
+	}
+	for _, k := range []tea.KeyMsg{key("q"), key("esc"), {Type: tea.KeyCtrlC}, key("a"), key("y"), key("x"), key("y")} {
+		clk.advance(time.Second)
+		p.key(k)
+	}
+	if p.quit {
+		t.Fatal("a key quit the dashboard while the approval ran")
+	}
+	_ = p.child()
+	if s := statusLine(p.m); !strings.Contains(s, "cannot close until it returns") {
+		t.Errorf("status line = %q, want why it cannot close", s)
+	}
+	p.run(approve)
+	wantActions(t, rsrc, "Approve R-1")
+	if !strings.Contains(p.m.View(), "R-1 approved: merged") {
+		t.Errorf("the approval's line is not shown:\n%s", p.m.View())
+	}
+	p.key(key("q")) // q closes even in the quiet after an action (Ruling 93)
+	if p.quit || !strings.Contains(p.m.View(), "model-S1") {
+		t.Errorf("q after the approval: quit %v, view:\n%s", p.quit, p.m.View())
+	}
+}
+
+// The view's diff tool runs through tea.ExecProcess: its exec message must
+// reach the program unwrapped, and the tool's end reach the view.
+func TestEmbeddedReviewRunsDiffTool(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	rsrc := &fakeReviews{diff: exec.Command("true")}
+	rsrc.set(rvDetail(1))
+	p, _ := newRealReviewDash(t, clk, rsrc)
+	p.key(key("r"))
+	clk.advance(reviewGap)
+	p.key(key("o"))
+	if len(p.runtime) != 1 {
+		t.Fatalf("runtime messages = %#v, want the diff tool's exec", p.runtime)
+	}
+	if _, wrapped := p.runtime[0].(childMsg); wrapped {
+		t.Fatal("the exec message was wrapped")
+	}
+	p.run(func() tea.Msg { return reviewDiffDoneMsg{} }) // what the program sends when the tool exits
+	if p.child().diffing {
+		t.Fatal("the view still waits for the tool")
+	}
+	clk.advance(reviewGap)
+	p.key(key("q"))
+	if !strings.Contains(p.m.View(), "model-S1") {
+		t.Errorf("q after the tool did not return to the dashboard:\n%s", p.m.View())
+	}
+}
+
+// Review-ready rows and r's notices draw no stored escape or control text
+// and fit every width.
+func TestReviewReadyRowsFitEveryWidth(t *testing.T) {
+	sessions := revSessions()
+	for i := range sessions {
+		sessions[i].Repo, sessions[i].Branch = "/src/"+hostile, hostile
+		sessions[i].LastUpdate, sessions[i].TaskID = hostile, "T-4\x1b[2J"+hostile
+		sessions[i].ReviewPending, sessions[i].State = true, model.StateIdle
+	}
+	tasks := map[string]model.Task{sessions[0].TaskID: {ID: sessions[0].TaskID, Title: hostile}}
+	reviews := map[string]string{sessions[0].TaskID: "R-1"}
+	for _, width := range []int{40, 60, 80, 120, 200} {
+		for _, k := range []string{"", "r", "j"} {
+			clk := &sayClock{t: testNow}
+			src := &fakeSource{sessions: sessions, tasks: tasks, reviews: reviews}
+			m := refresh(t, New(src, &tmux.Fake{}, config.Default(), clk.now, ModePopup))
+			m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: 10})
+			clk.advance(time.Second)
+			if k != "" {
+				m, _ = press(m, k, "r")
+			}
+			view := m.View()
+			for _, l := range strings.Split(view, "\n") {
+				if w := lipgloss.Width(l); w > width {
+					t.Errorf("width %d after %q: line is %d cells: %q", width, k, w, l)
+				}
+			}
+			wantClean(t, view)
+			if strings.Count(view, "◆") != len(sessions) {
+				t.Errorf("width %d: want every row review-ready:\n%s", width, view)
+			}
+		}
+	}
+}
+
+// TestKillAndJumpRefuseOtherServer: the dashboard neither kills nor jumps to
+// this server's pane that has the id of a session recorded on another tmux
+// server; a session recorded on this server, or on none, is reachable.
+func TestKillAndJumpRefuseOtherServer(t *testing.T) {
+	ss := threeSessions()
+	ss[0].Socket = "/tmp/tmux-501/default"
+	ss[1].Socket = "/tmp/tmux-501/other" // b, in %5, which this server also has
+	m, fake, _ := newTest(t, ModePopup, ss...)
+	for i := range fake.Panes {
+		fake.Panes[i].Socket = "/tmp/tmux-501/default"
+	}
+	m = refresh(t, m)
+	m = selectID(t, m, "b")
+	m, _ = press(m, "x", "y")
+	m, cmd := press(m, "enter")
+	if got := append(calls(fake, "KillPane"), calls(fake, "SwitchTo")...); len(got) != 0 {
+		t.Errorf("tmux calls %q for a session on another server", got)
+	}
+	if cmd != nil && isQuit(cmd) {
+		t.Error("the popup quit as after a jump")
+	}
+	if v := m.View(); !strings.Contains(v, "on another tmux server") {
+		t.Errorf("the view does not say why:\n%s", v)
+	}
+	m = selectID(t, m, "a")
+	_, _ = press(m, "x", "y")
+	if got := calls(fake, "KillPane"); !slices.Equal(got, []string{"KillPane %3"}) {
+		t.Errorf("this server's session: kill calls %q", got)
+	}
+}
+
+// selectID moves the selection down to the row of session id.
+func selectID(t *testing.T, m tea.Model, id string) tea.Model {
+	t.Helper()
+	for range 10 {
+		m, _ = press(m, "up")
+	}
+	for range 10 {
+		mm, ok := m.(Model)
+		if !ok {
+			t.Fatalf("model is %T", m)
+		}
+		if r, ok := mm.current(); ok && r.s.ID == id {
+			return m
+		}
+		m, _ = press(m, "down")
+	}
+	t.Fatalf("no row for %s", id)
+	return m
 }

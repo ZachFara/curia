@@ -41,6 +41,15 @@ type Session struct {
 	// TaskID is the task whose agent this is; Worktree its worktree. TeamID,
 	// TeamRole and TeamMember place the session in an agent team.
 	TaskID, Worktree, TeamID, TeamRole, TeamMember string
+	// Socket is the tmux server's socket path (stored). ReviewPending is
+	// never stored; fleet.WithReviews sets it.
+	Socket        string
+	ReviewPending bool
+	// EndReason is why an ended session ended (SessionEnd's reason, stored
+	// normalised by the store and only while the session is ended; Ruling
+	// 117): "other" when tmux was killed or crashed, a user's own exit
+	// otherwise.
+	EndReason string
 }
 
 // Team roles.
@@ -70,4 +79,7 @@ type Event struct {
 	At                                                                                    time.Time
 	// TaskID is the task named by the hook's environment (CURIA_TASK_ID).
 	TaskID string
+	// EndReason is SessionEnd's reason (Ruling 117), untrusted and at most
+	// 64 bytes: "other" when tmux was killed or crashed.
+	EndReason string
 }

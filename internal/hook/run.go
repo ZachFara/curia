@@ -2,6 +2,7 @@ package hook
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,9 +32,9 @@ type Env struct {
 	// branch and, in a linked worktree, the worktree's top level (else
 	// empty), or empty strings when cwd is not in a repository.
 	Git func(cwd string) (repo, branch, worktree string)
-	// PaneInfo returns the name of the tmux session and the id of the window
-	// (for example "@7") that hold pane.
-	PaneInfo func(pane string) (tmuxSession, window string)
+	// PaneInfo returns the name of the tmux session, the id of the window
+	// (for example "@7") and the socket path of the server that hold pane.
+	PaneInfo func(pane string) (tmuxSession, window, socket string)
 	// TaskID is the task named by the environment (CURIA_TASK_ID), already
 	// validated, or empty.
 	TaskID string
@@ -42,7 +43,7 @@ type Env struct {
 // startInfo is what a SessionStart learns from git and tmux before the
 // session's write transaction begins.
 type startInfo struct {
-	repo, branch, worktree, tmuxSession, window string
+	repo, branch, worktree, tmuxSession, window, socket string
 }
 
 // Result is what Run did: the session as stored, and what curia hook must
@@ -274,8 +275,8 @@ func blockLine(reason string) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// sessionStart ends the other sessions in ev's pane and asks git and tmux
-// about the new one. Git and tmux run at the same time: each is a subprocess
+// sessionStart asks git and tmux about the new session, then ends the other
+// sessions in ev's pane of the same tmux server. Git and tmux run at the same time: each is a subprocess
 // of several milliseconds, and together they would use most of the budget.
 func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store) (*startInfo, error) {
 	start := &startInfo{}
@@ -283,19 +284,21 @@ func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store)
 		start.repo, start.branch, start.worktree = env.Git(ev.Cwd)
 		return start, nil
 	}
-	if err := st.EndOthersInPane(ctx, ev.Pane, ev.SessionID, ev.At); err != nil {
-		return start, err
-	}
 	var wg sync.WaitGroup
 	var panicked any
 	wg.Go(func() {
 		defer func() { panicked = recover() }()
-		start.tmuxSession, start.window = env.PaneInfo(ev.Pane)
+		start.tmuxSession, start.window, start.socket = env.PaneInfo(ev.Pane)
 	})
 	start.repo, start.branch, start.worktree = env.Git(ev.Cwd)
 	wg.Wait()
 	if panicked != nil {
 		panic(panicked) // on the caller's goroutine, where it can be recovered
+	}
+	// Only the pane of this server: the same id on another server is
+	// another pane (I4). The socket comes from the PaneInfo call above.
+	if err := st.EndOthersInPane(ctx, ev.Pane, start.socket, ev.SessionID, ev.At); err != nil {
+		return start, err
 	}
 	return start, nil
 }
@@ -325,10 +328,28 @@ func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config,
 	if decisions != nil {
 		open = decisions(&ev)
 	}
-	return state.Apply(s, ev, open), err
+	s = state.Apply(s, ev, open)
+	recordEndReason(&s, ev)
+	return s, err
 }
 
-// enrich sets what git, tmux and the environment said about the session.
+// recordEndReason keeps why a session ended (Ruling 117): a SessionEnd
+// that ended s sets ev's reason, or endReasonOther when it gave none (an
+// older Claude Code sends none, and its sessions must stay restorable); a
+// session that is not ended has none. An ended session ignores a second
+// SessionEnd (state.Ignores), so the first reason stands. The store
+// normalizes the reason as it writes it.
+func recordEndReason(s *model.Session, ev model.Event) {
+	switch {
+	case s.State != model.StateEnded:
+		s.EndReason = ""
+	case ev.Kind == model.SessionEnd:
+		s.EndReason = cmp.Or(ev.EndReason, endReasonOther)
+	}
+}
+
+// enrich sets what git, tmux (including the socket of the pane's server)
+// and the environment said about the session.
 // start is nil when git and tmux were not asked. A session keeps the task it
 // has; an empty one takes ev's, on any event, so a missing CURIA_TASK_ID (a
 // teammate's process) never clears a task.
@@ -338,7 +359,7 @@ func enrich(s *model.Session, ev model.Event, start *startInfo) {
 	case start == nil: // git and tmux were not asked
 	case ev.Kind == model.SessionStart && !state.Continues(*s, ev):
 		s.Repo, s.Branch, s.Worktree = start.repo, start.branch, start.worktree
-		s.TmuxSession, s.TmuxWindow = start.tmuxSession, start.window
+		s.TmuxSession, s.TmuxWindow, s.Socket = start.tmuxSession, start.window, start.socket
 	default:
 		// First seen mid-run (a compaction's SessionStart included). A
 		// SessionStart may have written the row since Run looked, so fill
@@ -348,6 +369,7 @@ func enrich(s *model.Session, ev model.Event, start *startInfo) {
 		fillEmpty(&s.Worktree, start.worktree)
 		fillEmpty(&s.TmuxSession, start.tmuxSession)
 		fillEmpty(&s.TmuxWindow, start.window)
+		fillEmpty(&s.Socket, start.socket)
 	}
 }
 

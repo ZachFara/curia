@@ -71,27 +71,35 @@ var clock = time.Now
 // ends by refreshing team membership (refreshTeams), which reads files, not
 // tmux; what that cannot read is logged, and only a store error is returned.
 func reconcile(ctx context.Context, st *store.Store, client tmux.Client, logPath string, now time.Time) error {
+	_, err := reconcilePanes(ctx, st, client, logPath, now)
+	return err
+}
+
+// reconcilePanes is reconcile, and returns the panes tmux listed (nil when
+// it could not list them).
+func reconcilePanes(ctx context.Context, st *store.Store, client tmux.Client, logPath string, now time.Time) ([]tmux.Pane, error) {
 	tctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 	defer cancel()
 	panes, err := client.ListPanes(tctx)
 	if err != nil {
 		logWarn(logPath, "tmux unreachable, not reconciling", "err", err.Error())
-		return refreshTeams(ctx, st, logPath)
+		return nil, refreshTeams(ctx, st, logPath)
 	}
 	windows, err := fleet.Reconcile(ctx, st, panes, now)
-	applyMarkers(ctx, client, st, logPath, "reconcile attention marker", windows)
+	applyMarkers(ctx, client, st, logPath, "reconcile attention marker", fleet.Socket(panes), windows)
 	if err != nil {
-		return err
+		return panes, err
 	}
-	return refreshTeams(ctx, st, logPath)
+	return panes, refreshTeams(ctx, st, logPath)
 }
 
-// applyMarkers re-applies the attention marker of each window, logging a
-// failure under msg unless the window is gone.
-func applyMarkers(ctx context.Context, client tmux.Client, st *store.Store, logPath, msg string, windows []string) {
+// applyMarkers re-applies the attention marker of each window of the tmux
+// server at socket ("" when unknown: attention.Apply), logging a failure
+// under msg unless the window is gone.
+func applyMarkers(ctx context.Context, client tmux.Client, st *store.Store, logPath, msg, socket string, windows []string) {
 	for _, w := range windows {
 		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
-		if aerr := attention.Apply(actx, client, st, w); aerr != nil && !errors.Is(aerr, tmux.ErrNoWindow) {
+		if aerr := attention.Apply(actx, client, st, w, socket); aerr != nil && !errors.Is(aerr, tmux.ErrNoWindow) {
 			logWarn(logPath, msg, "window", w, "err", aerr.Error())
 		}
 		cancel()
@@ -135,8 +143,17 @@ func listSettled(ctx context.Context, st *store.Store, f store.ListFilter, logPa
 // sessions' windows, as reconcile does for the windows it marks stale.
 func listSettledMarked(ctx context.Context, st *store.Store, client tmux.Client, f store.ListFilter, logPath string, now time.Time) ([]model.Session, error) {
 	sessions, windows, err := listSettled(ctx, st, f, logPath, now)
-	applyMarkers(ctx, client, st, logPath, "settle attention marker", windows)
-	return sessions, err
+	applyMarkers(ctx, client, st, logPath, "settle attention marker", "", windows)
+	if err != nil {
+		return sessions, err
+	}
+	// A failed read leaves the sessions unmarked: ranking is a view, not a reason to fail.
+	pending, perr := st.PendingReviewTasks(ctx)
+	if perr != nil {
+		logWarn(logPath, "read pending reviews", "err", perr)
+		return sessions, nil
+	}
+	return fleet.WithReviews(sessions, pending), nil
 }
 
 // logWarn appends one warning to the log file at logPath, if it opens.

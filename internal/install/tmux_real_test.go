@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -279,13 +280,50 @@ func TestSnippetRespectsThemedConf(t *testing.T) {
 
 // TestMarkerRendersAfterThemedTab expands the window formats as the status
 // line does: with no marker a tab renders exactly as the theme's own format,
-// and with @curia_marker red it renders the same followed by the red dot.
+// and with @curia_marker red or blue it renders the same followed by a dot of
+// that color and nothing else: no style reset, no change to the tab itself.
 func TestMarkerRendersAfterThemedTab(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	dir := t.TempDir()
 	tm := realTmuxConf(ctx, t, dir, themedConf(t, dir))
-	display := func(format string) string {
+	display := markerDisplay(t, tm)
+	if out, err := tm("show", "-gv", "@curia_marker_format"); err != nil || strings.TrimSuffix(out, "\n") != markerFormat {
+		t.Fatalf("@curia_marker_format = %q, %v; want %q", out, err, markerFormat)
+	}
+	for opt, theme := range map[string]string{
+		"window-status-format":         themeWindow,
+		"window-status-current-format": themeCurrent,
+	} {
+		if got, err := tm("show", "-gv", opt); err != nil || strings.TrimSuffix(got, "\n") != theme+markerFragment {
+			t.Errorf("%s = %q, %v; want the theme's format with the fragment appended", opt, got, err)
+		}
+		plain := display(theme)
+		for _, tc := range []struct{ marker, want string }{
+			{"", plain},
+			{"red", plain + "#[fg=red] ●"},
+			{"blue", plain + "#[fg=blue] ●"},
+			{"green", plain}, // a value the format does not know draws nothing
+			{"", plain},      // unset again
+		} {
+			setMarker(t, tm, tc.marker)
+			if got := display("#{E:" + opt + "}"); got != tc.want {
+				t.Errorf("%s with marker %q = %q, want %q", opt, tc.marker, got, tc.want)
+			}
+		}
+	}
+}
+
+// markerDisplay returns a function that expands a format for window t: as
+// the status line would, styles left in the text. It names the window first:
+// rename-window turns automatic-rename off, so #W cannot change between two
+// expansions as the window's shell starts.
+func markerDisplay(t *testing.T, tm func(...string) (string, error)) func(string) string {
+	t.Helper()
+	if out, err := tm("rename-window", "-t", "t:", "tab"); err != nil {
+		t.Fatalf("rename-window: %v: %s", err, out)
+	}
+	return func(format string) string {
 		t.Helper()
 		out, err := tm("display-message", "-p", "-t", "t:", format)
 		if err != nil {
@@ -293,22 +331,127 @@ func TestMarkerRendersAfterThemedTab(t *testing.T) {
 		}
 		return strings.TrimSuffix(out, "\n")
 	}
-	for opt, theme := range map[string]string{
-		"window-status-format":         themeWindow,
-		"window-status-current-format": themeCurrent,
-	} {
-		plain := display(theme)
-		if got := display("#{E:" + opt + "}"); got != plain {
-			t.Errorf("%s without marker = %q, want the theme's %q", opt, got, plain)
+}
+
+// setMarker sets @curia_marker on window t: to marker, or unsets it when marker is "".
+func setMarker(t *testing.T, tm func(...string) (string, error), marker string) {
+	t.Helper()
+	args := []string{"set", "-w", "-t", "t:", "@curia_marker", marker}
+	if marker == "" {
+		args = []string{"set", "-uw", "-t", "t:", "@curia_marker"}
+	}
+	if out, err := tm(args...); err != nil {
+		t.Fatalf("%q: %v: %s", args, err, out)
+	}
+}
+
+// markerStyle matches one style directive in a format.
+var markerStyle = regexp.MustCompile(`#\[[^\]]*\]`)
+
+// TestMarkerFormatDrawsBlueAndRed: on a server with tmux's default formats,
+// the snippet's marker draws a red dot, a blue dot or nothing. The marker
+// only ever changes the foreground of its own dot (a #[default] or any other
+// style would reset a themed tab drawn before it).
+func TestMarkerFormatDrawsBlueAndRed(t *testing.T) {
+	for _, style := range markerStyle.FindAllString(markerFormat, -1) {
+		if style != "#[fg=red]" && style != "#[fg=blue]" {
+			t.Errorf("markerFormat has style %q, want only #[fg=red] and #[fg=blue]", style)
 		}
-		if out, err := tm("set", "-w", "-t", "t:", "@curia_marker", "red"); err != nil {
-			t.Fatalf("set @curia_marker: %v: %s", err, out)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	tm := realTmux(ctx, t, dir)
+	before := tmuxState(t, tm)
+	sourceSnippet(t, tm, dir, testBin, 1)
+	display := markerDisplay(t, tm)
+	for _, opt := range []string{"window-status-format", "window-status-current-format"} {
+		plain := display(before[opt])
+		for _, tc := range []struct{ marker, want string }{
+			{"", plain},
+			{"blue", plain + "#[fg=blue] ●"},
+			{"red", plain + "#[fg=red] ●"},
+			{"", plain},
+		} {
+			setMarker(t, tm, tc.marker)
+			if got := display("#{E:" + opt + "}"); got != tc.want {
+				t.Errorf("%s with marker %q = %q, want %q", opt, tc.marker, got, tc.want)
+			}
 		}
-		if got, want := display("#{E:"+opt+"}"), plain+"#[fg=red] ●"; got != want {
-			t.Errorf("%s with marker = %q, want %q", opt, got, want)
+	}
+}
+
+// oldMarkerFormat is the value of @curia_marker_format that the Plan 3
+// snippet set: a red dot only.
+const oldMarkerFormat = "#{?#{==:#{@curia_marker},red},#[fg=red] ●,}"
+
+// TestMarkerUpgradeNeedsOnlyTheOption: a server that sourced the Plan 3
+// snippet over a user's own window format gets the blue marker from sourcing
+// the new snippet, which changes the option and leaves the format byte for
+// byte as it was. Until then a blue marker draws nothing.
+func TestMarkerUpgradeNeedsOnlyTheOption(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	tm := realTmux(ctx, t, dir)
+	mine := "#[fg=green,bg=black] #I:#W #[fg=black,bg=default]"
+	if out, err := tm("set", "-g", "window-status-format", mine); err != nil {
+		t.Fatalf("set window-status-format: %v: %s", err, out)
+	}
+	snippet := filepath.Join(dir, "curia.tmux")
+	if _, err := WriteTmux(snippet, filepath.Join(dir, ".tmux.conf"), testBin, defaultKeys); err != nil {
+		t.Fatal(err)
+	}
+	current := readFile(t, snippet)
+	oldLine := "set -g @curia_marker_format " + tmuxQuote(oldMarkerFormat) + "\n"
+	previous := strings.Replace(current, "set -g @curia_marker_format "+tmuxQuote(markerFormat)+"\n", oldLine, 1)
+	if !strings.Contains(previous, oldLine) {
+		t.Fatalf("could not build the Plan 3 snippet from:\n%s", current)
+	}
+	oldSnippet := filepath.Join(dir, "plan3.tmux")
+	writeFile(t, oldSnippet, previous)
+	source := func(path string) {
+		t.Helper()
+		if out, err := tm("source-file", path); err != nil || out != "" {
+			t.Fatalf("source-file %s: %v: %q", filepath.Base(path), err, out)
 		}
-		if out, err := tm("set", "-uw", "-t", "t:", "@curia_marker"); err != nil {
-			t.Fatalf("unset @curia_marker: %v: %s", err, out)
+	}
+	source(oldSnippet)
+	formats := func() [2]string {
+		t.Helper()
+		var f [2]string
+		for i, opt := range []string{"window-status-format", "window-status-current-format"} {
+			out, err := tm("show", "-gv", opt)
+			if err != nil {
+				t.Fatalf("show %s: %v: %s", opt, err, out)
+			}
+			f[i] = out
+		}
+		return f
+	}
+	first := formats()
+	if want := mine + markerFragment + "\n"; first[0] != want {
+		t.Fatalf("window-status-format after the Plan 3 snippet = %q, want %q", first[0], want)
+	}
+	display := markerDisplay(t, tm)
+	plain := display(mine)
+
+	// Before the upgrade a blue marker is harmless: no dot, the tab as it was.
+	for marker, want := range map[string]string{"blue": plain, "red": plain + "#[fg=red] ●"} {
+		setMarker(t, tm, marker)
+		if got := display("#{E:window-status-format}"); got != want {
+			t.Errorf("Plan 3 snippet, marker %s = %q, want %q", marker, got, want)
+		}
+	}
+
+	source(snippet)
+	if got := formats(); got != first {
+		t.Errorf("formats after the new snippet = %q, want unchanged %q", got, first)
+	}
+	for marker, want := range map[string]string{"blue": plain + "#[fg=blue] ●", "red": plain + "#[fg=red] ●", "": plain} {
+		setMarker(t, tm, marker)
+		if got := display("#{E:window-status-format}"); got != want {
+			t.Errorf("new snippet, marker %q = %q, want %q", marker, got, want)
 		}
 	}
 }

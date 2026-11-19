@@ -72,6 +72,7 @@ const (
 	AnsweredPopup AnsweredVia = "popup"
 	AnsweredSSH   AnsweredVia = "ssh"
 	AnsweredCLI   AnsweredVia = "cli"
+	AnsweredNtfy  AnsweredVia = "ntfy"
 )
 
 // Option is one choice offered by a decision.

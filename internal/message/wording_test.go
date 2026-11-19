@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/task"
 )
 
 const lossySuffix = " Wording simplified: call check_messages."
@@ -416,4 +417,18 @@ func FuzzNoForge(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestTypedChangeRequestIsPlain: a change request typed into the agent's
+// prompt keeps its fixed words whole, so a plain note arrives without the
+// "Wording simplified" suffix; a note with a colon still gets it (Ruling
+// 105 is unchanged).
+func TestTypedChangeRequestIsPlain(t *testing.T) {
+	plain := TypedLine(userMsg("M-1", task.NoteMessage("R-1", "T-1", "handle the empty list")))
+	if want := "Message M-1 from the user: Changes requested in review R-1 of T-1. handle the empty list."; plain != want {
+		t.Errorf("plain note typed as %q, want %q", plain, want)
+	}
+	if lossy := TypedLine(userMsg("M-2", task.NoteMessage("R-1", "T-1", "rename it: use Refresh"))); !strings.HasSuffix(lossy, lossySuffix) {
+		t.Errorf("a note with a colon typed as %q, want the suffix", lossy)
+	}
 }

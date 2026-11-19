@@ -860,45 +860,100 @@ func TestUserAncestryWithoutPaneList(t *testing.T) {
 // The user works in pane %1 of a second tmux server (TMUX points at it)
 // while the agents' sessions are recorded in %1 and %2 of theirs: the pane
 // ids collide (re-review A). The guard reads, and writes no session row.
-//   - The second server started after the sessions: by fleet.Gone none of
-//     them is in it, so the user is let through.
-//   - It started before: %1 looks like agent-1's pane and the user is
-//     refused. Telling the servers apart needs a server identity on the
-//     session row (Plan 4); refusing is the safe side.
+// Each case is checked through the pane variable (agentSign), through the
+// pane's process (agentAncestor) and through userOnly.
+//   - The sessions record their server (Plan 4) and it is not the one
+//     reached: none of them is in it (fleet.OtherServer), whenever that
+//     server started, so the user is let through.
+//   - They record the server reached: %1 is agent-1's pane, refused.
+//   - They record no server (rows from before Plan 4): fleet.Gone alone
+//     decides. Started after the sessions, none is in it; started before,
+//     %1 looks like agent-1's pane and the user is refused (the safe side).
+//   - A live session of each server is in a pane %1: the one on the server
+//     reached refuses, whichever the store lists first.
 func TestSecondServerPaneIDCollision(t *testing.T) {
+	const agents, mine = "/tmp/tmux-501/agents", "/tmp/tmux-501/mine"
 	me := os.Getppid()
 	shell := map[int]userProc{me: {4242, "-zsh", ""}, 4242: {1, "tmux", ""}}
-	unchanged := func(t *testing.T, db string) {
-		t.Helper()
-		for _, id := range []string{"agent-1", "agent-2"} {
-			if s := getSession(t, db, id); s.State != model.StateIdle {
-				t.Errorf("%s = %s, want idle: the guard writes nothing", id, s.State)
+	on := func(s model.Session, socket string) model.Session {
+		s.Socket = socket
+		return s
+	}
+	for _, c := range []struct {
+		name        string
+		serverStart time.Time
+		sessions    []model.Session
+		refused     string // the session named in the refusal, "" when let through
+	}{
+		{
+			"recorded on another server, started after", at(10, 0),
+			[]model.Session{on(readSession("agent-1", model.StateIdle, "%1"), agents), on(readSession("agent-2", model.StateIdle, "%2"), agents)},
+			"",
+		},
+		{
+			"recorded on another server, started before", at(8, 0),
+			[]model.Session{on(readSession("agent-1", model.StateIdle, "%1"), agents), on(readSession("agent-2", model.StateIdle, "%2"), agents)},
+			"",
+		},
+		{
+			"recorded on the server reached", at(8, 0),
+			[]model.Session{on(readSession("agent-1", model.StateIdle, "%1"), mine), on(readSession("agent-2", model.StateIdle, "%2"), mine)},
+			"agent-1",
+		},
+		{
+			"no recorded server, started after", at(10, 0),
+			[]model.Session{readSession("agent-1", model.StateIdle, "%1"), readSession("agent-2", model.StateIdle, "%2")},
+			"",
+		},
+		{
+			"no recorded server, started before", at(8, 0),
+			[]model.Session{readSession("agent-1", model.StateIdle, "%1"), readSession("agent-2", model.StateIdle, "%2")},
+			"agent-1",
+		},
+		{
+			"one in each server, this one first", at(8, 0),
+			[]model.Session{on(readSession("agent-1", model.StateIdle, "%1"), mine), on(readSession("agent-2", model.StateIdle, "%1"), agents)},
+			"agent-1",
+		},
+		{
+			"one in each server, this one second", at(8, 0),
+			[]model.Session{on(readSession("agent-1", model.StateIdle, "%1"), agents), on(readSession("agent-2", model.StateIdle, "%1"), mine)},
+			"agent-2",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db, fake := readHome(t, []string{"%1"}, c.sessions...)
+			fake.Panes[0].ServerStart = c.serverStart
+			fake.Panes[0].PID = 4242 // the user's shell in the second server's %1
+			fake.Panes[0].Socket = mine
+			userProcessesAs(t, shell)
+			t.Setenv("TMUX_PANE", "%1")
+			decisionsWantGuard(t, c.refused)
+			for _, s := range c.sessions {
+				if got := getSession(t, db, s.ID); got.State != model.StateIdle || got.Socket != s.Socket {
+					t.Errorf("%s = %s on %q, want idle on %q: the guard writes nothing", s.ID, got.State, got.Socket, s.Socket)
+				}
 			}
-		}
+		})
 	}
-	world := func(t *testing.T, serverStart time.Time) string {
-		t.Helper()
-		db, fake := readHome(t, []string{"%1"}, readSession("agent-1", model.StateIdle, "%1"), readSession("agent-2", model.StateIdle, "%2"))
-		fake.Panes[0].ServerStart = serverStart
-		fake.Panes[0].PID = 4242 // the user's shell in the second server's %1
-		userProcessesAs(t, shell)
-		t.Setenv("TMUX_PANE", "%1")
-		return db
+}
+
+// decisionsWantGuard checks agentSign, agentAncestor and userOnly: each
+// names agent session refused, or with refused "" each lets the user
+// through.
+func decisionsWantGuard(t *testing.T, refused string) {
+	t.Helper()
+	sign, ancestor, err := agentSign(), agentAncestor(), userOnly("decide", "answer a decision")
+	if refused == "" {
+		if sign != "" || ancestor != "" || err != nil {
+			t.Errorf("agentSign = %q, agentAncestor = %q, userOnly = %v; want the user let through", sign, ancestor, err)
+		}
+		return
 	}
-	t.Run("second server started after the sessions", func(t *testing.T) {
-		db := world(t, at(10, 0))
-		if err := userOnly("decide", "answer a decision"); err != nil {
-			t.Errorf("userOnly = %v, want the user let through", err)
-		}
-		unchanged(t, db)
-	})
-	t.Run("second server started before the sessions", func(t *testing.T) {
-		db := world(t, at(8, 0))
-		if err := userOnly("decide", "answer a decision"); err == nil || !strings.Contains(err.Error(), "agent session agent-1") {
-			t.Errorf("userOnly = %v, want the refusal naming agent-1 (needs a server identity to tell apart)", err)
-		}
-		unchanged(t, db)
-	})
+	want := "agent session " + refused
+	if !strings.Contains(sign, want) || !strings.Contains(ancestor, want) || err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("agentSign = %q, agentAncestor = %q, userOnly = %v; want each to name %s", sign, ancestor, err, refused)
+	}
 }
 
 // The real process table, read by ps: it holds this test process with its
@@ -983,6 +1038,9 @@ var userOnlyCommands = map[string][]string{
 	"curia task import":     {"--backlog-md"},
 	"curia install":         {},
 	"curia uninstall":       {},
+	"curia review":          {"R-1", "--drop"},
+	"curia restore":         {"--dry-run"},
+	"curia serve":           {},
 }
 
 // userNotOnlyCommands are the leaf commands anyone, an agent included, may
@@ -994,10 +1052,11 @@ var userNotOnlyCommands = map[string]string{
 	"curia hook":                  "run by Claude Code's hooks; records the calling session's own event",
 	"curia launch":                "runs the agent in the caller's own process; spawn decides what is started",
 	"curia ls":                    "reads the sessions only",
-	"curia mcp":                   "run by Claude Code; its tools cannot decide, send, spawn or pause",
+	"curia mcp":                   "run by Claude Code; its tools cannot decide, send, spawn or pause; complete_task only files the caller's own task for review",
 	"curia messages ls":           "reads the messages only",
 	"curia next":                  "moves the tmux client to a session; changes nothing",
 	"curia read":                  "reads a pane's last lines, as tmux capture-pane does",
+	"curia reviews ls":            "reads the reviews only",
 	"curia routing stats":         "reads the routing counts only",
 	"curia seen":                  "attention bookkeeping, run by tmux on pane focus",
 	"curia send":                  "agents may send; labeled, limited and never from the user (Rulings 112, 113)",

@@ -31,6 +31,83 @@ func TestParseListPanes(t *testing.T) {
 	}
 }
 
+func TestParsePanesSocketRules(t *testing.T) {
+	long := "/" + strings.Repeat("a", 299)
+	for _, tc := range []struct{ name, sock, want string }{
+		{"absolute", "/tmp/tmux-501/default", "/tmp/tmux-501/default"},
+		{"exactly 256 bytes", "/" + strings.Repeat("a", 255), "/" + strings.Repeat("a", 255)},
+		{"relative", "tmux/default", ""},
+		{"empty", "", ""},
+		{"300 bytes", long, ""},
+		{"tab in path", "/tmp/a\tb", ""},
+		{"escape in path", "/tmp/a\x1bb", ""},
+		{"newline-free control", "/tmp/a\x01", ""},
+		{"invalid UTF-8", "/tmp/\xff\xfe", ""},
+	} {
+		got, err := parsePanes("%0\tmain\t@0\t1794437573\t401\tzsh\t" + tc.sock + "\n")
+		if err != nil || len(got) != 1 {
+			t.Errorf("%s: got %+v, %v; want one pane", tc.name, got, err)
+			continue
+		}
+		if got[0].Socket != tc.want {
+			t.Errorf("%s: Socket = %q, want %q", tc.name, got[0].Socket, tc.want)
+		}
+		if got[0].ID != "%0" || got[0].Session != "main" || got[0].WindowID != "@0" {
+			t.Errorf("%s: pane fields lost: %+v", tc.name, got[0])
+		}
+		if tc.sock != "" && strings.HasPrefix(tc.sock, "/") && got[0].WindowName != "zsh" {
+			t.Errorf("%s: WindowName = %q, want zsh", tc.name, got[0].WindowName)
+		}
+	}
+}
+
+// A six-field line (the format without the socket) has no socket. A
+// five-field line has no pane pid and is refused (TestParsePanesMalformed).
+func TestParsePanesWithoutSocket(t *testing.T) {
+	got, err := parsePanes("%0\tmain\t@0\t1794437573\t401\tzsh\n")
+	if err != nil || len(got) != 1 || got[0].Socket != "" || got[0].WindowName != "zsh" || got[0].PID != 401 {
+		t.Errorf("six-field line: %+v, %v", got, err)
+	}
+}
+
+func TestListPanesReportsSocket(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	if out, err := tm("new-window", "-d", "-n", "second"); err != nil {
+		t.Fatalf("new-window: %v: %s", err, out)
+	}
+	want, err := tm("display-message", "-p", "#{socket_path}")
+	want = strings.TrimSpace(want)
+	if err != nil || !filepath.IsAbs(want) {
+		t.Fatalf("display-message socket_path = %q, %v", want, err)
+	}
+	panes, err := NewExec(realSocket).ListPanes(ctx)
+	if err != nil || len(panes) != 2 {
+		t.Fatalf("ListPanes = %+v, %v; want two panes", panes, err)
+	}
+	for _, p := range panes {
+		if p.Socket != want {
+			t.Errorf("pane %s: Socket = %q, want %q", p.ID, p.Socket, want)
+		}
+	}
+}
+
+func TestPaneInfoReportsSocket(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	want, err := tm("display-message", "-p", "#{socket_path}")
+	want = strings.TrimSpace(want)
+	if err != nil || !filepath.IsAbs(want) {
+		t.Fatalf("display-message socket_path = %q, %v", want, err)
+	}
+	p, err := NewExec(realSocket).PaneInfo(ctx, paneID(t, tm, "t"))
+	if err != nil || p.Socket != want {
+		t.Fatalf("PaneInfo = %+v, %v; want Socket %q", p, err, want)
+	}
+}
+
 func TestParsePanesMalformed(t *testing.T) {
 	if _, err := parsePanes("%0\tonly-two\n"); err == nil {
 		t.Fatal("want error for malformed line")

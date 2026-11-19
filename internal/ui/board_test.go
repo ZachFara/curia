@@ -99,7 +99,8 @@ func wantBoardCalls(t *testing.T, src *fakeBoardSource, want ...string) {
 func card(n int, status model.TaskStatus, pane string) task.Card {
 	id := "T-" + strconv.Itoa(n)
 	stored := status
-	if status == model.TaskRunning || status == model.TaskNeedsDecision {
+	switch status {
+	case model.TaskRunning, model.TaskNeedsDecision, model.TaskReview, model.TaskDone:
 		stored = model.TaskReady
 	}
 	c := task.Card{
@@ -214,7 +215,7 @@ func TestBoardColumnsWide(t *testing.T) {
 	view := m.View()
 	checkWidth(t, view, 120)
 	lines := strings.Split(view, "\n")
-	headings := []string{"BACKLOG (1)", "READY (1)", "RUNNING (1)", "NEEDS DECISION (1)"}
+	headings := []string{"BACKLOG (1)", "READY (1)", "RUNNING (1)", "NEEDS DECISION (1)", "REVIEW (0)"}
 	at := make([]int, len(headings))
 	for i, h := range headings {
 		if at[i] = cellIndex(lines[0], h); at[i] < 0 {
@@ -255,12 +256,12 @@ func TestBoardListNarrow(t *testing.T) {
 			t.Errorf("width %d: dropped T-5 shown:\n%s", width, view)
 		}
 	}
-	// At 100 columns the board is wide: all four headings on one line.
+	// At 100 columns the board is wide: all five headings on one line.
 	m := newBoard(t, src, &tmux.Fake{}, 100, false)
 	view := m.View()
 	checkWidth(t, view, 100)
-	if first := strings.Split(view, "\n")[0]; !strings.Contains(first, "BACKLOG") || !strings.Contains(first, "NEEDS DECISION") {
-		t.Errorf("at 100 columns the first line is %q, want the four headings", first)
+	if first := strings.Split(view, "\n")[0]; !strings.Contains(first, "BACKLOG") || !strings.Contains(first, "REVIEW") {
+		t.Errorf("at 100 columns the first line is %q, want the five headings", first)
 	}
 }
 
@@ -506,7 +507,7 @@ func TestBoardEnterJumpsToLeadPane(t *testing.T) {
 	m = bpress(t, m, "l")
 	boardClock.advance(keyGap)
 	_, cmd := m.Update(bkey("enter"))
-	if want := []string{"SwitchTo %5"}; !slices.Equal(tm.Calls, want) {
+	if want := []string{"ListPanes", "SwitchTo %5"}; !slices.Equal(tm.Calls, want) { // the panes tell the server
 		t.Errorf("tmux calls = %q, want %q", tm.Calls, want)
 	}
 	if !isQuitCmd(cmd) {
@@ -786,5 +787,445 @@ func TestBoardShowsActionInFlight(t *testing.T) {
 	m, act = m.Update(bkey("r"))
 	if s := lastLine(m); act == nil || s != "setting T-2 to ready…" {
 		t.Errorf("status line while setting = %q, want the action in flight", s)
+	}
+}
+
+// reviewCards is fourCards plus T-6 waiting for review (its agent in %6)
+// and T-7 done.
+func reviewCards() []task.Card {
+	return append(fourCards(), card(6, model.TaskReview, "%6"), card(7, model.TaskDone, ""))
+}
+
+// wantHeadingsInLine checks that line holds headings, left to right, and
+// returns the cell at which each starts.
+func wantHeadingsInLine(t *testing.T, line string, headings ...string) []int {
+	t.Helper()
+	at := make([]int, len(headings))
+	for i, h := range headings {
+		if at[i] = cellIndex(line, h); at[i] < 0 {
+			t.Fatalf("heading line %q lacks %q", line, h)
+		}
+	}
+	if !slices.IsSorted(at) {
+		t.Errorf("headings at cells %v, want them left to right", at)
+	}
+	return at
+}
+
+// wantLinesInOrder checks that view has lines holding want, in order, each
+// on a line of its own after the one before.
+func wantLinesInOrder(t *testing.T, view string, want ...string) {
+	t.Helper()
+	lines := strings.Split(view, "\n")
+	i := 0
+	for _, w := range want {
+		for i < len(lines) && !strings.Contains(lines[i], w) {
+			i++
+		}
+		if i == len(lines) {
+			t.Errorf("no line holding %q after the one before:\n%s", w, view)
+			return
+		}
+		i++
+	}
+}
+
+func TestBoardShowsReviewColumn(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(reviewCards()...)
+	for _, width := range []int{100, 120} {
+		m := newBoard(t, src, &tmux.Fake{}, width, false)
+		view := m.View()
+		checkWidth(t, view, width)
+		lines := strings.Split(view, "\n")
+		at := wantHeadingsInLine(t, lines[0], "BACKLOG (1)", "READY (1)", "RUNNING (1)", "NEEDS DECISION (1)", "REVIEW (1)")
+		if got := cellIndex(lines[1], "T-6 task T-6"); got != at[4]+2 {
+			t.Errorf("width %d: T-6 drawn at cell %d, want %d under REVIEW:\n%s", width, got, at[4]+2, view)
+		}
+		if strings.Contains(view, "DONE") || strings.Contains(view, "T-7") {
+			t.Errorf("width %d: done shown before D:\n%s", width, view)
+		}
+		if s := lastLine(m); !strings.Contains(s, "D done") {
+			t.Errorf("width %d: help line %q lacks D done", width, s)
+		}
+	}
+}
+
+func TestBoardHidesDoneUntilToggled(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(reviewCards()...)
+	m := newBoard(t, src, &tmux.Fake{}, 130, false)
+	if view := m.View(); strings.Contains(view, "T-7") || strings.Contains(view, "DONE") {
+		t.Fatalf("done shown before D:\n%s", view)
+	}
+	m = bpress(t, m, "D")
+	view := m.View()
+	checkWidth(t, view, 130)
+	lines := strings.Split(view, "\n")
+	at := wantHeadingsInLine(t, lines[0], "BACKLOG (1)", "REVIEW (1)", "DONE (1)")
+	if got := cellIndex(lines[1], "T-7 task T-7"); got != at[2]+2 {
+		t.Errorf("T-7 drawn at cell %d, want %d under DONE:\n%s", got, at[2]+2, view)
+	}
+	// Shown across a refresh.
+	m = reload(t, m)
+	if !strings.Contains(m.View(), "T-7") {
+		t.Errorf("done hidden again by a refresh:\n%s", m.View())
+	}
+	m = bpress(t, m, "D")
+	if view := m.View(); strings.Contains(view, "T-7") || strings.Contains(view, "DONE") {
+		t.Errorf("done shown after the second D:\n%s", view)
+	}
+	wantSelected(t, m, "T-1")
+	// D under the spawn prompt only cancels it.
+	m = bpress(t, m, "n", "D")
+	if s := lastLine(m); s != "spawn canceled" {
+		t.Errorf("D under the prompt: status line = %q, want the cancel", s)
+	}
+	if strings.Contains(m.View(), "DONE") {
+		t.Errorf("D under the prompt showed done:\n%s", m.View())
+	}
+	wantBoardCalls(t, src)
+}
+
+func TestBoardDoneColumnNeedsWidth(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(reviewCards()...)
+	headings := []string{"BACKLOG (1)", "READY (1)", "RUNNING (1)", "NEEDS DECISION (1)", "REVIEW (1)", "DONE (1)"}
+	for _, width := range []int{100, 110, 119} {
+		m := newBoard(t, src, &tmux.Fake{}, width, false)
+		m = bpress(t, m, "D")
+		view := m.View()
+		checkWidth(t, view, width)
+		// The list layout: each heading on a line of its own, its cards under it.
+		wantLinesInOrder(t, view, "BACKLOG (1)", "T-1", "READY (1)", "T-2", "RUNNING (1)", "T-3",
+			"NEEDS DECISION (1)", "T-4", "REVIEW (1)", "T-6", "DONE (1)", "T-7")
+		if first := strings.Split(view, "\n")[0]; strings.Contains(first, "READY") {
+			t.Errorf("width %d: first line %q holds two headings, want the list", width, first)
+		}
+		// D again: back to five columns.
+		m = bpress(t, m, "D")
+		if first := strings.Split(m.View(), "\n")[0]; !strings.Contains(first, "REVIEW (1)") || strings.Contains(first, "DONE") {
+			t.Errorf("width %d: after the second D the first line is %q, want five columns", width, first)
+		}
+	}
+	for _, width := range []int{120, 130, 200} {
+		m := newBoard(t, src, &tmux.Fake{}, width, false)
+		m = bpress(t, m, "D")
+		view := m.View()
+		checkWidth(t, view, width)
+		lines := strings.Split(view, "\n")
+		at := wantHeadingsInLine(t, lines[0], headings...)
+		for i, id := range []string{"T-1", "T-2", "T-3", "T-4", "T-6", "T-7"} {
+			if got := cellIndex(lines[1], id+" task "+id); got != at[i]+2 {
+				t.Errorf("width %d: %s drawn at cell %d, want %d under %q:\n%s", width, id, got, at[i]+2, headings[i], view)
+			}
+		}
+	}
+}
+
+func TestBoardSelectionLeavesHiddenCard(t *testing.T) {
+	cases := []struct {
+		name  string
+		width int
+		cards []task.Card
+		keys  []string // from the first card to T-7
+		want  string
+	}{
+		{"wide, review next to done", 130, []task.Card{card(1, model.TaskBacklog, ""), card(6, model.TaskReview, "%6"), card(7, model.TaskDone, "")}, []string{"l", "l"}, "T-6"},
+		{"wide, nothing between", 130, []task.Card{card(1, model.TaskBacklog, ""), card(7, model.TaskDone, ""), card(8, model.TaskDone, "")}, []string{"l", "j"}, "T-1"},
+		{"list", 60, []task.Card{card(1, model.TaskBacklog, ""), card(6, model.TaskReview, "%6"), card(7, model.TaskDone, "")}, []string{"j", "j"}, "T-6"},
+		{"narrow columns to list", 110, []task.Card{card(1, model.TaskBacklog, ""), card(6, model.TaskReview, "%6"), card(7, model.TaskDone, "")}, []string{"j", "j"}, "T-6"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			src := &fakeBoardSource{}
+			src.set(c.cards...)
+			m := newBoard(t, src, &tmux.Fake{}, c.width, false)
+			m = bpress(t, m, "D")
+			m = bpress(t, m, c.keys...)
+			if c.name == "wide, nothing between" {
+				wantSelected(t, m, "T-8")
+			} else {
+				wantSelected(t, m, "T-7")
+			}
+			m = bpress(t, m, "D")
+			wantSelected(t, m, c.want)
+			// The hidden card is not reached by moving either.
+			m = bpress(t, m, "l", "j", "l", "j")
+			if id := selectedID(t, m); id == "T-7" || id == "T-8" {
+				t.Errorf("moved onto hidden %s:\n%s", id, m.View())
+			}
+		})
+	}
+	// Only done tasks: hidden, nothing is selected and no key acts.
+	src := &fakeBoardSource{}
+	src.set(card(7, model.TaskDone, "%7"))
+	tm := &tmux.Fake{}
+	m := newBoard(t, src, tm, 130, false)
+	m = bpress(t, m, "D")
+	wantSelected(t, m, "T-7")
+	m = bpress(t, m, "D")
+	view := m.View()
+	if strings.Contains(view, "T-7") || !strings.Contains(view, "every task is done; D shows them") {
+		t.Errorf("only done tasks, hidden: view =\n%s", view)
+	}
+	m = bpress(t, m, "j", "l", "r", "n", "y", "enter")
+	wantBoardCalls(t, src)
+	if len(tm.Calls) != 0 {
+		t.Errorf("tmux calls = %q", tm.Calls)
+	}
+	m = bpress(t, m, "D")
+	wantSelected(t, m, "T-7")
+}
+
+func TestBoardNoSpawnOrReadyOnReviewOrDone(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(card(6, model.TaskReview, "%6"), card(7, model.TaskDone, ""))
+	tm := &tmux.Fake{}
+	m := newBoard(t, src, tm, 130, false)
+	m = bpress(t, m, "D")
+	wantSelected(t, m, "T-6")
+	const review = "T-6 is waiting for review: curia review T-6"
+	for _, k := range []string{"r", "n"} {
+		m = bpress(t, m, k)
+		if s := lastLine(m); s != review {
+			t.Errorf("%s on review: status line = %q, want %q", k, s, review)
+		}
+	}
+	m = bpress(t, m, "y", "l")
+	wantSelected(t, m, "T-7")
+	for _, k := range []string{"r", "n"} {
+		m = bpress(t, m, k)
+		if s := lastLine(m); s != "T-7 is done" {
+			t.Errorf("%s on done: status line = %q, want %q", k, s, "T-7 is done")
+		}
+	}
+	bpress(t, m, "y")
+	// The same in the list layout.
+	m = newBoard(t, src, tm, 60, false)
+	m = bpress(t, m, "r")
+	if s := lastLine(m); s != review {
+		t.Errorf("list: status line = %q, want %q", s, review)
+	}
+	bpress(t, m, "n", "y")
+	wantBoardCalls(t, src)
+	if len(tm.Calls) != 0 {
+		t.Errorf("tmux calls = %q", tm.Calls)
+	}
+}
+
+func TestBoardEnterJumpsFromReviewCard(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(card(6, model.TaskReview, "%6"))
+	tm := &tmux.Fake{}
+	m := newBoard(t, src, tm, 120, false)
+	boardClock.advance(keyGap)
+	_, cmd := m.Update(bkey("enter"))
+	if want := []string{"ListPanes", "SwitchTo %6"}; !slices.Equal(tm.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q", tm.Calls, want)
+	}
+	if !isQuitCmd(cmd) {
+		t.Error("a jump did not quit")
+	}
+}
+
+func TestBoardNarrowListsReview(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(reviewCards()...)
+	m := newBoard(t, src, &tmux.Fake{}, 60, false)
+	view := m.View()
+	checkWidth(t, view, 60)
+	wantLinesInOrder(t, view, "BACKLOG (1)", "T-1", "READY (1)", "T-2", "RUNNING (1)", "T-3",
+		"NEEDS DECISION (1)", "T-4", "REVIEW (1)", "T-6")
+	if strings.Contains(view, "DONE") || strings.Contains(view, "T-7") {
+		t.Errorf("done shown before D:\n%s", view)
+	}
+	// j stops at the last shown card; after D it goes on into done.
+	m = bpress(t, m, "j", "j", "j", "j", "j")
+	wantSelected(t, m, "T-6")
+	m = bpress(t, m, "D")
+	wantLinesInOrder(t, m.View(), "REVIEW (1)", "T-6", "DONE (1)", "T-7")
+	m = bpress(t, m, "j")
+	wantSelected(t, m, "T-7")
+}
+
+func TestBoardPastedDIsNotACommand(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(reviewCards()...)
+	m := newBoard(t, src, &tmux.Fake{}, 130, false)
+	for _, p := range []string{"D", "DD", "Dj"} {
+		boardClock.advance(keyGap)
+		m = send(t, m, paste(p))
+		if strings.Contains(m.View(), "DONE") {
+			t.Fatalf("paste %q showed done:\n%s", p, m.View())
+		}
+		if s := lastLine(m); s != "typing ignored; the board takes single keys" {
+			t.Errorf("paste %q: status line = %q", p, s)
+		}
+	}
+	// A key D right after a paste is refused: the paste started the quiet period.
+	boardClock.advance(100 * time.Millisecond)
+	m = boardAt(t, m, "D")
+	if strings.Contains(m.View(), "DONE") {
+		t.Errorf("D during the quiet period showed done:\n%s", m.View())
+	}
+	// A typed D, later, shows them; a pasted D does not hide them again.
+	m = bpress(t, m, "D")
+	if !strings.Contains(m.View(), "DONE") {
+		t.Fatalf("typed D did not show done:\n%s", m.View())
+	}
+	boardClock.advance(keyGap)
+	m = send(t, m, paste("D"))
+	if !strings.Contains(m.View(), "DONE") {
+		t.Errorf("a pasted D hid done:\n%s", m.View())
+	}
+	wantBoardCalls(t, src)
+}
+
+func TestBoardHeldDTogglesOnce(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(reviewCards()...)
+	m := newBoard(t, src, &tmux.Fake{}, 130, false)
+	m = boardAt(t, m, "D")
+	boardClock.advance(500 * time.Millisecond) // a held key's first repeat
+	for range 20 {
+		m = boardAt(t, m, "D")
+		if !strings.Contains(m.View(), "DONE") {
+			t.Fatalf("a repeat of a held D hid done:\n%s", m.View())
+		}
+		boardClock.advance(30 * time.Millisecond)
+	}
+	// Let go, then D again: hidden.
+	m = bpress(t, m, "D")
+	if strings.Contains(m.View(), "DONE") {
+		t.Errorf("D after a pause did not hide done:\n%s", m.View())
+	}
+}
+
+func TestBoardBurstAfterDIgnored(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(card(1, model.TaskBacklog, ""), card(2, model.TaskBacklog, ""), card(7, model.TaskDone, "%7"))
+	tm := &tmux.Fake{}
+	// D and a key in one read: the key is dropped.
+	for _, burst := range []string{"Dr", "Dn", "Dj", "DD"} {
+		m := newBoard(t, src, tm, 130, false)
+		m = boardAt(t, m, burst)
+		if !strings.Contains(m.View(), "DONE") {
+			t.Errorf("%q: D did not show done:\n%s", burst, m.View())
+		}
+		wantSelected(t, m, "T-1")
+		if s := lastLine(m); strings.HasPrefix(s, "spawn T-1?") {
+			t.Errorf("%q: the prompt opened", burst)
+		}
+	}
+	// D then a key as two reads at once, or soon after: the layout moved
+	// under the cursor, so the card's dwell starts again.
+	for _, k := range []string{"r", "n", "enter"} {
+		for _, gap := range []time.Duration{0, 100 * time.Millisecond} {
+			m := newBoard(t, src, tm, 130, false)
+			m = bpress(t, m, "l") // T-7 is hidden: T-1 stays selected
+			boardClock.advance(keyGap)
+			m = boardAt(t, m, "D")
+			boardClock.advance(gap)
+			m = boardAt(t, m, k)
+			if s := lastLine(m); s != "too soon; pause, then press again" {
+				t.Errorf("D then %s after %v: status line = %q, want too soon", k, gap, s)
+			}
+		}
+	}
+	wantBoardCalls(t, src)
+	if len(tm.Calls) != 0 {
+		t.Errorf("tmux calls = %q", tm.Calls)
+	}
+}
+
+func TestBoardCardBecomesDoneUnderCursor(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(card(1, model.TaskBacklog, ""), card(6, model.TaskReview, "%6"))
+	tm := &tmux.Fake{}
+	m := newBoard(t, src, tm, 130, false)
+	m = bpress(t, m, "l")
+	wantSelected(t, m, "T-6")
+	// T-6 is approved while selected and done is hidden: the selection
+	// moves to a shown card, whose dwell starts now.
+	src.set(card(1, model.TaskBacklog, ""), card(6, model.TaskDone, "%6"))
+	boardClock.advance(keyGap)
+	m = reload(t, m)
+	wantSelected(t, m, "T-1")
+	m = boardAt(t, m, "enter")
+	m = boardAt(t, m, "r")
+	if s := lastLine(m); s != "too soon; pause, then press again" {
+		t.Errorf("status line = %q, want too soon", s)
+	}
+	// A ready card under the spawn prompt becomes review: the prompt closes.
+	src.set(card(2, model.TaskReady, ""))
+	m = newBoard(t, src, tm, 130, false)
+	m = bpress(t, m, "n")
+	src.set(card(2, model.TaskReview, "%2"))
+	m = reload(t, m)
+	if s := lastLine(m); s != "T-2 changed; spawn canceled" {
+		t.Errorf("status line = %q, want the prompt closed", s)
+	}
+	bpress(t, m, "y")
+	wantBoardCalls(t, src)
+	if len(tm.Calls) != 0 {
+		t.Errorf("tmux calls = %q", tm.Calls)
+	}
+}
+
+func TestBoardReviewAndDoneTextCannotDrawEscapes(t *testing.T) {
+	const evil = "\x1b[2J\x1b]0;x\x07\u202e\u2067"
+	rev := card(6, model.TaskReview, "%6")
+	rev.Task.Title = "A" + evil + "\nB"
+	rev.Task.Repo = "/src/re" + evil + "po"
+	done := card(7, model.TaskDone, "")
+	done.Task.Title = strings.Repeat("漢字", 30) + evil + strings.Repeat("🙂", 10)
+	src := &fakeBoardSource{}
+	src.set(card(1, model.TaskBacklog, ""), rev, done)
+	for _, width := range []int{40, 80, 110, 130, 200} {
+		m := newBoard(t, src, &tmux.Fake{}, width, false)
+		for _, keys := range [][]string{nil, {"D"}, {"l"}, {"r"}, {"j"}, {"n"}, {"D"}} {
+			m = bpress(t, m, keys...)
+			view := m.View()
+			for _, b := range []string{"\x1b", "\x07", "\u202e", "\u2067"} {
+				if strings.Contains(view, b) {
+					t.Errorf("width %d %q: view holds %q:\n%q", width, keys, b, view)
+				}
+			}
+			checkWidth(t, view, width)
+			if !slices.ContainsFunc(strings.Split(view, "\n"), func(l string) bool {
+				return strings.Contains(l, "T-6") && strings.Contains(l, "A B")
+			}) {
+				t.Errorf("width %d %q: no line holds T-6 and its title on one line:\n%s", width, keys, view)
+			}
+		}
+	}
+}
+
+// TestBoardJumpRefusesOtherServer: a card whose session is recorded on
+// another tmux server is not jumped to, though this server has a pane with
+// the same id; a session with no recorded server is, as before.
+func TestBoardJumpRefusesOtherServer(t *testing.T) {
+	src := &fakeBoardSource{}
+	c := card(6, model.TaskRunning, "%6")
+	c.Sessions[0].Socket = "/tmp/tmux-501/other"
+	src.set(c)
+	tm := &tmux.Fake{Panes: []tmux.Pane{{ID: "%6", Socket: "/tmp/tmux-501/default"}}}
+	m := newBoard(t, src, tm, 120, false)
+	boardClock.advance(keyGap)
+	m, cmd := m.Update(bkey("enter"))
+	if slices.ContainsFunc(tm.Calls, func(c string) bool { return strings.HasPrefix(c, "SwitchTo") }) || isQuitCmd(cmd) {
+		t.Errorf("tmux calls = %q: jumped to this server's %%6", tm.Calls)
+	}
+	if s := lastLine(m); !strings.Contains(s, "T-6 is on another tmux server") {
+		t.Errorf("status line = %q", s)
+	}
+	c.Sessions[0].Socket = ""
+	src.set(c)
+	tm.Calls = nil
+	m = newBoard(t, src, tm, 120, false)
+	boardClock.advance(keyGap)
+	if _, _ = m.Update(bkey("enter")); !slices.Contains(tm.Calls, "SwitchTo %6") {
+		t.Errorf("no recorded server: tmux calls = %q, want the jump", tm.Calls)
 	}
 }

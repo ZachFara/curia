@@ -96,19 +96,36 @@ func TestSetTeamsSetsAndClears(t *testing.T) {
 	assertTeam(t, get(t, s, "gone"))
 }
 
-func TestTeamSetTeamsNeverAssignsStale(t *testing.T) {
+// TestSetTeamsKeepsStaleMembership: a stale session's team columns are left
+// as they are (M8), whether the map names it, names it otherwise or does not
+// name it (its team's config went with its lead after a power cut); it is
+// never assigned anything.
+func TestSetTeamsKeepsStaleMembership(t *testing.T) {
 	path := dbPath(t)
 	s := open(t, path)
 	teamSession(t, s, "lead", "%1", model.StateWorking, "")
 	teamSession(t, s, "old", "%2", model.StateStale, "")
 	setTeam(t, path, "old")
-	// A stale session is in no team: its columns are cleared, and a map
-	// that names it does not assign it.
-	if n := setTeams(t, s, map[string]team.Membership{"lead": teamLead(), "old": teamMate("tester")}); n != 2 {
-		t.Errorf("SetTeams changed %d rows, want 2 (lead set, stale cleared)", n)
+	kept := membershipOf(t, s, "old")
+	if kept == (team.Membership{}) {
+		t.Fatal("setTeam gave old no membership")
 	}
-	assertMembership(t, s, "old", team.Membership{})
+	if n := setTeams(t, s, map[string]team.Membership{"lead": teamLead(), "old": teamMate("tester")}); n != 1 {
+		t.Errorf("SetTeams changed %d rows, want 1 (the lead)", n)
+	}
+	assertMembership(t, s, "old", kept)
 	assertMembership(t, s, "lead", teamLead())
+	if n := setTeams(t, s, map[string]team.Membership{}); n != 1 {
+		t.Errorf("an empty map changed %d rows, want 1 (the live lead cleared)", n)
+	}
+	assertMembership(t, s, "old", kept)
+}
+
+// membershipOf is session id's stored membership.
+func membershipOf(t *testing.T, s *store.Store, id string) team.Membership {
+	t.Helper()
+	g := get(t, s, id)
+	return team.Membership{TeamID: g.TeamID, Role: g.TeamRole, Member: g.TeamMember}
 }
 
 func TestSetTeamsWritesOnlyChanges(t *testing.T) {

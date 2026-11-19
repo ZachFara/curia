@@ -18,9 +18,10 @@ import (
 )
 
 // paneFormat is the tmux format string that parsePanes expects. start_time
-// is the server's start in unix seconds. The window name comes last because
-// it may hold tabs.
-const paneFormat = "#{pane_id}\t#{session_name}\t#{window_id}\t#{start_time}\t#{pane_pid}\t#{window_name}"
+// is the server's start in unix seconds. The window name may hold tabs; the
+// socket path comes last, so a tab inside it stays in one part and is then
+// refused.
+const paneFormat = "#{pane_id}\t#{session_name}\t#{window_id}\t#{start_time}\t#{pane_pid}\t#{window_name}\t#{socket_path}"
 
 type execClient struct {
 	socket string
@@ -524,16 +525,20 @@ func ringBell(ctx context.Context, f *os.File) error {
 }
 
 // parsePanes parses paneFormat output, one pane per line. Blank lines are
-// skipped; a window name may contain spaces or tabs.
+// skipped; a window name may contain spaces. The pane pid is required. tmux
+// escapes a tab in a window name, so a seventh part that does not start with
+// "/" is taken as the rest of a name that holds a tab, never as a socket; a
+// six-field line (no socket) has an empty Socket. An absolute seventh part
+// that fails the socket rules gives an empty Socket.
 func parsePanes(out string) ([]Pane, error) {
 	var panes []Pane
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, "\t", 6)
+		f := strings.SplitN(line, "\t", 7)
 		// An unknown -t target expands to empty fields, so an empty id is malformed too.
-		if len(f) != 6 || f[0] == "" {
+		if len(f) < 6 || f[0] == "" {
 			return nil, fmt.Errorf("tmux: malformed pane line %q", line)
 		}
 		start, err := strconv.ParseInt(f[3], 10, 64)
@@ -544,11 +549,36 @@ func parsePanes(out string) ([]Pane, error) {
 		if err != nil {
 			return nil, fmt.Errorf("tmux: bad pane pid in pane line %q", line)
 		}
+		name, socket := f[5], ""
+		if len(f) == 7 {
+			if strings.HasPrefix(f[6], "/") {
+				socket = usableSocket(f[6])
+			} else {
+				name += "\t" + f[6]
+			}
+		}
 		panes = append(panes, Pane{
-			ID: f[0], Session: f[1], WindowID: f[2], ServerStart: time.Unix(start, 0), PID: pid, WindowName: f[5],
+			ID: f[0], Session: f[1], WindowID: f[2], ServerStart: time.Unix(start, 0), PID: pid, WindowName: name, Socket: socket,
 		})
 	}
 	return panes, nil
+}
+
+// maxSocketPath bounds a socket path kept from tmux output.
+const maxSocketPath = 256
+
+// usableSocket returns p when it is an absolute path of at most maxSocketPath
+// bytes, valid UTF-8, with no rune below 0x20; otherwise "".
+func usableSocket(p string) string {
+	if len(p) > maxSocketPath || !strings.HasPrefix(p, "/") || !utf8.ValidString(p) {
+		return ""
+	}
+	for _, r := range p {
+		if r < 0x20 {
+			return ""
+		}
+	}
+	return p
 }
 
 // messageEscaper doubles the characters display-message expands: # starts

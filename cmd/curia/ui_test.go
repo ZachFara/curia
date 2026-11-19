@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -70,8 +71,8 @@ func TestUICommandShowsReconciledRankedSessions(t *testing.T) {
 	if out, err := runRoot(t, "ui"); err != nil || out != "" {
 		t.Fatalf("ui = %q, %v", out, err)
 	}
-	if run.opts != 2 {
-		t.Errorf("popup ran with %d program options, want 2 (alternate screen, mouse)", run.opts)
+	if run.opts != 3 {
+		t.Errorf("popup ran with %d program options, want 3 (alternate screen, mouse, the signal context)", run.opts)
 	}
 	lines := strings.Split(run.view, "\n")
 	if !strings.Contains(lines[0], "SESSION:WINDOW") {
@@ -101,8 +102,8 @@ func TestSidebarCommandShowsNarrowColumns(t *testing.T) {
 	if out, err := runRoot(t, "sidebar"); err != nil || out != "" {
 		t.Fatalf("sidebar = %q, %v", out, err)
 	}
-	if run.opts != 1 {
-		t.Errorf("sidebar ran with %d program options, want 1 (mouse)", run.opts)
+	if run.opts != 2 {
+		t.Errorf("sidebar ran with %d program options, want 2 (mouse, the signal context)", run.opts)
 	}
 	if !strings.Contains(run.view, "work:@1") || strings.Contains(run.view, "model-waiting") {
 		t.Errorf("sidebar view is not the narrow layout:\n%s", run.view)
@@ -459,28 +460,160 @@ func TestUIGroupsTeamFromConfig(t *testing.T) {
 	}
 }
 
+// uiReviewStore seeds the store at db with tasks T-1 and T-2, each with a
+// pending review (R-1 and R-2), and then stores T-2 dropped.
+func uiReviewStore(t *testing.T, db string) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	for _, title := range []string{"Auth refactor", "Fix login"} {
+		tk, cerr := st.CreateTask(ctx, model.Task{Title: title, Repo: "/src/api", Status: model.TaskReady, CreatedAt: fleetNow})
+		if cerr != nil {
+			t.Fatal(cerr)
+		}
+		if _, _, err = st.CompleteTask(ctx, model.Review{
+			TaskID: tk.ID, Summary: "Done.", Tests: model.TestsNotRun, CreatedAt: fleetNow,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = st.UpdateTask(ctx, "T-2", func(cur model.Task) (model.Task, error) {
+		cur.Status = model.TaskDropped
+		return cur, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreSourceReviews(t *testing.T) {
+	db, fake := fleetHome(t, nil)
+	uiReviewStore(t, db)
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	got, err := storeSource{st: st, tm: fake, cfg: config.Default()}.Reviews(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"T-1": "R-1"}; !maps.Equal(got, want) {
+		t.Errorf("Reviews = %v, want %v (a dropped task's review absent)", got, want)
+	}
+}
+
+// uiReviewKeyCase is one run of TestDashboardOffersReviewInPopupOnly: the
+// command, CLAUDECODE, whether the log file can be opened, and what the
+// view shows after r.
+type uiReviewKeyCase struct {
+	name, cmd, claudecode string
+	noLog                 bool
+	want                  string
+}
+
+// The popup opens the review of the selected session's task, inside an
+// agent session too, where the view is read-only (its actions refuse with
+// the user-only guard's reason: uiUserActions); the sidebar and the popup
+// without its log file say why not.
+func TestDashboardOffersReviewInPopupOnly(t *testing.T) {
+	for _, c := range []uiReviewKeyCase{
+		{name: "popup", cmd: "ui", want: "R-1"},
+		{name: "sidebar", cmd: "sidebar", want: "open the popup to review"},
+		{name: "agent", cmd: "ui", claudecode: "1", want: "R-1"},
+		{name: "no log", cmd: "ui", noLog: true, want: "reviews cannot be opened here: the log file cannot be opened"},
+	} {
+		t.Run(c.name, func(t *testing.T) { uiReviewKey(t, c) })
+	}
+}
+
+func uiReviewKey(t *testing.T, c uiReviewKeyCase) {
+	t.Helper()
+	sessions := dashboardSessions()
+	sessions[4].TaskID = "T-1" // "waiting", the first row
+	db, _ := fleetHome(t, []string{"%1", "%2"}, sessions...)
+	uiReviewStore(t, db)
+	t.Setenv("CLAUDECODE", c.claudecode)
+	if c.noLog {
+		if err := os.MkdirAll(config.Default().LogPath, 0o700); err != nil { // a directory cannot be opened for append
+			t.Fatal(err)
+		}
+	}
+	clk := &decideClock{t: fleetNow}
+	clock = clk.now // fleetHome restores it
+	var table string
+	run := uiDriveProgram(t, func(m tea.Model) tea.Model {
+		m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+		table = m.View()
+		clk.advance(500 * time.Millisecond) // past the dwell
+		m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+		return reviewPump(t, m, cmd)
+	})
+	if _, err := runRoot(t, c.cmd); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(table, "work:@1") {
+		t.Fatalf("the dashboard did not start:\n%s", table)
+	}
+	if !strings.Contains(run.view, c.want) {
+		t.Errorf("after r, view lacks %q:\n%s", c.want, run.view)
+	}
+	if opened := !strings.Contains(run.view, "work:@1"); opened != (c.name == "popup" || c.name == "agent") {
+		t.Errorf("after r, the review view is shown: %v:\n%s", opened, run.view)
+	}
+}
+
 // uiUserActions are the dashboard's actions with a user's effect (re-review
 // A, C1): each must do nothing, and say why, unless the user-only guard
 // lets the dashboard's caller through. A new such action belongs here.
 var uiUserActions = []struct {
 	name string
-	keys []string
-	done func(f *spawnFixture) bool // whether the action took effect
+	// world builds the fixture; nil is uiActionWorld. A review action's
+	// world is uiReviewWorld, and its keys are run to the end of what they
+	// start (the review view reads and acts in commands).
+	world func(t *testing.T) *spawnFixture
+	keys  []string                   // "enter" is the Enter key, anything else typed runes
+	done  func(f *spawnFixture) bool // whether the action took effect
 }{
-	{"board: r marks a backlog task ready", []string{"t", "r"}, func(f *spawnFixture) bool {
+	{"board: r marks a backlog task ready", nil, []string{"t", "r"}, func(f *spawnFixture) bool {
 		return f.get("T-1").Status == model.TaskReady
 	}},
-	{"board: n then y spawns a backlog task", []string{"t", "n", "y"}, func(f *spawnFixture) bool {
+	{"board: n then y spawns a backlog task", nil, []string{"t", "n", "y"}, func(f *spawnFixture) bool {
 		return len(f.windows()) > 0
 	}},
-	{"x then y kills an agent's pane", []string{"x", "y"}, func(f *spawnFixture) bool {
+	{"x then y kills an agent's pane", nil, []string{"x", "y"}, func(f *spawnFixture) bool {
 		return slices.Contains(f.fake.Calls, "KillPane %5")
 	}},
+	{"review: a then y approves (merges)", uiReviewWorld, []string{"r", "a", "y"}, uiReviewClosed},
+	{"review: c, a note, Enter requests changes", uiReviewWorld, []string{"r", "c", "fix the tests", "enter"}, uiReviewClosed},
+	{"review: x then y drops", uiReviewWorld, []string{"r", "x", "y"}, uiReviewClosed},
+}
+
+// uiReviewWorld is reviewWithLead: T-1 spawned with a commit on its branch
+// and review R-1 pending, its lead idle in pane %100, the dashboard's only
+// session.
+func uiReviewWorld(t *testing.T) *spawnFixture {
+	t.Helper()
+	return reviewWithLead(t, model.StateIdle).spawnFixture
+}
+
+// uiReviewClosed reports whether review R-1 is no longer pending.
+func uiReviewClosed(f *spawnFixture) bool {
+	r, found, err := f.st.GetReview(context.Background(), "R-1")
+	if err != nil || !found {
+		f.t.Fatalf("GetReview(R-1): found %v, err %v", found, err)
+	}
+	return r.Status != model.ReviewPending
 }
 
 // uiRunActions runs curia ui on f and presses keys, two seconds apart (past
 // the board's dwell and quiet periods), and returns the view after each key.
-func uiRunActions(t *testing.T, f *spawnFixture, keys []string) string {
+// With pump, each key's commands are run to the end (reviewPump), as the
+// review view needs; otherwise only the messages they give are fed.
+func uiRunActions(t *testing.T, f *spawnFixture, keys []string, pump bool) string {
 	t.Helper()
 	var view string
 	prev := runProgram
@@ -488,7 +621,17 @@ func uiRunActions(t *testing.T, f *spawnFixture, keys []string) string {
 		m, _ = m.Update(m.Init()())
 		for _, k := range keys {
 			f.now = f.now.Add(2 * time.Second)
-			m = uiPress(m, k)
+			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+			if k == "enter" {
+				msg = tea.KeyMsg{Type: tea.KeyEnter}
+			}
+			var cmd tea.Cmd
+			m, cmd = m.Update(msg)
+			if pump {
+				m = reviewPump(t, m, cmd)
+			} else {
+				m = uiFeed(m, cmd)
+			}
 			view += m.View() + "\n"
 		}
 		return nil
@@ -517,6 +660,15 @@ func uiActionWorld(t *testing.T) *spawnFixture {
 	return f
 }
 
+// uiWorld builds the fixture of an action: world, or uiActionWorld.
+func uiWorld(t *testing.T, world func(t *testing.T) *spawnFixture) *spawnFixture {
+	t.Helper()
+	if world == nil {
+		return uiActionWorld(t)
+	}
+	return world(t)
+}
+
 // TestDashboardActionsNeedTheUser: with an agent marker set, and with no
 // controlling terminal, every user action of the dashboard changes nothing
 // and shows the guard's reason; as the user each one acts.
@@ -530,23 +682,23 @@ func TestDashboardActionsNeedTheUser(t *testing.T) {
 			{"no terminal", "cannot run without a terminal", func(t *testing.T) { userTerminalAs(t, false) }},
 		} {
 			t.Run(a.name+"/"+c.name, func(t *testing.T) {
-				f := uiActionWorld(t)
+				f := uiWorld(t, a.world)
 				c.set(t)
-				view := uiRunActions(t, f, a.keys)
+				view := uiRunActions(t, f, a.keys, a.world != nil)
 				if a.done(f) {
 					t.Errorf("%s took effect for a caller the guard refuses", a.name)
 				}
-				if !strings.Contains(view, c.why) {
+				if !strings.Contains(strings.Join(strings.Fields(view), " "), c.why) { // the review view wraps it
 					t.Errorf("view does not give the guard's reason %q:\n%s", c.why, view)
 				}
-				if got := f.get("T-1").Status; got != model.TaskBacklog {
+				if got := f.get("T-1").Status; a.world == nil && got != model.TaskBacklog {
 					t.Errorf("T-1 = %s, want backlog", got)
 				}
 			})
 		}
 		t.Run(a.name+"/the user", func(t *testing.T) {
-			f := uiActionWorld(t)
-			view := uiRunActions(t, f, a.keys)
+			f := uiWorld(t, a.world)
+			view := uiRunActions(t, f, a.keys, a.world != nil)
 			if !a.done(f) {
 				t.Errorf("%s did not take effect for the user:\n%s", a.name, view)
 			}

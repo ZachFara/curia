@@ -141,14 +141,25 @@ install-script:
 	@echo "==> install.sh tests"
 	@sh scripts/install_test.sh
 
-## test: all tests under the race detector
-# Packages run one at a time (-p 1): several packages hold latency gates
-# (the hook's 20 ms budget, the end-to-end 50 ms budget), and with packages
-# running in parallel those gates measured the other packages' load, on CI
-# most of all. The tests and their thresholds are unchanged.
+## test: all tests under the race detector, in two steps
+# Several packages hold latency gates (the hook's 20 ms budget, the end-to-end
+# 50 ms budget). With packages running in parallel those gates measured the
+# other packages' load, on CI most of all, so they must run alone. Everything
+# else does not care, and running it one package at a time made the suite
+# four times slower than it needs to be.
+# Step 1: every test that is not a latency gate, packages in parallel.
+# Step 2: the latency gates only, one package at a time, nothing beside them.
+# Together the two steps run every test exactly once; no test and no
+# threshold is changed. A latency gate is a test whose name contains
+# "Latency", plus TestReplayFiveSessions: name new ones accordingly
+# (scripts/check-latency-names.sh fails the gate otherwise).
+LATENCY_TESTS := Latency|TestReplayFiveSessions
 test:
-	@echo "==> go test -race -p 1 ./..."
-	@scripts/with-test-lock.sh go test -race -p 1 ./...
+	@scripts/check-latency-names.sh
+	@echo "==> go test -race ./... (all but the latency gates, packages in parallel)"
+	@scripts/with-test-lock.sh go test -race -skip '$(LATENCY_TESTS)' ./...
+	@echo "==> go test -race -p 1 ./... (the latency gates alone)"
+	@scripts/with-test-lock.sh go test -race -p 1 -run '$(LATENCY_TESTS)' ./...
 
 ## build: build the curia binary into ./curia
 build:

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -295,7 +296,7 @@ func (m *markerHook) seen() {
 		m.t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
-	if err := st.MarkSeen(context.Background(), "%1", time.Now()); err != nil {
+	if err := st.MarkSeen(context.Background(), "%1", "", time.Now()); err != nil {
 		m.t.Fatal(err)
 	}
 }
@@ -1196,5 +1197,177 @@ func TestHookReadsTaskFromEnvironment(t *testing.T) {
 	}
 	if log := readLog(t); log != nil {
 		t.Errorf("log = %q, want none", log)
+	}
+}
+
+// hookSocketPane is a pane on a server whose socket is known, as Task 2's
+// PaneInfo reports it.
+var hookSocketPane = tmux.Pane{ID: "%3", Session: "api", WindowID: "@7", Socket: "/tmp/tmux-1/default"}
+
+// TestHookLatencySocketPane is TestHookLatency's method and threshold (1000
+// in-process PostToolUse runs in one pass, p95 under 20 ms, no retry, Ruling
+// 114) through the real hookEnv in a pane whose PaneInfo carries a socket,
+// with a fake tmux. It gates PostToolUse, as TestHookLatency does, and
+// reports 200 each of SessionStart (one real git process each), Stop with
+// nothing queued and SessionEnd (each SessionEnd's session is brought back
+// first by an untimed prompt) without gating them: one gate per test keeps a loaded CI runner's stalls from
+// failing it three times as often. tmux is asked once per SessionStart and
+// never otherwise.
+func TestHookLatencySocketPane(t *testing.T) {
+	t.Setenv("TMUX_PANE", hookSocketPane.ID)
+	fake := &tmux.Fake{Panes: []tmux.Pane{hookSocketPane}}
+	db := filepath.Join(t.TempDir(), "curia.db")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	logger, buf := testLogger()
+	env := hookEnv(context.Background(), fake, logger)
+	cwd, tr := t.TempDir(), filepath.Join(t.TempDir(), "t.jsonl")
+	const line = `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}` + "\n"
+	if err = os.WriteFile(tr, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appendLine := func() {
+		f, ferr := os.OpenFile(filepath.Clean(tr), os.O_APPEND|os.O_WRONLY, 0)
+		if ferr != nil {
+			t.Fatal(ferr)
+		}
+		if _, ferr = f.WriteString(line); ferr != nil {
+			t.Fatal(ferr)
+		}
+		_ = f.Close()
+	}
+	const runs, gatedRuns = 200, 1000 // reported; gated (Ruling 114)
+	last := fmt.Sprintf("S%d", runs-1)
+	body := func(id, extra string) []byte {
+		return fmt.Appendf(nil, `{"session_id":%q,"transcript_path":%q,"cwd":%q%s}`, id, tr, cwd, extra)
+	}
+	// timed is hookLatency's loop of n runs: prep(i) runs untimed and gives
+	// the i-th payload.
+	timed := func(kind model.EventKind, n int, prep func(i int) []byte) []time.Duration {
+		d := make([]time.Duration, 0, n)
+		for i := range n {
+			b := prep(i)
+			began := time.Now()
+			if _, rerr := hook.Run(context.Background(), kind, b, env, st, config.Default()); rerr != nil {
+				t.Fatal(rerr)
+			}
+			d = append(d, time.Since(began))
+		}
+		slices.Sort(d)
+		return d
+	}
+	starts := timed(model.SessionStart, runs, func(i int) []byte {
+		return body(fmt.Sprintf("S%d", i), `,"source":"startup"`)
+	})
+	tools := timed(model.PostToolUse, gatedRuns, func(int) []byte {
+		appendLine()
+		return body(last, `,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
+	})
+	stops := timed(model.Stop, runs, func(int) []byte {
+		appendLine()
+		return body(last, `,"last_assistant_message":"Done."`)
+	})
+	ends := timed(model.SessionEnd, runs, func(int) []byte {
+		if _, rerr := hook.Run(context.Background(), model.UserPromptSubmit, body(last, `,"prompt":"go on"`), env, st, config.Default()); rerr != nil {
+			t.Fatal(rerr)
+		}
+		return body(last, `,"reason":"other"`)
+	})
+	for _, m := range []struct {
+		kind  model.EventKind
+		d     []time.Duration
+		gated bool
+	}{{model.SessionStart, starts, false}, {model.PostToolUse, tools, true}, {model.Stop, stops, false}, {model.SessionEnd, ends, false}} {
+		n := len(m.d)
+		p50, p95 := m.d[n/2], m.d[n*95/100]
+		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, n, p50, p95, m.d[n-1])
+		if m.gated && p95 >= 20*time.Millisecond {
+			t.Errorf("%s p95 = %v, want < 20ms", m.kind, p95)
+		}
+	}
+	if n := len(fake.Calls); n != runs {
+		t.Errorf("tmux calls = %d (%q...), want %d, one PaneInfo per SessionStart", n, fake.Calls[:min(n, 3)], runs)
+	}
+	if lines := logLines(buf); lines != nil {
+		t.Errorf("log = %q, want none", lines)
+	}
+}
+
+// TestHookStoresSocketFromFakeTmux: the socket comes from the one PaneInfo
+// call SessionStart already makes, and no later event asks tmux again.
+func TestHookStoresSocketFromFakeTmux(t *testing.T) {
+	db := hookHome(t)
+	t.Setenv("TMUX_PANE", hookSocketPane.ID)
+	fake := useFakeTmux(t)
+	fake.Panes = []tmux.Pane{hookSocketPane}
+	cwd := t.TempDir()
+	body := `{"session_id":"A","cwd":"` + cwd + `","source":"startup"}`
+	assertQuietExitZero(t, runHookCmd(t, strings.NewReader(body), "hook", "SessionStart"))
+	s := getSession(t, db, "A")
+	if s.Socket != hookSocketPane.Socket || s.TmuxSession != "api" || s.TmuxWindow != "@7" || s.Pane != "%3" {
+		t.Errorf("session %+v, want pane %%3 in api/@7 on %q", s, hookSocketPane.Socket)
+	}
+	if want := []string{"PaneInfo %3"}; !slices.Equal(fake.Calls, want) {
+		t.Errorf("tmux calls after SessionStart = %q, want exactly %q", fake.Calls, want)
+	}
+	for _, kind := range []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"} {
+		assertQuietExitZero(t, runHookCmd(t, strings.NewReader(`{"session_id":"A","cwd":"`+cwd+`"}`), "hook", kind))
+	}
+	if n := strings.Count(strings.Join(fake.Calls, "\n"), "PaneInfo"); n != 1 {
+		t.Errorf("PaneInfo calls = %d after four more events (%q), want still one", n, fake.Calls)
+	}
+	if got := getSession(t, db, "A").Socket; got != hookSocketPane.Socket {
+		t.Errorf("Socket after later events = %q, want %q", got, hookSocketPane.Socket)
+	}
+}
+
+// TestHookSessionEndReasonDecidesRestore: Ruling 117 end to end. After
+// `curia hook SessionEnd` with Claude Code's real payload for a tmux kill
+// (reason "other"), or with no reason at all (an older Claude Code),
+// store.RestoreCandidates offers the session; after a user's /exit
+// (prompt_input_exit) it does not.
+func TestHookSessionEndReasonDecidesRestore(t *testing.T) {
+	fixture := func(name string) string {
+		b, err := fs.ReadFile(os.DirFS(filepath.Join("..", "..", "internal", "hook", "testdata")), name+".json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	for _, tc := range []struct {
+		name, end, wantReason string
+		restorable            bool
+	}{
+		{"tmux killed", fixture("SessionEndOther"), "other", true},
+		{"user exit", fixture("SessionEndPromptInputExit"), "prompt_input_exit", false},
+		{"no reason", `{"session_id":"sess-1","cwd":"/repo","hook_event_name":"SessionEnd"}`, "other", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := hookHome(t)
+			t.Setenv("TMUX_PANE", hookSocketPane.ID)
+			useFakeTmux(t).Panes = []tmux.Pane{hookSocketPane}
+			start := `{"session_id":"sess-1","cwd":"` + t.TempDir() + `","source":"startup"}`
+			assertQuietExitZero(t, runHookCmd(t, strings.NewReader(start), "hook", "SessionStart"))
+			assertQuietExitZero(t, runHookCmd(t, strings.NewReader(tc.end), "hook", "SessionEnd"))
+			if s := getSession(t, db, "sess-1"); s.State != model.StateEnded || s.EndReason != tc.wantReason {
+				t.Errorf("after SessionEnd: %s (%q), want ended (%q)", s.State, s.EndReason, tc.wantReason)
+			}
+			st, err := store.Open(db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = st.Close() }()
+			got, err := st.RestoreCandidates(context.Background(), time.Now().Add(-time.Hour), 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			offered := len(got) == 1 && got[0].ID == "sess-1" && got[0].Socket == hookSocketPane.Socket
+			if offered != tc.restorable || len(got) > 1 {
+				t.Errorf("RestoreCandidates = %+v, want sess-1 offered: %v", got, tc.restorable)
+			}
+		})
 	}
 }

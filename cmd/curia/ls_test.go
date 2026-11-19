@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -344,5 +345,26 @@ func TestLsJSONHasTaskAndTeamKeys(t *testing.T) {
 		if got, ok := rows[1][k]; !ok || got != "" {
 			t.Errorf("without: %s = %v (present %v), want empty string", k, got, ok)
 		}
+	}
+}
+
+func TestLsRanksReviewReadyAfterWaiting(t *testing.T) {
+	db, _ := fleetHome(t, []string{"%1", "%2", "%3"})
+	task := statusReviewTask(t, db, "one")
+	seedSessions(t, db,
+		model.Session{ID: "wrk", Agent: "claude", State: model.StateWorking, Pane: "%1", UpdatedAt: at(8, 0)},
+		model.Session{ID: "rev", Agent: "claude", State: model.StateIdle, Pane: "%2", TaskID: task, UpdatedAt: at(9, 0), SeenAt: at(10, 0)},
+		model.Session{ID: "wai", Agent: "claude", State: model.StateWaiting, Pane: "%3", UpdatedAt: at(11, 0)},
+	)
+	out, err := runRoot(t, "ls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, pane := range []string{"%3", "%2", "%1"} {
+		order = append(order, fmt.Sprintf("%04d%s", strings.Index(out, pane), pane))
+	}
+	if !slices.IsSorted(order) {
+		t.Errorf("ls order wrong, want %%3 (waiting), %%2 (review-ready), %%1 (working):\n%s", out)
 	}
 }

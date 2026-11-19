@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/ZachFara/curia/internal/model"
 )
 
 // notifyKey is the meta key of the last blocking-ticket notification.
@@ -52,4 +55,122 @@ func (s *Store) PruneEvents(ctx context.Context, before time.Time, limit int) (i
 		return 0, fmt.Errorf("store: prune events: %w", err)
 	}
 	return n, nil
+}
+
+// restoreKey is the meta key of the curia restore claim: the time its
+// holder claimed it.
+const restoreKey = "restore_claim_at"
+
+// ClaimRestore claims the right to run curia restore at now, one holder at a time; a claim older than hold is taken over.
+//
+// It is ClaimNotifySlot's statement on restoreKey, so the take is atomic:
+// of concurrent claimers exactly one gets true. A crashed restore holds the
+// claim for hold at most. A stored time after now (a clock set back) holds
+// it until now reaches that time plus hold. hold must be positive. The
+// Store remembers the value it wrote, so that ReleaseRestore gives up only
+// its own claim.
+func (s *Store) ClaimRestore(ctx context.Context, now time.Time, hold time.Duration) (bool, error) {
+	if hold <= 0 || now.IsZero() {
+		return false, errors.New("store: claim restore: needs a time and a positive hold")
+	}
+	value := now.UTC().Format(timeLayout)
+	res, err := s.db.ExecContext(ctx, `
+INSERT INTO meta (key, value) VALUES (?, ?)
+ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE meta.value <= ?`,
+		restoreKey, value, formatTime(now.Add(-hold)))
+	if err != nil {
+		return false, fmt.Errorf("store: claim restore: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: claim restore: %w", err)
+	}
+	if n != 1 {
+		return false, nil
+	}
+	s.restoreMu.Lock()
+	s.restoreClaim = value
+	s.restoreMu.Unlock()
+	return true, nil
+}
+
+// RenewRestore dates this Store's restore claim at at, which may be in the future: the claim then holds until
+// at plus the hold ClaimRestore is given. It changes only the claim this Store holds, in one statement, and
+// reports false, changing nothing, when the claim was taken over or released.
+func (s *Store) RenewRestore(ctx context.Context, at time.Time) (bool, error) {
+	s.restoreMu.Lock()
+	defer s.restoreMu.Unlock()
+	if s.restoreClaim == "" || at.IsZero() {
+		return false, nil
+	}
+	value := at.UTC().Format(timeLayout)
+	res, err := s.db.ExecContext(ctx, `UPDATE meta SET value = ? WHERE key = ? AND value = ?`, value, restoreKey, s.restoreClaim)
+	if err != nil {
+		return false, fmt.Errorf("store: renew restore: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: renew restore: %w", err)
+	}
+	if n != 1 {
+		return false, nil
+	}
+	s.restoreClaim = value
+	return true, nil
+}
+
+// ReleaseRestore gives the claim up.
+//
+// It deletes the key only while it still holds the value this Store's last
+// successful ClaimRestore wrote, in one statement: a restore whose claim
+// was taken over after hold does not free the newer holder's claim, and a
+// Store that holds no claim changes nothing.
+func (s *Store) ReleaseRestore(ctx context.Context) error {
+	s.restoreMu.Lock()
+	defer s.restoreMu.Unlock()
+	if s.restoreClaim == "" {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM meta WHERE key = ? AND value = ?`, restoreKey, s.restoreClaim); err != nil {
+		return fmt.Errorf("store: release restore: %w", err)
+	}
+	s.restoreClaim = ""
+	return nil
+}
+
+// restoreCandidates is RestoreCandidates' statement (parameters: since, limit).
+const restoreCandidates = selectSessions + `
+WHERE (state != 'ended' OR (state = 'ended' AND end_reason = 'other')) AND updated_at >= ?
+ORDER BY updated_at DESC, id
+LIMIT ?`
+
+// RestoreCandidates returns the sessions curia restore classifies (plan
+// section 4.10, step 3, with Ruling 117), most recently active first, at
+// most limit of them (none when limit <= 0): every session that is not
+// ended, plus every ended session whose end_reason is exactly "other" (a
+// tmux kill or crash ends Claude Code that way), whose updated_at is at or
+// after since. A session ended for any other reason, or with none (a
+// user's own exit, or ended by a nested session), is never one. The
+// transcript's age is restore's own check on top of this window.
+func (s *Store) RestoreCandidates(ctx context.Context, since time.Time, limit int) ([]model.Session, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, restoreCandidates, formatTime(since), limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: restore candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []model.Session
+	for rows.Next() {
+		sess, err := scanSession(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: restore candidates: %w", err)
+		}
+		out = append(out, sess)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: restore candidates: %w", err)
+	}
+	return out, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -318,5 +319,254 @@ func TestNextNoneWhenAllWorking(t *testing.T) {
 	}
 	if _, ok := fleet.Next(nil); ok {
 		t.Error("Next(nil) found a session")
+	}
+}
+
+// withTask is sess with TaskID task.
+func withTask(id string, state model.State, pane, task string, updated time.Time) model.Session {
+	s := sess(id, state, pane, updated)
+	s.TaskID = task
+	return s
+}
+
+func TestWithReviewsMarksLiveSessionsOfPendingTasks(t *testing.T) {
+	in := []model.Session{
+		withTask("idle", model.StateIdle, "%1", "T-1", t0),
+		withTask("working", model.StateWorking, "%2", "T-1", t0),
+		withTask("waiting", model.StateWaiting, "%3", "T-1", t0),
+		withTask("needs", model.StateNeedsDecision, "%4", "T-1", t0),
+		withTask("ended", model.StateEnded, "%5", "T-1", t0),
+		withTask("stale", model.StateStale, "%6", "T-1", t0),
+		withTask("other-task", model.StateIdle, "%7", "T-2", t0),
+		withTask("no-task", model.StateIdle, "%8", "", t0),
+	}
+	got := fleet.WithReviews(in, map[string]string{"T-1": "R-1", "T-3": "R-2"})
+	want := map[string]bool{"idle": true, "working": true, "waiting": true, "needs": true}
+	if len(got) != len(in) {
+		t.Fatalf("WithReviews returned %d sessions, want %d", len(got), len(in))
+	}
+	for i, s := range got {
+		if s.ID != in[i].ID {
+			t.Errorf("session %d = %s, want %s (order kept)", i, s.ID, in[i].ID)
+		}
+		if s.ReviewPending != want[s.ID] {
+			t.Errorf("%s ReviewPending = %v, want %v", s.ID, s.ReviewPending, want[s.ID])
+		}
+		s.ReviewPending = in[i].ReviewPending
+		if !reflect.DeepEqual(s, in[i]) {
+			t.Errorf("%s changed beyond ReviewPending:\n got %+v\nwant %+v", s.ID, s, in[i])
+		}
+	}
+	// A session already marked by an earlier call whose review has since closed is unmarked.
+	if again := fleet.WithReviews(got, map[string]string{}); again[0].ReviewPending {
+		t.Error("WithReviews with no pending reviews kept ReviewPending set")
+	}
+	if out := fleet.WithReviews(nil, map[string]string{"T-1": "R-1"}); len(out) != 0 {
+		t.Errorf("WithReviews(nil) = %v, want empty", out)
+	}
+}
+
+func TestWithReviewsDoesNotMutateInput(t *testing.T) {
+	in := []model.Session{
+		withTask("a", model.StateIdle, "%1", "T-1", t0),
+		withTask("b", model.StateWorking, "%2", "T-2", t0),
+	}
+	orig := slices.Clone(in)
+	got := fleet.WithReviews(in, map[string]string{"T-1": "R-1", "T-2": "R-2"})
+	if !reflect.DeepEqual(in, orig) {
+		t.Errorf("WithReviews changed its input: %+v", in)
+	}
+	if !got[0].ReviewPending || !got[1].ReviewPending {
+		t.Fatalf("WithReviews = %+v, want both marked", got)
+	}
+	got[0].ID = "changed"
+	if in[0].ID != "a" {
+		t.Error("WithReviews returned a slice sharing the input's array")
+	}
+}
+
+func TestRankPutsReviewReadyAfterWaiting(t *testing.T) {
+	at := t0.Add(-time.Hour)
+	reviewSeen := withTask("3-review-ready-seen", model.StateIdle, "%3", "T-1", at)
+	reviewSeen.SeenAt, reviewSeen.ReviewPending = at.Add(time.Minute), true
+	reviewUnseen := withTask("3-review-ready-unseen", model.StateIdle, "%9", "T-2", at.Add(time.Second))
+	reviewUnseen.ReviewPending = true
+	idleUnseen := sess("4-idle-unseen", model.StateIdle, "%4", at.Add(-time.Hour)) // older than the review-ready ones
+	idleSeen := sess("6-idle-seen", model.StateIdle, "%6", at)
+	idleSeen.SeenAt = at.Add(time.Minute)
+	in := []model.Session{
+		idleSeen,
+		sess("5-working", model.StateWorking, "%5", at.Add(-2*time.Hour)),
+		idleUnseen,
+		reviewUnseen,
+		reviewSeen,
+		sess("2-waiting", model.StateWaiting, "%2", at),
+		sess("1-needs-decision", model.StateNeedsDecision, "%1", at),
+	}
+	want := []string{
+		"1-needs-decision", "2-waiting", "3-review-ready-seen", "3-review-ready-unseen",
+		"4-idle-unseen", "5-working", "6-idle-seen",
+	}
+	if got := ids(fleet.Rank(in)); !reflect.DeepEqual(got, want) {
+		t.Errorf("Rank = %v\nwant   %v", got, want)
+	}
+}
+
+// The agent was sent back to work: its review is still pending, but it is
+// working, not ready for review.
+func TestReviewPendingWorkingSessionRanksAsWorking(t *testing.T) {
+	at := t0.Add(-time.Hour)
+	back := withTask("back-at-work", model.StateWorking, "%1", "T-1", at.Add(-time.Hour))
+	back.ReviewPending = true
+	idleUnseen := sess("idle-unseen", model.StateIdle, "%2", at)
+	working := sess("working", model.StateWorking, "%3", at)
+	idleSeen := sess("idle-seen", model.StateIdle, "%4", at.Add(-2*time.Hour))
+	idleSeen.SeenAt = at
+	want := []string{"idle-unseen", "back-at-work", "working", "idle-seen"}
+	if got := ids(fleet.Rank([]model.Session{idleSeen, working, back, idleUnseen})); !reflect.DeepEqual(got, want) {
+		t.Errorf("Rank = %v, want %v", got, want)
+	}
+	if got, ok := fleet.Next([]model.Session{back, working}); ok {
+		t.Errorf("Next = %q, true; want none (a working review-pending session is not review-ready)", got.ID)
+	}
+}
+
+func TestNextJumpsToReviewReady(t *testing.T) {
+	ready := withTask("ready", model.StateIdle, "%2", "T-1", t0)
+	ready.SeenAt, ready.ReviewPending = t0.Add(time.Minute), true // seen: still review-ready
+	working := sess("working", model.StateWorking, "%1", t0.Add(-time.Hour))
+	got, ok := fleet.Next([]model.Session{working, ready})
+	if !ok || got.ID != "ready" {
+		t.Errorf("Next = %q, %v, want ready, true", got.ID, ok)
+	}
+	// Without its review the same session is idle-seen, which Next skips.
+	ready.ReviewPending = false
+	if got, ok := fleet.Next([]model.Session{working, ready}); ok {
+		t.Errorf("Next without the review = %q, true; want none", got.ID)
+	}
+}
+
+// onServer is a pane on the server whose socket is socket.
+func onServer(socket string, start time.Time, ids ...string) []tmux.Pane {
+	var panes []tmux.Pane
+	for _, id := range ids {
+		panes = append(panes, tmux.Pane{ID: id, ServerStart: start, Socket: socket})
+	}
+	return panes
+}
+
+func TestReconcileLeavesOtherServerAlone(t *testing.T) {
+	old := t0.Add(-time.Hour)
+	elsewhere := sess("elsewhere", model.StateIdle, "%1", old)
+	elsewhere.Socket, elsewhere.TmuxWindow = "/tmp/a", "@1"
+	// Pane ids are reused across servers: %2 on /tmp/b is not this session's
+	// pane, and /tmp/b started after the session did.
+	recycled := sess("recycled", model.StateWaiting, "%2", old)
+	recycled.Socket, recycled.TmuxWindow, recycled.StartedAt = "/tmp/a", "@2", t0.Add(-2*time.Hour)
+	st := openStore(t, elsewhere, recycled)
+	windows, err := fleet.Reconcile(context.Background(), st, onServer("/tmp/b", t0.Add(-30*time.Minute), "%2", "%3"), t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows) != 0 {
+		t.Errorf("windows = %q, want none", windows)
+	}
+	if s := get(t, st, "elsewhere"); s.State != model.StateIdle || !s.UpdatedAt.Equal(old) {
+		t.Errorf("elsewhere = %s at %v, want unchanged idle", s.State, s.UpdatedAt)
+	}
+	if s := get(t, st, "recycled"); s.State != model.StateWaiting || !s.UpdatedAt.Equal(old) {
+		t.Errorf("recycled = %s at %v, want unchanged waiting", s.State, s.UpdatedAt)
+	}
+}
+
+func TestReconcileSameServerStillMarksStale(t *testing.T) {
+	old := t0.Add(-time.Hour)
+	gone := sess("gone", model.StateIdle, "%1", old)
+	gone.Socket, gone.TmuxWindow = "/tmp/b", "@1"
+	// Same server, restarted since the session started: %2 is another pane now.
+	ghost := sess("ghost", model.StateWaiting, "%2", old)
+	ghost.Socket, ghost.TmuxWindow, ghost.StartedAt = "/tmp/b", "@2", t0.Add(-2*time.Hour)
+	live := sess("live", model.StateWaiting, "%3", old)
+	live.Socket, live.StartedAt = "/tmp/b", t0.Add(-10*time.Minute)
+	st := openStore(t, gone, ghost, live)
+	// The first pane reports no socket: the server's socket is the first non-empty one.
+	panes := append([]tmux.Pane{{ID: "%9", ServerStart: t0.Add(-30 * time.Minute)}},
+		onServer("/tmp/b", t0.Add(-30*time.Minute), "%2", "%3")...)
+	windows, err := fleet.Reconcile(context.Background(), st, panes, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(windows)
+	if want := []string{"@1", "@2"}; !reflect.DeepEqual(windows, want) {
+		t.Errorf("windows = %q, want %q (in any order)", windows, want)
+	}
+	for _, id := range []string{"gone", "ghost"} {
+		if s := get(t, st, id); s.State != model.StateStale || !s.UpdatedAt.Equal(t0) {
+			t.Errorf("%s = %s at %v, want stale at %v", id, s.State, s.UpdatedAt, t0)
+		}
+	}
+	if s := get(t, st, "live"); s.State != model.StateWaiting {
+		t.Errorf("live = %s, want waiting", s.State)
+	}
+}
+
+// A session with no recorded server (a row from before Plan 4, or written by
+// an older hook), or a server whose panes report no socket, is reconciled as
+// in Plan 2: by pane id and server start alone.
+func TestReconcileUnknownSocketBehavesAsBefore(t *testing.T) {
+	serverStart := t0.Add(-30 * time.Minute)
+	old := t0.Add(-time.Hour)
+	for _, tc := range []struct {
+		name, sessionSocket, serverSocket string
+	}{
+		{"session socket unknown", "", "/tmp/b"},
+		{"server socket unknown", "/tmp/a", ""},
+		{"both unknown", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gone := sess("gone", model.StateIdle, "%1", old)
+			ghost := sess("ghost", model.StateWaiting, "%2", old)
+			ghost.StartedAt = t0.Add(-2 * time.Hour)
+			live := sess("live", model.StateWaiting, "%3", old)
+			live.StartedAt = t0.Add(-10 * time.Minute)
+			for _, s := range []*model.Session{&gone, &ghost, &live} {
+				s.Socket = tc.sessionSocket
+			}
+			st := openStore(t, gone, ghost, live)
+			if _, err := fleet.Reconcile(context.Background(), st, onServer(tc.serverSocket, serverStart, "%2", "%3"), t0); err != nil {
+				t.Fatal(err)
+			}
+			for id, want := range map[string]model.State{"gone": model.StateStale, "ghost": model.StateStale, "live": model.StateWaiting} {
+				if s := get(t, st, id); s.State != want {
+					t.Errorf("%s = %s, want %s", id, s.State, want)
+				}
+			}
+		})
+	}
+}
+
+// OtherServer is Reconcile's server rule for callers that must not type
+// into, or count, a pane whose id the session's own server also uses.
+func TestOtherServer(t *testing.T) {
+	start := t0.Add(-30 * time.Minute)
+	noSocket := []tmux.Pane{{ID: "%9", ServerStart: start}}
+	for _, tc := range []struct {
+		name, socket string
+		live         []tmux.Pane
+		want         bool
+	}{
+		{"another server", "/tmp/a", onServer("/tmp/b", start, "%1"), true},
+		{"the same server", "/tmp/b", onServer("/tmp/b", start, "%1"), false},
+		{"first known socket decides", "/tmp/a", append(noSocket, onServer("/tmp/b", start, "%1")...), true},
+		{"first known socket is the same", "/tmp/b", append(noSocket, onServer("/tmp/b", start, "%1")...), false},
+		{"session socket unknown", "", onServer("/tmp/b", start, "%1"), false},
+		{"server socket unknown", "/tmp/a", onServer("", start, "%1"), false},
+		{"no panes", "/tmp/a", nil, false},
+	} {
+		s := sess("s", model.StateIdle, "%1", t0)
+		s.Socket = tc.socket
+		if got := fleet.OtherServer(tc.live, s); got != tc.want {
+			t.Errorf("%s: OtherServer = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

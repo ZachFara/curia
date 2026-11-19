@@ -15,15 +15,15 @@ const (
 	fenceEnd   = "# <<< curia <<<"
 )
 
-// markerFormat is the window marker: a red dot after a window whose
-// @curia_marker is red. It is kept in the @curia_marker_format option and
-// each window format refers to it, so the formats themselves are only ever
+// markerFormat is the window marker: a red or a blue dot after a window
+// whose @curia_marker is red or blue. It is kept in the @curia_marker_format
+// option and each window format refers to it, so the formats themselves are only ever
 // appended to, and unsetting the option on a running server turns the marker
 // off. It sits at the end of the window's own format: it changes only the
 // foreground and styles nothing after the dot, so the tab before it renders
 // as the theme drew it. (The status line resets the style after each window
 // format; #[default] or push/pop-default inside it would reset a themed tab.)
-const markerFormat = "#{?#{==:#{@curia_marker},red},#[fg=red] ●,}"
+const markerFormat = "#{?#{==:#{@curia_marker},red},#[fg=red] ●,#{?#{==:#{@curia_marker},blue},#[fg=blue] ●,}}"
 
 // oldSnippetLine is a line only the snippet before the marker option wrote:
 // it replaced the user's window formats.
