@@ -443,6 +443,9 @@ WHERE id = ? AND status = 'pending' AND (closed_at IS NULL OR closed_at <= ?)`
 	releaseIntent = `
 UPDATE reviews SET approved_how = '', head = '', diff_stat = '', closed_at = NULL
 WHERE id = ? AND status = 'pending' AND closed_at = ?`
+	restoreIntent = `
+UPDATE reviews SET approved_how = ?, head = ?, diff_stat = ?, closed_at = ?
+WHERE id = ? AND status = 'pending' AND closed_at = ?`
 )
 
 // ClaimReviewIntent records in on pending review id at now, in one conditional statement, before an approval
@@ -484,6 +487,20 @@ func (s *Store) ClaimReviewIntent(ctx context.Context, id string, in ReviewInten
 func (s *Store) ReleaseReviewIntent(ctx context.Context, id string, at time.Time) error {
 	if _, err := s.db.ExecContext(ctx, releaseIntent, id, formatTime(at)); err != nil {
 		return fail("release review", id, err)
+	}
+	return nil
+}
+
+// RestoreReviewIntent puts back prev, the intent recorded at prevAt that the claim made at at replaced, on
+// pending review id, after the claiming approval failed with nothing done: an earlier approval whose process
+// died may still have git running, and its merge must stay recordable. Like ReleaseReviewIntent it changes
+// only the claim made at at; a zero prevAt clears it instead.
+func (s *Store) RestoreReviewIntent(ctx context.Context, id string, at time.Time, prev ReviewIntent, prevAt time.Time) error {
+	if prevAt.IsZero() {
+		return s.ReleaseReviewIntent(ctx, id, at)
+	}
+	if _, err := s.db.ExecContext(ctx, restoreIntent, prev.How, prev.Head, prev.DiffStat, formatTime(prevAt), id, formatTime(at)); err != nil {
+		return fail("restore review", id, err)
 	}
 	return nil
 }

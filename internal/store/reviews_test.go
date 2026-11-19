@@ -1349,3 +1349,39 @@ func TestDropWithoutHoldIgnoresIntent(t *testing.T) {
 		t.Errorf("dropped = %+v", got)
 	}
 }
+
+// TestRestoreReviewIntent: a claim that replaced an earlier (stale) intent
+// puts that intent back exactly when its approval fails; it changes only its
+// own claim, and with no earlier intent it clears its own.
+func TestRestoreReviewIntent(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, dbPath(t))
+	r := reviewFor(t, s, "Restore me")
+	old := store.ReviewIntent{How: model.ApproveMerge, Head: strings.Repeat("a", 40), DiffStat: "old stat"}
+	oldAt, hold := reviewT0, 10*time.Minute
+	if _, err := s.ClaimReviewIntent(ctx, r.ID, old, oldAt, hold); err != nil {
+		t.Fatal(err)
+	}
+	newAt := oldAt.Add(11 * time.Minute)
+	if _, err := s.ClaimReviewIntent(ctx, r.ID, store.ReviewIntent{How: model.ApproveMerge, Head: strings.Repeat("a", 40), DiffStat: "new"}, newAt, hold); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RestoreReviewIntent(ctx, r.ID, newAt.Add(time.Second), old, oldAt); err != nil { // not its claim
+		t.Fatal(err)
+	}
+	if g := getReview(t, s, r.ID); !g.IntentAt.Equal(newAt) {
+		t.Errorf("another's restore changed the claim: %+v", g)
+	}
+	if err := s.RestoreReviewIntent(ctx, r.ID, newAt, old, oldAt); err != nil {
+		t.Fatal(err)
+	}
+	if g := getReview(t, s, r.ID); !g.IntentAt.Equal(oldAt) || g.Head != old.Head || g.DiffStat != "old stat" || g.ApprovedHow != old.How {
+		t.Errorf("after the restore: %+v, want the earlier intent at %v", g, oldAt)
+	}
+	if err := s.RestoreReviewIntent(ctx, r.ID, oldAt, store.ReviewIntent{}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if g := getReview(t, s, r.ID); !g.IntentAt.IsZero() || g.Head != "" {
+		t.Errorf("a restore with no earlier intent: %+v, want none", g)
+	}
+}

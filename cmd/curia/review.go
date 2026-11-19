@@ -519,13 +519,66 @@ func reviewApprove(ctx context.Context, st *store.Store, cfg config.Config, revi
 	if seen != head {
 		return "", errReviewBranchChanged
 	}
+	if how == model.ApproveMerge {
+		// Refuse before claiming, so a refusal touches no intent (C-B).
+		if err = reviewMergeReady(ctx, r, t, now); err != nil {
+			return "", err
+		}
+	}
+	prior := r // its intent, if any, is what the claim may replace
 	if r, err = st.ClaimReviewIntent(ctx, r.ID, store.ReviewIntent{How: how, Head: head, DiffStat: stat}, now, reviewIntentHold); err != nil {
 		return "", reviewBusyError(r, err)
 	}
 	if how == model.ApproveMerge {
-		return reviewApproveMerge(ctx, st, r, t, stat, head, via, now)
+		return reviewApproveMerge(ctx, st, r, prior, t, stat, head, via, now)
 	}
-	return reviewApprovePR(ctx, st, cfg, r, t, stat, head, via, now)
+	return reviewApprovePR(ctx, st, cfg, r, prior, t, stat, head, via, now)
+}
+
+// reviewMergeReady runs the checks of the user's checkout that refuse a merge (the base checked out, no
+// operation under way, no staged change) before the approval claims the review. When an earlier approval's
+// intent stands, a merge under way or staged changes may be that approval's git still running, its process
+// killed (C-B): the refusal says so, and that approving again once it is done records its merge.
+func reviewMergeReady(ctx context.Context, r model.Review, t model.Task, now time.Time) error {
+	if err := reviewCheckNames(t); err != nil {
+		return err
+	}
+	if err := reviewCheckCheckout(ctx, t); err != nil {
+		return reviewEarlierApproval(r, t, now, err)
+	}
+	staged, err := reviewStaged(ctx, t.Repo, "HEAD")
+	switch {
+	case err != nil:
+		return err
+	case staged:
+		return reviewEarlierApproval(r, t, now, fmt.Errorf("staged changes in %s: commit or unstage them first. Nothing was merged",
+			sanitize.Line(t.Repo, 300)))
+	}
+	return nil
+}
+
+// reviewEarlierApproval is refusal err, reworded when an earlier approval's intent to merge stands on r: while
+// it is younger than the hold, the approval in flight is named as busy, as the claim would; once older, its
+// process may have been killed with its git still running.
+func reviewEarlierApproval(r model.Review, t model.Task, now time.Time, err error) error {
+	if r.IntentAt.IsZero() || r.ApprovedHow != model.ApproveMerge {
+		return err
+	}
+	if r.IntentAt.After(now.Add(-reviewIntentHold)) {
+		return reviewBusyError(r, store.ErrReviewBusy)
+	}
+	repo := sanitize.Line(t.Repo, 300)
+	return fmt.Errorf("%s holds a merge under way or staged changes, and an earlier approval of %s (merge at %s, since %s) may still "+
+		"be running git there: wait for it to finish, then approve again, which records its merge once it is in %s. If no git "+
+		"runs there, what is staged is what that approval's merge left: look with git -C %s status. Nothing was done",
+		repo, r.ID, sanitize.Line(reviewShort(r.Head), 10), r.IntentAt.Local().Format("15:04:05"), t.BaseBranch, repo)
+}
+
+// reviewRelease gives up claim r after its approval failed with nothing done: it puts back the earlier
+// intent the claim replaced (prior's), whose approval may still have git running (C-B), or clears r's.
+func reviewRelease(ctx context.Context, st *store.Store, r, prior model.Review) error {
+	return st.RestoreReviewIntent(ctx, r.ID, r.IntentAt,
+		store.ReviewIntent{How: prior.ApprovedHow, Head: prior.Head, DiffStat: prior.DiffStat}, prior.IntentAt)
 }
 
 // reviewBusyError says that review r is being approved elsewhere when err is
@@ -588,11 +641,11 @@ func reviewInBase(ctx context.Context, t model.Task, head string) bool {
 
 // reviewApproveMerge merges and records the review merged. When the merge fails its intent is cleared, unless
 // the base holds the head after all, so that approving again records it.
-func reviewApproveMerge(ctx context.Context, st *store.Store, r model.Review, t model.Task, stat, head string,
+func reviewApproveMerge(ctx context.Context, st *store.Store, r, prior model.Review, t model.Task, stat, head string,
 	via model.AnsweredVia, now time.Time,
 ) (string, error) {
 	if err := reviewMerge(ctx, t, head); err != nil {
-		return "", reviewMergeRelease(ctx, st, r, t, head, err)
+		return "", reviewMergeRelease(ctx, st, r, prior, t, head, err)
 	}
 	what := fmt.Sprintf("merged %s into %s (%s)", t.Branch, t.BaseBranch, reviewShort(head))
 	_, expired, err := st.CloseReview(ctx, r.ID, store.ReviewClose{
@@ -607,8 +660,8 @@ func reviewApproveMerge(ctx context.Context, st *store.Store, r model.Review, t 
 
 // reviewMergeRelease follows a failed merge of head: it keeps r's intent when the base contains head after
 // all (and says to approve again to record it) or when Curia left the checkout as it found it (errReviewLeft),
-// else clears it, and returns the merge's error.
-func reviewMergeRelease(ctx context.Context, st *store.Store, r model.Review, t model.Task, head string, failed error) error {
+// else clears it (or puts back the earlier intent it replaced: reviewRelease), and returns the merge's error.
+func reviewMergeRelease(ctx context.Context, st *store.Store, r, prior model.Review, t model.Task, head string, failed error) error {
 	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), worktreeGitLimit)
 	defer cancel()
 	if n, err := reviewAhead(actx, t, head); err == nil && n == 0 {
@@ -618,14 +671,14 @@ func reviewMergeRelease(ctx context.Context, st *store.Store, r model.Review, t 
 	if errors.Is(failed, errReviewLeft) { // what git left is unknown: the intent stays, the claim with it
 		return failed
 	}
-	if err := st.ReleaseReviewIntent(actx, r.ID, r.IntentAt); err != nil {
+	if err := reviewRelease(actx, st, r, prior); err != nil {
 		return fmt.Errorf("%w (and clearing the approval's claim failed: %s)", failed, sanitize.Line(err.Error(), reviewGitErrMax))
 	}
 	return failed
 }
 
 // reviewApprovePR opens the pull request and records the review approved; on a failure its intent is cleared.
-func reviewApprovePR(ctx context.Context, st *store.Store, cfg config.Config, r model.Review, t model.Task, stat, head string,
+func reviewApprovePR(ctx context.Context, st *store.Store, cfg config.Config, r, prior model.Review, t model.Task, stat, head string,
 	via model.AnsweredVia, now time.Time,
 ) (string, error) {
 	ds, err := st.TaskDecisions(ctx, t.ID)
@@ -635,7 +688,7 @@ func reviewApprovePR(ctx context.Context, st *store.Store, cfg config.Config, r 
 		url, err = reviewOpenPR(ctx, t, r, decided, cfg.Review.Remote, head)
 	}
 	if err != nil {
-		if rerr := st.ReleaseReviewIntent(context.WithoutCancel(ctx), r.ID, r.IntentAt); rerr != nil {
+		if rerr := reviewRelease(context.WithoutCancel(ctx), st, r, prior); rerr != nil {
 			err = fmt.Errorf("%w (and clearing the approval's claim failed: %s)", err, sanitize.Line(rerr.Error(), reviewGitErrMax))
 		}
 		return "", err

@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
 )
 
@@ -1387,4 +1388,63 @@ func TestMergeCutShortByKilledGit(t *testing.T) {
 	}
 	f.wantAsBefore(before, status)
 	f.wantPending()
+}
+
+// TestOrphanMergeKeepsIntent: an approval recorded its intent and started
+// git, then its curia was killed; git runs on alone, its pre-merge-commit hook
+// longer than the 10-minute hold. A second approval after the hold is refused
+// before it claims anything, naming the earlier approval, and the intent stays
+// exactly as it was; once the orphaned git has made the merge commit, the next
+// approval records the review merged.
+func TestOrphanMergeKeepsIntent(t *testing.T) {
+	f := reviewNew(t)
+	in, release := reviewHookAt(f, "pre-merge-commit", 0)
+	head := f.head(f.wt, "HEAD")
+	ctx := context.Background()
+	if _, err := f.st.ClaimReviewIntent(ctx, "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head, DiffStat: " auth.go | 1 +"},
+		f.now, reviewIntentHold); err != nil {
+		t.Fatal(err)
+	}
+	orphan := make(chan gitResult, 1)
+	go func() {
+		orphan <- runGitGroup(ctx, f.repo, "merge", "--no-ff", "--no-edit", "--no-autostash", "-m", "Merge", head)
+	}()
+	reviewWaitFile(t, in)
+	_, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.now.Add(11*time.Minute))
+	if err == nil || !strings.Contains(err.Error(), "an earlier approval of R-1 (merge at "+head[:7]+", since ") ||
+		!strings.Contains(err.Error(), "may still be running git there") {
+		t.Errorf("approve during the orphan's hook: %v, want the refusal naming the earlier approval", err)
+	}
+	if r := f.review(); !r.IntentAt.Equal(f.now) || r.Head != head || r.ApprovedHow != model.ApproveMerge || r.DiffStat != " auth.go | 1 +" {
+		t.Errorf("intent after the refusal = %+v, want the earlier one, untouched", r)
+	}
+	worktreeWrite(t, release, "")
+	if res := <-orphan; res.err != nil {
+		t.Fatalf("the orphaned merge: %v %s", res.err, res.stderr)
+	}
+	line, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.now.Add(12*time.Minute))
+	if err != nil || !strings.Contains(line, "is already merged into main; recorded") {
+		t.Fatalf("approve after the orphan merged = %q, %v; want it recorded", line, err)
+	}
+	f.wantMerged(head)
+}
+
+// TestRefusalAfterClaimRestoresEarlierIntent: an approval that takes over a
+// stale intent and is then refused (here: the merge would conflict) puts the
+// earlier intent back exactly, rather than clearing it.
+func TestRefusalAfterClaimRestoresEarlierIntent(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	old := f.now.Add(-time.Hour)
+	if _, err := f.st.ClaimReviewIntent(context.Background(), "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head, DiffStat: "earlier"},
+		old, reviewIntentHold); err != nil {
+		t.Fatal(err)
+	}
+	f.commitOnMain("auth.go", "package auth // main's own\n", "main side")
+	if _, err := f.approve(model.ApproveMerge, head); err == nil || !strings.Contains(err.Error(), "would conflict") {
+		t.Fatalf("approve = %v, want the conflict refusal", err)
+	}
+	if r := f.review(); !r.IntentAt.Equal(old) || r.Head != head || r.DiffStat != "earlier" {
+		t.Errorf("intent after the refusal = %+v, want the earlier one back", r)
+	}
 }
