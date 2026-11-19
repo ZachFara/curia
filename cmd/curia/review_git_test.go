@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode"
@@ -378,7 +380,10 @@ func TestMergeRefusesWhileUserMerges(t *testing.T) {
 	f.wantPending()
 }
 
-func TestMergeConflictAborts(t *testing.T) {
+// TestMergeRefusesConflictBeforeMerging: a merge that would conflict is
+// refused from git merge-tree's result before git merge runs, with the
+// conflicting paths named; nothing in the checkout changes.
+func TestMergeRefusesConflictBeforeMerging(t *testing.T) {
 	for _, dirty := range []bool{false, true} {
 		t.Run(fmt.Sprintf("unrelated local change %v", dirty), func(t *testing.T) {
 			f := reviewNew(t)
@@ -389,12 +394,14 @@ func TestMergeConflictAborts(t *testing.T) {
 				worktreeWrite(t, filepath.Join(f.repo, "notes.txt"), "my edit\n")
 			}
 			before, status := f.head(f.repo, "HEAD"), f.status()
+			calls := reviewRecordGit(t)
 			_, err := f.approve(model.ApproveMerge, "")
-			if err == nil || !strings.Contains(err.Error(), "; nothing was merged") || !strings.Contains(err.Error(), "CONFLICT") {
-				t.Fatalf("approve error = %v, want git's conflict message ending in \"; nothing was merged\"", err)
+			if err == nil || !strings.Contains(err.Error(), "merging "+reviewBranch+" into main would conflict in README") ||
+				!strings.HasSuffix(err.Error(), "Nothing was merged") {
+				t.Fatalf("approve error = %v, want the conflict refused before merging", err)
 			}
-			if !strings.Contains(err.Error(), "git may have left ORIG_HEAD") || !strings.HasSuffix(err.Error(), ": they are harmless and need nothing") {
-				t.Errorf("approve error = %v, want the note on git's leftover files", err)
+			if m := reviewGitCalls(calls(), "merge"); len(m) != 0 {
+				t.Errorf("git merge ran: %q", m)
 			}
 			f.wantAsBefore(before, status)
 			f.wantPending()
@@ -414,6 +421,9 @@ func TestMergeHookFailureAborts(t *testing.T) {
 			}
 			if f.hasMergeHead() {
 				t.Error("MERGE_HEAD is left")
+			}
+			if !strings.Contains(err.Error(), "git may have left ORIG_HEAD") || !strings.HasSuffix(err.Error(), ": they are harmless and need nothing") {
+				t.Errorf("approve error = %v, want the note on git's leftover files", err)
 			}
 			if s := f.status(); s != "" {
 				t.Errorf("status = %q, want clean", s)
@@ -1203,4 +1213,178 @@ func TestReviewObjectIDLen(t *testing.T) {
 			t.Errorf("%s: %d, %v; want %d", format, got, err, want)
 		}
 	}
+}
+
+// reviewHookAt installs hook name in f, which touches marker <dir>/in, then
+// waits for <dir>/go to appear (or 30 s) and exits with code; it returns the
+// marker and the release file.
+func reviewHookAt(f *reviewFixture, name string, code int) (in, release string) {
+	f.t.Helper()
+	dir := f.t.TempDir()
+	in, release = filepath.Join(dir, "in"), filepath.Join(dir, "go")
+	lifecycleHooks(f.spawnFixture, name, fmt.Sprintf("#!/bin/sh\ntouch '%s'\ni=0\nwhile [ ! -e '%s' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\nexit %d\n",
+		in, release, code))
+	return in, release
+}
+
+// reviewStageDuring waits for marker, then stages content in the main
+// checkout's notes.txt, as the developer, an editor or a formatter may while
+// a hook runs (git holds no index lock then), and touches release, if any.
+func (f *reviewFixture) reviewStageDuring(marker, release, content string) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			if _, err := os.Stat(marker); err == nil {
+				break
+			}
+		}
+		worktreeWrite(f.t, filepath.Join(f.repo, "notes.txt"), content)
+		gitRun(f.t, f.repo, "add", "notes.txt")
+		if release != "" {
+			worktreeWrite(f.t, release, "")
+		}
+	}()
+	return done
+}
+
+// wantLeftAsIs checks that Curia ran neither git reset nor git merge --abort,
+// said why, kept the developer's staged notes.txt (index and disk) and left
+// the review pending with its intent.
+func (f *reviewFixture) wantLeftAsIs(err error, recorded [][]string, content string) {
+	f.t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "cannot attribute to its own merge") || strings.Contains(err.Error(), "is as it was") ||
+		!strings.Contains(err.Error(), "git -C "+f.repo+" status") || !strings.Contains(err.Error(), "The review stays pending") {
+		f.t.Errorf("approve error = %v, want the checkout left as it is, and why", err)
+	}
+	if r := reviewGitCalls(recorded, "reset"); len(r) != 0 {
+		f.t.Errorf("git reset ran: %q", r)
+	}
+	for _, c := range reviewGitCalls(recorded, "merge") {
+		if slices.Contains(c, "--abort") {
+			f.t.Errorf("git merge --abort ran: %q", c)
+		}
+	}
+	if got := lifecycleRead(f.t, filepath.Join(f.repo, "notes.txt")); got != content {
+		f.t.Errorf("notes.txt = %q, want the developer's %q kept", got, content)
+	}
+	if staged := worktreeGit(f.t, f.repo, "show", ":notes.txt"); staged+"\n" != content {
+		f.t.Errorf("staged notes.txt = %q, want the developer's %q", staged, content)
+	}
+	if r := f.review(); r.Status != model.ReviewPending || r.IntentAt.IsZero() {
+		f.t.Errorf("R-1 = %+v, want pending with its intent kept", r)
+	}
+}
+
+// TestMergeCutShortKeepsWorkStagedDuringHook: the developer stages an edit
+// while the approval's pre-merge-commit hook runs, then the limit cuts the
+// merge short. The index is no longer only the merge's result, so Curia runs
+// no reset: the edit stays staged and on disk, the message says why and what
+// to run, and the review stays pending with its intent.
+func TestMergeCutShortKeepsWorkStagedDuringHook(t *testing.T) {
+	f := reviewNew(t)
+	f.commitOnMain("notes.txt", "a\n", "notes")
+	in, _ := reviewHookAt(f, "pre-merge-commit", 0)
+	const work = "the developer's staged work\n"
+	done := f.reviewStageDuring(in, "", work)
+	calls := reviewRecordGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, f.head(f.wt, "HEAD"), model.AnsweredCLI, f.now)
+	<-done
+	f.wantLeftAsIs(err, calls(), work)
+	if !strings.Contains(err.Error(), "the index holds changes that are not the merge's") {
+		t.Errorf("approve error = %v, want it to say the index holds other changes", err)
+	}
+}
+
+// TestHookRefusalKeepsWorkStagedDuringHook: the same, with a hook that then
+// refuses the merge commit (git leaves MERGE_HEAD): no git merge --abort runs
+// over the staged edit; the merge stays under way for the developer to end.
+func TestHookRefusalKeepsWorkStagedDuringHook(t *testing.T) {
+	f := reviewNew(t)
+	f.commitOnMain("notes.txt", "a\n", "notes")
+	in, release := reviewHookAt(f, "pre-merge-commit", 1)
+	const work = "staged while the hook ran\n"
+	done := f.reviewStageDuring(in, release, work)
+	calls := reviewRecordGit(t)
+	_, err := f.approve(model.ApproveMerge, "")
+	<-done
+	f.wantLeftAsIs(err, calls(), work)
+	if !f.hasMergeHead() {
+		t.Error("MERGE_HEAD is gone: the merge was ended over the developer's change")
+	}
+}
+
+// TestLimitDuringPostMerge: the limit ends while post-merge runs, after the
+// merge commit. With only the merge in the index, git merge --abort clears
+// the state git left (MERGE_HEAD); with an edit staged during the hook,
+// nothing runs and the edit stays.
+func TestLimitDuringPostMerge(t *testing.T) {
+	for _, staged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("staged during the hook %v", staged), func(t *testing.T) { reviewPostMergeCase(t, staged) })
+	}
+}
+
+// reviewPostMergeCase is one case of TestLimitDuringPostMerge.
+func reviewPostMergeCase(t *testing.T, staged bool) {
+	f := reviewNew(t)
+	f.commitOnMain("notes.txt", "a\n", "notes")
+	in, _ := reviewHookAt(f, "post-merge", 0)
+	head := f.head(f.wt, "HEAD")
+	const work = "staged during post-merge\n"
+	done := make(<-chan struct{})
+	if staged {
+		done = f.reviewStageDuring(in, "", work)
+	}
+	calls := reviewRecordGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.now)
+	if got := f.head(f.repo, "main^2"); got != head {
+		t.Fatalf("main^2 = %s, want the merge commit of %s", got, head)
+	}
+	if staged {
+		<-done
+		f.wantLeftAsIs(err, calls(), work)
+		return
+	}
+	if f.hasMergeHead() || f.status() != "" {
+		t.Errorf("after the abort: MERGE_HEAD %v, status %q; want neither", f.hasMergeHead(), f.status())
+	}
+	if err == nil || !strings.Contains(err.Error(), "main holds "+head[:7]+" all the same") {
+		t.Errorf("approve error = %v, want it to say the merge is in main", err)
+	}
+}
+
+// TestMergeCutShortByKilledGit: git alone is killed (SIGKILL) while
+// pre-merge-commit runs; with only the merge in the index Curia undoes it
+// with git reset --merge and the checkout is as before.
+func TestMergeCutShortByKilledGit(t *testing.T) {
+	f := reviewNew(t)
+	worktreeWrite(t, filepath.Join(f.repo, "mine.txt"), "untracked\n")
+	pidFile := filepath.Join(t.TempDir(), "gitpid")
+	lifecycleHooks(f.spawnFixture, "pre-merge-commit", "#!/bin/sh\necho $PPID > '"+pidFile+".tmp'\nmv '"+pidFile+".tmp' '"+pidFile+"'\nsleep 2\nexit 0\n")
+	before, status := f.head(f.repo, "HEAD"), f.status()
+	killed := make(chan bool, 1)
+	go func() {
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			if b, err := os.ReadFile(filepath.Clean(pidFile)); err == nil {
+				pid, perr := strconv.Atoi(strings.TrimSpace(string(b)))
+				killed <- perr == nil && syscall.Kill(pid, syscall.SIGKILL) == nil
+				return
+			}
+		}
+		killed <- false
+	}()
+	_, err := f.approve(model.ApproveMerge, "")
+	if !<-killed {
+		t.Fatal("git was not killed during its hook")
+	}
+	if err == nil || !strings.Contains(err.Error(), "git merge failed (signal: killed)") ||
+		!strings.Contains(err.Error(), "Curia undid what it had staged (git reset --merge)") {
+		t.Fatalf("approve error = %v, want the killed merge undone", err)
+	}
+	f.wantAsBefore(before, status)
+	f.wantPending()
 }

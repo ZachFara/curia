@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -242,7 +243,7 @@ func TestReviewApproveFailureStaysPending(t *testing.T) {
 	f.commitOnMain("README", "main side\n", "main readme")
 	before := f.head(f.repo, "HEAD")
 	stdout, stderr, err := reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve"}, f.headArg()...)...)
-	if err == nil || !strings.Contains(stderr, "; nothing was merged") {
+	if err == nil || !strings.Contains(stderr, "Nothing was merged") {
 		t.Fatalf("err %v, stderr %q; want the failure", err, stderr)
 	}
 	if stdout != "" {
@@ -588,9 +589,45 @@ func TestReviewWithoutTerminalNeedsAnAction(t *testing.T) {
 }
 
 // reviewPump runs cmd and the commands its messages lead to, feeding each
-// message to m. A command that does not return within a moment is one of
-// the view's refresh ticks, which are dropped.
+// message to m. Timer ticks are dropped (reviewIsTick), and so is a command
+// still running after reviewPumpLimit (a review action held in a hook).
 func reviewPump(t *testing.T, m tea.Model, cmd tea.Cmd) tea.Model {
+	t.Helper()
+	return reviewPumping(t, m, cmd, false)
+}
+
+// reviewPumpLimit is how long reviewPump waits for one command: long enough
+// for a git call on a loaded machine (the gate runs packages in parallel),
+// shorter than an approval held in a hook, which it leaves running.
+const reviewPumpLimit = 2 * time.Second
+
+// reviewIsTick reports whether v is one of the views' timer ticks, which
+// reviewPump drops so a refresh chain cannot run on: a message whose type
+// ends in TickMsg (or the dashboard's tickMsg), also inside the dashboard's
+// wrapper of a child's message.
+func reviewIsTick(v reflect.Value) bool {
+	if !v.IsValid() {
+		return false
+	}
+	if name := v.Type().Name(); strings.HasSuffix(name, "TickMsg") || name == "tickMsg" {
+		return true
+	}
+	if v.Kind() == reflect.Struct {
+		if f := v.FieldByName("msg"); f.IsValid() && f.Kind() == reflect.Interface {
+			return reviewIsTick(f.Elem())
+		}
+	}
+	return false
+}
+
+// reviewPumpActions is reviewPump that also waits for a command a review
+// action is running (reviewPumpWait), so the action's outcome is fed back.
+func reviewPumpActions(t *testing.T, m tea.Model, cmd tea.Cmd) tea.Model {
+	t.Helper()
+	return reviewPumping(t, m, cmd, true)
+}
+
+func reviewPumping(t *testing.T, m tea.Model, cmd tea.Cmd, actions bool) tea.Model {
 	t.Helper()
 	pending := []tea.Cmd{cmd}
 	for steps := 0; len(pending) > 0; steps++ {
@@ -604,19 +641,49 @@ func reviewPump(t *testing.T, m tea.Model, cmd tea.Cmd) tea.Model {
 		}
 		ch := make(chan tea.Msg, 1)
 		go func() { ch <- c() }()
+		wait := (<-chan tea.Msg)(ch)
+		if actions {
+			wait = reviewPumpWait(ch)
+		}
 		select {
-		case msg := <-ch:
+		case msg := <-wait:
 			if batch, ok := msg.(tea.BatchMsg); ok {
 				pending = append(pending, batch...)
-			} else if msg != nil {
+			} else if msg != nil && !reviewIsTick(reflect.ValueOf(msg)) {
 				var next tea.Cmd
 				m, next = m.Update(msg)
 				pending = append(pending, next)
 			}
-		case <-time.After(300 * time.Millisecond):
+		case <-time.After(reviewPumpLimit):
 		}
 	}
 	return m
+}
+
+// reviewPumpWait is ch, or, when its command is still running after 300 ms
+// while a review action is in flight (an approval can take seconds), ch
+// waited on for up to 30 s more: the view's timer ticks start no action.
+func reviewPumpWait(ch chan tea.Msg) <-chan tea.Msg {
+	select {
+	case msg := <-ch:
+		out := make(chan tea.Msg, 1)
+		out <- msg
+		return out
+	case <-time.After(250 * time.Millisecond):
+	}
+	reviewFlight.mu.Lock()
+	busy := reviewFlight.n > 0
+	reviewFlight.mu.Unlock()
+	if !busy {
+		return ch
+	}
+	out := make(chan tea.Msg, 1)
+	select {
+	case msg := <-ch:
+		out <- msg
+	case <-time.After(30 * time.Second):
+	}
+	return out
 }
 
 func TestReviewViewApprovesAndPrintsOutcome(t *testing.T) {
@@ -634,7 +701,7 @@ func TestReviewViewApprovesAndPrintsOutcome(t *testing.T) {
 			f.now = f.now.Add(3 * time.Second)
 			var cmd tea.Cmd
 			m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
-			m = reviewPump(t, m, cmd)
+			m = reviewPumpActions(t, m, cmd)
 		}
 		return nil
 	}

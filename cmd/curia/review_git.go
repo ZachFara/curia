@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -327,7 +328,7 @@ func reviewCheckClean(ctx context.Context, path string, onDisk bool) error {
 // checkout does not have the base checked out or is in the middle of a merge, rebase, cherry-pick, revert or
 // bisect; and leaves git to refuse a local change the merge would overwrite. The repository's hooks run as git
 // runs them. It refuses a checkout whose index holds staged changes, so that a merge cut short can be undone
-// without touching the user's own work (reviewUndoCutShort). After a failure the repository is as it was, or
+// without touching the user's own work (reviewUndoProven). After a failure the repository is as it was, or
 // the error says how it is not.
 func reviewMerge(ctx context.Context, t model.Task, head string) error {
 	if !reviewHeadPattern.MatchString(head) {
@@ -356,6 +357,12 @@ func reviewMerge(ctx context.Context, t model.Task, head string) error {
 	if now != head {
 		return errReviewBranchChanged
 	}
+	// The tree the merge will give, computed before anything changes: a
+	// conflict is refused here, and an undo later must find exactly it.
+	tree, err := reviewMergeTree(ctx, t, head)
+	if err != nil {
+		return err
+	}
 	mctx, cancel := context.WithTimeout(ctx, reviewMergeLimit)
 	defer cancel()
 	res := runGitGroup(mctx, t.Repo, "merge", "--no-ff", "--no-edit", "--no-autostash",
@@ -363,7 +370,37 @@ func reviewMerge(ctx context.Context, t model.Task, head string) error {
 	if res.err == nil {
 		return nil
 	}
-	return reviewMergeFailed(ctx, t, res, before)
+	return reviewMergeFailed(ctx, t, res, before, tree)
+}
+
+// reviewConflictsShown bounds the conflicting paths a refusal names.
+const reviewConflictsShown = 5
+
+// reviewMergeTree is the tree id git merge of head into the checkout's HEAD will produce, computed with git
+// merge-tree --write-tree (it writes objects only, never the working tree, the index or a ref). A merge that
+// would conflict is refused here, before anything changes. A git too old for --write-tree (before 2.38) gives
+// "" and no error: the merge then runs, but nothing can prove an interrupted one is only Curia's, so it is never
+// undone except after a conflict (reviewMergeFailed).
+func reviewMergeTree(ctx context.Context, t model.Task, head string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, worktreeGitLimit)
+	defer cancel()
+	res := runGit(ctx, t.Repo, "merge-tree", "--write-tree", "--name-only", "--no-messages", "HEAD", head)
+	lines := strings.Split(res.out, "\n")
+	switch code := worktreeExitCode(res); {
+	case res.err == nil && reviewHeadPattern.MatchString(lines[0]):
+		return lines[0], nil
+	case code == 1 && reviewHeadPattern.MatchString(lines[0]):
+		paths := lines[1:]
+		if n := len(paths) - reviewConflictsShown; n > 0 {
+			paths = append(paths[:reviewConflictsShown], fmt.Sprintf("%d more", n))
+		}
+		return "", fmt.Errorf("merging %s into %s would conflict in %s: resolve it on the branch first (merge %s into it in its "+
+			"worktree). Nothing was merged", t.Branch, t.BaseBranch, sanitize.Line(strings.Join(paths, ", "), reviewGitErrMax),
+			t.BaseBranch)
+	case code == 129:
+		return "", nil // no --write-tree
+	}
+	return "", worktreeGitError(res, worktreeGitLimit)
 }
 
 // reviewCheckCheckout refuses a merge unless the user's checkout has t's
@@ -426,11 +463,12 @@ func reviewInProgress(ctx context.Context, repo string) (string, error) {
 	return "", nil
 }
 
-// reviewState is what a failed merge must leave as it found: HEAD's commit
-// and git status, and whether the index held staged changes.
+// reviewState is what an interrupted merge must leave as it found: HEAD's commit, git status, whether the
+// index held staged changes, and the tracked files whose working tree differed from the index, by content.
 type reviewState struct {
 	head, status string
 	staged       bool
+	modified     map[string]string // path -> git hash-object of the working tree file; nil when it cannot be read
 }
 
 func reviewRepoState(ctx context.Context, repo string) (reviewState, error) {
@@ -442,15 +480,19 @@ func reviewRepoState(ctx context.Context, repo string) (reviewState, error) {
 	if err != nil {
 		return reviewState{}, err
 	}
-	staged, err := reviewStaged(ctx, repo)
-	return reviewState{head: head, status: status, staged: staged}, err
+	staged, err := reviewStaged(ctx, repo, "HEAD")
+	if err != nil {
+		return reviewState{}, err
+	}
+	modified, err := reviewModified(ctx, repo)
+	return reviewState{head: head, status: status, staged: staged, modified: modified}, err
 }
 
-// reviewStaged reports whether repo's index differs from HEAD.
-func reviewStaged(ctx context.Context, repo string) (bool, error) {
+// reviewStaged reports whether repo's index differs from tree (a tree-ish: HEAD, or a tree id).
+func reviewStaged(ctx context.Context, repo, tree string) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, worktreeGitLimit)
 	defer cancel()
-	res := runGit(ctx, repo, "diff-index", "--cached", "--quiet", "HEAD", "--")
+	res := runGit(ctx, repo, "diff-index", "--cached", "--quiet", tree, "--")
 	switch {
 	case res.err == nil:
 		return false, nil
@@ -460,54 +502,141 @@ func reviewStaged(ctx context.Context, repo string) (bool, error) {
 	return false, worktreeGitError(res, worktreeGitLimit)
 }
 
-// reviewMergeFailed aborts the merge res left under way (MERGE_HEAD exists:
-// a conflict, or a hook that refused the merge commit), or undoes one that
-// was cut short before git recorded it (reviewUndoCutShort), then checks the
-// repository is as before. The error is git's message, cleaned, and what
-// state the repository is in.
-func reviewMergeFailed(ctx context.Context, t model.Task, res gitResult, before reviewState) error {
+// reviewModifiedMax bounds the files reviewModified hashes; with more the state cannot be told exactly.
+const reviewModifiedMax = 500
+
+// errReviewTooManyModified is reviewModified's refusal of a working tree with more than reviewModifiedMax
+// modified files.
+var errReviewTooManyModified = errors.New("too many modified files to compare")
+
+// reviewModified maps each tracked file of repo whose working tree differs from the index (git diff
+// --name-only -z) to the hash of its content (git hash-object), so that an edit made while a merge ran is seen
+// even in a file that was modified before.
+func reviewModified(ctx context.Context, repo string) (map[string]string, error) {
+	out, err := worktreeRun(ctx, worktreeGitLimit, repo, "diff", "--name-only", "-z", "--no-ext-diff")
+	if err != nil {
+		return nil, err
+	}
+	paths := slices.DeleteFunc(strings.Split(strings.Trim(out, "\x00"), "\x00"), func(p string) bool { return p == "" })
+	if len(paths) > reviewModifiedMax {
+		return nil, errReviewTooManyModified
+	}
+	m := make(map[string]string, len(paths))
+	if len(paths) == 0 {
+		return m, nil
+	}
+	hashes, err := worktreeRun(ctx, worktreeGitLimit, repo, append([]string{"hash-object", "--"}, paths...)...)
+	if err != nil {
+		return nil, err
+	}
+	ids := strings.Split(hashes, "\n")
+	if len(ids) != len(paths) {
+		return nil, fmt.Errorf("git hash-object printed %d ids for %d files", len(ids), len(paths))
+	}
+	for i, p := range paths {
+		m[p] = ids[i]
+	}
+	return m, nil
+}
+
+// errReviewLeft marks the outcome of an interrupted merge that Curia left as it found it, because it could not
+// prove the checkout held only its own merge: the review stays pending with its intent kept.
+var errReviewLeft = errors.New("left as it is")
+
+// reviewSituation is what reviewInspect reads of a checkout after a merge failed.
+type reviewSituation struct {
+	gitDir             string
+	head               string
+	underWay, unmerged bool // MERGE_HEAD exists; the index has conflict entries
+	locked             bool // index.lock exists
+}
+
+// reviewInspect reads repo's situation after a merge failed.
+func reviewInspect(ctx context.Context, repo string) (reviewSituation, error) {
+	var s reviewSituation
+	dir, err := worktreeRun(ctx, worktreeGitLimit, repo, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return s, err
+	}
+	if !filepath.IsAbs(dir) {
+		return s, fmt.Errorf("git printed %q as the git dir", sanitize.Line(dir, 200))
+	}
+	s.gitDir = dir
+	if s.head, err = worktreeRun(ctx, worktreeGitLimit, repo, "rev-parse", "--verify", "HEAD"); err != nil {
+		return s, err
+	}
+	if s.underWay, err = refExists(ctx, repo, "MERGE_HEAD"); err != nil {
+		return s, err
+	}
+	unmerged, err := worktreeRun(ctx, worktreeGitLimit, repo, "ls-files", "--unmerged")
+	if err != nil {
+		return s, err
+	}
+	s.unmerged = unmerged != ""
+	_, lerr := os.Lstat(filepath.Join(dir, "index.lock"))
+	s.locked = lerr == nil
+	return s, nil
+}
+
+// reviewMergeMsg is git's message for failed merge res, cleaned, saying why git stopped; never empty.
+func reviewMergeMsg(res gitResult) string {
 	said := res.stderr
 	if said == "" {
 		said = res.out // a conflict is reported on stdout
 	}
 	msg := sanitize.Line(said, reviewGitErrMax)
-	if res.timedOut {
+	switch {
+	case res.timedOut:
 		msg = strings.TrimSuffix("git merge was stopped (its limit of "+reviewMergeLimit.String()+", or the action's, ran out): "+msg, ": ")
+	case msg == "":
+		msg = "git merge failed (" + sanitize.Line(res.err.Error(), 80) + ")"
 	}
-	// The caller's context may be what ended the merge; cleaning up must still run.
+	return msg
+}
+
+// reviewMergeFailed follows merge res that did not succeed, on a context detached from the caller's. Only an
+// interruption Curia can prove is its own merge and nothing else is undone (reviewUndo); a conflict (git stops
+// before any hook runs) is aborted as git leaves it; in every other case nothing is run and the error, wrapping
+// errReviewLeft, says what is there and what the user can run.
+func reviewMergeFailed(ctx context.Context, t model.Task, res gitResult, before reviewState, tree string) error {
+	msg := reviewMergeMsg(res)
 	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 4*worktreeGitLimit)
 	defer cancel()
 	repo := sanitize.Line(t.Repo, 300)
-	underWay, _ := refExists(actx, t.Repo, "MERGE_HEAD")
-	if underWay {
-		if err := reviewRunGroup(actx, worktreeGitLimit, t.Repo, "merge", "--abort"); err != nil {
-			return fmt.Errorf("%s; the merge is still under way in %s and could not be aborted (%w): run git -C %s merge --abort there",
-				msg, repo, err, repo)
+	sit, err := reviewInspect(actx, t.Repo)
+	if err != nil {
+		return fmt.Errorf("%s; afterwards the state of %s could not be read (%w): check git status there. %w", msg, repo, err, errReviewLeft)
+	}
+	switch {
+	case sit.underWay && sit.unmerged: // a conflict: git wrote nothing but the merge, and ran no hook
+		return reviewUndo(actx, t, msg, before, "merge", "--abort")
+	case sit.underWay:
+		// A hook refused the merge commit (HEAD unmoved), or the merge commit was made and git stopped in
+		// post-merge (HEAD moved): the index must be exactly the merge's result.
+		target := tree
+		if sit.head != before.head {
+			target = sit.head + "^{tree}"
 		}
+		return reviewUndoProven(actx, t, msg, before, sit, target, "merge", "--abort")
+	case sit.head != before.head:
+		return fmt.Errorf("%s; %s moved from %s to %s: check git -C %s log", msg, t.BaseBranch,
+			reviewShort(before.head), sanitize.Line(reviewShort(sit.head), 20), repo)
 	}
 	after, err := reviewRepoState(actx, t.Repo)
 	switch {
 	case err != nil:
-		return fmt.Errorf("%s; afterwards the state of %s could not be read (%w): check git status there", msg, repo, err)
-	case after.head != before.head:
-		return fmt.Errorf("%s; %s moved from %s to %s: check git -C %s log", msg, t.BaseBranch,
-			reviewShort(before.head), sanitize.Line(reviewShort(after.head), 20), repo)
-	case after.status == before.status:
+		return fmt.Errorf("%s; afterwards the state of %s could not be read (%w): check git status there. %w", msg, repo, err, errReviewLeft)
+	case reviewSame(before, after):
 		return fmt.Errorf("%s; nothing was merged%s", msg, reviewLeftovers(actx, t.Repo))
-	case !underWay && reviewCutShort(res, before):
-		return reviewUndoCutShort(actx, t, msg, before)
-	case underWay:
-		return fmt.Errorf("%s; the merge was aborted, but git status in %s differs from before the merge (%s): check it there",
-			msg, repo, reviewStateDiff(before, after))
+	case reviewCutShort(res, before):
+		return reviewUndoProven(actx, t, msg+"; git merge was cut short before it recorded the merge", before, sit, tree, "reset", "--merge")
 	}
-	return fmt.Errorf("%s; nothing was merged, but git status in %s differs from before the merge (%s). Curia left it as it is: "+
-		"if what differs is what the merge staged, git -C %s reset --merge undoes it; check git status there first",
-		msg, repo, reviewStateDiff(before, after), repo)
+	return reviewLeft(t, msg, before, after, "git stopped on its own and Curia cannot tell what it changed")
 }
 
 // reviewCutShort reports whether merge res was stopped before it ended on
 // its own (Curia stopped it, or a signal killed it) in a checkout whose
-// index was clean before: the one case where Curia undoes it itself.
+// index was clean before.
 func reviewCutShort(res gitResult, before reviewState) bool {
 	if before.staged {
 		return false
@@ -523,30 +652,89 @@ func reviewCutShort(res gitResult, before reviewState) bool {
 	return ok && ws.Signaled()
 }
 
-// reviewUndoCutShort undoes Curia's own merge that was cut short before git wrote MERGE_HEAD (a hook still
-// ran): HEAD has not moved, the index was clean before (reviewMerge refuses staged changes), and what differs
-// is what the merge staged. git reset --merge, what git merge --abort runs, resets the index and the files
-// the merge changed and keeps unstaged and untracked work. The checkout is then compared with the state before
-// the merge (HEAD and git status) and the error says exactly what differs, if anything; nothing more is tried.
-// It is the only reset Curia ever runs (Ruling P4-R5): never another form, --hard, checkout or clean.
-func reviewUndoCutShort(ctx context.Context, t model.Task, msg string, before reviewState) error {
+// reviewSame reports whether after is before in every way an undo must restore: HEAD, the index equal to
+// HEAD, git status with untracked files, and the content of every modified file.
+func reviewSame(before, after reviewState) bool {
+	return after.head == before.head && after.staged == before.staged && after.status == before.status &&
+		before.modified != nil && after.modified != nil && maps.Equal(before.modified, after.modified)
+}
+
+// reviewUndoProven runs the undo (git merge --abort, or git reset --merge) only when the checkout provably
+// holds Curia's merge and nothing else: no index.lock; the index exactly target, the tree the merge produced
+// (from git merge-tree before it ran, or the merge commit's); the working tree different from the index only in
+// files that differed before the merge, with the same content. Anything that cannot be proven runs nothing.
+func reviewUndoProven(ctx context.Context, t model.Task, msg string, before reviewState, sit reviewSituation, target string, undo ...string) error {
+	if why := reviewUnproven(ctx, t, before, sit, target); why != "" {
+		after, err := reviewRepoState(ctx, t.Repo)
+		if err != nil {
+			after = reviewState{status: "(git status could not be read)"}
+		}
+		return reviewLeft(t, msg, before, after, why)
+	}
+	return reviewUndo(ctx, t, msg, before, undo...)
+}
+
+// reviewUnproven says why the checkout cannot be shown to hold only Curia's merge, or "" when it can.
+func reviewUnproven(ctx context.Context, t model.Task, before reviewState, sit reviewSituation, target string) string {
+	switch {
+	case target == "":
+		return "this git cannot compute a merge's result beforehand (git merge-tree --write-tree needs git 2.38)"
+	case sit.locked:
+		return sanitize.Line(filepath.Join(sit.gitDir, "index.lock"), 300) + " exists: a git was killed, or one still runs"
+	case before.modified == nil:
+		return "the working tree could not be read before the merge"
+	}
+	if differs, err := reviewStaged(ctx, t.Repo, target); err != nil || differs {
+		return "the index holds changes that are not the merge's (something was staged while the merge ran)"
+	}
+	now, err := reviewModified(ctx, t.Repo)
+	if err != nil {
+		return "the working tree could not be read: " + sanitize.Line(err.Error(), 200)
+	}
+	for p, id := range now {
+		if before.modified[p] != id {
+			return "files changed in the working tree while the merge ran (" + sanitize.Line(p, 200) + ")"
+		}
+	}
+	return ""
+}
+
+// reviewUndo runs git undo... (merge --abort, or reset --merge: the only two Curia runs, never --hard,
+// checkout or clean) and reports whether the checkout is then as it was before the merge (reviewSame).
+func reviewUndo(ctx context.Context, t model.Task, msg string, before reviewState, undo ...string) error {
 	repo := sanitize.Line(t.Repo, 300)
-	cut := msg + "; git merge was cut short before it recorded the merge"
-	if err := reviewRunGroup(ctx, worktreeGitLimit, t.Repo, "reset", "--merge"); err != nil {
-		return fmt.Errorf("%s, and undoing what it had staged failed (%w). Nothing was merged, but %s holds what the merge "+
-			"staged: run git -C %s reset --merge there once no git runs in it", cut, err, repo, repo)
+	cmd := strings.Join(undo, " ")
+	if err := reviewRunGroup(ctx, worktreeGitLimit, t.Repo, undo...); err != nil {
+		return fmt.Errorf("%s; git %s failed (%w). Nothing was merged, but %s holds what the merge left: look with git -C %s status. %w",
+			msg, cmd, err, repo, repo, errReviewLeft)
 	}
 	after, err := reviewRepoState(ctx, t.Repo)
 	switch {
 	case err != nil:
-		return fmt.Errorf("%s; Curia ran git reset --merge, then the state of %s could not be read (%w): check git status there",
-			cut, repo, err)
-	case after.head != before.head || after.status != before.status:
-		return fmt.Errorf("%s; after git reset --merge, %s still differs from before the merge (%s): check it there",
-			cut, repo, reviewStateDiff(before, after))
+		return fmt.Errorf("%s; Curia ran git %s, then the state of %s could not be read (%w): check git status there", msg, cmd, repo, err)
+	case !reviewSame(before, after):
+		return fmt.Errorf("%s; after git %s, %s still differs from before the merge (%s): check it there", msg, cmd, repo,
+			reviewStateDiff(before, after))
 	}
-	return fmt.Errorf("%s; Curia undid what it had staged (git reset --merge) and %s is as it was. Nothing was merged%s",
-		cut, repo, reviewLeftovers(ctx, t.Repo))
+	if undo[0] == "reset" {
+		return fmt.Errorf("%s; Curia undid what it had staged (git reset --merge) and %s is as it was. Nothing was merged%s",
+			msg, repo, reviewLeftovers(ctx, t.Repo))
+	}
+	return fmt.Errorf("%s; nothing was merged%s", msg, reviewLeftovers(ctx, t.Repo))
+}
+
+// reviewLeft is the outcome when Curia runs nothing after an interrupted merge: what it found, why it cannot
+// undo it, and what the user can run. It wraps errReviewLeft: the review stays pending with its intent kept.
+func reviewLeft(t model.Task, msg string, before, after reviewState, why string) error {
+	repo := sanitize.Line(t.Repo, 300)
+	diff := reviewStateDiff(before, after)
+	if diff == "" {
+		diff = "git status as before"
+	}
+	return fmt.Errorf("%s; the merge was interrupted and %s holds changes Curia cannot attribute to its own merge (%s), so it "+
+		"ran nothing there (%s). Look with git -C %s status; to undo the merge yourself, git -C %s merge --abort while a merge "+
+		"is under way, or git -C %s reset --merge, either of which also undoes anything staged since. The review stays pending: %w",
+		msg, repo, why, diff, repo, repo, repo, errReviewLeft)
 }
 
 // reviewLeftoverFiles are the files git may leave in its directory after a merge that did not complete:

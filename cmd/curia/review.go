@@ -606,13 +606,17 @@ func reviewApproveMerge(ctx context.Context, st *store.Store, r model.Review, t 
 }
 
 // reviewMergeRelease follows a failed merge of head: it keeps r's intent when the base contains head after
-// all (and says to approve again to record it), else clears it, and returns the merge's error.
+// all (and says to approve again to record it) or when Curia left the checkout as it found it (errReviewLeft),
+// else clears it, and returns the merge's error.
 func reviewMergeRelease(ctx context.Context, st *store.Store, r model.Review, t model.Task, head string, failed error) error {
 	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), worktreeGitLimit)
 	defer cancel()
 	if n, err := reviewAhead(actx, t, head); err == nil && n == 0 {
 		return fmt.Errorf("%w. %s holds %s all the same: record it with curia review %s --approve --head %s",
 			failed, t.BaseBranch, reviewShort(head), r.ID, head)
+	}
+	if errors.Is(failed, errReviewLeft) { // what git left is unknown: the intent stays, the claim with it
+		return failed
 	}
 	if err := st.ReleaseReviewIntent(actx, r.ID, r.IntentAt); err != nil {
 		return fmt.Errorf("%w (and clearing the approval's claim failed: %s)", failed, sanitize.Line(err.Error(), reviewGitErrMax))
