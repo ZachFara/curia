@@ -570,3 +570,23 @@ func TestOtherServer(t *testing.T) {
 		}
 	}
 }
+
+func TestBadgeWithForecast(t *testing.T) {
+	const fc = "5h 62% → limit ~48m (resets 1h50m)"
+	for _, tc := range []struct {
+		name string
+		in   fleet.Counts
+		want string
+	}{
+		{"counts and forecast", fleet.Counts{Decisions: 2, Waiting: 1, Forecast: fc}, "D2 W1 " + fc},
+		{"forecast alone", fleet.Counts{Forecast: fc}, fc},
+		{"with auto-off", fleet.Counts{Decisions: 2, Waiting: 1, Forecast: fc, AutoOff: true}, "D2 W1 " + fc + " auto-off"},
+		{"forecast and auto-off only", fleet.Counts{Forecast: fc, AutoOff: true}, fc + " auto-off"},
+		{"no forecast", fleet.Counts{Decisions: 2, Waiting: 1, AutoOff: true}, "D2 W1 auto-off"},
+		{"nothing", fleet.Counts{}, ""},
+	} {
+		if got := fleet.Badge(tc.in); got != tc.want {
+			t.Errorf("%s: Badge(%+v) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
