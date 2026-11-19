@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -130,6 +131,7 @@ func bindLine(key, command, def string) string {
 //     they mention @curia_marker already. set -ag appends the text as it is,
 //     without expanding anything in the user's format.
 //   - Each key bound only when free (bindLine).
+//   - The focus hook set as one entry of pane-focus-in's array (hookLine).
 //
 // Each command that reaches a shell holds bin as one shell word, wrapped in
 // one tmux quoting layer per tmux parse on the way.
@@ -145,15 +147,29 @@ func snippet(bin string, keys []KeyState) string {
 	}
 	for _, opt := range []string{"window-status-format", "window-status-current-format"} {
 		lines = append(lines, "if -F '#{m:*@curia_marker*,#{"+opt+"}}' '' "+
-			tmuxQuote("set -ag "+opt+" '#{E:@curia_marker_format}'"))
+			tmuxQuote("set -ag "+opt+" '"+markerRef+"'"))
 	}
 	for _, k := range keys {
 		if k.Key != "" {
 			lines = append(lines, bindLine(k.Key, k.Command, k.Default))
 		}
 	}
-	lines = append(lines, "set-hook -g pane-focus-in "+tmuxQuote("run-shell -b "+tmuxQuote(b+" seen #{pane_id}")))
+	lines = append(lines, hookLine(b))
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// hookLine sets Curia's focus hook, for the binary b (shell-quoted), as one
+// entry of the hook's array, focusHookName, and only when that entry is
+// empty or already the snippet's command for some binary: every other
+// entry, the user's or another program's, stays as it is, and a re-source
+// or a new binary replaces Curia's own entry instead of adding a second. As
+// in bindLine, the shell asks the server that runs it.
+func hookLine(b string) string {
+	idx := `pane-focus-in\[` + strconv.Itoa(focusHookIndex) + `\]`
+	check := `[ -n "$TMUX" ] && tmux show -g status >/dev/null 2>&1 && tmux show-hooks -g '` + focusHookName + `' 2>/dev/null | ` +
+		`grep -qE '^` + idx + ` *$|^` + idx + ` run-shell -b .* seen .\{pane_id\}.?$'`
+	set := "set-hook -g '" + focusHookName + "' " + tmuxQuote("run-shell -b "+tmuxQuote(b+seenSuffix))
+	return "if-shell " + tmuxQuote(check) + " " + tmuxQuote(set)
 }
 
 // tmuxDoubleQuoted escapes what tmux reads specially inside double quotes.

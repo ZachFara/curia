@@ -219,8 +219,9 @@ func TestInstallAndUninstallRoundTrip(t *testing.T) {
 	}
 }
 
-// Re-sourcing ~/.tmux.conf unsets nothing in a running server, so uninstall
-// says how to undo the snippet instead.
+// Re-sourcing ~/.tmux.conf unsets nothing in a running server. With no server
+// to reach, uninstall says the file is clean, that a running server keeps the
+// old settings, and gives the commands that clear them by hand.
 func TestUninstallSaysHowToUndoTmux(t *testing.T) {
 	installRecord(t)
 	t.Setenv("HOME", t.TempDir())
@@ -229,9 +230,12 @@ func TestUninstallSaysHowToUndoTmux(t *testing.T) {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
 	for _, want := range []string{
-		"Restart tmux",
-		"tmux set-hook -gu pane-focus-in; tmux set -gu @curia_marker_format\n",
-		`for k in a A N; do tmux list-keys -T prefix "$k" 2>/dev/null | grep -q curia && tmux unbind "$k"; done` + "\n",
+		"no longer loads Curia; no running tmux server was reached",
+		"a tmux server that is still running keeps Curia's hook, keys, badge and marker until it restarts",
+		"  tmux show-hooks -g pane-focus-in | grep -F -- ",
+		"tmux set-hook -gu \"$h\"",
+		"tmux unbind-key -T prefix a\n",
+		"tmux set -gu @curia_marker_format",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("uninstall output missing %q:\n%s", want, out)
@@ -239,6 +243,9 @@ func TestUninstallSaysHowToUndoTmux(t *testing.T) {
 	}
 	if strings.Contains(out, "source-file") {
 		t.Errorf("uninstall output still says to re-source:\n%s", out)
+	}
+	if again, err := installRun(t, "uninstall"); err != nil || !strings.Contains(again, "no running tmux server was reached") {
+		t.Errorf("second uninstall: err = %v\n%s", err, again)
 	}
 }
 
@@ -729,10 +736,10 @@ func TestInstallUsesConfiguredTmuxKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
-	if want := "for k in a C-y; do"; !strings.Contains(out, want) {
+	if want := "tmux list-keys -T prefix C-y "; !strings.Contains(out, want) {
 		t.Errorf("uninstall output missing %q:\n%s", want, out)
 	}
-	if !strings.Contains(out, "tmux bind m select-pane -m") {
+	if !strings.Contains(out, "tmux bind-key -T prefix m select-pane -m") {
 		t.Errorf("uninstall output does not restore tmux's m:\n%s", out)
 	}
 }
@@ -754,7 +761,7 @@ func TestInstallMessageKeyOptionAndTakenKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "for k in a A N F6; do") || strings.Contains(out, "select-pane") {
+	if !strings.Contains(out, "tmux list-keys -T prefix F6 ") || strings.Contains(out, "select-pane") {
 		t.Errorf("uninstall output:\n%s", out)
 	}
 
@@ -774,7 +781,7 @@ func TestInstallMessageKeyOptionAndTakenKey(t *testing.T) {
 	}
 }
 
-// Uninstall's loop covers every configured key, and for m, which tmux binds
+// Uninstall's by-hand lines cover every configured key, and for m, which tmux binds
 // by default, it gives tmux's own binding back instead of leaving it unbound.
 func TestUninstallSaysHowToUnbindBothKeys(t *testing.T) {
 	installRecord(t)
@@ -784,8 +791,10 @@ func TestUninstallSaysHowToUnbindBothKeys(t *testing.T) {
 		t.Fatalf("uninstall: %v\n%s", err, out)
 	}
 	for _, want := range []string{
-		`for k in a A N; do tmux list-keys -T prefix "$k" 2>/dev/null | grep -q curia && tmux unbind "$k"; done` + "\n",
-		"  tmux list-keys -T prefix m 2>/dev/null | grep -q curia && tmux bind m select-pane -m\n",
+		" && tmux unbind-key -T prefix a\n",
+		" && tmux unbind-key -T prefix A\n",
+		" && tmux unbind-key -T prefix N\n",
+		" && tmux bind-key -T prefix m select-pane -m\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("uninstall output missing %q:\n%s", want, out)
@@ -793,11 +802,12 @@ func TestUninstallSaysHowToUnbindBothKeys(t *testing.T) {
 	}
 }
 
-// installPrivateTmux starts a private tmux server (no configuration, its own
+// installPrivateTmux (tmuxEnv is the TMUX value that makes plain tmux reach
+// the private server) starts a private tmux server (no configuration, its own
 // socket) and returns a function that runs a tmux command on it and a
 // function that runs the tmux lines of uninstall's hint against it, failing
 // on any output.
-func installPrivateTmux(t *testing.T) (tm func(args ...string) string, runHint func(out string)) {
+func installPrivateTmux(t *testing.T) (tm func(args ...string) string, runHint func(out string), tmuxEnv string) {
 	t.Helper()
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
@@ -837,7 +847,7 @@ func installPrivateTmux(t *testing.T) (tm func(args ...string) string, runHint f
 			}
 		}
 	}
-	return tm, runHint
+	return tm, runHint, sock + ",1,0"
 }
 
 // The uninstall commands run against a real tmux server: Curia's m goes back
@@ -845,7 +855,7 @@ func installPrivateTmux(t *testing.T) (tm func(args ...string) string, runHint f
 func TestUninstallCommandsInRealTmux(t *testing.T) {
 	installRecord(t)
 	h := installSetup(t, "")
-	tm, runHint := installPrivateTmux(t)
+	tm, runHint, _ := installPrivateTmux(t)
 	if out, err := installRun(t, "install"); err != nil {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
@@ -873,6 +883,74 @@ func TestUninstallCommandsInRealTmux(t *testing.T) {
 	runHint(out)
 	if got := tm("list-keys", "-T", "prefix", "m"); !strings.Contains(got, "display-message") {
 		t.Errorf("user's m after uninstall = %q, want untouched", got)
+	}
+}
+
+// With TMUX naming a private server, uninstall itself undoes the snippet in
+// it: Curia's hook entry (beside a foreign one before and after), keys and
+// badge go, the themed status-right is otherwise byte for byte as it was, a
+// key the user rebound stays, and every action is a printed line.
+func TestUninstallUndoesTheSnippetInARunningServer(t *testing.T) {
+	installRecord(t)
+	h := installSetup(t, "")
+	tm, _, tmuxEnv := installPrivateTmux(t)
+	t.Setenv("TMUX", tmuxEnv)
+	tm("set-option", "-g", "status-right", "#[fg=green]LEFT | %H:%M")
+	tm("set-hook", "-g", "pane-focus-in[0]", "run-shell 'echo before'")
+	if out, err := installRun(t, "install"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	tm("set-hook", "-g", "pane-focus-in[200]", "run-shell 'echo after'")
+	tm("set-option", "-ag", "status-right", " | RIGHT")
+	if out := tm("source-file", filepath.Join(h.home, ".config", "curia", "curia.tmux")); out != "" {
+		t.Fatalf("source-file: %s", out)
+	}
+	wantRight := tm("show-options", "-gv", "status-right")
+	if !strings.Contains(wantRight, "@curia_badge") {
+		t.Fatalf("status-right has no badge: %q", wantRight)
+	}
+	tm("bind", "N", "display-message", "mine") // the user rebinds next
+	out, err := installRun(t, "uninstall")
+	if err != nil {
+		t.Fatalf("uninstall: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"removed Curia's hook", "removed Curia's badge", "prefix a: unbound", "prefix A: unbound",
+		"prefix N: not Curia's binding, left as it is", "replaced by tmux's own",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("uninstall output missing %q:\n%s", want, out)
+		}
+	}
+	if got := tm("show-options", "-gv", "status-right"); got != "#[fg=green]LEFT | %H:%M | RIGHT" {
+		t.Errorf("status-right after uninstall = %q", got)
+	}
+	installCheckServerAfterUninstall(t, tm)
+	again, err := installRun(t, "uninstall")
+	if err != nil || strings.Contains(again, "removed Curia's") {
+		t.Errorf("second uninstall: err = %v\n%s", err, again)
+	}
+}
+
+// installCheckServerAfterUninstall checks the private server after uninstall
+// undid the snippet there: foreign hook entries and the user's N stay, Curia's
+// a and A are gone, and m is tmux's own again.
+func installCheckServerAfterUninstall(t *testing.T, tm func(args ...string) string) {
+	t.Helper()
+	hooks := tm("show-hooks", "-g", "pane-focus-in")
+	if strings.Contains(hooks, "curia") || !strings.Contains(hooks, "echo before") || !strings.Contains(hooks, "echo after") {
+		t.Errorf("pane-focus-in after uninstall:\n%s", hooks)
+	}
+	if got := tm("list-keys", "-T", "prefix", "N"); !strings.Contains(got, "display-message") {
+		t.Errorf("user's N after uninstall = %q", got)
+	}
+	for _, key := range []string{"a", "A"} {
+		if got := tm("list-keys", "-T", "prefix", key); strings.Contains(got, "curia") {
+			t.Errorf("%s after uninstall = %q, want unbound", key, got)
+		}
+	}
+	if got := tm("list-keys", "-T", "prefix", "m"); !strings.HasSuffix(got, " select-pane -m") {
+		t.Errorf("m after uninstall = %q, want tmux's default", got)
 	}
 }
 
