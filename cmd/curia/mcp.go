@@ -309,7 +309,7 @@ func mcpMarkWindow(ctx context.Context, st *store.Store, tm tmux.Client, logger 
 	}
 	actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 	defer cancel()
-	if err := attention.Apply(actx, tm, st, sess.TmuxWindow); err != nil && !errors.Is(err, tmux.ErrNoWindow) {
+	if err := attention.Apply(actx, tm, st, sess.TmuxWindow, sess.Socket); err != nil && !errors.Is(err, tmux.ErrNoWindow) {
 		logger.Warn("mcp: marker", "window", sess.TmuxWindow, "err", err.Error())
 	}
 }

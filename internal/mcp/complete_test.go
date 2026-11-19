@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/task"
 )
 
 // reviewed is one call of Deps.Reviewed.
@@ -395,5 +397,24 @@ func TestCompleteNeverClosesItsReview(t *testing.T) {
 	}
 	if r := f.review("R-1"); r.Status != model.ReviewPending || !r.ClosedAt.IsZero() || r.ApprovedHow != "" {
 		t.Errorf("R-1 = %+v, want pending", r)
+	}
+}
+
+// TestCompleteSchemaStatesLimits: the schema's maxLength values are the
+// limits complete_task enforces.
+func TestCompleteSchemaStatesLimits(t *testing.T) {
+	var s struct {
+		Properties map[string]struct {
+			MaxLength int `json:"maxLength"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(completeSchema), &s); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Properties["summary"].MaxLength; got != task.MaxSummary {
+		t.Errorf("summary maxLength = %d, want %d", got, task.MaxSummary)
+	}
+	if got := s.Properties["tests_detail"].MaxLength; got != task.MaxTestsDetail {
+		t.Errorf("tests_detail maxLength = %d, want %d", got, task.MaxTestsDetail)
 	}
 }

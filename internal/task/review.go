@@ -72,9 +72,12 @@ func NormalizeNote(note string) (string, error) {
 	return note, nil
 }
 
-// NoteMessage is the message that carries a change request.
+// NoteMessage is the message that carries a change request. Its fixed words
+// hold none of the characters a typed line strips (a colon, a message id:
+// Ruling 105), so only the developer's own note can make a typed change
+// request "Wording simplified".
 func NoteMessage(reviewID, taskID, note string) string {
-	return "Review " + reviewID + " of " + taskID + ": changes requested. " + note
+	return "Changes requested in review " + reviewID + " of " + taskID + ". " + note
 }
 
 // PRTitle is the task id and title on one line, without mentions, at most
@@ -84,18 +87,15 @@ func PRTitle(t model.Task) string {
 	return sanitize.Line(t.ID+": "+title, maxPRTitle)
 }
 
-// PRBody is the pull-request description. Only the tests detail (one line,
-// without "@" or backticks) and the fenced summary come from the agent.
+// PRBody is the pull-request description. What the agent wrote, its tests
+// detail and its summary, is inside one tilde fence (whose tilde runs are
+// cut to two, so neither can close it); outside it only Curia's own words,
+// the ids and the tests status (an enum) appear, so no closing keyword,
+// mention, link or image of the agent's reaches the rendered page.
 func PRBody(t model.Task, r model.Review, decided []model.Decision) string {
 	var head strings.Builder
 	head.WriteString("Curia task " + t.ID + ", review " + r.ID + ".\n\n")
-	head.WriteString("Tests (the agent's report): " + string(r.Tests) + ".")
-	detail := sanitize.Line(r.TestsDetail, MaxTestsDetail)
-	detail = strings.NewReplacer("@", "", "`", "").Replace(detail)
-	if detail = strings.TrimSpace(detail); detail != "" {
-		head.WriteString(" " + detail)
-	}
-	head.WriteString("\n\n")
+	head.WriteString("Tests (the agent's report): " + string(r.Tests) + ".\n\n")
 	if len(decided) > 0 {
 		ids := make([]string, len(decided))
 		for i, d := range decided {
@@ -103,7 +103,10 @@ func PRBody(t model.Task, r model.Review, decided []model.Decision) string {
 		}
 		head.WriteString("Decisions on this task: " + strings.Join(ids, ", ") + "\n\n")
 	}
-	head.WriteString("Summary by the agent:\n\n~~~~text\n")
+	head.WriteString("The agent's tests detail and summary:\n\n~~~~text\n")
+	if detail := strings.TrimSpace(sanitize.Line(r.TestsDetail, MaxTestsDetail)); detail != "" {
+		head.WriteString("Tests detail: " + tildeRuns.ReplaceAllString(detail, "~~") + "\n\n")
+	}
 	const tail = "\n~~~~\n"
 
 	summary := tildeRuns.ReplaceAllString(sanitize.Text(r.Summary, MaxSummary), "~~")

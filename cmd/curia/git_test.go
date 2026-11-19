@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -351,4 +353,86 @@ func TestGitInfoUnexpectedOutput(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunGroupOwnProcessGroup: the child leads a process group of its own,
+// so a signal to Curia's group does not reach it.
+func TestRunGroupOwnProcessGroup(t *testing.T) {
+	out, _, err := runGroup(context.Background(), "", os.Environ(), "/bin/sh", "-c", "ps -o pgid= -p $$; echo $$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgid, pid, _ := strings.Cut(out, "\n")
+	if strings.TrimSpace(pgid) != strings.TrimSpace(pid) {
+		t.Errorf("the child's process group is %s, want its own (%s)", pgid, pid)
+	}
+	if strings.TrimSpace(pgid) == strconv.Itoa(syscall.Getpgrp()) {
+		t.Errorf("the child is in Curia's process group %s", pgid)
+	}
+}
+
+// TestRunGroupStopsWithTermThenKill: when the context ends the child gets
+// SIGTERM first; one that ignores it is killed after the grace period, with
+// what is left of its group.
+func TestRunGroupStopsWithTermThenKill(t *testing.T) {
+	prev := groupGrace
+	groupGrace = 300 * time.Millisecond
+	t.Cleanup(func() { groupGrace = prev })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	out, _, err := runGroup(ctx, "", os.Environ(), "/bin/sh", "-c", "trap 'echo got TERM; exit 3' TERM; sleep 30 & wait")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 3 || out != "got TERM" {
+		t.Errorf("a child that stops on SIGTERM: out %q, err %v; want it to see TERM and exit 3", out, err)
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel2()
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	start := time.Now()
+	_, _, err = runGroup(ctx2, "", os.Environ(), "/bin/sh", "-c", "trap '' TERM; sleep 30 & echo $! > '"+pidFile+"'; wait")
+	if took := time.Since(start); took > 10*time.Second {
+		t.Errorf("runGroup took %s to stop a child that ignores SIGTERM", took)
+	}
+	if ws, ok := exitStatus(err); !ok || ws.Signal() != syscall.SIGKILL {
+		t.Errorf("a child that ignores SIGTERM: err %v, want it killed", err)
+	}
+	b, rerr := os.ReadFile(filepath.Clean(pidFile))
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	for deadline := time.Now().Add(5 * time.Second); syscall.Kill(pid, 0) == nil; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the child's own child %d still runs", pid)
+		}
+	}
+}
+
+// TestRunGroupOutputInFiles: what the child writes is kept, at most
+// groupMaxOut bytes of each stream, and it does not die writing once no one
+// reads.
+func TestRunGroupOutputInFiles(t *testing.T) {
+	out, errOut, err := runGroup(context.Background(), "", os.Environ(), "/bin/sh", "-c",
+		"echo out; echo err >&2; head -c 200000 /dev/zero | tr '\\0' x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out, "out\nxxx") || len(out) != groupMaxOut {
+		t.Errorf("stdout starts %q and is %d bytes, want %d", out[:min(10, len(out))], len(out), groupMaxOut)
+	}
+	if errOut != "err" {
+		t.Errorf("stderr = %q", errOut)
+	}
+}
+
+// exitStatus is the wait status of a child that err says did not exit 0.
+func exitStatus(err error) (syscall.WaitStatus, bool) {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return 0, false
+	}
+	ws, ok := exit.Sys().(syscall.WaitStatus)
+	return ws, ok
 }

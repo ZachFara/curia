@@ -23,10 +23,12 @@ var (
 	reviewsJSON   bool
 )
 
-// Cell limits of the reviews table, in runes.
+// Cell limits of the reviews table, in runes: with ids below R-1000 and
+// T-1000 a row fits 80 columns (live check defect 10), as curia ls does by
+// keeping its cells short. The whole text is in --json and curia review.
 const (
-	reviewsTitleLimit   = 30
-	reviewsSummaryLimit = 60
+	reviewsTitleLimit   = 12
+	reviewsSummaryLimit = 20
 	reviewsShortLimit   = 40
 )
 
@@ -177,7 +179,7 @@ func reviewsCell(s string, limit int) string { return ui.Cell(sanitize.Line(s, l
 func reviewsStatusText(r model.Review) string {
 	switch r.Status {
 	case model.ReviewChanges:
-		return "changes requested"
+		return "changes asked"
 	case model.ReviewApproved:
 		if r.ApprovedHow != "" {
 			return "approved (" + string(r.ApprovedHow) + ")"
@@ -186,9 +188,10 @@ func reviewsStatusText(r model.Review) string {
 	return string(r.Status)
 }
 
-// reviewsTestsText is the test result, marked as the agent's own claim.
+// reviewsTestsText is the test result, under the header AGENT TESTS, which
+// marks it as the agent's own claim.
 func reviewsTestsText(r model.Review) string {
-	return "agent: " + strings.ReplaceAll(string(r.Tests), "_", " ")
+	return strings.ReplaceAll(string(r.Tests), "_", " ")
 }
 
 // reviewsFirstLine is the first line of s, whatever the line break.
@@ -212,7 +215,7 @@ func reviewsTaskText(id, title string) string {
 // titles holds each task's title by task id.
 func reviewsPrintTable(w io.Writer, rs []model.Review, titles map[string]string, now time.Time) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "ID\tAGE\tTASK\tSTATUS\tTESTS\tSUMMARY")
+	_, _ = fmt.Fprintln(tw, "ID\tAGE\tTASK\tSTATUS\tAGENT TESTS\tSUMMARY")
 	for _, r := range rs {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			reviewsCell(r.ID, reviewsShortLimit), reviewsCell(ui.Age(r.CreatedAt, now), reviewsShortLimit),

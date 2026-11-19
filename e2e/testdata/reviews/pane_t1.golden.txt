@@ -1,3 +1,3 @@
 Decision D-2 answered: option B, Redis stream. Continue.
-Message M-1 from the user: Review R-1 of T-1 changes requested. handle the empty list. Wording simplified: call check_messages.
+Message M-1 from the user: Changes requested in review R-1 of T-1. handle the empty list.
 Message M-3 from the user: back on the restored session.

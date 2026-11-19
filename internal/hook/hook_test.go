@@ -2749,3 +2749,32 @@ func TestSecondSessionEndKeepsFirstReason(t *testing.T) {
 		t.Errorf("EndReason = %q after a second SessionEnd, want the first, prompt_input_exit", s.EndReason)
 	}
 }
+
+// TestSessionStartLeavesOtherServersSession: a SessionStart in %0 of one
+// tmux server does not end the live session in %0 of another server; it
+// still ends one in %0 of its own (TestSessionStartEndsPriorSessionInPane)
+// and, through the socket of the one PaneInfo call it already makes, costs
+// no other tmux call (TestSessionStartStillOneTmuxCall).
+func TestSessionStartLeavesOtherServersSession(t *testing.T) {
+	st := openStore(t)
+	a := &fakeEnv{socket: "/tmp/tmux-501/A"}
+	b := &fakeEnv{socket: "/tmp/tmux-501/B"}
+	run(t, st, a.env("%0"), model.SessionStart, payload("A", "/p/a.jsonl", ""))
+	run(t, st, b.env("%0"), model.SessionStart, payload("B", "/p/b.jsonl", ""))
+	if sa := get(t, st, "A"); sa.State == model.StateEnded {
+		t.Errorf("A on %s was ended by B's SessionStart on another server", sa.Socket)
+	}
+	if sb := get(t, st, "B"); sb.State != model.StateIdle || sb.Socket != "/tmp/tmux-501/B" {
+		t.Errorf("B = %s on %q", sb.State, sb.Socket)
+	}
+	if len(b.paneCalls) != 1 {
+		t.Errorf("PaneInfo calls = %q, want one", b.paneCalls)
+	}
+	run(t, st, a.env("%0"), model.SessionStart, payload("C", "/p/c.jsonl", ""))
+	if sa := get(t, st, "A"); sa.State != model.StateEnded {
+		t.Errorf("A = %s after C started in its own pane, want ended", sa.State)
+	}
+	if sb := get(t, st, "B"); sb.State != model.StateIdle {
+		t.Errorf("B = %s after C started on another server, want idle", sb.State)
+	}
+}

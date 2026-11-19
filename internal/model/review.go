@@ -48,6 +48,10 @@ type Review struct {
 	DiffStat, Head, PRURL, Notes, NoteMessage string
 	ClosedVia                                 AnsweredVia
 	CreatedAt, UpdatedAt, ClosedAt            time.Time
+	// IntentAt is, on a pending review, when an approval recorded its intent
+	// (ApprovedHow, Head and DiffStat) before running git; zero when none.
+	// It is stored in closed_at, which a pending review does not otherwise use.
+	IntentAt time.Time
 }
 
 // PushKind says what a push notification is about.

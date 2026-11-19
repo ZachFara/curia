@@ -392,21 +392,27 @@ func (s *Store) AppendEvent(ctx context.Context, ev model.Event, raw []byte) err
 }
 
 // MarkSeen sets SeenAt to at on every non-ended session in pane.
-func (s *Store) MarkSeen(ctx context.Context, pane string, at time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET seen_at = ? WHERE tmux_pane = ? AND state != ?`,
-		formatTime(at), pane, model.StateEnded)
+func (s *Store) MarkSeen(ctx context.Context, pane, socket string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET seen_at = ? WHERE tmux_pane = ? AND state != ?`+sameServer,
+		formatTime(at), pane, model.StateEnded, socket, socket)
 	if err != nil {
 		return fmt.Errorf("store: mark pane %s seen: %w", pane, err)
 	}
 	return nil
 }
 
-// EndOthersInPane sets every non-ended session in pane other than keepID to
-// ended, with UpdatedAt at.
-func (s *Store) EndOthersInPane(ctx context.Context, pane, keepID string, at time.Time) error {
+// sameServer is fleet.OtherSocket's rule in SQL, negated: the row is on the
+// tmux server whose socket is the two parameters that follow, or either
+// socket is unknown (NULL or ""). A pane id names a pane of one server only.
+const sameServer = ` AND (COALESCE(tmux_socket, '') = '' OR ? = '' OR tmux_socket = ?)`
+
+// EndOthersInPane sets every non-ended session in pane of the tmux server
+// at socket ("" when unknown) other than keepID to ended, with UpdatedAt
+// at. A session recorded on another server is left alone.
+func (s *Store) EndOthersInPane(ctx context.Context, pane, socket, keepID string, at time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET state = ?, updated_at = ? WHERE tmux_pane = ? AND id != ? AND state != ?`,
-		model.StateEnded, formatTime(at), pane, keepID, model.StateEnded)
+		`UPDATE sessions SET state = ?, updated_at = ? WHERE tmux_pane = ? AND id != ? AND state != ?`+sameServer,
+		model.StateEnded, formatTime(at), pane, keepID, model.StateEnded, socket, socket)
 	if err != nil {
 		return fmt.Errorf("store: end sessions in pane %s other than %s: %w", pane, keepID, err)
 	}

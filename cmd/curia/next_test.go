@@ -180,3 +180,22 @@ func TestNextJumpsToReviewReadySession(t *testing.T) {
 		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
 	}
 }
+
+// TestNextSkipsOtherServer: a session recorded on another tmux server is
+// never the target, though this server has a pane with its id; the next
+// most urgent session on this server is.
+func TestNextSkipsOtherServer(t *testing.T) {
+	_, fake := fleetHome(t, []string{"%1", "%2"},
+		model.Session{ID: "elsewhere", Agent: "claude", State: model.StateNeedsDecision, Pane: "%1", Socket: "/tmp/tmux-501/other", UpdatedAt: at(9, 0)},
+		model.Session{ID: "here", Agent: "claude", State: model.StateWaiting, Pane: "%2", Socket: "/tmp/tmux-501/default", UpdatedAt: at(11, 0)},
+	)
+	for i := range fake.Panes {
+		fake.Panes[i].Socket = "/tmp/tmux-501/default"
+	}
+	if out, err := runRoot(t, "next"); err != nil || out != "" {
+		t.Errorf("next = %q, %v, want no output", out, err)
+	}
+	if want := []string{"ListPanes", "SwitchTo %2"}; !reflect.DeepEqual(fake.Calls, want) {
+		t.Errorf("tmux calls = %q, want %q", fake.Calls, want)
+	}
+}

@@ -67,9 +67,11 @@ func init() {
 			"T-42: (a task), @<name> (an alias, task id, repository or branch), and rule: or\n" +
 			"task: for the kind. Without an address one bounded `claude -p` call suggests the\n" +
 			"target, which you confirm (Enter), change (Tab, k) or cancel (Esc). With no text\n" +
-			"on a terminal it opens the say view (prefix + m). Without a terminal only an\n" +
-			"addressed message, or one auto-send allows, is sent. - reads the text from\n" +
-			"stdin. Refuses to run inside an agent session.",
+			"on a terminal it opens the say view (prefix + m). When stdin or stdout is not\n" +
+			"a terminal (piped, or a script run from your shell) only an addressed message,\n" +
+			"or one auto-send allows, is sent. - reads the text from stdin. It needs a\n" +
+			"controlling terminal, as every user-only command does, and refuses to run\n" +
+			"inside an agent session.",
 		DisableFlagParsing: true, // the message is text: "--force" in it is no flag
 		RunE:               runSay,
 	})

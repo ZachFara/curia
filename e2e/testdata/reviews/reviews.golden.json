@@ -27,7 +27,7 @@
     "tests_detail": "",
     "status": "merged",
     "approved_how": "merge",
-    "diff_stat": "auth/refresh.go      | 3 +++\n auth/refresh_test.go | 3 +++\n 2 files changed, 6 insertions(+)",
+    "diff_stat": " auth/refresh.go      | 3 +++\n auth/refresh_test.go | 3 +++\n 2 files changed, 6 insertions(+)",
     "head": "<commit>",
     "pr_url": "",
     "my_notes": "",
