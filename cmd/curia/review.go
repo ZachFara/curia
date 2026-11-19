@@ -592,18 +592,18 @@ func reviewApproveReady(ctx context.Context, r model.Review, t model.Task, how m
 	if err := reviewEarlierMerge(ctx, r, t, now, "approve"); err != nil || how != model.ApproveMerge {
 		return err
 	}
-	return reviewMergeReady(ctx, r, t, now)
+	return reviewMergeReady(ctx, r, t)
 }
 
 // reviewMergeReady runs the checks of the user's checkout that refuse a merge (the base checked out, no
 // operation under way, no staged change) before the approval claims the review (C-B); an earlier approval's
 // git that may still run there is refused before, by reviewEarlierMerge.
-func reviewMergeReady(ctx context.Context, r model.Review, t model.Task, now time.Time) error {
+func reviewMergeReady(ctx context.Context, r model.Review, t model.Task) error {
 	if err := reviewCheckNames(t); err != nil {
 		return err
 	}
 	if err := reviewCheckCheckout(ctx, t); err != nil {
-		return reviewEarlierApproval(r, t, now, err)
+		return reviewEarlierApproval(r, t, err)
 	}
 	staged, err := reviewStaged(ctx, t.Repo, "HEAD")
 	switch {
@@ -652,21 +652,15 @@ func reviewEarlierMerge(ctx context.Context, r model.Review, t model.Task, now t
 		repo, r.ID, sanitize.Line(reviewShort(r.Head), 10), r.IntentAt.Local().Format("15:04:05"), verb, then, repo)
 }
 
-// reviewEarlierApproval is refusal err, reworded when an earlier approval's intent to merge stands on r: while
-// it is younger than the hold, the approval in flight is named as busy, as the claim would; once older, its
-// process may have been killed with its git still running.
-func reviewEarlierApproval(r model.Review, t model.Task, now time.Time, err error) error {
+// reviewEarlierApproval is refusal err of the checkout, with a sentence added when an earlier approval's
+// intent to merge stands on r (M-a). reviewEarlierMerge has refused before while that approval's git may still
+// run there, so err is the reason, kept as it is; the sentence says what approving again then does.
+func reviewEarlierApproval(r model.Review, t model.Task, err error) error {
 	if r.IntentAt.IsZero() || r.ApprovedHow != model.ApproveMerge {
 		return err
 	}
-	if r.IntentAt.After(now.Add(-reviewIntentHold)) {
-		return reviewBusyError(r, store.ErrReviewBusy)
-	}
-	repo := sanitize.Line(t.Repo, 300)
-	return fmt.Errorf("%s holds a merge under way or staged changes, and an earlier approval of %s (merge at %s, since %s) may still "+
-		"be running git there: wait for it to finish, then approve again, which records its merge once it is in %s. If no git "+
-		"runs there, what is staged is what that approval's merge left: look with git -C %s status. Nothing was done",
-		repo, r.ID, sanitize.Line(reviewShort(r.Head), 10), r.IntentAt.Local().Format("15:04:05"), t.BaseBranch, repo)
+	return fmt.Errorf("%w. An earlier approval of %s (merge at %s, since %s) did not finish: once its merge is in %s, approving "+
+		"again records it", err, r.ID, sanitize.Line(reviewShort(r.Head), 10), r.IntentAt.Local().Format("15:04:05"), t.BaseBranch)
 }
 
 // reviewHasCheckout reports whether t names a checkout an approval could have run git in: its names are valid

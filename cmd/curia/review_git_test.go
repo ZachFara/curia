@@ -1793,3 +1793,37 @@ func TestMergeCaseRenameIsNotInTheWay(t *testing.T) {
 		t.Fatalf("approve = %q, %v; want the merge", line, err)
 	}
 }
+
+// TestStaleIntentKeepsCheckoutReason: with an earlier approval's stale intent
+// standing and nothing of its git in the checkout, a refusal of the checkout
+// for another reason (here another branch checked out) keeps that reason and
+// adds a sentence on the earlier approval (M-a).
+func TestStaleIntentKeepsCheckoutReason(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	if _, err := f.st.ClaimReviewIntent(context.Background(), "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head},
+		f.now.Add(-time.Hour), reviewIntentHold); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, f.repo, "checkout", "-q", "-b", "other")
+	_, err := f.approve(model.ApproveMerge, head)
+	if err == nil || !strings.Contains(err.Error(), f.repo+" has other checked out, not main") ||
+		!strings.Contains(err.Error(), "An earlier approval of R-1 (merge at "+head[:7]+", since ") ||
+		strings.Contains(err.Error(), "merge under way or staged changes") {
+		t.Errorf("approve = %v, want the real reason, then the earlier approval", err)
+	}
+}
+
+// TestConflictRefusalNamesMergeOptions: with branch.main.mergeOptions
+// -Xtheirs, git's own merge of a conflicting branch would succeed; Curia's
+// refuses, and says that its merge does not use such options (M-b).
+func TestConflictRefusalNamesMergeOptions(t *testing.T) {
+	f := reviewNew(t)
+	f.commitOnMain("auth.go", "package auth // main's own\n", "main side")
+	gitRun(t, f.repo, "config", "branch.main.mergeOptions", "-Xtheirs")
+	_, err := f.approve(model.ApproveMerge, "")
+	if err == nil || !strings.Contains(err.Error(), "would conflict in auth.go") ||
+		!strings.Contains(err.Error(), "git's own merge may differ if this branch has custom merge options") {
+		t.Errorf("approve = %v, want the conflict refusal naming merge options", err)
+	}
+}

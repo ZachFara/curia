@@ -447,7 +447,8 @@ func reviewMergeTree(ctx context.Context, t model.Task, head string) (string, er
 			paths = append(paths[:reviewConflictsShown], fmt.Sprintf("%d more", n))
 		}
 		return "", fmt.Errorf("merging %s into %s would conflict in %s: resolve it on the branch first (merge %s into it in its "+
-			"worktree). Nothing was merged", t.Branch, t.BaseBranch, sanitize.Line(strings.Join(paths, ", "), reviewGitErrMax),
+			"worktree). Curia's merge uses git's default strategy and options, so git's own merge may differ if this branch has "+
+			"custom merge options. Nothing was merged", t.Branch, t.BaseBranch, sanitize.Line(strings.Join(paths, ", "), reviewGitErrMax),
 			t.BaseBranch)
 	case code == 129:
 		return "", nil // no --write-tree
@@ -896,6 +897,10 @@ func reviewUnproven(ctx context.Context, t model.Task, before reviewState, sit r
 
 // reviewUndo runs git undo... (merge --abort, or reset --merge: the only two Curia runs, never --hard,
 // checkout or clean) and reports whether the checkout is then as it was before the merge (reviewSame).
+// Accepted residual window (M-c): between reviewUnproven's last read and the start of the undo there is only
+// process start-up, a few tens of milliseconds after an interrupted merge; a change staged exactly then is lost
+// with the merge's, and "is as it was" is then not true of it. git offers no way to hold its index lock across a
+// check, so it cannot be closed from outside git.
 func reviewUndo(ctx context.Context, t model.Task, msg string, before reviewState, undo ...string) error {
 	repo := sanitize.Line(t.Repo, 300)
 	cmd := strings.Join(undo, " ")
