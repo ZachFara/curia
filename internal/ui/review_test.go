@@ -534,6 +534,68 @@ func TestReviewCostNotRecorded(t *testing.T) {
 	r.wantNotIn("cost not recorded")
 }
 
+// rvSessionsLine is the view's line that starts "Sessions:", its trailing
+// padding cut.
+func rvSessionsLine(t *testing.T, r *reviewRun) string {
+	t.Helper()
+	for _, l := range strings.Split(r.view(), "\n") {
+		if l = strings.TrimSpace(l); strings.HasPrefix(l, "Sessions:") {
+			return l
+		}
+	}
+	t.Fatalf("no Sessions line:\n%s", r.view())
+	return ""
+}
+
+func TestReviewShowsBranchCost(t *testing.T) {
+	d := rvDetail(1)
+	d.CostKnown, d.CostUSD = true, 4.12
+	src := &fakeReviews{}
+	src.set(d)
+	r := openReview(t, src, ReviewOptions{})
+	// Not known: Plan 4's line, byte for byte.
+	if got, want := rvSessionsLine(t, r), "Sessions: 3 (lead and 2 teammates) · duration 1h12m · cost $4.12"; got != want {
+		t.Errorf("line 7 = %q, want %q", got, want)
+	}
+	r.wantNotIn("cost-lens")
+
+	d.BranchCostKnown, d.BranchCostUSD = true, 5.03
+	src.set(d)
+	r = openReview(t, src, ReviewOptions{})
+	if got := rvSessionsLine(t, r); !strings.HasSuffix(got, "· cost $4.12 · branch $5.03 (cost-lens)") {
+		t.Errorf("line 7 = %q", got)
+	}
+	d.CostKnown, d.CostUSD, d.BranchCostUSD = false, 0, 1234.5
+	src.set(d)
+	r = openReview(t, src, ReviewOptions{})
+	if got, want := rvSessionsLine(t, r),
+		"Sessions: 3 (lead and 2 teammates) · duration 1h12m · cost not recorded · branch $1234.50 (cost-lens)"; got != want {
+		t.Errorf("line 7 = %q, want %q", got, want)
+	}
+}
+
+// The branch cost arrives seconds after the detail (the analyzer runs in the
+// background): it is drawn, but it neither restarts the dwell nor cancels an
+// open approve prompt, and the approval stays bound to the head shown.
+func TestReviewBranchCostKeepsThePrompt(t *testing.T) {
+	src := &fakeReviews{line: "R-1 approved"}
+	d := rvDetail(1)
+	d.Head = rvHead1
+	src.set(d)
+	r := openReview(t, src, ReviewOptions{})
+	r.at(0, "a")
+	r.wantPrompt(reviewConfirmApprove)
+	src.edit(func(d *ReviewDetail) { d.BranchCostKnown, d.BranchCostUSD = true, 5.03 })
+	r.detailTick()
+	r.wantPrompt(reviewConfirmApprove)
+	r.wantIn("· branch $5.03 (cost-lens)")
+	r.at(reviewGap, "y")
+	wantActions(t, src, "Approve R-1")
+	if got := src.approvedHeads(); !slices.Equal(got, []string{rvHead1}) {
+		t.Errorf("approved heads = %q, want %q", got, rvHead1)
+	}
+}
+
 func TestReviewDiffNoteShown(t *testing.T) {
 	d := rvDetail(1)
 	d.DiffNote = "the worktree has uncommitted changes that are not in this diff"

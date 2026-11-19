@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -116,11 +117,21 @@ func (m ReviewModel) textWidth() int {
 // keeps the scroll offset inside it.
 func (m ReviewModel) relayout() ReviewModel {
 	w := m.textWidth()
-	if f := m.face(); f != m.bodyFace || w != m.bodyWidth {
+	if f := m.bodyKey(); f != m.bodyFace || w != m.bodyWidth {
 		m.body, m.alerts = m.buildBody(w)
 		m.bodyFace, m.bodyWidth = f, w
 	}
 	return m.clampOffset()
+}
+
+// bodyKey is what the body is built for: the face, and the branch cost,
+// which is drawn but kept out of the face (ReviewDetail.BranchCostUSD).
+func (m ReviewModel) bodyKey() string {
+	k := m.face()
+	if d, ok := m.shownDetail(); ok && d.BranchCostKnown {
+		k += field(strconv.FormatFloat(d.BranchCostUSD, 'g', -1, 64))
+	}
+	return k
 }
 
 // bodyRoom is how many body lines are on screen.
@@ -351,7 +362,8 @@ func answerOf(d model.Decision) string {
 }
 
 // sessionsText is "Sessions: 3 (lead and 2 teammates) · duration 1h12m ·
-// cost $4.12", or "cost not recorded".
+// cost $4.12", or "cost not recorded", then " · branch $5.03 (cost-lens)"
+// when the analyzer has answered for the branch.
 func sessionsText(d ReviewDetail) string {
 	s := fmt.Sprintf("Sessions: %d", d.Sessions)
 	if d.Teammates > 0 {
@@ -359,9 +371,14 @@ func sessionsText(d ReviewDetail) string {
 	}
 	s += " · duration " + durationText(d.Duration)
 	if d.CostKnown {
-		return s + fmt.Sprintf(" · cost $%.2f", d.CostUSD)
+		s += fmt.Sprintf(" · cost $%.2f", d.CostUSD)
+	} else {
+		s += " · cost not recorded"
 	}
-	return s + " · cost not recorded"
+	if d.BranchCostKnown {
+		s += fmt.Sprintf(" · branch $%.2f (cost-lens)", d.BranchCostUSD)
+	}
+	return s
 }
 
 // durationText is "1h12m", "12m" or "45s", and "unknown" when not positive.
