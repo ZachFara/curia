@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/usage"
 )
 
 func init() {
@@ -70,5 +72,20 @@ func statusBadge(ctx context.Context, args []string) (string, error) {
 	counts := fleet.Count(sessions, openBlocking, undelivered+messages)
 	counts.Reviews = reviews
 	counts.AutoOff = autoOff
+	counts.Forecast = statusForecast(ctx, st, now)
 	return fleet.Badge(counts), nil
+}
+
+// statusForecast is the badge's limit warning, already rendered: one indexed
+// read of the last 20 minutes of samples, no network, no process. Empty when
+// no window warns or when the read fails (the counts still print).
+func statusForecast(ctx context.Context, st *store.Store, now time.Time) string {
+	samples, err := st.UsageSince(ctx, now.Add(-usage.BurnWindow))
+	if err != nil {
+		return ""
+	}
+	if w, ok := usage.Warning(usage.Forecasts(samples, now), now); ok {
+		return usage.BadgeText(w, now)
+	}
+	return ""
 }
