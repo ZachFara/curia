@@ -460,8 +460,9 @@ func reviewMergeTree(ctx context.Context, t model.Task, head string) (string, er
 // ignored (I-2): git merge replaces an ignored file without a word, and an undo of a merge cut short would then
 // delete it. The paths added are those of tree (the merge's result; head itself on a git without merge-tree
 // --write-tree) that HEAD does not have; one is in the way when it, or a part of its path that is not a directory,
-// exists on disk and git ls-files --others (which lists ignored files too) lists it, so a tracked file that only
-// differs in case on a case-insensitive disk is not.
+// exists on disk (os.Lstat, which on a case-insensitive disk also finds a name in another case), unless what is
+// there is a file HEAD tracks under a name that differs only in case (reviewTrackedAs), as when the branch
+// renames Notes.txt to notes.txt. Whatever else answers is refused, untracked, ignored or unknown: it fails closed.
 func reviewCheckOnDisk(ctx context.Context, t model.Task, tree, head string) error {
 	to := tree
 	if to == "" {
@@ -482,18 +483,12 @@ func reviewCheckOnDisk(ctx context.Context, t model.Task, tree, head string) err
 	if len(near) == 0 {
 		return nil
 	}
-	args := []string{"ls-files", "-z", "--others", "--"}
-	for _, q := range near {
-		args = append(args, ":(literal)"+q)
-	}
-	res = runGit(gctx, t.Repo, args...)
+	res = runGit(gctx, t.Repo, "ls-tree", "-r", "-z", "--name-only", "HEAD")
 	if res.err != nil {
 		return worktreeGitError(res, worktreeGitLimit)
 	}
-	others := strings.Split(strings.TrimSuffix(res.raw, "\x00"), "\x00")
-	found := slices.DeleteFunc(near, func(q string) bool {
-		return !slices.ContainsFunc(others, func(o string) bool { return o == q || strings.HasPrefix(o, q+"/") })
-	})
+	tracked := strings.Split(strings.TrimSuffix(res.raw, "\x00"), "\x00")
+	found := slices.DeleteFunc(near, func(q string) bool { return reviewTrackedAs(t.Repo, q, tracked) })
 	if len(found) == 0 {
 		return nil
 	}
@@ -508,6 +503,23 @@ func reviewCheckOnDisk(ctx context.Context, t model.Task, tree, head string) err
 	return fmt.Errorf("merging %s into %s would add %s, which already %s in %s, untracked or ignored, and not in %s: git would "+
 		"replace %s. Move %s out of the way there, then approve again. Nothing was merged", t.Branch, t.BaseBranch,
 		sanitize.Line(strings.Join(found, ", "), reviewGitErrMax), exist, repo, t.BaseBranch, it, it)
+}
+
+// reviewTrackedAs reports whether what repo's disk holds at q is a file of tracked (HEAD's paths) whose name
+// differs from q only in case: the two names lead to the same file (os.SameFile), the disk's own answer.
+func reviewTrackedAs(repo, q string, tracked []string) bool {
+	qi, err := os.Lstat(filepath.Join(repo, filepath.FromSlash(q)))
+	if err != nil {
+		return false
+	}
+	for _, p := range tracked {
+		if p != q && strings.EqualFold(p, q) {
+			if pi, perr := os.Lstat(filepath.Join(repo, filepath.FromSlash(p))); perr == nil && os.SameFile(qi, pi) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // reviewInTheWay is the part of path p (p itself, or a leading part of it that is not a directory) that exists

@@ -1827,3 +1827,49 @@ func TestConflictRefusalNamesMergeOptions(t *testing.T) {
 		t.Errorf("approve = %v, want the conflict refusal naming merge options", err)
 	}
 }
+
+// reviewCaseInsensitive reports whether the file system under dir answers
+// for a name in another case, as APFS and NTFS do by default.
+func reviewCaseInsensitive(t *testing.T, dir string) bool {
+	t.Helper()
+	worktreeWrite(t, filepath.Join(dir, "casecheck"), "")
+	_, err := os.Lstat(filepath.Join(dir, "CASECHECK"))
+	if rerr := os.Remove(filepath.Join(dir, "casecheck")); rerr != nil {
+		t.Fatal(rerr)
+	}
+	return err == nil
+}
+
+// TestMergeRefusesOtherCaseFileOnDisk: on a case-insensitive disk (APFS, the
+// default here), an ignored file whose name differs only in case from a path
+// the merge adds (or from a leading part of it) is the same file to the disk,
+// and git would replace it: the merge is refused and the file kept (I-2). On
+// a case-sensitive disk (CI's) it is another file: the merge runs and the file
+// is kept too.
+func TestMergeRefusesOtherCaseFileOnDisk(t *testing.T) {
+	insensitive := reviewCaseInsensitive(t, t.TempDir())
+	for _, c := range []struct{ ignore, onDisk, adds, named string }{
+		{"notes.md", "notes.md", "Notes.md", "Notes.md"},
+		{"conf", "conf", "Conf/app.cfg", "Conf"},
+	} {
+		t.Run(c.adds, func(t *testing.T) {
+			f := reviewNew(t)
+			worktreeWrite(t, filepath.Join(f.repo, ".git", "info", "exclude"), c.ignore+"\n")
+			worktreeWrite(t, filepath.Join(f.wt, c.adds), "branch version\n")
+			gitRun(t, f.wt, "add", "-f", c.adds)
+			gitRun(t, f.wt, "commit", "-q", "-m", "add "+c.adds)
+			mine := filepath.Join(f.repo, c.onDisk)
+			worktreeWrite(t, mine, "developer secret\n")
+			line, err := f.approve(model.ApproveMerge, "")
+			switch {
+			case insensitive && (err == nil || !strings.Contains(err.Error(), "would add "+c.named+", which already exists in "+f.repo)):
+				t.Errorf("approve = %q, %v; want the merge refused, naming %s", line, err, c.named)
+			case !insensitive && err != nil:
+				t.Errorf("approve = %v; want the merge, %s being another file here", err, c.onDisk)
+			}
+			if got := lifecycleRead(t, mine); got != "developer secret\n" {
+				t.Errorf("%s = %q, want the developer's kept", c.onDisk, got)
+			}
+		})
+	}
+}
