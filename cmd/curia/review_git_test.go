@@ -1482,3 +1482,394 @@ func TestBaseTagDoesNotShadowBranch(t *testing.T) {
 		t.Errorf("R-1 = %+v, want merged with the real stat", r)
 	}
 }
+
+// TestMergeIgnoresMergeOptions: the developer's merge configuration cannot
+// turn the approval's merge into something else (C-1): with
+// branch.main.mergeOptions --no-commit git would stop before committing and
+// exit 0, with --squash refuse, with -s ours (or pull.twohead ours) make a
+// merge commit without the branch's change. Each approval merges the approved
+// head with its content, and records it merged.
+func TestMergeIgnoresMergeOptions(t *testing.T) {
+	for _, c := range []struct{ key, value string }{
+		{"branch.main.mergeOptions", "--no-commit"},
+		{"branch.main.mergeOptions", "--squash"},
+		{"branch.main.mergeOptions", "-s ours"},
+		{"pull.twohead", "ours"},
+		{"merge.ff", "only"},
+	} {
+		t.Run(c.key+"="+c.value, func(t *testing.T) {
+			f := reviewNew(t)
+			gitRun(t, f.repo, "config", c.key, c.value)
+			head := f.head(f.wt, "HEAD")
+			line, err := f.approve(model.ApproveMerge, "")
+			if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main") {
+				t.Fatalf("approve = %q, %v; want the merge", line, err)
+			}
+			f.wantMerged(head)
+			if got := worktreeGit(t, f.repo, "show", "main:auth.go"); got != "package auth" {
+				t.Errorf("main:auth.go = %q, want the branch's change merged", got)
+			}
+		})
+	}
+}
+
+// TestMergeReportedDoneButNotInBase: git merge exits 0 but the base does not
+// hold the approved head afterwards (here a post-merge hook resets it). Curia
+// records nothing merged, says what it found and what to run, and keeps the
+// review pending with its intent.
+func TestMergeReportedDoneButNotInBase(t *testing.T) {
+	f := reviewNew(t)
+	lifecycleHooks(f.spawnFixture, "post-merge", "#!/bin/sh\ngit reset -q --hard HEAD^\n")
+	before := f.head(f.repo, "HEAD")
+	line, err := f.approve(model.ApproveMerge, "")
+	if err == nil || !strings.Contains(err.Error(), "git merge reported success, but main does not contain "+reviewShort(f.head(f.wt, "HEAD"))) ||
+		!strings.Contains(err.Error(), "git -C "+f.repo+" log") || !strings.Contains(err.Error(), "The review stays pending") {
+		t.Fatalf("approve = %q, %v; want the missing merge reported", line, err)
+	}
+	if r := f.review(); r.Status != model.ReviewPending || r.IntentAt.IsZero() {
+		t.Errorf("R-1 = %+v, want pending with its intent kept", r)
+	}
+	if got := f.head(f.repo, "HEAD"); got != before {
+		t.Errorf("HEAD = %s, want the hook's reset to %s", got, before)
+	}
+}
+
+// TestOrphanMergeRefusesEveryClaim: while an earlier approval's intent to
+// merge stands and its orphaned git still runs (its pre-merge-commit hook
+// longer than the hold, the merge's result staged), no other outcome may
+// claim the review (C-2): a merge approval, a pull request approval, a drop
+// and a change request are each refused with the same explanation, and the
+// intent stays exactly as it was. Once the orphan has made the merge commit,
+// approving (here with a pull request) records the review merged.
+func TestOrphanMergeRefusesEveryClaim(t *testing.T) {
+	f := reviewNew(t)
+	gh := reviewUseGH(t, "https://github.com/o/r/pull/7\n")
+	in, release := reviewHookAt(f, "pre-merge-commit", 0)
+	head := f.head(f.wt, "HEAD")
+	ctx := context.Background()
+	if _, err := f.st.ClaimReviewIntent(ctx, "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head, DiffStat: " auth.go | 1 +"},
+		f.now, reviewIntentHold); err != nil {
+		t.Fatal(err)
+	}
+	orphan := make(chan gitResult, 1)
+	go func() {
+		orphan <- runGitGroup(ctx, f.repo, "merge", "--no-ff", "--no-edit", "--no-autostash", "-m", "Merge", head)
+	}()
+	reviewWaitFile(t, in)
+	later := f.now.Add(11 * time.Minute)
+	for _, c := range []struct {
+		name, again string
+		act         func() (string, error)
+	}{
+		{"merge approval", "approve again", func() (string, error) {
+			return reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, later)
+		}},
+		{"pull request approval", "approve again", func() (string, error) {
+			return reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApprovePR, head, model.AnsweredCLI, later)
+		}},
+		{"drop", "drop again", func() (string, error) { return reviewDrop(ctx, f.st, "R-1", model.AnsweredCLI, later) }},
+		{"change request", "request changes again", func() (string, error) {
+			return reviewRequestChanges(ctx, f.st, f.fake, testLoggerOnly(), "R-1", "more", model.AnsweredCLI, later)
+		}},
+	} {
+		line, err := c.act()
+		f.wantOrphanRefusal(c.name, c.again, head, line, err)
+	}
+	if len(gh.calls) != 0 {
+		t.Errorf("gh ran: %+v", gh.calls)
+	}
+	worktreeWrite(t, release, "")
+	if res := <-orphan; res.err != nil {
+		t.Fatalf("the orphaned merge: %v %s", res.err, res.stderr)
+	}
+	line, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApprovePR, head, model.AnsweredCLI, later.Add(time.Minute))
+	if err != nil || !strings.Contains(line, "is already merged into main; recorded") {
+		t.Fatalf("approve after the orphan merged = %q, %v; want it recorded", line, err)
+	}
+	f.wantMerged(head)
+}
+
+// reviewOddKinds are working-tree states git hash-object cannot read (I-1),
+// each set up in the main checkout after a commit that tracks the path: a
+// tracked file deleted, a tracked symlink retargeted to nowhere, and an
+// embedded repository (a gitlink) with a commit its gitlink does not record.
+var reviewOddKinds = []struct {
+	name  string
+	setup func(f *reviewFixture)
+}{
+	{"deleted file", func(f *reviewFixture) {
+		f.commitOnMain("notes.txt", "a\n", "notes")
+		if err := os.Remove(filepath.Join(f.repo, "notes.txt")); err != nil {
+			f.t.Fatal(err)
+		}
+	}},
+	{"dangling symlink", func(f *reviewFixture) {
+		lnk := filepath.Join(f.repo, "lnk")
+		if err := os.Symlink("README", lnk); err != nil {
+			f.t.Fatal(err)
+		}
+		gitRun(f.t, f.repo, "add", "lnk")
+		gitRun(f.t, f.repo, "commit", "-q", "-m", "link")
+		if err := os.Remove(lnk); err != nil {
+			f.t.Fatal(err)
+		}
+		if err := os.Symlink("nowhere", lnk); err != nil {
+			f.t.Fatal(err)
+		}
+	}},
+	{"submodule with a new commit", func(f *reviewFixture) {
+		sub := filepath.Join(f.repo, "sub")
+		gitInit(f.t, sub, "main")
+		for i, file := range []string{"s", "t"} {
+			worktreeWrite(f.t, filepath.Join(sub, file), file+"\n")
+			gitRun(f.t, sub, "add", file)
+			gitRun(f.t, sub, "commit", "-q", "-m", file)
+			if i == 0 {
+				gitRun(f.t, f.repo, "add", "sub")
+				gitRun(f.t, f.repo, "commit", "-q", "-m", "submodule")
+			}
+		}
+	}},
+}
+
+// reviewManyModified commits reviewModifiedMax+1 files on main and modifies
+// each in the main checkout.
+func (f *reviewFixture) reviewManyModified() {
+	f.t.Helper()
+	dir := filepath.Join(f.repo, "many")
+	for i := range reviewModifiedMax + 1 {
+		worktreeWrite(f.t, filepath.Join(dir, strconv.Itoa(i)), "a\n")
+	}
+	gitRun(f.t, f.repo, "add", "-A")
+	gitRun(f.t, f.repo, "commit", "-q", "-m", "many")
+	for i := range reviewModifiedMax + 1 {
+		worktreeWrite(f.t, filepath.Join(dir, strconv.Itoa(i)), "b\n")
+	}
+}
+
+// TestMergeWithOddWorkingTree: a working tree with a deleted tracked file, a
+// dangling symlink, a submodule with new commits, or more modified files than
+// Curia compares, merges (I-1): none of them is an error, and nothing raw from
+// git reaches the user.
+func TestMergeWithOddWorkingTree(t *testing.T) {
+	kinds := append(slices.Clone(reviewOddKinds), struct {
+		name  string
+		setup func(f *reviewFixture)
+	}{"too many modified files", (*reviewFixture).reviewManyModified})
+	for _, k := range kinds {
+		t.Run(k.name, func(t *testing.T) {
+			f := reviewNew(t)
+			k.setup(f)
+			head := f.head(f.wt, "HEAD")
+			line, err := f.approve(model.ApproveMerge, "")
+			if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main") {
+				t.Fatalf("approve = %q, %v; want the merge", line, err)
+			}
+			if r := f.review(); r.Status != model.ReviewMerged || f.head(f.repo, "main^2") != head {
+				t.Errorf("R-1 = %+v, main^2 %s; want merged at %s", r, f.head(f.repo, "main^2"), head)
+			}
+		})
+	}
+}
+
+// TestMergeCutShortWithOddWorkingTree: with all three odd kinds in the working
+// tree, a merge cut short in pre-merge-commit is proven Curia's own and undone:
+// each path is compared by its kind (deleted, symlink target, gitlink commit),
+// and the checkout is as before.
+func TestMergeCutShortWithOddWorkingTree(t *testing.T) {
+	f := reviewNew(t)
+	for _, k := range reviewOddKinds {
+		k.setup(f)
+	}
+	lifecycleHooks(f.spawnFixture, "pre-merge-commit", "#!/bin/sh\nsleep 4\nexit 0\n")
+	before, status := f.head(f.repo, "HEAD"), f.status()
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	_, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, f.head(f.wt, "HEAD"), model.AnsweredCLI, f.now)
+	if err == nil || !strings.Contains(err.Error(), "Curia undid what it had staged (git reset --merge)") {
+		t.Fatalf("approve error = %v, want the cut-short merge undone", err)
+	}
+	f.wantAsBefore(before, status)
+	if target, err := os.Readlink(filepath.Join(f.repo, "lnk")); err != nil || target != "nowhere" {
+		t.Errorf("lnk -> %q (%v), want the developer's nowhere kept", target, err)
+	}
+	f.wantPending()
+}
+
+// TestMergeCutShortWithTooManyModified: with more modified files than Curia
+// compares, the merge runs, and when it is cut short Curia undoes nothing and
+// says plainly why: too many modified files to prove an undo.
+func TestMergeCutShortWithTooManyModified(t *testing.T) {
+	f := reviewNew(t)
+	f.reviewManyModified()
+	lifecycleHooks(f.spawnFixture, "pre-merge-commit", "#!/bin/sh\nsleep 4\nexit 0\n")
+	calls := reviewRecordGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, f.head(f.wt, "HEAD"), model.AnsweredCLI, f.now)
+	if err == nil || !strings.Contains(err.Error(), "has more than 500 modified files, too many for Curia to prove that undoing the merge "+
+		"touches nothing else") || !strings.Contains(err.Error(), "The review stays pending") {
+		t.Fatalf("approve error = %v, want the undo refused, saying why", err)
+	}
+	if r := reviewGitCalls(calls(), "reset"); len(r) != 0 {
+		t.Errorf("git reset ran: %q", r)
+	}
+	if r := f.review(); r.Status != model.ReviewPending || r.IntentAt.IsZero() {
+		t.Errorf("R-1 = %+v, want pending with its intent kept", r)
+	}
+}
+
+// wantOrphanRefusal checks that action name was refused, naming the earlier
+// approval of head (intent at f.now) and saying to act again (again), and
+// that the earlier intent is untouched.
+func (f *reviewFixture) wantOrphanRefusal(name, again, head, line string, err error) {
+	f.t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "an earlier approval of R-1 (merge at "+head[:7]+", since ") ||
+		!strings.Contains(err.Error(), "may still be running git there") || !strings.Contains(err.Error(), "then "+again) {
+		f.t.Errorf("%s during the orphan's hook = %q, %v; want the refusal naming the earlier approval", name, line, err)
+	}
+	if r := f.review(); r.Status != model.ReviewPending || !r.IntentAt.Equal(f.now) || r.Head != head ||
+		r.ApprovedHow != model.ApproveMerge || r.DiffStat != " auth.go | 1 +" {
+		f.t.Errorf("after the %s: R-1 = %+v, want the earlier intent, untouched", name, r)
+	}
+}
+
+// TestMergeRefusesToReplaceFilesOnDisk: a path the merge would add already
+// exists in the main checkout, untracked or ignored, so git would replace it
+// (git merge overwrites an ignored file without a word, and a merge cut short
+// then deletes it). Curia refuses before merging, names the path, and nothing
+// on disk changes (I-2).
+func TestMergeRefusesToReplaceFilesOnDisk(t *testing.T) {
+	for _, c := range []struct {
+		name, ignore, onDisk, adds, named string
+	}{
+		{"ignored file", "local.cfg", "local.cfg", "local.cfg", "local.cfg"},
+		{"untracked file", "", "local.cfg", "local.cfg", "local.cfg"},
+		{"ignored directory where a file is added", "cache", "cache/x", "cache", "cache"},
+		{"ignored file where a directory is added", "conf", "conf", "conf/app.cfg", "conf"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := reviewNew(t)
+			if c.ignore != "" {
+				worktreeWrite(t, filepath.Join(f.repo, ".git", "info", "exclude"), c.ignore+"\n")
+			}
+			worktreeWrite(t, filepath.Join(f.wt, c.adds), "branch version\n")
+			gitRun(t, f.wt, "add", "-f", c.adds)
+			gitRun(t, f.wt, "commit", "-q", "-m", "add "+c.adds)
+			mine := filepath.Join(f.repo, c.onDisk)
+			worktreeWrite(t, mine, "developer secret\n")
+			before, status := f.head(f.repo, "HEAD"), f.status()
+			calls := reviewRecordGit(t)
+			_, err := f.approve(model.ApproveMerge, "")
+			if err == nil || !strings.Contains(err.Error(), "would add "+c.named+", which already exists in "+f.repo) ||
+				!strings.Contains(err.Error(), "git would replace it") || !strings.HasSuffix(err.Error(), "Nothing was merged") {
+				t.Fatalf("approve error = %v, want the merge refused, naming %s", err, c.named)
+			}
+			if m := reviewGitCalls(calls(), "merge"); len(m) != 0 {
+				t.Errorf("git merge ran: %q", m)
+			}
+			if got := lifecycleRead(t, mine); got != "developer secret\n" {
+				t.Errorf("%s = %q, want the developer's kept", c.onDisk, got)
+			}
+			f.wantAsBefore(before, status)
+			if r := f.review(); r.Status != model.ReviewPending || !r.IntentAt.IsZero() {
+				t.Errorf("R-1 = %+v, want pending with no intent", r)
+			}
+		})
+	}
+}
+
+// TestMergeCaseRenameIsNotInTheWay: a branch that renames a tracked file to
+// a name differing only in case merges; on a case-insensitive disk the old,
+// tracked file answers for the new name, and it is not in the way (I-2).
+func TestMergeCaseRenameIsNotInTheWay(t *testing.T) {
+	f := reviewNew(t)
+	f.commitOnMain("Notes.txt", "a\n", "notes")
+	gitRun(t, f.wt, "merge", "-q", "main")
+	gitRun(t, f.wt, "mv", "-f", "Notes.txt", "notes.txt")
+	gitRun(t, f.wt, "commit", "-q", "-m", "rename")
+	line, err := f.approve(model.ApproveMerge, "")
+	if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main") {
+		t.Fatalf("approve = %q, %v; want the merge", line, err)
+	}
+}
+
+// TestStaleIntentKeepsCheckoutReason: with an earlier approval's stale intent
+// standing and nothing of its git in the checkout, a refusal of the checkout
+// for another reason (here another branch checked out) keeps that reason and
+// adds a sentence on the earlier approval (M-a).
+func TestStaleIntentKeepsCheckoutReason(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	if _, err := f.st.ClaimReviewIntent(context.Background(), "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head},
+		f.now.Add(-time.Hour), reviewIntentHold); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, f.repo, "checkout", "-q", "-b", "other")
+	_, err := f.approve(model.ApproveMerge, head)
+	if err == nil || !strings.Contains(err.Error(), f.repo+" has other checked out, not main") ||
+		!strings.Contains(err.Error(), "An earlier approval of R-1 (merge at "+head[:7]+", since ") ||
+		strings.Contains(err.Error(), "merge under way or staged changes") {
+		t.Errorf("approve = %v, want the real reason, then the earlier approval", err)
+	}
+}
+
+// TestConflictRefusalNamesMergeOptions: with branch.main.mergeOptions
+// -Xtheirs, git's own merge of a conflicting branch would succeed; Curia's
+// refuses, and says that its merge does not use such options (M-b).
+func TestConflictRefusalNamesMergeOptions(t *testing.T) {
+	f := reviewNew(t)
+	f.commitOnMain("auth.go", "package auth // main's own\n", "main side")
+	gitRun(t, f.repo, "config", "branch.main.mergeOptions", "-Xtheirs")
+	_, err := f.approve(model.ApproveMerge, "")
+	if err == nil || !strings.Contains(err.Error(), "would conflict in auth.go") ||
+		!strings.Contains(err.Error(), "git's own merge may differ if this branch has custom merge options") {
+		t.Errorf("approve = %v, want the conflict refusal naming merge options", err)
+	}
+}
+
+// reviewCaseInsensitive reports whether the file system under dir answers
+// for a name in another case, as APFS and NTFS do by default.
+func reviewCaseInsensitive(t *testing.T, dir string) bool {
+	t.Helper()
+	worktreeWrite(t, filepath.Join(dir, "casecheck"), "")
+	_, err := os.Lstat(filepath.Join(dir, "CASECHECK"))
+	if rerr := os.Remove(filepath.Join(dir, "casecheck")); rerr != nil {
+		t.Fatal(rerr)
+	}
+	return err == nil
+}
+
+// TestMergeRefusesOtherCaseFileOnDisk: on a case-insensitive disk (APFS, the
+// default here), an ignored file whose name differs only in case from a path
+// the merge adds (or from a leading part of it) is the same file to the disk,
+// and git would replace it: the merge is refused and the file kept (I-2). On
+// a case-sensitive disk (CI's) it is another file: the merge runs and the file
+// is kept too.
+func TestMergeRefusesOtherCaseFileOnDisk(t *testing.T) {
+	insensitive := reviewCaseInsensitive(t, t.TempDir())
+	for _, c := range []struct{ ignore, onDisk, adds, named string }{
+		{"notes.md", "notes.md", "Notes.md", "Notes.md"},
+		{"conf", "conf", "Conf/app.cfg", "Conf"},
+	} {
+		t.Run(c.adds, func(t *testing.T) {
+			f := reviewNew(t)
+			worktreeWrite(t, filepath.Join(f.repo, ".git", "info", "exclude"), c.ignore+"\n")
+			worktreeWrite(t, filepath.Join(f.wt, c.adds), "branch version\n")
+			gitRun(t, f.wt, "add", "-f", c.adds)
+			gitRun(t, f.wt, "commit", "-q", "-m", "add "+c.adds)
+			mine := filepath.Join(f.repo, c.onDisk)
+			worktreeWrite(t, mine, "developer secret\n")
+			line, err := f.approve(model.ApproveMerge, "")
+			switch {
+			case insensitive && (err == nil || !strings.Contains(err.Error(), "would add "+c.named+", which already exists in "+f.repo)):
+				t.Errorf("approve = %q, %v; want the merge refused, naming %s", line, err, c.named)
+			case !insensitive && err != nil:
+				t.Errorf("approve = %v; want the merge, %s being another file here", err, c.onDisk)
+			}
+			if got := lifecycleRead(t, mine); got != "developer secret\n" {
+				t.Errorf("%s = %q, want the developer's kept", c.onDisk, got)
+			}
+		})
+	}
+}
