@@ -2,7 +2,11 @@
 // next session row out.
 package state
 
-import "github.com/ZachFara/curia/internal/model"
+import (
+	"cmp"
+
+	"github.com/ZachFara/curia/internal/model"
+)
 
 const maxLastUpdateRunes = 80
 
@@ -134,13 +138,16 @@ func stop(s *model.Session, ev model.Event, openDecision bool) {
 // start copies the session identity from ev, as SessionStart does. The
 // transcript offset belongs to the old transcript, so it restarts at 0 when
 // the path changes; a session with no path yet keeps it, because the hook
-// read ev's transcript up to it.
+// read ev's transcript up to it. A new session takes ev's agent, Claude
+// Code when ev names none; a stored one keeps its agent.
 func start(s *model.Session, ev model.Event) {
 	if s.TranscriptPath != "" && s.TranscriptPath != ev.TranscriptPath {
 		s.TranscriptOffset = 0
 	}
 	s.ID = ev.SessionID
-	s.Agent = "claude"
+	if s.Agent == "" {
+		s.Agent = cmp.Or(ev.Agent, model.AgentClaude)
+	}
 	s.Pane = ev.Pane
 	s.Cwd = ev.Cwd
 	s.TranscriptPath = ev.TranscriptPath

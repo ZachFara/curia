@@ -38,6 +38,9 @@ type Env struct {
 	// TaskID is the task named by the environment (CURIA_TASK_ID), already
 	// validated, or empty.
 	TaskID string
+	// Agent is the agent named on the command line; empty means Claude
+	// Code.
+	Agent string
 }
 
 // startInfo is what a SessionStart learns from git and tmux before the
@@ -90,12 +93,17 @@ type Result struct {
 // and is not printed, and the other kind is still delivered) and for the
 // read before the claims that fails (it counts as no open ticket and
 // nothing queued).
+//
+// An event whose agent is Codex (env.Agent, plan section 4.10) does less:
+// its transcript is not read, and its Stop claims no answer and no message,
+// so it prints nothing and the session becomes idle, or needs_decision with
+// an open blocking ticket. What is queued stays queued.
 func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st *store.Store, cfg config.Config) (Result, error) {
 	ev, err := Parse(kind, payload, env.Pane, env.Now())
 	if err != nil {
 		return Result{}, err
 	}
-	ev.TaskID = env.TaskID
+	ev.TaskID, ev.Agent = env.TaskID, env.Agent
 	if err = st.AppendEvent(ctx, ev, payload); err != nil {
 		return Result{}, err
 	}
@@ -231,9 +239,13 @@ func runStop(ctx context.Context, ev model.Event, start *startInfo, st *store.St
 // does not fit stays queued for the next Stop. It sets ev.StopBlocked when
 // it claimed anything. A failed claim has been rolled back and claims
 // nothing, and the other kind is still claimed; a failed read counts as no
-// ticket and nothing queued. Errors are returned.
+// ticket and nothing queued. Errors are returned. A Codex event claims
+// nothing: nothing is handed to Codex at Stop (plan section 4.10).
 func decide(ctx context.Context, tx *store.Tx, ev *model.Event) (stopClaims, bool, error) {
 	state, readErr := tx.StopState(ctx, ev.SessionID, ev.At)
+	if ev.Agent == model.AgentCodex {
+		return stopClaims{}, state.OpenBlocking > 0, readErr
+	}
 	var c stopClaims
 	var answerErr, messageErr error
 	if state.Answers {
@@ -317,7 +329,9 @@ func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config,
 	var err error
 	switch ev.Kind {
 	case model.PostToolUse, model.Notification, model.Stop:
-		err = readTranscript(&s, &ev, cfg)
+		if ev.Agent != model.AgentCodex { // a Codex transcript is not Claude Code's
+			err = readTranscript(&s, &ev, cfg)
+		}
 	}
 	// Claude Code may run Stop before the final answer is in the transcript,
 	// so the payload's copy wins (Ruling 36).

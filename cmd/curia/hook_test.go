@@ -1371,3 +1371,183 @@ func TestHookSessionEndReasonDecidesRestore(t *testing.T) {
 		})
 	}
 }
+
+// TestHookArgs: the event is the first argument, and an optional
+// --agent <name> or --agent=<name> follows it. codex is the only agent
+// named; any other name is logged at WARN and read as Claude Code. Anything
+// else after the event refuses the invocation, as before the flag.
+func TestHookArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		args         []string
+		event, agent string
+		refused      bool
+		warn         string
+	}{
+		{"event only", []string{"Stop"}, "Stop", "", false, ""},
+		{"agent codex", []string{"Stop", "--agent", "codex"}, "Stop", model.AgentCodex, false, ""},
+		{"agent=codex", []string{"Stop", "--agent=codex"}, "Stop", model.AgentCodex, false, ""},
+		{"agent gemini", []string{"Stop", "--agent", "gemini"}, "Stop", "", false, `agent=gemini`},
+		{"agent=gemini", []string{"Stop", "--agent=gemini"}, "Stop", "", false, `agent=gemini`},
+		{"agent claude", []string{"Stop", "--agent", "claude"}, "Stop", "", false, `agent=claude`},
+		{"agent Codex", []string{"Stop", "--agent", "Codex"}, "Stop", "", false, `agent=Codex`},
+		{"agent empty", []string{"Stop", "--agent="}, "Stop", "", false, `agent=""`},
+		{"agent missing", []string{"Stop", "--agent"}, "Stop", "", false, `agent=""`},
+		{"hostile agent", []string{"Stop", "--agent", "x\nlevel=ERROR msg=forged"}, "Stop", "", false, `agent="x level=ERROR msg=forged"`},
+		{"flag first", []string{"--agent", "codex"}, "--agent", "", true, ""},
+		{"no event", nil, "", "", true, ""},
+		{"two events", []string{"Stop", "Stop"}, "Stop", "", true, ""},
+		{"extra after agent", []string{"Stop", "--agent", "codex", "x"}, "Stop", model.AgentCodex, true, ""},
+		{"agent twice", []string{"Stop", "--agent=codex", "--agent=codex"}, "Stop", model.AgentCodex, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, buf := testLogger()
+			event, agent, err := hookArgs(tc.args, logger)
+			if event != tc.event || agent != tc.agent || (err != nil) != tc.refused {
+				t.Errorf("hookArgs(%q) = %q, %q, %v; want %q, %q, refused %v",
+					tc.args, event, agent, err, tc.event, tc.agent, tc.refused)
+			}
+			lines := logLines(buf)
+			switch {
+			case tc.warn == "" && lines != nil:
+				t.Errorf("log = %q, want none", lines)
+			case tc.warn != "" && (len(lines) != 1 || !strings.Contains(lines[0], "level=WARN") ||
+				!strings.Contains(lines[0], tc.warn)):
+				t.Errorf("log = %q, want one WARN line with %s", lines, tc.warn)
+			}
+		})
+	}
+}
+
+// On the command path a refused invocation records nothing and logs one
+// line; an agent Curia does not know is Claude Code's, with a WARN line.
+func TestHookArgsOnCommandPath(t *testing.T) {
+	for _, args := range [][]string{{"--agent", "codex"}, {"--agent=codex", "SessionStart"}, {"SessionStart", "--agent", "codex", "x"}} {
+		db := hookHome(t)
+		res := runHookCmd(t, strings.NewReader(`{"session_id":"A","source":"startup"}`), append([]string{"hook"}, args...)...)
+		assertQuietExitZero(t, res)
+		if len(res.log) != 1 || !strings.Contains(res.log[0], "hook failed") {
+			t.Errorf("%q: log = %q, want one line refusing it", args, res.log)
+		}
+		if _, err := os.Stat(db); err == nil {
+			if s, found := hookFindSession(t, db, "A"); found {
+				t.Errorf("%q: session recorded: %+v", args, s)
+			}
+		}
+	}
+
+	db := hookHome(t)
+	body := `{"session_id":"A","cwd":"` + t.TempDir() + `","source":"startup"}`
+	res := runHookCmd(t, strings.NewReader(body), "hook", "SessionStart", "--agent", "gemini")
+	assertQuietExitZero(t, res)
+	if len(res.log) != 1 || !strings.Contains(res.log[0], "level=WARN") || !strings.Contains(res.log[0], "agent=gemini") {
+		t.Errorf("log = %q, want one WARN line naming gemini", res.log)
+	}
+	if s := getSession(t, db, "A"); s.Agent != model.AgentClaude {
+		t.Errorf("agent = %q, want claude", s.Agent)
+	}
+}
+
+// hookFindSession reads session id from the store at db.
+func hookFindSession(t *testing.T, db, id string) (model.Session, bool) {
+	t.Helper()
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	s, found, err := st.GetSession(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, found
+}
+
+// The command path for a Codex session: with an answer and a message
+// queued, its Stop writes nothing to stdout or stderr, logs nothing, exits
+// 0 and leaves both queued; the session is Codex's and idle.
+func TestHookCodexPrintsNothingAtStop(t *testing.T) {
+	for _, flag := range [][]string{{"--agent", "codex"}, {"--agent=codex"}} {
+		db := hookHome(t)
+		body := `{"session_id":"A","cwd":"` + t.TempDir() + `","source":"startup"}`
+		runEvent := func(event string) hookStreams {
+			return hookRunStreams(t, strings.NewReader(body), append([]string{"hook", event}, flag...)...)
+		}
+		for _, event := range []string{"SessionStart", "UserPromptSubmit"} {
+			hookWantExitZero(t, runEvent(event))
+		}
+		id := hookQueueAnswer(t, db, "A")
+		msgs := hookQueueMessages(t, db, "A", "use pnpm, not npm")
+
+		res := runEvent("Stop")
+		hookWantExitZero(t, res)
+		if res.stdout != "" || res.stderr != "" || res.log != nil {
+			t.Errorf("%q: Stop wrote stdout %q, stderr %q, log %q; want nothing", flag, res.stdout, res.stderr, res.log)
+		}
+		if got, _ := hookDelivery(t, db, id); got != model.DeliveryQueued {
+			t.Errorf("%q: after Stop %s is %s, want queued", flag, id, got)
+		}
+		if got, _ := hookMessageStatus(t, db, msgs[0]); got != model.MsgQueued {
+			t.Errorf("%q: after Stop %s is %s, want queued", flag, msgs[0], got)
+		}
+		if s := getSession(t, db, "A"); s.Agent != model.AgentCodex || s.State != model.StateIdle {
+			t.Errorf("%q: session agent %q state %s, want codex and idle", flag, s.Agent, s.State)
+		}
+	}
+}
+
+// TestHookLatencyUnchangedWithAgentFlag is TestHookLatency's method and
+// threshold (1000 in-process PostToolUse runs in one pass, p95 under 20 ms,
+// no retry, Ruling 114) through the real hookEnv with the agent that
+// `--agent codex` gives, read by hookArgs. It also reports 200 Stops with
+// an answer and a message queued, without gating them (one gate per test).
+func TestHookLatencyUnchangedWithAgentFlag(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "curia.db")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	logger, buf := testLogger()
+	env := hookEnv(context.Background(), unreachableTmux{}, logger)
+	if _, env.Agent, err = hookArgs([]string{"PostToolUse", "--agent", "codex"}, logger); err != nil || env.Agent != model.AgentCodex {
+		t.Fatalf("hookArgs: agent %q, err %v; want codex", env.Agent, err)
+	}
+	cwd, tr := t.TempDir(), filepath.Join(t.TempDir(), "rollout.jsonl")
+	const line = `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}` + "\n"
+	if err = os.WriteFile(tr, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := func(extra string) []byte {
+		return fmt.Appendf(nil, `{"session_id":"S","transcript_path":%q,"cwd":%q%s}`, tr, cwd, extra)
+	}
+	if _, err = hook.Run(context.Background(), model.SessionStart, body(`,"source":"startup"`), env, st, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	hookQueueAnswer(t, db, "S")
+	hookQueueMessages(t, db, "S", "use pnpm, not npm")
+
+	const runs, gatedRuns = 200, 1000 // reported; gated (Ruling 114)
+	tools := hookLatency(t, st, env, model.PostToolUse, gatedRuns, func(int) []byte {
+		return body(`,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
+	})
+	stops := hookLatency(t, st, env, model.Stop, runs, func(int) []byte {
+		return body(`,"last_assistant_message":"Done."`)
+	})
+	for _, m := range []struct {
+		kind model.EventKind
+		d    []time.Duration
+	}{{model.PostToolUse, tools}, {model.Stop, stops}} {
+		n := len(m.d)
+		t.Logf("%s --agent codex over %d runs: p50 %v, p95 %v, max %v", m.kind, n, m.d[n/2], m.d[n*95/100], m.d[n-1])
+	}
+	if p95 := tools[gatedRuns*95/100]; p95 >= 20*time.Millisecond {
+		t.Errorf("PostToolUse p95 = %v, want < 20ms", p95)
+	}
+	if s := getSession(t, db, "S"); s.Agent != model.AgentCodex || s.TranscriptOffset != 0 || s.State != model.StateIdle {
+		t.Errorf("S: agent %q offset %d state %s, want codex, 0, idle", s.Agent, s.TranscriptOffset, s.State)
+	}
+	if lines := logLines(buf); lines != nil {
+		t.Errorf("log = %q, want none", lines)
+	}
+}
