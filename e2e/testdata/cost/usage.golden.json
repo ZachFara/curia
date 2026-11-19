@@ -1,0 +1,11 @@
+{
+  "windows": [
+    {"window": "five_hour", "used_pct": 62, "resets_at": "<time>", "limit_at": "<time>", "warn": true}
+  ],
+  "api_projection_usd": null,
+  "burn": [
+    {"session_id": "00000001-0000-4000-8000-000000000001", "task_id": "T-1", "usd_per_hour": 3.4, "cost_usd": 4.12},
+    {"session_id": "00000002-0000-4000-8000-000000000002", "task_id": "T-2", "usd_per_hour": 0.6, "cost_usd": 0.3}
+  ],
+  "suggest_pause": "T-2"
+}
