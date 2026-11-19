@@ -1,6 +1,6 @@
 # 0024. Pushes, the outbox and one-time tokens
 
-Status: accepted (Plan 4 setup). Probes N1 and N2 can amend the request shape; they have not run yet.
+Status: accepted (Plan 4 setup). Probes N1 and N2 ran on 2026-11-14 against a local ntfy 2.38.0 and left the request shape as written (see the amendment below).
 
 ## Context
 
@@ -21,3 +21,9 @@ Spec F11 wants a blocking ticket to reach the owner's phone and be answerable fr
 - Anyone who can read a topic within 24 hours and reach the endpoint can answer that one ticket once (owner question 2). A runaway agent can send many pushes (each distinct ticket once per device); an option is one config key later.
 - If probe N1 shows ntfy does not allow headers or a body in an action, the token moves into the action URL's path and the log rule gains "never the path"; if probe N2 shows the app overrides `Content-Type`, the endpoint accepts the recorded type too.
 - Plan sections 4.7 and 4.8 and decisions 9 to 16 of section 13 carry the detail and the reasons.
+
+Amended 2026-11-19 (Plan 4 final records; Rulings in `PROGRESS.md`):
+
+- Probes N1 and N2 (local ntfy 2.38.0 on loopback; nothing was sent to a public service): the request shape is accepted as written, `headers` and `body` are allowed in an action, three actions are the maximum and `clear` belongs inside each action, so the token stays in the `Authorization` header and the contingency above (the token in the URL path) is not needed. A JSON publish must go to the base URL; a message must be under 4096 bytes and the body under about 8 KiB; a subscriber receives the action's headers and body unchanged. Whether the phone app keeps the action's `Content-Type` is unverified (one real button press is still owed), so the endpoint accepts `application/json` with no charset or utf-8. The `ntfy.url` may not contain a path.
+- Ruling 127: `curia serve` listens on `127.0.0.1:8787` by default and detects no address. A non-loopback address is used only when set explicitly, is still limited to the Tailscale ranges, and prints one more start-up line; the phone reaches it through `tailscale serve` with `[serve] public_url` set to its https URL. (The first build took the first 100.64.0.0/10 interface address, which ISPs and hotspots also hand out.)
+- Ruling 129: the one-time token rests on the ntfy topic (in ntfy's cache and on the phone), so anyone who can read the topic can answer that one ticket once within 24 hours, with any option it offers. This is accepted on two written conditions, stated in the README and at `curia serve`'s start: a self-hosted or access-controlled topic, and an endpoint reachable from the tailnet only (never Funnel or a public address). The token stays one per push, bound to the ticket and device, not to an option. The final review also changed the endpoint's order and limiter: a request for an unknown option no longer spends the token, and only a request whose token does not match counts toward the ten-a-minute limit.

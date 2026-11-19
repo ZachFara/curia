@@ -1,0 +1,18 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "identifier": "OPS-7",
+          "title": "Rotate the deploy keys",
+          "description": "The deploy keys are a year old.",
+          "priority": 4,
+          "url": "https://linear.app/e2e-team/issue/OPS-7/rotate-the-deploy-keys",
+          "state": { "type": "backlog" },
+          "labels": { "nodes": [ { "name": "Infra" }, { "name": "Security" } ] }
+        }
+      ],
+      "pageInfo": { "hasNextPage": false, "endCursor": "e2e-cursor-2" }
+    }
+  }
+}

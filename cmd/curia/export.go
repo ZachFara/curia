@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -11,8 +12,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,6 +32,9 @@ import (
 
 // exportAll is `curia export obsidian --all`; tests reset it.
 var exportAll bool
+
+// exportRetry is `curia export obsidian --retry-skipped`; tests reset it.
+var exportRetry bool
 
 // Bounds of one Obsidian sweep (plan section 4.7).
 const (
@@ -53,11 +59,14 @@ func init() {
 		Long: "Writes a note for every decided decision that is due (never exported, or\n" +
 			"changed since) into obsidian.dir, an existing folder. --all re-exports\n" +
 			"every decided decision; ids export only those. A file of the note's name\n" +
-			"without Curia's marker is left alone and reported. Nothing is deleted.",
+			"without Curia's marker is left alone, reported with its path and skipped:\n" +
+			"later runs pass it by until the decision is answered or changed again, or\n" +
+			"--retry-skipped tries it anew. Nothing is deleted.",
 		Annotations: userOnlyMark(),
 		RunE:        userOnlyRunE("export obsidian", "write notes into the vault", runExportObsidian),
 	}
 	obsidian.Flags().BoolVar(&exportAll, "all", false, "re-export every decided decision")
+	obsidian.Flags().BoolVar(&exportRetry, "retry-skipped", false, "also try the decisions skipped because of a foreign note")
 	commons := &cobra.Command{
 		Use:   "commons <id>",
 		Short: "Print a decided global decision as an Agent Commons entry (the user only)",
@@ -78,10 +87,17 @@ type exportFailure struct {
 	Err error
 }
 
+// exportSkip is a decision skipped because a foreign file holds its path.
+type exportSkip struct {
+	ID   string
+	Name string // the foreign file's name inside the folder
+}
+
 // exportResult counts one sweep.
 type exportResult struct {
 	Written int
 	Foreign []string        // ids whose note exists without Curia's marker
+	Skipped []exportSkip    // the same, with the foreign file's name; remembered in the store
 	Failed  []exportFailure // notes not written or not marked; the caller logs them
 }
 
@@ -105,13 +121,18 @@ func runExportObsidian(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	res, err := exportObsidian(cmd.Context(), st, dir, exportAll, args, clock())
+	res, err := exportSweep(cmd.Context(), st, dir, exportAll, exportRetry, args, clock())
 	exportLog(cfg.LogPath, res)
 	if err != nil {
 		return err
 	}
 	if len(res.Failed) == 0 || res.Written > 0 || len(res.Foreign) > 0 {
 		if _, perr := fmt.Fprintln(cmd.OutOrStdout(), exportSummary(dir, res)); perr != nil {
+			return perr
+		}
+	}
+	for _, k := range res.Skipped {
+		if _, perr := fmt.Fprintln(cmd.OutOrStdout(), exportSkipLine(dir, k)); perr != nil {
 			return perr
 		}
 	}
@@ -157,6 +178,12 @@ func exportSummary(dir string, res exportResult) string {
 	return s
 }
 
+// exportSkipLine is the line printed for one skipped decision.
+func exportSkipLine(dir string, k exportSkip) string {
+	return fmt.Sprintf("skipped %s: a note of yours is at %s (not Curia's; left alone). Rename or remove it, or run with --retry-skipped",
+		k.ID, sanitize.Line(filepath.Join(dir, k.Name), exportPathLimit))
+}
+
 // exportLog writes each failed note to the log at logPath, and each foreign note at INFO.
 func exportLog(logPath string, res exportResult) {
 	for _, f := range res.Failed {
@@ -164,7 +191,7 @@ func exportLog(logPath string, res exportResult) {
 	}
 	if len(res.Foreign) > 0 {
 		if logger, closeLog, err := openLog(logPath); err == nil {
-			logger.Info("obsidian export: foreign notes left alone", "ids", strings.Join(res.Foreign, ","))
+			logger.Info("obsidian export: foreign notes left alone and skipped", "ids", strings.Join(res.Foreign, ","))
 			_ = closeLog()
 		}
 	}
@@ -172,10 +199,16 @@ func exportLog(logPath string, res exportResult) {
 
 // exportObsidian writes the notes that are due (all: every decided decision; ids: only those) into dir and marks them.
 func exportObsidian(ctx context.Context, st *store.Store, dir string, all bool, ids []string, now time.Time) (exportResult, error) {
+	return exportSweep(ctx, st, dir, all, false, ids, now)
+}
+
+// exportSweep is exportObsidian; retry also tries the decisions skipped
+// because of a foreign note.
+func exportSweep(ctx context.Context, st *store.Store, dir string, all, retry bool, ids []string, now time.Time) (exportResult, error) {
 	if err := exportCheckDir(dir); err != nil {
 		return exportResult{}, err
 	}
-	ds, err := exportDue(ctx, st, all, ids)
+	ds, err := exportDue(ctx, st, all, retry, ids)
 	if err != nil {
 		return exportResult{}, err
 	}
@@ -194,18 +227,24 @@ func exportObsidian(ctx context.Context, st *store.Store, dir string, all bool, 
 			return res, err // the rest stay due for the next run
 		}
 		note := export.Note(d)
-		state, err := exportWrite(root, names, d, note)
+		state, foreignName, err := exportWrite(root, names, d, note)
 		switch {
 		case err != nil:
 			res.Failed = append(res.Failed, exportFailure{d.ID, err})
 			continue
 		case state == exportForeign:
 			res.Foreign = append(res.Foreign, d.ID)
+			res.Skipped = append(res.Skipped, exportSkip{d.ID, foreignName})
+			// Remembered (only for this version of the decision), so the
+			// next sweep moves past it.
+			if _, err := st.MarkExportSkipped(ctx, d, now); err != nil {
+				res.Failed = append(res.Failed, exportFailure{d.ID, err})
+			}
 			continue
 		case state == exportWritten:
 			res.Written++
 		}
-		if err := exportMark(ctx, st, d.ID, note, now); err != nil {
+		if err := exportMark(ctx, st, d, now); err != nil {
 			res.Failed = append(res.Failed, exportFailure{d.ID, err})
 		}
 	}
@@ -215,9 +254,9 @@ func exportObsidian(ctx context.Context, st *store.Store, dir string, all bool, 
 // exportDue is the decisions to export: the store's queue (at most
 // exportMaxNotes), or the named ids, each of which must be a decided
 // decision. A bad id refuses the whole list, so nothing is half done.
-func exportDue(ctx context.Context, st *store.Store, all bool, ids []string) ([]model.Decision, error) {
+func exportDue(ctx context.Context, st *store.Store, all, retry bool, ids []string) ([]model.Decision, error) {
 	if len(ids) == 0 {
-		return st.ExportQueue(ctx, all, exportMaxNotes)
+		return st.ExportQueueWith(ctx, all, retry, exportMaxNotes)
 	}
 	if len(ids) > exportMaxNotes {
 		return nil, fmt.Errorf("at most %d ids at a time", exportMaxNotes)
@@ -283,34 +322,37 @@ type exportExisting struct {
 // exportWrite puts note in the folder: over Curia's own note of d under the
 // name it has (only when the content differs, keeping its mode), or as a
 // new file under export.NoteName (mode 0600) that never replaces anything.
-// Any other file of the note's name makes it foreign.
-func exportWrite(root *os.Root, names []string, d model.Decision, note []byte) (exportState, error) {
+// Any other file of the note's name makes it foreign, and its name is
+// returned. Curia's own earlier note is recognized by its marker alone
+// (export.OwnsNote), not by any mark in the store, so a note written before
+// a crash that left the decision unmarked is updated, never foreign.
+func exportWrite(root *os.Root, names []string, d model.Decision, note []byte) (exportState, string, error) {
 	for range 2 {
 		own, foreign, err := exportFind(root, names, d, len(note))
 		switch {
 		case err != nil:
-			return 0, err
+			return 0, "", err
 		case own != nil && bytes.Equal(own.data, note):
-			return exportUnchanged, nil
+			return exportUnchanged, "", nil
 		case own != nil:
-			return exportWritten, exportReplace(root, own, note)
-		case foreign:
-			return exportForeign, nil
+			return exportWritten, "", exportReplace(root, own, note)
+		case foreign != "":
+			return exportForeign, foreign, nil
 		}
 		err = exportCreate(root, export.NoteName(d), note)
 		if !errors.Is(err, fs.ErrExist) {
-			return exportWritten, err
+			return exportWritten, "", err
 		}
 		// Created meanwhile (another sweep, or by hand): look again once.
 	}
-	return exportForeign, nil
+	return exportForeign, export.NoteName(d), nil
 }
 
 // exportFind looks at every candidate of d (a listed name that
 // export.IsNoteOf accepts, and the computed name): the first in name order
-// that is a regular file holding Curia's marker is returned; foreign says
-// whether any candidate exists that is not Curia's.
-func exportFind(root *os.Root, names []string, d model.Decision, noteLen int) (*exportExisting, bool, error) {
+// that is a regular file holding Curia's marker is returned; foreign is the
+// first candidate that exists and is not Curia's ("" when none).
+func exportFind(root *os.Root, names []string, d model.Decision, noteLen int) (*exportExisting, string, error) {
 	cands := []string{export.NoteName(d)}
 	for _, n := range names {
 		if export.IsNoteOf(n, d.ID) && !slices.Contains(cands, n) {
@@ -318,28 +360,28 @@ func exportFind(root *os.Root, names []string, d model.Decision, noteLen int) (*
 		}
 	}
 	slices.Sort(cands)
-	foreign := false
+	foreign := ""
 	for _, name := range cands {
 		info, err := root.Lstat(name)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return nil, false, fmt.Errorf("look at %s: %w", sanitize.Line(name, exportPathLimit), err)
+			return nil, "", fmt.Errorf("look at %s: %w", sanitize.Line(name, exportPathLimit), err)
 		}
 		if !info.Mode().IsRegular() { // a directory, a symlink, a device
-			foreign = true
+			foreign = cmp.Or(foreign, name)
 			continue
 		}
 		data, err := exportReadOwn(root, name, info, noteLen)
 		if err != nil {
-			return nil, false, err
+			return nil, "", err
 		}
 		if data == nil || !export.OwnsNote(data[:min(len(data), exportHeadBytes)], d.ID) {
-			foreign = true
+			foreign = cmp.Or(foreign, name)
 			continue
 		}
-		return &exportExisting{name: name, data: data, perm: info.Mode().Perm()}, false, nil
+		return &exportExisting{name: name, data: data, perm: info.Mode().Perm()}, "", nil
 	}
 	return nil, foreign, nil
 }
@@ -425,24 +467,15 @@ func exportTemp(root *os.Root, data []byte, perm fs.FileMode) (string, error) {
 	return name, nil
 }
 
-// exportMark marks decision id exported at now, its note being written.
-// A note built from an older state must never stay marked (a rescope
-// clears the mark and has no timestamp of its own, so it can land between
-// reading the queue and marking): after marking, the decision is read again
-// and, if its note would now differ from written, the mark is cleared, so
-// the decision stays due. Whichever order the rescope and these two writes
-// take, a stale note ends unmarked.
-func exportMark(ctx context.Context, st *store.Store, id string, written []byte, now time.Time) error {
-	if err := st.MarkExported(ctx, id, now); err != nil {
-		return err
-	}
-	cur, found, err := st.GetDecision(ctx, id)
-	if err == nil && found && decision.IsDecided(cur.Status) && bytes.Equal(export.Note(cur), written) {
-		return nil
-	}
-	if uerr := st.MarkExported(ctx, id, time.Time{}); uerr != nil {
-		return errors.Join(err, uerr)
-	}
+// exportMark marks decision d exported at now, its note (built from d, as
+// read before the note was written) being in the vault. The store marks
+// only if the decision is still exactly that version, in one statement, so
+// a note built from an older state is never marked: the decision stays due
+// and the next sweep writes it again. The order is write, then mark, so a
+// crash between them leaves the decision unmarked and, the note being
+// recognized as Curia's own, the next sweep updates or confirms it.
+func exportMark(ctx context.Context, st *store.Store, d model.Decision, now time.Time) error {
+	_, err := st.MarkExportedIf(ctx, d, now)
 	return err
 }
 
@@ -482,6 +515,62 @@ func (s *exportCountingSource) Answer(ctx context.Context, id string, a model.An
 	out, err := s.DecideSource.Answer(ctx, id, a)
 	if err == nil {
 		s.answered.Add(1)
+	}
+	return out, err
+}
+
+// exportBackground starts the Obsidian sweep after an answer given in the
+// dashboard's decide view, as `curia decide` does after its answer, but in
+// the background: Kick never blocks, at most one sweep runs at a time (a
+// kick during a sweep asks for one more run after it), each sweep is
+// bounded by exportAfterTimeout, and the sweep's failure is logged once by
+// exportAfterAnswer and never shown. Wait lets a running sweep finish
+// (bounded) before the store is closed.
+type exportBackground struct {
+	st      *store.Store
+	cfg     config.Config
+	running atomic.Bool
+	again   atomic.Bool
+	wg      sync.WaitGroup
+}
+
+// Kick starts a sweep when obsidian.dir is set and none is running.
+func (b *exportBackground) Kick() {
+	if b.cfg.Obsidian.Dir == "" {
+		return
+	}
+	if !b.running.CompareAndSwap(false, true) {
+		b.again.Store(true)
+		return
+	}
+	b.wg.Add(1)
+	go func() {
+		defer b.wg.Done()
+		for {
+			b.again.Store(false)
+			exportAfterAnswer(context.Background(), b.st, b.cfg, b.cfg.LogPath, clock())
+			b.running.Store(false)
+			if !b.again.Load() || !b.running.CompareAndSwap(false, true) {
+				return
+			}
+		}
+	}()
+}
+
+// Wait blocks until the running sweep, if any, has finished.
+func (b *exportBackground) Wait() { b.wg.Wait() }
+
+// exportKickSource is a decide view's source that starts a background
+// sweep after every answer that was stored; the answer itself is untouched.
+type exportKickSource struct {
+	ui.DecideSource
+	bg *exportBackground
+}
+
+func (s exportKickSource) Answer(ctx context.Context, id string, a model.Answer) (model.Outcome, error) {
+	out, err := s.DecideSource.Answer(ctx, id, a)
+	if err == nil {
+		s.bg.Kick()
 	}
 	return out, err
 }

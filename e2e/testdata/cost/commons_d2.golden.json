@@ -1,0 +1,13 @@
+{
+  "symptom": "Decision: Should errors be wrapped with %w at every package boundary?",
+  "environment": {
+    "kind": "decision",
+    "source": "curia"
+  },
+  "cause": "Callers match errors with errors.Is in three places.\n\nOptions considered: A: Wrap with %w; B: Return them as they are",
+  "fix": "Chosen: A: Wrap with %w. Reasoning: r",
+  "domains": [
+    "errors",
+    "go"
+  ]
+}

@@ -1,0 +1,27 @@
+# The configuration of e2e/cost_test.go, written to the temp home's
+# .config/curia/config.toml. The test replaces <ntfy_url> and <linear_url>
+# with its stand-in ntfy and Linear servers (httptest servers on 127.0.0.1),
+# <obsidian_dir> with a temp folder it creates first (Curia never creates
+# it) and <analyzer> with a regular file in the temp home: the cost-lens
+# analyzer, which the stub node on PATH never reads. public_url is only what
+# the push buttons carry; nothing connects to it.
+[ntfy]
+url = "<ntfy_url>"
+
+[ntfy.devices]
+phone = "curia-e2e"
+
+[serve]
+public_url = "http://localhost:8787"
+
+[usage]
+cheaper_model = "sonnet"
+
+[obsidian]
+dir = "<obsidian_dir>"
+
+[linear]
+url = "<linear_url>"
+
+[costlens]
+analyzer = "<analyzer>"
