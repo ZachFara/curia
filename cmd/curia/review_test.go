@@ -867,7 +867,7 @@ func TestReviewSourceDiffCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"/opt/bin/git", "-C", f.repo, "diff", "main..." + reviewBranch}; !slices.Equal(append([]string{cmd.Path}, cmd.Args[1:]...), want) {
+	if want := []string{"/opt/bin/git", "-C", f.repo, "diff", "refs/heads/main...refs/heads/" + reviewBranch}; !slices.Equal(append([]string{cmd.Path}, cmd.Args[1:]...), want) {
 		t.Errorf("argv = %q, want %q", cmd.Args, want)
 	}
 }
@@ -1026,6 +1026,13 @@ func TestApproveSurvivesTerminate(t *testing.T) {
 	}
 	reviewChildWait(t, cmd, out)
 	f.wantMerged(head)
+	// M-2: it said it waits, and logged the outcome.
+	if !strings.Contains(out.String(), reviewWaitingLine) {
+		t.Errorf("the child did not say it waits:\n%s", out)
+	}
+	if log := strings.Join(readLog(t), "\n"); !strings.Contains(log, "review action done") || !strings.Contains(log, "R-1 approved: merged") {
+		t.Errorf("the log lacks the outcome:\n%s", log)
+	}
 }
 
 // TestApproveViewSurvivesHangup: the review view's program ends (the popup
@@ -1081,7 +1088,12 @@ func TestApproveRecordsMergeFoundDone(t *testing.T) {
 	}
 	reviewChildWait(t, cmd, out)
 	reviewWaitFile(t, marker+".done")
-	time.Sleep(200 * time.Millisecond) // git exits after its hook
+	// git exits after its hook: wait for it to leave no merge under way.
+	for deadline := time.Now().Add(30 * time.Second); f.hasMergeHead() || f.head(f.repo, "main^2") != head; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the orphaned git did not finish its merge")
+		}
+	}
 	if r := f.review(); r.Status != model.ReviewPending || r.Head != head || r.IntentAt.IsZero() || r.ApprovedHow != model.ApproveMerge {
 		t.Fatalf("after the kill R-1 = %+v, want pending with the intent to merge %s", r, head)
 	}
@@ -1112,11 +1124,11 @@ func TestSecondApproverRefusedWhileFirstMerges(t *testing.T) {
 		t.Errorf("second approve: %v, want the in-flight refusal", err)
 	}
 	if _, err = reviewDrop(context.Background(), f.st, "R-1", model.AnsweredCLI, f.now); err == nil ||
-		!strings.Contains(err.Error(), "is being approved") {
+		!strings.Contains(err.Error(), "is being approved") || !strings.Contains(err.Error(), "If that curia was killed, drop again after ") {
 		t.Errorf("drop during the approval: %v, want the in-flight refusal", err)
 	}
 	if _, err = reviewRequestChanges(context.Background(), f.st, f.fake, testLoggerOnly(), "R-1", "more", model.AnsweredCLI, f.now); err == nil ||
-		!strings.Contains(err.Error(), "is being approved") {
+		!strings.Contains(err.Error(), "is being approved") || !strings.Contains(err.Error(), "If that curia was killed, request changes again after ") {
 		t.Errorf("request changes during the approval: %v, want the in-flight refusal", err)
 	}
 	reviewChildWait(t, cmd, out)

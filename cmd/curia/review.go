@@ -85,6 +85,13 @@ func (f *reviewInFlight) begin() (end func()) {
 	}
 }
 
+// busy reports whether an action is in flight.
+func (f *reviewInFlight) busy() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n > 0
+}
+
 // wait waits until no action is in flight, at most limit, and reports
 // whether none is.
 func (f *reviewInFlight) wait(limit time.Duration) bool {
@@ -127,6 +134,35 @@ func reviewHoldSignals(interrupt bool) (ctx context.Context, stop context.Cancel
 		sigs = append(sigs, os.Interrupt)
 	}
 	return signal.NotifyContext(context.Background(), sigs...)
+}
+
+// reviewWaitingLine is what curia prints when a held signal came while a
+// review action was in flight (M-2).
+const reviewWaitingLine = "curia: a review action is still running; waiting for it to finish and be recorded (its own limits bound it)"
+
+// reviewSayWaiting prints reviewWaitingLine on w once, when sig ends before the returned func is called (the
+// flag form's action ends).
+func reviewSayWaiting(sig context.Context, w io.Writer) (done func()) {
+	end := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		select {
+		case <-sig.Done():
+			_, _ = fmt.Fprintln(w, reviewWaitingLine)
+		case <-end:
+		}
+	}()
+	return func() { close(end); <-finished }
+}
+
+// reviewAfterProgram waits for the review actions in flight once a view's program has returned, saying so on
+// w when a held signal ended it while one runs.
+func reviewAfterProgram(sig context.Context, w io.Writer) error {
+	if sig.Err() != nil && reviewFlight.busy() {
+		_, _ = fmt.Fprintln(w, reviewWaitingLine)
+	}
+	return reviewWaitFlight()
 }
 
 // reviewProgramErr is err from a view's program, except that a program
@@ -317,8 +353,9 @@ func reviewRunAction(cmd *cobra.Command, act reviewAction, arg string, how model
 		return reviewPrintJSON(ctx, out, st, cfg, r)
 	}
 	// A hang-up, SIGTERM or Ctrl-C waits for the action to be done and recorded.
-	_, stop := reviewHoldSignals(true)
+	sig, stop := reviewHoldSignals(true)
 	defer stop()
+	defer reviewSayWaiting(sig, cmd.ErrOrStderr())()
 	var line string
 	switch act {
 	case reviewDoApprove:
@@ -335,6 +372,7 @@ func reviewRunAction(cmd *cobra.Command, act reviewAction, arg string, how model
 	default:
 		line, err = reviewDrop(ctx, st, r.ID, model.AnsweredCLI, clock())
 	}
+	reviewLogOutcome(logger, r.ID, line, err)
 	if err != nil {
 		return err
 	}
@@ -401,7 +439,7 @@ func reviewRunView(cmd *cobra.Command, arg string) error {
 	sig, stop := reviewHoldSignals(false)
 	defer stop()
 	err = reviewProgramErr(sig, runProgram(reviewCapture{m: last, last: &last}, tea.WithAltScreen(), tea.WithContext(sig)))
-	if werr := reviewWaitFlight(); err == nil {
+	if werr := reviewAfterProgram(sig, cmd.ErrOrStderr()); err == nil {
 		err = werr
 	}
 	if err != nil {
@@ -433,6 +471,18 @@ func (c reviewCapture) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (c reviewCapture) View() string { return c.m.View() }
+
+// reviewLogOutcome logs a review action's outcome line or error, cleaned.
+func reviewLogOutcome(logger *slog.Logger, id, line string, err error) {
+	if logger == nil {
+		return
+	}
+	if err != nil {
+		logger.Info("review action failed", "review", sanitize.Line(id, 20), "err", sanitize.Line(err.Error(), reviewLineMax))
+		return
+	}
+	logger.Info("review action done", "review", sanitize.Line(id, 20), "outcome", sanitize.Line(line, reviewLineMax))
+}
 
 // reviewStatusWord is a review status as a sentence says it.
 func reviewStatusWord(s model.ReviewStatus) string {
@@ -517,6 +567,10 @@ func reviewApprove(ctx context.Context, st *store.Store, cfg config.Config, revi
 		return "", err
 	}
 	if seen != head {
+		if via == model.AnsweredCLI { // the flag form shows nothing: say where to look
+			return "", fmt.Errorf("the branch changed since you looked: %s is now at %s. Look at it again with curia review %s",
+				t.Branch, head, r.ID)
+		}
 		return "", errReviewBranchChanged
 	}
 	if how == model.ApproveMerge {
@@ -584,24 +638,30 @@ func reviewRelease(ctx context.Context, st *store.Store, r, prior model.Review) 
 // reviewBusyError says that review r is being approved elsewhere when err is
 // store.ErrReviewBusy, else is err.
 func reviewBusyError(r model.Review, err error) error {
+	return reviewBusyAgain(r, err, "approve")
+}
+
+// reviewBusyAgain is reviewBusyError for an action named by verb ("approve", "drop", "request changes"),
+// which the refusal says to try again.
+func reviewBusyAgain(r model.Review, err error, verb string) error {
 	if !errors.Is(err, store.ErrReviewBusy) {
 		return err
 	}
 	since := r.IntentAt.Local()
 	return fmt.Errorf("%s is being approved (%s at %s) by another curia since %s: wait for it to finish. "+
-		"If that curia was killed, approve again after %s", r.ID, sanitize.Line(string(r.ApprovedHow), 10),
-		sanitize.Line(reviewShort(r.Head), 10), since.Format("15:04:05"), since.Add(reviewIntentHold).Format("15:04:05"))
+		"If that curia was killed, %s again after %s", r.ID, sanitize.Line(string(r.ApprovedHow), 10),
+		sanitize.Line(reviewShort(r.Head), 10), since.Format("15:04:05"), verb, since.Add(reviewIntentHold).Format("15:04:05"))
 }
 
 // reviewBusyNow is reviewBusyError with review r read again, so that the
 // refusal names the approval in flight as it is stored now.
-func reviewBusyNow(ctx context.Context, st *store.Store, r model.Review, err error) error {
+func reviewBusyNow(ctx context.Context, st *store.Store, r model.Review, err error, verb string) error {
 	if errors.Is(err, store.ErrReviewBusy) {
 		if cur, found, gerr := st.GetReview(ctx, r.ID); gerr == nil && found {
 			r = cur
 		}
 	}
-	return reviewBusyError(r, err)
+	return reviewBusyAgain(r, err, verb)
 }
 
 // reviewFoundDone records review r merged, and reports done, when an approval recorded the intent to merge
@@ -644,10 +704,16 @@ func reviewInBase(ctx context.Context, t model.Task, head string) bool {
 func reviewApproveMerge(ctx context.Context, st *store.Store, r, prior model.Review, t model.Task, stat, head string,
 	via model.AnsweredVia, now time.Time,
 ) (string, error) {
-	if err := reviewMerge(ctx, t, head); err != nil {
-		return "", reviewMergeRelease(ctx, st, r, prior, t, head, err)
-	}
 	what := fmt.Sprintf("merged %s into %s (%s)", t.Branch, t.BaseBranch, reviewShort(head))
+	if err := reviewMerge(ctx, t, head); err != nil {
+		if !reviewHolds(ctx, t, head) {
+			return "", reviewMergeRelease(ctx, st, r, prior, err)
+		}
+		// git was stopped after it made the merge commit (in post-merge): the merge is done and is recorded now
+		// (M-9), whatever ended the caller's context.
+		what += ", though git was stopped after the merge commit (" + sanitize.Line(err.Error(), reviewLineMax) + ")"
+		ctx = context.WithoutCancel(ctx)
+	}
 	_, expired, err := st.CloseReview(ctx, r.ID, store.ReviewClose{
 		Status: model.ReviewMerged, How: model.ApproveMerge, DiffStat: stat, Head: head, Via: via,
 	}, now)
@@ -658,16 +724,21 @@ func reviewApproveMerge(ctx context.Context, st *store.Store, r, prior model.Rev
 		r.ID, what, reviewExpired(expired), t.ID), nil
 }
 
-// reviewMergeRelease follows a failed merge of head: it keeps r's intent when the base contains head after
-// all (and says to approve again to record it) or when Curia left the checkout as it found it (errReviewLeft),
-// else clears it (or puts back the earlier intent it replaced: reviewRelease), and returns the merge's error.
-func reviewMergeRelease(ctx context.Context, st *store.Store, r, prior model.Review, t model.Task, head string, failed error) error {
+// reviewHolds reports whether t's base contains head after a merge failed (git stopped after the merge
+// commit), on a context detached from ctx's end; a read that fails is false.
+func reviewHolds(ctx context.Context, t model.Task, head string) bool {
 	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), worktreeGitLimit)
 	defer cancel()
-	if n, err := reviewAhead(actx, t, head); err == nil && n == 0 {
-		return fmt.Errorf("%w. %s holds %s all the same: record it with curia review %s --approve --head %s",
-			failed, t.BaseBranch, reviewShort(head), r.ID, head)
-	}
+	n, err := reviewAhead(actx, t, head)
+	return err == nil && n == 0
+}
+
+// reviewMergeRelease follows a failed merge of head that left it outside the base: it keeps r's intent when
+// Curia left the checkout as it found it (errReviewLeft), else clears it (or puts back the earlier intent it
+// replaced: reviewRelease), and returns the merge's error.
+func reviewMergeRelease(ctx context.Context, st *store.Store, r, prior model.Review, failed error) error {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), worktreeGitLimit)
+	defer cancel()
 	if errors.Is(failed, errReviewLeft) { // what git left is unknown: the intent stays, the claim with it
 		return failed
 	}
@@ -757,7 +828,7 @@ func reviewRequestChanges(ctx context.Context, st *store.Store, tm tmux.Client, 
 	if _, _, err = st.CloseReview(ctx, r.ID, store.ReviewClose{
 		Status: model.ReviewChanges, Notes: note, Via: via, IntentHold: reviewIntentHold,
 	}, now); err != nil {
-		return "", reviewBusyNow(ctx, st, r, err)
+		return "", reviewBusyNow(ctx, st, r, err, "request changes")
 	}
 	done := r.ID + ": changes requested; "
 	if target == "" {
@@ -807,7 +878,7 @@ func reviewDrop(ctx context.Context, st *store.Store, reviewID string, via model
 		return "", err
 	}
 	if _, _, err = st.CloseReview(ctx, r.ID, store.ReviewClose{Status: model.ReviewDropped, Via: via, IntentHold: reviewIntentHold}, now); err != nil {
-		return "", reviewBusyNow(ctx, st, r, err)
+		return "", reviewBusyNow(ctx, st, r, err, "drop")
 	}
 	return fmt.Sprintf("%s dropped; %s is dropped. Its agent is not stopped.", r.ID, r.TaskID), nil
 }
@@ -965,6 +1036,7 @@ func (s reviewSource) Drop(ctx context.Context, id string) (string, error) {
 // closed it, and passes the action's outcome on.
 func (s reviewSource) after(ctx context.Context, id string) func(string, error) (string, error) {
 	return func(line string, err error) (string, error) {
+		reviewLogOutcome(s.log, id, line, err) // also when the view that started it has gone
 		if err == nil {
 			if r, found, gerr := s.st.GetReview(ctx, id); gerr == nil && found {
 				reviewMarkers(ctx, s.st, s.tm, s.cfg.LogPath, r.TaskID)

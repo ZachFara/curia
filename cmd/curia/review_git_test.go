@@ -327,7 +327,7 @@ func reviewRefusals() []reviewRefusal {
 		{name: "task stored dropped", want: "T-1 is dropped: nothing to approve", setup: func(f *reviewFixture) {
 			f.update("T-1", func(tk *model.Task) { tk.Status = model.TaskDropped })
 		}},
-		{name: "branch moved since shown", want: errReviewBranchChanged.Error(), seen: strings.Repeat("0", 40)},
+		{name: "branch moved since shown", want: "the branch changed since you looked: " + reviewBranch + " is now at ", seen: strings.Repeat("0", 40)},
 	}
 	for _, b := range []string{"-x", "--upload-pack=touch /tmp/pwned", "curia/T-1;rm -rf", "a..b", "/abs", "curia/T-1 x", "$(id)"} {
 		rows = append(rows, reviewRefusal{name: "hostile branch " + b, want: "not a valid branch name", setup: setBranch(b)})
@@ -785,7 +785,7 @@ func TestDiffCmdTable(t *testing.T) {
 		return "/opt/bin/" + name, nil
 	})
 	tk := f.get("T-1")
-	rng := "main..." + reviewBranch
+	rng := "refs/heads/main...refs/heads/" + reviewBranch
 	for _, tc := range []struct {
 		tool string
 		want []string
@@ -1318,9 +1318,10 @@ func TestHookRefusalKeepsWorkStagedDuringHook(t *testing.T) {
 }
 
 // TestLimitDuringPostMerge: the limit ends while post-merge runs, after the
-// merge commit. With only the merge in the index, git merge --abort clears
-// the state git left (MERGE_HEAD); with an edit staged during the hook,
-// nothing runs and the edit stays.
+// merge commit. The merge is in main, so the review is recorded merged at once
+// (M-9). With only the merge in the index, git merge --abort clears the state
+// git left (MERGE_HEAD); with an edit staged during the hook nothing runs, the
+// edit stays and the outcome says why.
 func TestLimitDuringPostMerge(t *testing.T) {
 	for _, staged := range []bool{false, true} {
 		t.Run(fmt.Sprintf("staged during the hook %v", staged), func(t *testing.T) { reviewPostMergeCase(t, staged) })
@@ -1341,20 +1342,30 @@ func reviewPostMergeCase(t *testing.T, staged bool) {
 	calls := reviewRecordGit(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.now)
-	if got := f.head(f.repo, "main^2"); got != head {
-		t.Fatalf("main^2 = %s, want the merge commit of %s", got, head)
+	line, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.now)
+	if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main ("+head[:7]+"), though git was stopped after the merge commit") {
+		t.Fatalf("approve = %q, %v; want it recorded merged at once", line, err)
 	}
-	if staged {
-		<-done
-		f.wantLeftAsIs(err, calls(), work)
+	if r := f.review(); r.Status != model.ReviewMerged || r.Head != head || f.head(f.repo, "main^2") != head {
+		t.Errorf("R-1 = %+v, main^2 %s; want merged at %s", r, f.head(f.repo, "main^2"), head)
+	}
+	if !staged {
+		if f.hasMergeHead() || f.status() != "" {
+			t.Errorf("after the abort: MERGE_HEAD %v, status %q; want neither", f.hasMergeHead(), f.status())
+		}
 		return
 	}
-	if f.hasMergeHead() || f.status() != "" {
-		t.Errorf("after the abort: MERGE_HEAD %v, status %q; want neither", f.hasMergeHead(), f.status())
+	<-done
+	if !strings.Contains(line, "cannot attribute to its own merge") || !f.hasMergeHead() {
+		t.Errorf("line %q, MERGE_HEAD %v; want the checkout left as it is", line, f.hasMergeHead())
 	}
-	if err == nil || !strings.Contains(err.Error(), "main holds "+head[:7]+" all the same") {
-		t.Errorf("approve error = %v, want it to say the merge is in main", err)
+	for _, c := range reviewGitCalls(calls(), "merge") {
+		if slices.Contains(c, "--abort") {
+			t.Errorf("git merge --abort ran over the staged edit: %q", c)
+		}
+	}
+	if got := worktreeGit(t, f.repo, "show", ":notes.txt"); got+"\n" != work {
+		t.Errorf("staged notes.txt = %q, want the developer's", got)
 	}
 }
 
@@ -1446,5 +1457,28 @@ func TestRefusalAfterClaimRestoresEarlierIntent(t *testing.T) {
 	}
 	if r := f.review(); !r.IntentAt.Equal(old) || r.Head != head || r.DiffStat != "earlier" {
 		t.Errorf("intent after the refusal = %+v, want the earlier one back", r)
+	}
+}
+
+// TestBaseTagDoesNotShadowBranch: a tag named like the base, at the branch's
+// head, does not make the branch look merged: every read of the base names
+// refs/heads/<base> (M-4), so the approval merges and records the real stat.
+func TestBaseTagDoesNotShadowBranch(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	gitRun(t, f.repo, "tag", "main", head)
+	stat, _, _ := reviewDiffStat(context.Background(), f.get("T-1"), 100)
+	if !strings.Contains(stat, "auth.go") {
+		t.Errorf("stat = %q, want the branch's change against the branch main", stat)
+	}
+	line, err := f.approve(model.ApproveMerge, "")
+	if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main") {
+		t.Fatalf("approve = %q, %v; want the merge", line, err)
+	}
+	if got := f.head(f.repo, "refs/heads/main^2"); got != head {
+		t.Errorf("the branch main's second parent = %s, want %s", got, head)
+	}
+	if r := f.review(); r.Status != model.ReviewMerged || !strings.Contains(r.DiffStat, "auth.go") {
+		t.Errorf("R-1 = %+v, want merged with the real stat", r)
 	}
 }

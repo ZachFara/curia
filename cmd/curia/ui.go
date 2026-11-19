@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -100,7 +101,7 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 	sig, stop := reviewHoldSignals(false)
 	defer stop()
 	err = reviewProgramErr(sig, runProgram(m, append(opts, tea.WithContext(sig))...))
-	if werr := reviewWaitFlight(); err == nil {
+	if werr := reviewAfterProgram(sig, os.Stderr); err == nil {
 		err = werr
 	}
 	return err

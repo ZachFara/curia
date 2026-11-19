@@ -218,7 +218,7 @@ func reviewStatAt(ctx context.Context, t model.Task, head string, width int) (st
 	sctx, cancel := context.WithTimeout(ctx, worktreeGitLimit)
 	defer cancel()
 	res := runGit(sctx, t.Repo, "diff", "--no-color", "--no-ext-diff", "--no-textconv",
-		"--stat="+strconv.Itoa(width), t.BaseBranch+"..."+head, "--")
+		"--stat="+strconv.Itoa(width), "refs/heads/"+t.BaseBranch+"..."+head, "--")
 	if res.err != nil {
 		return "", worktreeGitError(res, worktreeGitLimit)
 	}
@@ -241,7 +241,7 @@ func reviewAhead(ctx context.Context, t model.Task, head string) (int, error) {
 	if !reviewHeadPattern.MatchString(head) {
 		return 0, fmt.Errorf("refusing commit %q", sanitize.Line(head, 80))
 	}
-	out, err := worktreeRun(ctx, worktreeGitLimit, t.Repo, "rev-list", "--count", t.BaseBranch+".."+head, "--")
+	out, err := worktreeRun(ctx, worktreeGitLimit, t.Repo, "rev-list", "--count", "refs/heads/"+t.BaseBranch+".."+head, "--")
 	if err != nil {
 		return 0, err
 	}
@@ -268,7 +268,7 @@ func reviewCheck(ctx context.Context, st *store.Store, t model.Task) (stat, head
 	if head == "" {
 		return "", "", fmt.Errorf("branch %s does not exist in %s", t.Branch, sanitize.Line(t.Repo, 300))
 	}
-	ok, err := refExists(ctx, t.Repo, t.BaseBranch+"^{commit}")
+	ok, err := refExists(ctx, t.Repo, "refs/heads/"+t.BaseBranch+"^{commit}")
 	if err != nil {
 		return "", "", err
 	}
@@ -408,13 +408,17 @@ func reviewMergeTree(ctx context.Context, t model.Task, head string) (string, er
 func reviewCheckCheckout(ctx context.Context, t model.Task) error {
 	ctx, cancel := context.WithTimeout(ctx, worktreeGitLimit)
 	defer cancel()
-	res := runGit(ctx, t.Repo, "symbolic-ref", "--short", "-q", "HEAD")
-	cur := res.out
+	// The full name, not --short: a tag named like the base makes --short
+	// print heads/<base> (M-4).
+	res := runGit(ctx, t.Repo, "symbolic-ref", "-q", "HEAD")
+	cur := strings.TrimPrefix(res.out, "refs/heads/")
 	switch {
 	case res.err != nil && worktreeExitCode(res) == 1 && res.stderr == "":
 		cur = "a detached HEAD"
 	case res.err != nil:
 		return worktreeGitError(res, worktreeGitLimit)
+	case cur == res.out:
+		cur = res.out // not a branch: shown as it is
 	}
 	if cur != t.BaseBranch {
 		return fmt.Errorf("%s has %s checked out, not %s: check out %s there, or approve with --pr",
@@ -975,7 +979,7 @@ func reviewDiffCmd(t model.Task, tool string) (*exec.Cmd, error) {
 	if err := reviewCheckNames(t); err != nil {
 		return nil, err
 	}
-	rng := t.BaseBranch + "..." + t.Branch
+	rng := "refs/heads/" + t.BaseBranch + "...refs/heads/" + t.Branch
 	var bin string
 	var args, needs []string
 	switch tool {
