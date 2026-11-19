@@ -1589,6 +1589,136 @@ func TestOrphanMergeRefusesEveryClaim(t *testing.T) {
 	f.wantMerged(head)
 }
 
+// reviewOddKinds are working-tree states git hash-object cannot read (I-1),
+// each set up in the main checkout after a commit that tracks the path: a
+// tracked file deleted, a tracked symlink retargeted to nowhere, and an
+// embedded repository (a gitlink) with a commit its gitlink does not record.
+var reviewOddKinds = []struct {
+	name  string
+	setup func(f *reviewFixture)
+}{
+	{"deleted file", func(f *reviewFixture) {
+		f.commitOnMain("notes.txt", "a\n", "notes")
+		if err := os.Remove(filepath.Join(f.repo, "notes.txt")); err != nil {
+			f.t.Fatal(err)
+		}
+	}},
+	{"dangling symlink", func(f *reviewFixture) {
+		lnk := filepath.Join(f.repo, "lnk")
+		if err := os.Symlink("README", lnk); err != nil {
+			f.t.Fatal(err)
+		}
+		gitRun(f.t, f.repo, "add", "lnk")
+		gitRun(f.t, f.repo, "commit", "-q", "-m", "link")
+		if err := os.Remove(lnk); err != nil {
+			f.t.Fatal(err)
+		}
+		if err := os.Symlink("nowhere", lnk); err != nil {
+			f.t.Fatal(err)
+		}
+	}},
+	{"submodule with a new commit", func(f *reviewFixture) {
+		sub := filepath.Join(f.repo, "sub")
+		gitInit(f.t, sub, "main")
+		for i, file := range []string{"s", "t"} {
+			worktreeWrite(f.t, filepath.Join(sub, file), file+"\n")
+			gitRun(f.t, sub, "add", file)
+			gitRun(f.t, sub, "commit", "-q", "-m", file)
+			if i == 0 {
+				gitRun(f.t, f.repo, "add", "sub")
+				gitRun(f.t, f.repo, "commit", "-q", "-m", "submodule")
+			}
+		}
+	}},
+}
+
+// reviewManyModified commits reviewModifiedMax+1 files on main and modifies
+// each in the main checkout.
+func (f *reviewFixture) reviewManyModified() {
+	f.t.Helper()
+	dir := filepath.Join(f.repo, "many")
+	for i := range reviewModifiedMax + 1 {
+		worktreeWrite(f.t, filepath.Join(dir, strconv.Itoa(i)), "a\n")
+	}
+	gitRun(f.t, f.repo, "add", "-A")
+	gitRun(f.t, f.repo, "commit", "-q", "-m", "many")
+	for i := range reviewModifiedMax + 1 {
+		worktreeWrite(f.t, filepath.Join(dir, strconv.Itoa(i)), "b\n")
+	}
+}
+
+// TestMergeWithOddWorkingTree: a working tree with a deleted tracked file, a
+// dangling symlink, a submodule with new commits, or more modified files than
+// Curia compares, merges (I-1): none of them is an error, and nothing raw from
+// git reaches the user.
+func TestMergeWithOddWorkingTree(t *testing.T) {
+	kinds := append(slices.Clone(reviewOddKinds), struct {
+		name  string
+		setup func(f *reviewFixture)
+	}{"too many modified files", (*reviewFixture).reviewManyModified})
+	for _, k := range kinds {
+		t.Run(k.name, func(t *testing.T) {
+			f := reviewNew(t)
+			k.setup(f)
+			head := f.head(f.wt, "HEAD")
+			line, err := f.approve(model.ApproveMerge, "")
+			if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main") {
+				t.Fatalf("approve = %q, %v; want the merge", line, err)
+			}
+			if r := f.review(); r.Status != model.ReviewMerged || f.head(f.repo, "main^2") != head {
+				t.Errorf("R-1 = %+v, main^2 %s; want merged at %s", r, f.head(f.repo, "main^2"), head)
+			}
+		})
+	}
+}
+
+// TestMergeCutShortWithOddWorkingTree: with all three odd kinds in the working
+// tree, a merge cut short in pre-merge-commit is proven Curia's own and undone:
+// each path is compared by its kind (deleted, symlink target, gitlink commit),
+// and the checkout is as before.
+func TestMergeCutShortWithOddWorkingTree(t *testing.T) {
+	f := reviewNew(t)
+	for _, k := range reviewOddKinds {
+		k.setup(f)
+	}
+	lifecycleHooks(f.spawnFixture, "pre-merge-commit", "#!/bin/sh\nsleep 4\nexit 0\n")
+	before, status := f.head(f.repo, "HEAD"), f.status()
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	_, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, f.head(f.wt, "HEAD"), model.AnsweredCLI, f.now)
+	if err == nil || !strings.Contains(err.Error(), "Curia undid what it had staged (git reset --merge)") {
+		t.Fatalf("approve error = %v, want the cut-short merge undone", err)
+	}
+	f.wantAsBefore(before, status)
+	if target, err := os.Readlink(filepath.Join(f.repo, "lnk")); err != nil || target != "nowhere" {
+		t.Errorf("lnk -> %q (%v), want the developer's nowhere kept", target, err)
+	}
+	f.wantPending()
+}
+
+// TestMergeCutShortWithTooManyModified: with more modified files than Curia
+// compares, the merge runs, and when it is cut short Curia undoes nothing and
+// says plainly why: too many modified files to prove an undo.
+func TestMergeCutShortWithTooManyModified(t *testing.T) {
+	f := reviewNew(t)
+	f.reviewManyModified()
+	lifecycleHooks(f.spawnFixture, "pre-merge-commit", "#!/bin/sh\nsleep 4\nexit 0\n")
+	calls := reviewRecordGit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, f.head(f.wt, "HEAD"), model.AnsweredCLI, f.now)
+	if err == nil || !strings.Contains(err.Error(), "has more than 500 modified files, too many for Curia to prove that undoing the merge "+
+		"touches nothing else") || !strings.Contains(err.Error(), "The review stays pending") {
+		t.Fatalf("approve error = %v, want the undo refused, saying why", err)
+	}
+	if r := reviewGitCalls(calls(), "reset"); len(r) != 0 {
+		t.Errorf("git reset ran: %q", r)
+	}
+	if r := f.review(); r.Status != model.ReviewPending || r.IntentAt.IsZero() {
+		t.Errorf("R-1 = %+v, want pending with its intent kept", r)
+	}
+}
+
 // wantOrphanRefusal checks that action name was refused, naming the earlier
 // approval of head (intent at f.now) and saying to act again (again), and
 // that the earlier intent is untouched.
