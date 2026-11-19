@@ -1,7 +1,7 @@
 # Curia build and check entry points.
 #
-# `make check` is the single gate. The lefthook pre-commit hook and CI both
-# run exactly `make check`, so they can never diverge (docs/decisions/0007).
+# `make check` is the full gate and CI runs exactly it (docs/decisions/0007).
+# The lefthook pre-commit hook runs the fast `make check-fast` instead.
 #
 # Tools are pinned here and installed into .bin/ (gitignored) with
 # `go install <pkg>@<version>`, so local runs and CI use identical binaries.
@@ -37,11 +37,20 @@ BOUNDARY_LINTERS   := depguard
 # Every tracked or untracked-but-not-ignored Go file (skips .scratch/ etc.).
 GO_FILES = $$(git ls-files --cached --others --exclude-standard -- '*.go')
 
-.PHONY: check check-gates tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test build release-snapshot clean
+.PHONY: check check-fast check-gates tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test build release-snapshot clean
 
-## check: run every gate, in order. This is what the hook and CI run.
+## check: run every gate, in order, under the lock. CI runs this; run it by hand for the full gate.
 check:
 	@scripts/with-test-lock.sh $(MAKE) --no-print-directory check-gates
+
+## check-fast: the pre-commit gate, no lock: static gates, build, tests of the staged packages only
+## (no latency tests, no full suite; CI's `make check` runs those)
+check-fast: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script
+	@sh scripts/staged_tests_test.sh
+	@echo "==> go build ./..."
+	@go build ./...
+	@scripts/staged-tests.sh
+	@echo "==> make check-fast: all gates passed"
 
 ## check-gates: the gates themselves; `check` runs them under the worktree lock
 check-gates: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test
