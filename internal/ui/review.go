@@ -60,6 +60,11 @@ type ReviewDetail struct {
 	CostUSD     float64
 	CostKnown   bool
 	Approve     model.ApproveHow // what the a key will do
+	// BranchCostUSD is the task branch's cost as the cost-lens analyzer counts it, when BranchCostKnown. It
+	// comes seconds after the rest (the analyzer runs in the background), so it is kept out of the face: its
+	// arrival redraws the body but neither restarts the dwell nor cancels a prompt.
+	BranchCostUSD   float64
+	BranchCostKnown bool
 }
 
 // ReviewSource is where the view reads and acts. The command's implementation runs git.
@@ -161,7 +166,7 @@ type ReviewModel struct {
 	offset        int // first body line on screen
 	body          []bodyLine
 	alerts        int    // the body's first lines that are open tickets
-	bodyFace      string // what the body was built for
+	bodyFace      string // what the body was built for (bodyKey)
 	bodyWidth     int
 }
 
@@ -325,7 +330,7 @@ func field(s string) string {
 	return strconv.Itoa(len(s)) + ":" + s
 }
 
-// detailFace is every field of d the view draws.
+// detailFace is every field of d the view draws, but the branch cost (bodyKey).
 func detailFace(d ReviewDetail) string {
 	r, t := d.Review, d.Task
 	parts := []string{

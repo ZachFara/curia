@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -26,6 +28,7 @@ import (
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
 	"github.com/ZachFara/curia/internal/team"
+	"github.com/ZachFara/curia/internal/ui"
 )
 
 // reviewRunCmd runs `curia args...` in-process with stdin and returns
@@ -525,11 +528,174 @@ func TestReviewJSON(t *testing.T) {
 		"n", "id", "task_id", "session_id", "summary", "tests_status", "tests_detail", "status", "approved_how",
 		"diff_stat", "head", "pr_url", "my_notes", "note_message", "closed_via", "created_at", "updated_at", "closed_at",
 		"task", "diff_note", "open_assumptions", "open_blocking", "decided", "sessions", "teammates", "duration_seconds", "cost_usd",
+		"branch_cost_usd",
 	})
 	reviewWantJSONValues(t, got, head, a.ID, b.ID, d.ID)
 	f.wantPending()
 	if f.status() != statusBefore || len(f.messages()) != 0 {
 		t.Error("--json changed something")
+	}
+}
+
+// reviewCostlensTask is T-1 as the store holds it.
+func reviewCostlensTask(t *testing.T, f *reviewFixture) model.Task {
+	t.Helper()
+	tk, found, err := f.st.GetTask(context.Background(), "T-1")
+	if err != nil || !found || tk.Worktree == "" || tk.Worktree == tk.Repo {
+		t.Fatalf("T-1 = %+v %v %v", tk, found, err)
+	}
+	return tk
+}
+
+func TestReviewDetailNeverWaits(t *testing.T) {
+	f := reviewWithLead(t, model.StateIdle)
+	cfg, bin := costlensSetup(t)
+	f.cfg.CostLens.Analyzer = cfg.CostLens.Analyzer
+	fake := &costlensFake{release: make(chan struct{}), out: costlensSummary(t, reviewBranch)}
+	costlensUse(t, costlensLookIn(bin), fake)
+	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
+
+	type result struct {
+		d   ui.ReviewDetail
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		d, err := src.Detail(context.Background(), "R-1")
+		done <- result{d, err}
+	}()
+	var first result
+	select { // the run is held until released: a Detail that waited for it would never return
+	case first = <-done:
+	case <-time.After(10 * time.Second):
+		close(fake.release)
+		t.Fatal("Detail waited for the analyzer")
+	}
+	if first.err != nil || first.d.BranchCostKnown || first.d.Head == "" {
+		t.Fatalf("first Detail = %+v %v, want no branch cost yet", first.d, first.err)
+	}
+	costlensWaitCalls(t, fake, 1)
+	// P5-R4: the analyzer is asked about the worktree, never the repository.
+	if tk := reviewCostlensTask(t, f); fake.call(0)[2] != tk.Worktree {
+		t.Errorf("--project = %q, want the worktree %q", fake.call(0)[2], tk.Worktree)
+	}
+	close(fake.release)
+	costlensProcWait(t)
+	d, err := src.Detail(context.Background(), "R-1")
+	if err != nil || !d.BranchCostKnown || !costlensIs503(d.BranchCostUSD) {
+		t.Errorf("Detail after the run = %v %v, %v", d.BranchCostUSD, d.BranchCostKnown, err)
+	}
+	if d.Head != first.d.Head || fake.n() != 1 {
+		t.Errorf("head %q then %q, runs %d", first.d.Head, d.Head, fake.n())
+	}
+}
+
+// costlensProcWait waits for the process cache's run in flight, at most 10 s.
+func costlensProcWait(t *testing.T) {
+	t.Helper()
+	costlensProcMu.Lock()
+	c := costlensProc
+	costlensProcMu.Unlock()
+	if c != nil {
+		costlensWait(t, c)
+	}
+}
+
+// reviewBranchCostJSON runs curia review T-1 --json and returns its
+// branch_cost_usd and how long it took.
+func reviewBranchCostJSON(t *testing.T) (any, time.Duration) {
+	t.Helper()
+	start := time.Now()
+	stdout, stderr, err := reviewRunCmd(t, "", "review", "T-1", "--json")
+	took := time.Since(start)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, stderr)
+	}
+	var got map[string]any
+	if err = json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("%v: %s", err, stdout)
+	}
+	v, present := got["branch_cost_usd"]
+	if !present {
+		t.Fatalf("no branch_cost_usd in %s", stdout)
+	}
+	return v, took
+}
+
+// reviewFloat is v as a JSON number, or NaN.
+func reviewFloat(v any) float64 {
+	if f, ok := v.(float64); ok {
+		return f
+	}
+	return math.NaN()
+}
+
+func TestReviewJSONHasBranchCost(t *testing.T) {
+	reviewWithLead(t, model.StateIdle)
+	cfg, bin := costlensSetup(t)
+	reviewConfig(t, "[costlens]\nanalyzer = "+strconv.Quote(cfg.CostLens.Analyzer)+"\n")
+	// The run ends 200 ms after it starts: --json waits for it.
+	fake := &costlensFake{release: make(chan struct{}), out: costlensSummary(t, reviewBranch)}
+	costlensUse(t, costlensLookIn(bin), fake)
+	timer := time.AfterFunc(200*time.Millisecond, func() { close(fake.release) })
+	defer timer.Stop()
+	if v, _ := reviewBranchCostJSON(t); v == nil || !costlensIs503(reviewFloat(v)) {
+		t.Errorf("branch_cost_usd = %v, want 5.03", v)
+	}
+	if n := fake.n(); n != 1 {
+		t.Errorf("runs = %d, want 1", n)
+	}
+
+	// A failed run: null.
+	failing := &costlensFake{err: errors.New("exit status 1")}
+	costlensUse(t, costlensLookIn(bin), failing)
+	if v, _ := reviewBranchCostJSON(t); v != nil || failing.n() != 1 {
+		t.Errorf("failed run: branch_cost_usd = %v, runs %d", v, failing.n())
+	}
+
+	// No node: null, nothing run, and nothing waited for (a run would be held for good).
+	held := &costlensFake{release: make(chan struct{})}
+	defer close(held.release)
+	costlensUse(t, costlensLookIn(t.TempDir()), held)
+	if v, took := reviewBranchCostJSON(t); v != nil || held.n() != 0 || took > costlensLimit/2 {
+		t.Errorf("no analyzer: branch_cost_usd = %v, runs %d, took %v", v, held.n(), took)
+	}
+}
+
+func TestReviewWithoutBranchAsksNothing(t *testing.T) {
+	f := reviewWithLead(t, model.StateIdle)
+	cfg, bin := costlensSetup(t)
+	f.cfg.CostLens.Analyzer = cfg.CostLens.Analyzer
+	reviewConfig(t, "[costlens]\nanalyzer = "+strconv.Quote(cfg.CostLens.Analyzer)+"\n")
+	fake := &costlensFake{out: costlensSummary(t, reviewBranch)}
+	costlensUse(t, costlensLookIn(bin), fake)
+	for _, set := range []string{
+		`UPDATE tasks SET branch = '' WHERE id = 'T-1'`,
+		`UPDATE tasks SET branch = ?, worktree = '' WHERE id = 'T-1'`,
+	} {
+		raw, err := sql.Open("sqlite", f.db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var args []any
+		if strings.Contains(set, "?") {
+			args = []any{reviewBranch}
+		}
+		if _, err = raw.Exec(set, args...); err != nil {
+			t.Fatal(err)
+		}
+		_ = raw.Close()
+		src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
+		if d, err := src.Detail(context.Background(), "R-1"); err != nil || d.BranchCostKnown {
+			t.Errorf("%s: Detail = %v %v", set, d.BranchCostKnown, err)
+		}
+		if v, _ := reviewBranchCostJSON(t); v != nil {
+			t.Errorf("%s: branch_cost_usd = %v", set, v)
+		}
+		costlensProcWait(t)
+		if n := fake.n(); n != 0 {
+			t.Errorf("%s: costlensRun called %d times", set, n)
+		}
 	}
 }
 

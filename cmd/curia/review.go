@@ -995,7 +995,11 @@ func (s reviewSource) Detail(ctx context.Context, id string) (ui.ReviewDetail, e
 	if err != nil {
 		return ui.ReviewDetail{}, err
 	}
-	return reviewDetail(ctx, s.st, s.cfg, r, t)
+	d, err := reviewDetail(ctx, s.st, s.cfg, r, t)
+	if err == nil { // the branch cost never waits: the first ask starts the analyzer (costlens.go)
+		d.BranchCostUSD, d.BranchCostKnown = costlensTaskCost(s.cfg, t)
+	}
+	return d, err
 }
 
 // Approve approves review id at head, the branch head that was shown, as
@@ -1106,6 +1110,7 @@ type reviewJSON struct {
 	Teammates       int            `json:"teammates"`
 	DurationSeconds int64          `json:"duration_seconds"`
 	CostUSD         *float64       `json:"cost_usd"`
+	BranchCostUSD   *float64       `json:"branch_cost_usd"`
 }
 
 // reviewIDs is the ids of ds, never nil, cleaned.
@@ -1147,6 +1152,9 @@ func reviewPrintJSON(ctx context.Context, w io.Writer, st *store.Store, cfg conf
 	}
 	if d.CostKnown {
 		j.CostUSD = &d.CostUSD
+	}
+	if usd, ok := costlensTaskCostWait(ctx, cfg, t); ok {
+		j.BranchCostUSD = &usd
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
