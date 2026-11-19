@@ -6,11 +6,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -40,10 +44,17 @@ func reviewRunCmd(t *testing.T, stdin string, args ...string) (stdout, stderr st
 		rootCmd.SetArgs(nil)
 		reviewApproveFlag, reviewMergeFlag, reviewPRFlag = false, false, false
 		reviewChangesFlag, reviewDropFlag, reviewJSONFlag = false, false, false
-		reviewNoteFlag = ""
+		reviewNoteFlag, reviewHeadFlag = "", ""
 	}()
 	err = rootCmd.Execute()
 	return out.String(), errOut.String(), err
+}
+
+// headArg is --head and the branch's head now: the commit a user who has
+// just looked approves.
+func (f *reviewFixture) headArg() []string {
+	f.t.Helper()
+	return []string{"--head", f.head(f.wt, "HEAD")}
 }
 
 // reviewWithLead is reviewNew with the lead session linked to T-1, idle in
@@ -151,7 +162,7 @@ func TestReviewRefusesInsideAgent(t *testing.T) {
 func TestReviewApproveMerges(t *testing.T) {
 	f := reviewNew(t)
 	head := f.head(f.wt, "HEAD")
-	stdout, stderr, err := reviewRunCmd(t, "", "review", "R-1", "--approve")
+	stdout, stderr, err := reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve"}, f.headArg()...)...)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, stderr)
 	}
@@ -174,7 +185,7 @@ func TestReviewApproveExpiresAssumptions(t *testing.T) {
 	a1 := reviewTicket(f, "Assume v2 endpoint?", model.ModeAssume)
 	a2 := reviewTicket(f, "Assume 5 minute margin?", model.ModeAssume)
 	b := reviewTicket(f, "Rotate the key?", model.ModeBlocking)
-	stdout, stderr, err := reviewRunCmd(t, "", "review", "T-1", "--approve", "--merge")
+	stdout, stderr, err := reviewRunCmd(t, "", append([]string{"review", "T-1", "--approve", "--merge"}, f.headArg()...)...)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, stderr)
 	}
@@ -194,7 +205,7 @@ func TestReviewApproveExpiresAssumptions(t *testing.T) {
 func TestReviewApprovePRFlagAndConfig(t *testing.T) {
 	f := reviewNew(t)
 	reviewUseGH(t, "https://github.com/o/r/pull/3\n")
-	stdout, stderr, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--pr")
+	stdout, stderr, err := reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve", "--pr"}, f.headArg()...)...)
 	if err != nil {
 		t.Fatalf("--pr: %v\n%s", err, stderr)
 	}
@@ -208,7 +219,7 @@ func TestReviewApprovePRFlagAndConfig(t *testing.T) {
 	g := reviewNew(t)
 	reviewConfig(t, "[review]\napprove = \"pr\"\n")
 	gh := reviewUseGH(t, "https://github.com/o/r/pull/4\n")
-	if _, stderr, err = reviewRunCmd(t, "", "review", "R-1", "--approve"); err != nil {
+	if _, stderr, err = reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve"}, g.headArg()...)...); err != nil {
 		t.Fatalf("config pr: %v\n%s", err, stderr)
 	}
 	if r := g.review(); r.Status != model.ReviewApproved || r.PRURL != "https://github.com/o/r/pull/4" || len(gh.calls) != 1 {
@@ -218,7 +229,7 @@ func TestReviewApprovePRFlagAndConfig(t *testing.T) {
 	h := reviewNew(t)
 	reviewConfig(t, "[review]\napprove = \"pr\"\n")
 	gh = reviewUseGH(t, "")
-	if _, stderr, err = reviewRunCmd(t, "", "review", "R-1", "--approve", "--merge"); err != nil {
+	if _, stderr, err = reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve", "--merge"}, h.headArg()...)...); err != nil {
 		t.Fatalf("--merge over config: %v\n%s", err, stderr)
 	}
 	if r := h.review(); r.Status != model.ReviewMerged || len(gh.calls) != 0 {
@@ -231,8 +242,8 @@ func TestReviewApproveFailureStaysPending(t *testing.T) {
 	f.commitOnBranch("README", "branch side\n", "branch readme")
 	f.commitOnMain("README", "main side\n", "main readme")
 	before := f.head(f.repo, "HEAD")
-	stdout, stderr, err := reviewRunCmd(t, "", "review", "R-1", "--approve")
-	if err == nil || !strings.Contains(stderr, "; nothing was merged") {
+	stdout, stderr, err := reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve"}, f.headArg()...)...)
+	if err == nil || !strings.Contains(stderr, "Nothing was merged") {
 		t.Fatalf("err %v, stderr %q; want the failure", err, stderr)
 	}
 	if stdout != "" {
@@ -244,7 +255,7 @@ func TestReviewApproveFailureStaysPending(t *testing.T) {
 	}
 	// A working agent: refused before any git that changes something.
 	g := reviewWithLead(t, model.StateWorking)
-	if _, stderr, err = reviewRunCmd(t, "", "review", "R-1", "--approve"); err == nil ||
+	if _, stderr, err = reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve"}, g.headArg()...)...); err == nil ||
 		!strings.Contains(stderr, "the agent is still working; wait for it to stop") {
 		t.Errorf("working agent: err %v, stderr %q", err, stderr)
 	}
@@ -413,6 +424,9 @@ func TestReviewActionReappliesMarker(t *testing.T) {
 		{"review", "R-1", "--drop"},
 	} {
 		f := reviewWithLead(t, model.StateIdle)
+		if args[2] == "--approve" {
+			args = append(args, f.headArg()...)
+		}
 		f.fake.Calls = nil
 		if _, stderr, err := reviewRunCmd(t, "", args...); err != nil {
 			t.Fatalf("%q: %v\n%s", args, err, stderr)
@@ -448,6 +462,8 @@ func TestReviewFlagErrors(t *testing.T) {
 		{"review", "-x", "--drop"},
 		{"review", "R-1", "R-2", "--drop"},
 		{"review", "R-1;x", "--drop"},
+		{"review", "R-1", "--head", "abcdef1"},
+		{"review", "R-1", "--drop", "--head", "abcdef1"},
 	} {
 		if _, _, err := reviewRunCmd(t, "", args...); err == nil {
 			t.Errorf("%q: no error", args)
@@ -474,7 +490,7 @@ func TestReviewResolveByTaskAndByReview(t *testing.T) {
 	if _, err := reviewResolve(ctx, f.st, "R-9"); err == nil || err.Error() != "no review R-9" {
 		t.Errorf("R-9: %v", err)
 	}
-	if _, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, "", model.AnsweredCLI, f.now); err != nil {
+	if _, err := f.approve(model.ApproveMerge, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := reviewResolve(ctx, f.st, "R-1"); err == nil || err.Error() != "R-1 is merged" {
@@ -573,9 +589,45 @@ func TestReviewWithoutTerminalNeedsAnAction(t *testing.T) {
 }
 
 // reviewPump runs cmd and the commands its messages lead to, feeding each
-// message to m. A command that does not return within a moment is one of
-// the view's refresh ticks, which are dropped.
+// message to m. Timer ticks are dropped (reviewIsTick), and so is a command
+// still running after reviewPumpLimit (a review action held in a hook).
 func reviewPump(t *testing.T, m tea.Model, cmd tea.Cmd) tea.Model {
+	t.Helper()
+	return reviewPumping(t, m, cmd, false)
+}
+
+// reviewPumpLimit is how long reviewPump waits for one command: long enough
+// for a git call on a loaded machine (the gate runs packages in parallel),
+// shorter than an approval held in a hook, which it leaves running.
+const reviewPumpLimit = 2 * time.Second
+
+// reviewIsTick reports whether v is one of the views' timer ticks, which
+// reviewPump drops so a refresh chain cannot run on: a message whose type
+// ends in TickMsg (or the dashboard's tickMsg), also inside the dashboard's
+// wrapper of a child's message.
+func reviewIsTick(v reflect.Value) bool {
+	if !v.IsValid() {
+		return false
+	}
+	if name := v.Type().Name(); strings.HasSuffix(name, "TickMsg") || name == "tickMsg" {
+		return true
+	}
+	if v.Kind() == reflect.Struct {
+		if f := v.FieldByName("msg"); f.IsValid() && f.Kind() == reflect.Interface {
+			return reviewIsTick(f.Elem())
+		}
+	}
+	return false
+}
+
+// reviewPumpActions is reviewPump that also waits for a command a review
+// action is running (reviewPumpWait), so the action's outcome is fed back.
+func reviewPumpActions(t *testing.T, m tea.Model, cmd tea.Cmd) tea.Model {
+	t.Helper()
+	return reviewPumping(t, m, cmd, true)
+}
+
+func reviewPumping(t *testing.T, m tea.Model, cmd tea.Cmd, actions bool) tea.Model {
 	t.Helper()
 	pending := []tea.Cmd{cmd}
 	for steps := 0; len(pending) > 0; steps++ {
@@ -589,19 +641,49 @@ func reviewPump(t *testing.T, m tea.Model, cmd tea.Cmd) tea.Model {
 		}
 		ch := make(chan tea.Msg, 1)
 		go func() { ch <- c() }()
+		wait := (<-chan tea.Msg)(ch)
+		if actions {
+			wait = reviewPumpWait(ch)
+		}
 		select {
-		case msg := <-ch:
+		case msg := <-wait:
 			if batch, ok := msg.(tea.BatchMsg); ok {
 				pending = append(pending, batch...)
-			} else if msg != nil {
+			} else if msg != nil && !reviewIsTick(reflect.ValueOf(msg)) {
 				var next tea.Cmd
 				m, next = m.Update(msg)
 				pending = append(pending, next)
 			}
-		case <-time.After(300 * time.Millisecond):
+		case <-time.After(reviewPumpLimit):
 		}
 	}
 	return m
+}
+
+// reviewPumpWait is ch, or, when its command is still running after 300 ms
+// while a review action is in flight (an approval can take seconds), ch
+// waited on for up to 30 s more: the view's timer ticks start no action.
+func reviewPumpWait(ch chan tea.Msg) <-chan tea.Msg {
+	select {
+	case msg := <-ch:
+		out := make(chan tea.Msg, 1)
+		out <- msg
+		return out
+	case <-time.After(250 * time.Millisecond):
+	}
+	reviewFlight.mu.Lock()
+	busy := reviewFlight.n > 0
+	reviewFlight.mu.Unlock()
+	if !busy {
+		return ch
+	}
+	out := make(chan tea.Msg, 1)
+	select {
+	case msg := <-ch:
+		out <- msg
+	case <-time.After(30 * time.Second):
+	}
+	return out
 }
 
 func TestReviewViewApprovesAndPrintsOutcome(t *testing.T) {
@@ -610,8 +692,8 @@ func TestReviewViewApprovesAndPrintsOutcome(t *testing.T) {
 	prev, prevProgram := reviewIsTerminal, runProgram
 	reviewIsTerminal = func() bool { return true }
 	runProgram = func(m tea.Model, opts ...tea.ProgramOption) error {
-		if _, ok := m.(reviewCapture); !ok || len(opts) != 1 {
-			t.Fatalf("model is %T with %d options, want the capture in the alt screen", m, len(opts))
+		if _, ok := m.(reviewCapture); !ok || len(opts) != 2 {
+			t.Fatalf("model is %T with %d options, want the capture in the alt screen, with the signal context", m, len(opts))
 		}
 		m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
 		m = reviewPump(t, m, m.Init())
@@ -619,7 +701,7 @@ func TestReviewViewApprovesAndPrintsOutcome(t *testing.T) {
 			f.now = f.now.Add(3 * time.Second)
 			var cmd tea.Cmd
 			m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
-			m = reviewPump(t, m, cmd)
+			m = reviewPumpActions(t, m, cmd)
 		}
 		return nil
 	}
@@ -643,7 +725,7 @@ func TestReviewOutputIsSanitised(t *testing.T) {
 	f := reviewNew(t)
 	f.update("T-1", func(tk *model.Task) { tk.Title = "evil \x1b]0;pwned\x07 \x1b[31mtitle" })
 	lifecycleHooks(f.spawnFixture, "commit-msg", "#!/bin/sh\nprintf 'hook \\033[2J\\033]0;x\\007 says no\\n' >&2\nexit 1\n")
-	for _, args := range [][]string{{"review", "R-1", "--json"}, {"review", "R-1", "--approve"}} {
+	for _, args := range [][]string{{"review", "R-1", "--json"}, append([]string{"review", "R-1", "--approve"}, f.headArg()...)} {
 		stdout, stderr, _ := reviewRunCmd(t, "", args...)
 		for _, s := range []string{stdout, stderr} {
 			if strings.ContainsAny(s, "\x1b\x07") {
@@ -785,7 +867,435 @@ func TestReviewSourceDiffCmd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"/opt/bin/git", "-C", f.repo, "diff", "main..." + reviewBranch}; !slices.Equal(append([]string{cmd.Path}, cmd.Args[1:]...), want) {
+	if want := []string{"/opt/bin/git", "-C", f.repo, "diff", "refs/heads/main...refs/heads/" + reviewBranch}; !slices.Equal(append([]string{cmd.Path}, cmd.Args[1:]...), want) {
 		t.Errorf("argv = %q, want %q", cmd.Args, want)
 	}
+}
+
+// The variables a signal test passes to its child (TestReviewChild).
+const (
+	reviewChildArgs = "CURIA_TEST_REVIEW_ARGS" // curia's arguments, joined by \x1f; "view" first drives the view
+	reviewChildHome = "CURIA_TEST_REVIEW_HOME"
+	reviewChildDB   = "CURIA_TEST_REVIEW_DB"
+)
+
+// TestReviewChild is no test of its own: the signal tests run it in a child
+// process, where it runs curia with the arguments they pass, as the user at
+// a terminal, against their home and store. With "view" first it runs the
+// review view, approves with a then y, and ends the program a second later,
+// while the merge's hook (3 s) runs (as a closed popup does), leaving the
+// approval in flight.
+func TestReviewChild(t *testing.T) {
+	joined := os.Getenv(reviewChildArgs)
+	if joined == "" {
+		t.Skip("run by the signal tests in a child process")
+	}
+	t.Setenv("HOME", os.Getenv(reviewChildHome))
+	t.Setenv("CURIA_DB", os.Getenv(reviewChildDB))
+	userTerminalAs(t, true)
+	useFakeTmux(t)
+	args := strings.Split(joined, "\x1f")
+	if args[0] == "view" {
+		args = args[1:]
+		reviewChildView(t)
+	}
+	stdout, stderr, err := reviewRunCmd(t, "", args...)
+	fmt.Printf("child err=%v\nstdout=%s\nstderr=%s\n", err, stdout, stderr)
+}
+
+// reviewChildView makes runProgram drive the review view: a then y, then
+// it returns a second later, with the approval still in flight.
+func reviewChildView(t *testing.T) {
+	t.Helper()
+	clk := &decideClock{t: time.Now()}
+	prevClock, prevTerm, prevProgram := clock, reviewIsTerminal, runProgram
+	clock, reviewIsTerminal = clk.now, func() bool { return true }
+	runProgram = func(m tea.Model, _ ...tea.ProgramOption) error {
+		m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
+		m = reviewPump(t, m, m.Init())
+		for _, k := range []string{"a", "y"} {
+			clk.advance(3 * time.Second)
+			var cmd tea.Cmd
+			m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+			m = reviewPump(t, m, cmd)
+		}
+		time.Sleep(time.Second)
+		return nil
+	}
+	t.Cleanup(func() { clock, reviewIsTerminal, runProgram = prevClock, prevTerm, prevProgram })
+}
+
+// reviewWaitFile waits up to 30 s for path to exist.
+func reviewWaitFile(t *testing.T, path string) {
+	t.Helper()
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never appeared", path)
+		}
+	}
+}
+
+// reviewChild starts curia args in a child process (TestReviewChild) in a
+// process group of its own, against f's home and store, with a hook named
+// hook that touches a marker, sleeps for 3 s and succeeds; it returns once
+// the hook has started, with the marker's path (the hook touches the same
+// path with ".done" when it ends). The child is killed if it is still
+// running when the test ends.
+func reviewChild(t *testing.T, f *reviewFixture, hook string, args ...string) (cmd *exec.Cmd, out *bytes.Buffer, marker string) {
+	t.Helper()
+	marker = filepath.Join(t.TempDir(), "hook-started")
+	lifecycleHooks(f.spawnFixture, hook, "#!/bin/sh\ntouch '"+marker+"'\nsleep 3\ntouch '"+marker+".done'\nexit 0\n")
+	self, err := os.Executable() // this test binary
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command(self, "-test.run", "^TestReviewChild$", "-test.v")
+	cmd.Env = append(os.Environ(), reviewChildArgs+"="+strings.Join(args, "\x1f"),
+		reviewChildHome+"="+os.Getenv("HOME"), reviewChildDB+"="+f.db)
+	out = &bytes.Buffer{}
+	cmd.Stdout, cmd.Stderr = out, out
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	reviewWaitFile(t, marker)
+	return cmd, out, marker
+}
+
+// reviewChildWait waits up to 60 s for the child to exit.
+func reviewChildWait(t *testing.T, cmd *exec.Cmd, out *bytes.Buffer) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		t.Logf("child exited: %v\n%s", err, out)
+	case <-time.After(60 * time.Second):
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		t.Fatalf("the child did not exit\n%s", out)
+	}
+}
+
+// reviewWantMerged checks that R-1 is recorded merged at head and that the
+// main checkout holds the merge, clean, with no merge under way.
+func (f *reviewFixture) wantMerged(head string) {
+	f.t.Helper()
+	if r := f.review(); r.Status != model.ReviewMerged || r.Head != head {
+		f.t.Errorf("R-1 is %s at %q, want merged at %s", r.Status, r.Head, head)
+	}
+	if got := f.head(f.repo, "main^2"); got != head {
+		f.t.Errorf("main^2 = %s, want the approved %s", got, head)
+	}
+	if s := f.status(); s != "" {
+		f.t.Errorf("status = %q, want clean", s)
+	}
+	if f.hasMergeHead() {
+		f.t.Error("MERGE_HEAD is left")
+	}
+	if _, err := os.Stat(filepath.Join(f.repo, ".git", "index.lock")); err == nil {
+		f.t.Error("index.lock is left")
+	}
+}
+
+// TestApproveSurvivesHangup: the terminal of curia review --approve goes
+// away (a hang-up to its process group) while a pre-merge-commit hook runs:
+// the merge completes, and the review is recorded merged before curia exits.
+func TestApproveSurvivesHangup(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	cmd, out, _ := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge", "--head", head)
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	reviewChildWait(t, cmd, out)
+	f.wantMerged(head)
+}
+
+// TestApproveSurvivesTerminate: only curia gets SIGTERM, mid-merge: it
+// waits for the merge and records it.
+func TestApproveSurvivesTerminate(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	cmd, out, _ := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge", "--head", head)
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	reviewChildWait(t, cmd, out)
+	f.wantMerged(head)
+	// M-2: it said it waits, and logged the outcome.
+	if !strings.Contains(out.String(), reviewWaitingLine) {
+		t.Errorf("the child did not say it waits:\n%s", out)
+	}
+	if log := strings.Join(readLog(t), "\n"); !strings.Contains(log, "review action done") || !strings.Contains(log, "R-1 approved: merged") {
+		t.Errorf("the log lacks the outcome:\n%s", log)
+	}
+}
+
+// TestApproveViewSurvivesHangup: the review view's program ends (the popup
+// closed) while its approval merges, and a hang-up follows: curia review
+// waits for the approval and records it before it exits.
+func TestApproveViewSurvivesHangup(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	cmd, out, _ := reviewChild(t, f, "pre-merge-commit", "view", "review", "T-1")
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	reviewChildWait(t, cmd, out)
+	f.wantMerged(head)
+}
+
+// TestDashboardWaitsForReviewAction: the dashboard's program returns while
+// the approval it started still merges: curia ui returns only once the
+// review is recorded.
+func TestDashboardWaitsForReviewAction(t *testing.T) {
+	f := reviewWithLead(t, model.StateIdle)
+	head := f.head(f.wt, "HEAD")
+	lifecycleHooks(f.spawnFixture, "pre-merge-commit", "#!/bin/sh\nsleep 2\nexit 0\n")
+	prev := runProgram
+	runProgram = func(m tea.Model, _ ...tea.ProgramOption) error {
+		m, _ = m.Update(m.Init()())
+		for _, k := range []string{"r", "a", "y"} {
+			f.now = f.now.Add(2 * time.Second)
+			var cmd tea.Cmd
+			m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+			m = reviewPump(t, m, cmd) // drops the approval's command, still running, after 300 ms
+		}
+		return nil
+	}
+	t.Cleanup(func() { runProgram = prev })
+	if _, err := runRoot(t, "ui"); err != nil {
+		t.Fatal(err)
+	}
+	f.wantMerged(head)
+}
+
+// TestApproveRecordsMergeFoundDone: the approving curia is killed (SIGKILL,
+// nothing can hold it) after git made the merge commit, while the
+// post-merge hook runs. git, in its own process group, finishes; the review
+// stays pending with the approval's intent; the next approve finds the head
+// in the base and records the review merged, with the stat of the intent.
+func TestApproveRecordsMergeFoundDone(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	cmd, out, marker := reviewChild(t, f, "post-merge", "review", "R-1", "--approve", "--merge", "--head", head)
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	reviewChildWait(t, cmd, out)
+	reviewWaitFile(t, marker+".done")
+	// git exits after its hook: wait for it to leave no merge under way.
+	for deadline := time.Now().Add(30 * time.Second); f.hasMergeHead() || f.head(f.repo, "main^2") != head; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the orphaned git did not finish its merge")
+		}
+	}
+	if r := f.review(); r.Status != model.ReviewPending || r.Head != head || r.IntentAt.IsZero() || r.ApprovedHow != model.ApproveMerge {
+		t.Fatalf("after the kill R-1 = %+v, want pending with the intent to merge %s", r, head)
+	}
+	line, err := f.approve(model.ApproveMerge, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "R-1 approved: " + reviewBranch + " (" + head[:7] + ") is already merged into main; recorded. " +
+		"Remove the worktree and branch with: curia clean T-1"; line != want {
+		t.Errorf("line = %q, want %q", line, want)
+	}
+	f.wantMerged(head)
+	if r := f.review(); r.ApprovedHow != model.ApproveMerge || !strings.Contains(r.DiffStat, "auth.go") || r.ClosedVia != model.AnsweredCLI {
+		t.Errorf("R-1 = %+v, want merged by merge with the intent's stat", r)
+	}
+}
+
+// TestSecondApproverRefusedWhileFirstMerges: while one curia merges, a
+// second approval, a change request and a drop of the same review are
+// refused, naming the approval in flight; the first then records its merge.
+func TestSecondApproverRefusedWhileFirstMerges(t *testing.T) {
+	f := reviewNew(t)
+	f.now = time.Now()
+	head := f.head(f.wt, "HEAD")
+	cmd, out, _ := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge", "--head", head)
+	_, err := f.approve(model.ApproveMerge, "")
+	if err == nil || !strings.Contains(err.Error(), "R-1 is being approved (merge at "+head[:7]+") by another curia since ") {
+		t.Errorf("second approve: %v, want the in-flight refusal", err)
+	}
+	if _, err = reviewDrop(context.Background(), f.st, "R-1", model.AnsweredCLI, f.now); err == nil ||
+		!strings.Contains(err.Error(), "is being approved") || !strings.Contains(err.Error(), "If that curia was killed, drop again after ") {
+		t.Errorf("drop during the approval: %v, want the in-flight refusal", err)
+	}
+	if _, err = reviewRequestChanges(context.Background(), f.st, f.fake, testLoggerOnly(), "R-1", "more", model.AnsweredCLI, f.now); err == nil ||
+		!strings.Contains(err.Error(), "is being approved") || !strings.Contains(err.Error(), "If that curia was killed, request changes again after ") {
+		t.Errorf("request changes during the approval: %v, want the in-flight refusal", err)
+	}
+	reviewChildWait(t, cmd, out)
+	f.wantMerged(head)
+	if strings.Count(worktreeGit(t, f.repo, "log", "--merges", "--format=%H"), "\n") != 0 {
+		t.Error("more than one merge commit")
+	}
+}
+
+// TestStaleIntentDoesNotBlock: an intent older than the hold, left by an
+// approval that was killed before git merged, does not refuse a new one.
+func TestStaleIntentDoesNotBlock(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	if _, err := f.st.ClaimReviewIntent(context.Background(), "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head},
+		f.now.Add(-reviewIntentHold), reviewIntentHold); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.approve(model.ApproveMerge, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.wantMerged(head)
+}
+
+// TestApproveFailureClearsIntent: a merge or a pull request that fails with
+// nothing done leaves the review pending with no intent.
+func TestApproveFailureClearsIntent(t *testing.T) {
+	f := reviewNew(t)
+	f.commitOnBranch("README", "branch side\n", "branch readme")
+	f.commitOnMain("README", "main side\n", "main readme")
+	if _, err := f.approve(model.ApproveMerge, ""); err == nil {
+		t.Fatal("conflict: approved")
+	}
+	if r := f.review(); r.Status != model.ReviewPending || !r.IntentAt.IsZero() || r.Head != "" || r.ApprovedHow != "" || r.DiffStat != "" {
+		t.Errorf("after a conflict R-1 = %+v, want pending with no intent", r)
+	}
+	g := reviewNew(t)
+	bin := filepath.Join(t.TempDir(), "bin")
+	reviewExecutable(t, bin, "gh", "#!/bin/sh\necho 'no permission' >&2\nexit 1\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	prevGH, prevLook := reviewGH, reviewGHLookPath
+	reviewGH, reviewGHLookPath = reviewRealGH, exec.LookPath
+	t.Cleanup(func() { reviewGH, reviewGHLookPath = prevGH, prevLook })
+	if _, err := g.approve(model.ApprovePR, ""); err == nil {
+		t.Fatal("failing gh: approved")
+	}
+	if r := g.review(); r.Status != model.ReviewPending || !r.IntentAt.IsZero() || r.Head != "" {
+		t.Errorf("after gh failed R-1 = %+v, want pending with no intent", r)
+	}
+}
+
+// TestRecordErrorNeverAdvisesDrop: when the work is done but its record
+// fails, the message says to approve again, never to drop the task.
+func TestRecordErrorNeverAdvisesDrop(t *testing.T) {
+	f := reviewNew(t)
+	head := strings.Repeat("c", 40)
+	r := f.review()
+	for _, err := range []error{errors.New("database is locked"), store.ErrReviewClosed} {
+		msg := reviewRecordError(context.Background(), f.st, r, "merged x into main (ccccccc)", head, err).Error()
+		if strings.Contains(msg, "--drop") || strings.Contains(msg, "drop it") {
+			t.Errorf("%v: %q advises dropping", err, msg)
+		}
+		if errors.Is(err, store.ErrReviewClosed) {
+			continue
+		}
+		if !strings.Contains(msg, "the review stays pending; run curia review R-1 --approve --head "+head+" again to record it") {
+			t.Errorf("%q does not say how to record it", msg)
+		}
+	}
+	// A record that another curia made meanwhile is said so.
+	if _, _, err := f.st.CloseReview(context.Background(), "R-1", store.ReviewClose{
+		Status: model.ReviewMerged, How: model.ApproveMerge,
+		Head: head, Via: model.AnsweredCLI,
+	}, f.now); err != nil {
+		t.Fatal(err)
+	}
+	if msg := reviewRecordError(context.Background(), f.st, r, "merged", head, store.ErrReviewClosed).Error(); !strings.Contains(msg, "another curia recorded it meanwhile (merged)") {
+		t.Errorf("closed by another: %q", msg)
+	}
+}
+
+// TestApproveFlagNeedsHead: without --head the flag form approves nothing:
+// it prints the branch's head, its stat line and the exact command that
+// approves that commit, and exits 1.
+func TestApproveFlagNeedsHead(t *testing.T) {
+	f := reviewNew(t)
+	head, before := f.head(f.wt, "HEAD"), f.head(f.repo, "HEAD")
+	for _, c := range []struct {
+		args []string
+		flag string
+	}{{[]string{"review", "R-1", "--approve"}, ""}, {[]string{"review", "T-1", "--approve", "--pr"}, " --pr"}} {
+		stdout, stderr, err := reviewRunCmd(t, "", c.args...)
+		if err == nil || stdout != "" {
+			t.Fatalf("%q: approved: %q, %v", c.args, stdout, err)
+		}
+		msg := err.Error()
+		for _, want := range []string{
+			"--approve needs --head <commit>", reviewBranch + " is at " + head + " (1 file changed, 1 insertion(+))",
+			"\n  curia review R-1 --approve" + c.flag + " --head " + head,
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("%q: error %q lacks %q", c.args, msg, want)
+			}
+		}
+		if !strings.Contains(stderr, head) {
+			t.Errorf("%q: stderr %q does not show the head", c.args, stderr)
+		}
+	}
+	if f.head(f.repo, "HEAD") != before {
+		t.Error("main moved")
+	}
+	if r := f.review(); r.Status != model.ReviewPending || !r.IntentAt.IsZero() {
+		t.Errorf("R-1 = %+v, want pending with no intent", r)
+	}
+}
+
+// TestApproveFlagRefusesMovedBranch: a commit that lands on the branch after
+// the user looked is never merged: --head (whole or a prefix) no longer
+// names the branch's head.
+func TestApproveFlagRefusesMovedBranch(t *testing.T) {
+	f := reviewNew(t)
+	shown, before := f.head(f.wt, "HEAD"), f.head(f.repo, "HEAD")
+	f.commitOnBranch("evil.go", "package auth // added after the developer looked\n", "sneak")
+	for _, h := range []string{shown} {
+		_, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", h)
+		if err == nil || !strings.Contains(err.Error(), "the branch changed since you looked: "+reviewBranch+" is now at ") {
+			t.Errorf("--head %s: %v, want the changed-branch refusal", h, err)
+		}
+	}
+	if f.head(f.repo, "HEAD") != before {
+		t.Error("main moved")
+	}
+	if _, err := os.Stat(filepath.Join(f.repo, "evil.go")); err == nil {
+		t.Error("the unseen commit was merged")
+	}
+	f.wantPending()
+}
+
+// TestApproveFlagRefusesPrefix: --head must be the branch head's full commit
+// id, of the length the repository's object format gives; a prefix, however
+// unique, and anything else are refused before git merges, with the full head
+// shown. The full id merges.
+func TestApproveFlagRefusesPrefix(t *testing.T) {
+	f := reviewNew(t)
+	head := f.head(f.wt, "HEAD")
+	for _, bad := range []string{
+		head[:7], head[:12], head[:39], "ABCDEF" + head[6:], "HEAD", "main", "-x", "--upload-pack=x", head + "0",
+		"g" + head[1:], head + strings.Repeat("0", 24),
+	} {
+		_, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", bad)
+		if err == nil || !strings.Contains(err.Error(), "give the full commit id you looked at (40 lower-case hex digits; a prefix is not enough)") ||
+			!strings.Contains(err.Error(), reviewBranch+" is at "+head) {
+			t.Errorf("--head %q: %v, want the refusal showing the full head", bad, err)
+		}
+	}
+	other := f.head(f.repo, "main")
+	if _, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", other); err == nil ||
+		!strings.Contains(err.Error(), "the branch changed since you looked") {
+		t.Errorf("--head of another commit: %v", err)
+	}
+	f.wantPending()
+	stdout, stderr, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", head)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, stderr)
+	}
+	if !strings.HasPrefix(stdout, "R-1 approved: merged "+reviewBranch+" into main ("+head[:7]+")") {
+		t.Errorf("stdout = %q", stdout)
+	}
+	f.wantMerged(head)
 }

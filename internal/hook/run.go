@@ -275,17 +275,14 @@ func blockLine(reason string) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// sessionStart ends the other sessions in ev's pane and asks git and tmux
-// about the new one. Git and tmux run at the same time: each is a subprocess
+// sessionStart asks git and tmux about the new session, then ends the other
+// sessions in ev's pane of the same tmux server. Git and tmux run at the same time: each is a subprocess
 // of several milliseconds, and together they would use most of the budget.
 func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store) (*startInfo, error) {
 	start := &startInfo{}
 	if ev.Pane == "" {
 		start.repo, start.branch, start.worktree = env.Git(ev.Cwd)
 		return start, nil
-	}
-	if err := st.EndOthersInPane(ctx, ev.Pane, ev.SessionID, ev.At); err != nil {
-		return start, err
 	}
 	var wg sync.WaitGroup
 	var panicked any
@@ -297,6 +294,11 @@ func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store)
 	wg.Wait()
 	if panicked != nil {
 		panic(panicked) // on the caller's goroutine, where it can be recovered
+	}
+	// Only the pane of this server: the same id on another server is
+	// another pane (I4). The socket comes from the PaneInfo call above.
+	if err := st.EndOthersInPane(ctx, ev.Pane, start.socket, ev.SessionID, ev.At); err != nil {
+		return start, err
 	}
 	return start, nil
 }

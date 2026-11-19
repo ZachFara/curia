@@ -1056,3 +1056,35 @@ func TestPauseInRealTmuxAndGit(t *testing.T) {
 		t.Errorf("branch tip = %q, want the WIP commit", got)
 	}
 }
+
+// TestPauseNeverKillsOtherServersPane: pause run from a second tmux server
+// whose %100 has the id of the agent's pane on the first server neither
+// kills that pane nor takes the agent for stopped: it refuses, naming the
+// other server, and with --force it still kills nothing.
+func TestPauseNeverKillsOtherServersPane(t *testing.T) {
+	f := lifecycleWithLead(t)
+	lead, found, err := f.st.GetSession(context.Background(), lifecycleLead)
+	if err != nil || !found {
+		t.Fatal(found, err)
+	}
+	lead.Socket = "/tmp/tmux-501/first"
+	if err = f.st.UpsertSession(context.Background(), lead); err != nil {
+		t.Fatal(err)
+	}
+	for i := range f.fake.Panes {
+		f.fake.Panes[i].Socket = "/tmp/tmux-501/second"
+	}
+	_, err = lifecycleRun(t, "pause", "T-1")
+	if err == nil || !strings.Contains(err.Error(), "of another tmux server (first): run curia pause from that server") ||
+		!strings.Contains(err.Error(), "Nothing was done") {
+		t.Fatalf("pause = %v, want the other-server refusal", err)
+	}
+	if got := lifecycleKills(f); len(got) != 0 {
+		t.Errorf("kills = %q, want none", got)
+	}
+	lifecycleWantKept(f)
+	out, _ := lifecycleRun(t, "pause", "T-1", "--force")
+	if got := lifecycleKills(f); len(got) != 0 {
+		t.Errorf("--force: kills = %q, want none\n%s", got, out)
+	}
+}

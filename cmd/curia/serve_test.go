@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -124,7 +125,7 @@ func (f *serveFix) mint(kind model.PushKind, ref string, at time.Time, sent bool
 		f.t.Fatalf("claim the push of %s: %+v found=%v err=%v", ref, p, found, err)
 	}
 	if sent {
-		if err := f.st.FinishPush(ctx, p.N, model.PushSent, "", time.Time{}, at); err != nil {
+		if err := f.st.FinishPush(ctx, p.N, p.Attempts, model.PushSent, "", time.Time{}, at); err != nil {
 			f.t.Fatal(err)
 		}
 	}
@@ -587,22 +588,35 @@ func TestAnswerReplaysProbeRequest(t *testing.T) {
 	}
 }
 
-func TestAnswerUnknownOption(t *testing.T) {
+// TestAnswerUnknownKeyKeepsToken: an option the ticket does not offer is
+// refused before the token is spent, so the same token then answers (M1).
+func TestAnswerUnknownKeyKeepsToken(t *testing.T) {
 	f := serveNewFix(t)
 	d := f.ticket(model.ReversCostly)
 	tok := f.mint(model.PushDecision, d.ID, serveT0, true)
-	code, body, _ := f.do(serveAnswerReq(tok, d.ID, "Z"))
-	if code != http.StatusUnprocessableEntity || body != `{"error":"unknown option"}` {
-		t.Errorf("key Z = %d %s", code, body)
+	for _, key := range []string{"Z", "ZZ", "a"} {
+		code, body, _ := f.do(serveAnswerReq(tok, d.ID, key))
+		if code != http.StatusUnprocessableEntity || body != `{"error":"unknown option"}` {
+			t.Errorf("key %s = %d %s", key, code, body)
+		}
 	}
-	if !f.spent(tok) {
-		t.Error("the token is not spent")
+	if f.spent(tok) {
+		t.Error("a refused option spent the token")
 	}
 	if got := f.decision(d.ID); got.Status != model.StatusOpen {
 		t.Errorf("D-1 = %s, want open", got.Status)
 	}
 	if len(f.typed()) != 0 {
 		t.Error("something was typed")
+	}
+	if code, body, _ := f.do(serveAnswerReq(tok, d.ID, "A")); code != http.StatusOK {
+		t.Errorf("then key A = %d %s, want 200", code, body)
+	}
+	if !f.spent(tok) {
+		t.Error("the answer did not spend the token")
+	}
+	if code, _, _ := f.do(serveAnswerReq(tok, d.ID, "B")); code != http.StatusUnauthorized {
+		t.Errorf("the spent token again = %d, want 401", code)
 	}
 }
 
@@ -651,7 +665,9 @@ func TestAnswerRateLimit(t *testing.T) {
 			t.Fatalf("wrong token %d = %d, want 401", i+1, code)
 		}
 	}
-	for _, r := range []serveReq{serveAnswerReq(tok, d.ID, "A"), serveAnswerReq(f.unknownToken(), d.ID, "A"), {method: http.MethodPost, path: "/v1/answer"}} {
+	malformed := serveAnswerReq(f.unknownToken(), d.ID, "A")
+	malformed.auth = []string{"Bearer short"}
+	for _, r := range []serveReq{serveAnswerReq(f.unknownToken(), d.ID, "A"), malformed} {
 		if code, body, _ := f.do(r); code != http.StatusTooManyRequests || body != `{"error":"too many attempts"}` {
 			t.Errorf("after %d failures = %d %s, want 429", serveMaxFailures, code, body)
 		}
@@ -661,12 +677,32 @@ func TestAnswerRateLimit(t *testing.T) {
 	}
 	// The window is the minute of the clock (serveT0 is 12:00:30).
 	f.setNow(serveT0.Add(29 * time.Second))
-	if code, _, _ := f.do(serveAnswerReq(tok, d.ID, "A")); code != http.StatusTooManyRequests {
+	if code, _, _ := f.do(serveAnswerReq(f.unknownToken(), d.ID, "A")); code != http.StatusTooManyRequests {
 		t.Errorf("at 12:00:59 = %d, want 429", code)
 	}
 	f.setNow(serveT0.Add(30 * time.Second))
+	if code, _, _ := f.do(serveAnswerReq(f.unknownToken(), d.ID, "A")); code != http.StatusUnauthorized {
+		t.Errorf("at 12:01:00 = %d, want 401", code)
+	}
+}
+
+// TestRateLimitNeverBlocksValidToken: however many bad tokens came first,
+// a request whose token matches is answered (M2).
+func TestRateLimitNeverBlocksValidToken(t *testing.T) {
+	f := serveNewFix(t)
+	d := f.ticket(model.ReversCostly)
+	tok := f.mint(model.PushDecision, d.ID, serveT0, true)
+	for range 3 * serveMaxFailures {
+		f.do(serveAnswerReq(f.unknownToken(), d.ID, "A"))
+	}
+	if code, _, _ := f.do(serveAnswerReq(f.unknownToken(), d.ID, "A")); code != http.StatusTooManyRequests {
+		t.Fatalf("a bad token after the limit = %d, want 429", code)
+	}
 	if code, body, _ := f.do(serveAnswerReq(tok, d.ID, "A")); code != http.StatusOK {
-		t.Errorf("at 12:01:00 = %d %s, want 200", code, body)
+		t.Errorf("the valid token after the limit = %d %s, want 200", code, body)
+	}
+	if got := f.decision(d.ID); got.AnswerKey != "A" || got.AnsweredVia != model.AnsweredNtfy {
+		t.Errorf("D-1 = %+v, want answered A via ntfy", got)
 	}
 }
 
@@ -757,33 +793,66 @@ func TestServeResponsesAreClean(t *testing.T) {
 }
 
 func TestServeListenAddrTable(t *testing.T) {
-	ip := func(s string) net.Addr { return &net.IPNet{IP: net.ParseIP(s), Mask: net.CIDRMask(32, 32)} }
-	lan, ts4, ts4b, ts6 := ip("192.168.1.5"), ip("100.101.102.103"), ip("100.64.0.9"), ip("fd7a:115c:a1e0::1")
 	cases := []struct {
 		name, flag, listen string
-		addrs              []net.Addr
 		want               string
 	}{
-		{"flag wins", "127.0.0.1:9000", "100.101.102.103:8787", []net.Addr{ts4}, "127.0.0.1:9000"},
-		{"flag port 0", "127.0.0.1:0", "", nil, "127.0.0.1:0"},
-		{"flag IPv6 loopback", "[::1]:9000", "", nil, "[::1]:9000"},
-		{"flag Tailscale", "100.101.102.103:9000", "", nil, "100.101.102.103:9000"},
-		{"flag mapped loopback", "[::ffff:127.0.0.1]:9000", "", nil, "127.0.0.1:9000"},
-		{"then cfg", "", "100.101.102.103:8788", []net.Addr{ts4b}, "100.101.102.103:8788"},
-		{"then the first 100.64/10 address", "", "", []net.Addr{lan, ip("127.0.0.1"), ts4, ts4b, ts6}, "100.101.102.103:8787"},
-		{"an IPAddr", "", "", []net.Addr{&net.IPAddr{IP: net.ParseIP("100.64.0.9")}}, "100.64.0.9:8787"},
-		{"then fd7a", "", "", []net.Addr{lan, ts6}, "[fd7a:115c:a1e0::1]:8787"},
-		{"100.64/10 before an earlier fd7a", "", "", []net.Addr{ts6, lan, ts4b}, "100.64.0.9:8787"},
+		{"flag wins", "127.0.0.1:9000", "100.101.102.103:8787", "127.0.0.1:9000"},
+		{"flag port 0", "127.0.0.1:0", "", "127.0.0.1:0"},
+		{"flag IPv6 loopback", "[::1]:9000", "", "[::1]:9000"},
+		{"flag Tailscale", "100.101.102.103:9000", "", "100.101.102.103:9000"},
+		{"flag Tailscale IPv6", "[fd7a:115c:a1e0::1]:9000", "", "[fd7a:115c:a1e0::1]:9000"},
+		{"flag mapped loopback", "[::ffff:127.0.0.1]:9000", "", "127.0.0.1:9000"},
+		{"then cfg", "", "100.101.102.103:8788", "100.101.102.103:8788"},
+		{"then loopback", "", "", "127.0.0.1:8787"},
 	}
 	for _, c := range cases {
-		got, err := serveListenAddr(c.flag, config.Serve{Listen: c.listen, PublicURL: "https://x.ts.net"}, c.addrs)
+		got, err := serveListenAddr(c.flag, config.Serve{Listen: c.listen, PublicURL: "https://x.ts.net"})
 		if err != nil || got != c.want {
 			t.Errorf("%s: %q, %v; want %q", c.name, got, err, c.want)
 		}
 	}
-	_, err := serveListenAddr("", config.Serve{}, []net.Addr{lan, ip("127.0.0.1"), ip("100.128.0.1"), ip("fd7a:115c:a1e1::1")})
-	if err == nil || !strings.Contains(err.Error(), "[serve] listen") {
-		t.Errorf("none found = %v, want an error naming [serve] listen", err)
+}
+
+// TestServeDefaultIsLoopback: with no --listen and no [serve] listen, curia
+// serve listens on 127.0.0.1:8787 whatever addresses the machine has; no
+// address is ever detected (Ruling P4-R9).
+func TestServeDefaultIsLoopback(t *testing.T) {
+	serveConfig(t, "https://curia.example.ts.net", "")
+	var got []string
+	prev := serveListen
+	serveListen = func(_ context.Context, network, addr string) (net.Listener, error) {
+		got = append(got, network+" "+addr)
+		return nil, errors.New("test: not listening")
+	}
+	t.Cleanup(func() { serveListen = prev })
+	if err := serveRun(t); err == nil {
+		t.Fatal("serve returned nil with a failing listen")
+	}
+	if !slices.Equal(got, []string{"tcp 127.0.0.1:8787"}) {
+		t.Errorf("listened on %q, want only tcp 127.0.0.1:8787", got)
+	}
+}
+
+// TestServeExplicitTailscaleAddressWarns: a non-loopback address, given
+// explicitly, is announced with what it means; loopback says to put
+// tailscale serve in front. Both say what the token is worth.
+func TestServeExplicitTailscaleAddressWarns(t *testing.T) {
+	for _, c := range []struct{ addr, want, not string }{
+		{"100.101.102.103:8787", "listening on a non-loopback address: make sure 100.101.102.103 is this machine's Tailscale address. " +
+			"Anyone who can reach it and read your ntfy topic can answer the ticket a push names, once", "loopback only"},
+		{"[fd7a:115c:a1e0::1]:8787", "make sure fd7a:115c:a1e0::1 is this machine's Tailscale address", "loopback only"},
+		{"127.0.0.1:8787", "loopback only: put tailscale serve in front of it so your phone reaches it (never Funnel)", "non-loopback"},
+	} {
+		var out bytes.Buffer
+		serveStartLines(&out, c.addr)
+		text := out.String()
+		if !strings.HasPrefix(text, "curia serve: listening on "+c.addr+"\n") || !strings.Contains(text, c.want) || strings.Contains(text, c.not) {
+			t.Errorf("%s: start lines\n%s\nwant %q and not %q", c.addr, text, c.want, c.not)
+		}
+		if !strings.Contains(text, "Keep the ntfy topic private (self-hosted or access-controlled) and this endpoint on your tailnet") {
+			t.Errorf("%s: start lines lack the topic and tailnet line:\n%s", c.addr, text)
+		}
 	}
 }
 
@@ -794,12 +863,12 @@ func TestServeRefusesPublicAddress(t *testing.T) {
 		"100.128.0.1:8787", "[fe80::1%en0]:8787", "[::1%lo0]:8787", "[2001:db8::1]:8787", "127.0.0.1",
 		"[::ffff:0.0.0.0]:8787", "[::ffff:192.168.1.5]:8787",
 	} {
-		if _, err := serveListenAddr(a, config.Serve{}, nil); err == nil {
+		if _, err := serveListenAddr(a, config.Serve{}); err == nil {
 			t.Errorf("flag %q accepted", a)
 		}
 		// A configured address is checked again here, whatever the config
 		// file allowed.
-		if _, err := serveListenAddr("", config.Serve{Listen: a}, nil); err == nil {
+		if _, err := serveListenAddr("", config.Serve{Listen: a}); err == nil {
 			t.Errorf("[serve] listen %q accepted", a)
 		}
 	}
@@ -809,15 +878,6 @@ func TestServeRefusesPublicAddress(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "loopback or Tailscale") {
 			t.Errorf("serve --listen %s = %v, want the refusal", a, err)
 		}
-	}
-	// No Tailscale address on this machine and nothing configured: refused.
-	prev := serveInterfaceAddrs
-	serveInterfaceAddrs = func() ([]net.Addr, error) {
-		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.1.5"), Mask: net.CIDRMask(24, 32)}}, nil
-	}
-	t.Cleanup(func() { serveInterfaceAddrs = prev })
-	if err := serveRun(t); err == nil || !strings.Contains(err.Error(), "[serve] listen") {
-		t.Errorf("serve with no address = %v", err)
 	}
 	if n := listened(); n != 0 {
 		t.Errorf("listened %d times, want never", n)

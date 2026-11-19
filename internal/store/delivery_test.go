@@ -911,3 +911,41 @@ func TestConfirmTypedIgnoresAgentBuiltPrompts(t *testing.T) {
 		t.Errorf("ConfirmTyped(user's prompt) = %d; want 1", n)
 	}
 }
+
+// TestSharesPaneIgnoresOtherServer: a live row in the same pane id of
+// another tmux server does not block typing (it is another pane); one on
+// the same server, or with no recorded server on either side, still does.
+func TestSharesPaneIgnoresOtherServer(t *testing.T) {
+	const a, b = "/tmp/tmux-501/a", "/tmp/tmux-501/b"
+	for _, c := range []struct {
+		name       string
+		own, other string
+		ok         bool
+	}{
+		{"other server", a, b, true},
+		{"same server", a, a, false},
+		{"peer's server unknown", a, "", false},
+		{"own server unknown", "", b, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := open(t, dbPath(t))
+			sess := model.Session{ID: "s1", Agent: "claude", Pane: "%3", State: model.StateIdle, UpdatedAt: t0, Socket: c.own}
+			upsert(t, s, sess)
+			upsert(t, s, model.Session{ID: "s2", Agent: "claude", Pane: "%3", State: model.StateWaiting, UpdatedAt: t0, Socket: c.other})
+			d := queued(t, s, "Type the answer?", "s1")
+			_, _, why, err := claim4(context.Background(), s, d.ID, tClaim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok := why == store.TypingClaimed; ok != c.ok {
+				t.Fatalf("claimed = %v (%v), want %v", ok, why, c.ok)
+			}
+			if !c.ok {
+				return
+			}
+			if why, err := s.StillTypable(context.Background(), "s1", "%3"); err != nil || why != store.TypingClaimed {
+				t.Errorf("StillTypable = %v, %v; want typable", why, err)
+			}
+		})
+	}
+}

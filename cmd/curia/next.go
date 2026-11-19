@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/fleet"
+	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 )
 
@@ -59,7 +61,8 @@ func jumpNext(ctx context.Context, cfg config.Config, args []string) error {
 	client := newTmuxClient()
 	// Reconcile first, so a session whose pane is gone is never the target.
 	now := clock()
-	if err = reconcile(ctx, st, client, cfg.LogPath, now); err != nil {
+	panes, err := reconcilePanes(ctx, st, client, cfg.LogPath, now)
+	if err != nil {
 		return err
 	}
 	// Settle next, so a session a denial left waiting is not the target.
@@ -69,6 +72,9 @@ func jumpNext(ctx context.Context, cfg config.Config, args []string) error {
 	}
 	tctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 	defer cancel()
+	// A session on another tmux server is not reachable from this one: its
+	// pane id names another pane here (fleet.OtherServer).
+	sessions = slices.DeleteFunc(sessions, func(s model.Session) bool { return fleet.OtherServer(panes, s) })
 	s, ok := fleet.Next(sessions)
 	if !ok {
 		return client.DisplayMessage(tctx, "nothing needs you")

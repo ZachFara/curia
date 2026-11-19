@@ -62,8 +62,11 @@ func WindowMarker(sessions []model.Session) string {
 // only when one of those sessions has a task, since no other can be review
 // ready, so a window without one costs the single list, as before Plan 4.
 // When the read fails the marker is applied without reviews and the read's
-// error is returned. An empty window does nothing.
-func Apply(ctx context.Context, tm tmux.Client, st *store.Store, window string) error {
+// error is returned. An empty window does nothing. socket is the socket of
+// the tmux server tm reaches, "" when the caller does not know it: window
+// ids are per server, so a session recorded on another server
+// (fleet.OtherSocket) is not one of the window's.
+func Apply(ctx context.Context, tm tmux.Client, st *store.Store, window, socket string) error {
 	if window == "" {
 		return nil // a session outside tmux has no window
 	}
@@ -74,7 +77,7 @@ func Apply(ctx context.Context, tm tmux.Client, st *store.Store, window string) 
 	var live []model.Session
 	tasked := false
 	for _, s := range all {
-		if s.TmuxWindow == window && s.State != model.StateStale {
+		if s.TmuxWindow == window && s.State != model.StateStale && !fleet.OtherSocket(socket, s) {
 			live = append(live, s)
 			tasked = tasked || s.TaskID != ""
 		}

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -190,15 +191,15 @@ func TestReviewsLsTableStatusWords(t *testing.T) {
 	if len(lines) != 6 {
 		t.Fatalf("table has %d lines, want 6:\n%s", len(lines), out)
 	}
-	if f := strings.Fields(lines[0]); strings.Join(f, " ") != "ID AGE TASK STATUS TESTS SUMMARY" {
+	if f := strings.Fields(lines[0]); strings.Join(f, " ") != "ID AGE TASK STATUS AGENT TESTS SUMMARY" {
 		t.Errorf("header = %q", lines[0])
 	}
 	for i, want := range []string{
-		"R-1  1h   T-1 One    pending            agent: passed   s1",
-		"R-2  1h   T-2 Two    approved (pr)      agent: failed   s2",
-		"R-3  1h   T-3 Three  changes requested  agent: not run  s3",
-		"R-4  1h   T-4 Four   merged             agent: passed   s4",
-		"R-5  1h   T-5 Five   dropped            agent: passed   s5",
+		"R-1  1h   T-1 One    pending        passed       s1",
+		"R-2  1h   T-2 Two    approved (pr)  failed       s2",
+		"R-3  1h   T-3 Three  changes asked  not run      s3",
+		"R-4  1h   T-4 Four   merged         passed       s4",
+		"R-5  1h   T-5 Five   dropped        passed       s5",
 	} {
 		if lines[i+1] != want {
 			t.Errorf("line %d = %q, want %q", i+1, lines[i+1], want)
@@ -218,11 +219,24 @@ func TestReviewsLsTableCutsAndFirstLine(t *testing.T) {
 	if strings.Contains(row, "second") {
 		t.Errorf("second summary line shown: %q", row)
 	}
-	if want := strings.Repeat("é", 29) + "…"; !strings.Contains(row, "T-1 "+want+"  ") {
-		t.Errorf("title not cut to 30 runes: %q", row)
+	if want := strings.Repeat("é", 11) + "…"; !strings.Contains(row, "T-1 "+want+"  ") {
+		t.Errorf("title not cut to 12 runes: %q", row)
 	}
-	if want := strings.Repeat("é", 59) + "…"; !strings.HasSuffix(row, want) {
-		t.Errorf("summary not cut to 60 runes: %q", row)
+	if want := strings.Repeat("é", 19) + "…"; !strings.HasSuffix(row, want) {
+		t.Errorf("summary not cut to 20 runes: %q", row)
+	}
+	// The widest row: the longest status word, ids of three digits, days.
+	reviewsHome(t, []string{long},
+		reviewsSpec{task: "T-1", summary: long, tests: "not_run", status: "approved", how: "pr", pr: "https://x/pr/1", created: "2026-10-04T11:00:00.000000000Z"})
+	reviewsStatus = "all"
+	out, err = runRoot(t, "reviews", "ls", "--status", "all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if n := utf8.RuneCountInString(strings.ReplaceAll(strings.ReplaceAll(l, "R-1 ", "R-999 "), "T-1 ", "T-999 ")); n > 80 {
+			t.Errorf("a row is %d columns with three-digit ids, want at most 80: %q", n, l)
+		}
 	}
 	if !strings.Contains(row, "30s") {
 		t.Errorf("age missing: %q", row)

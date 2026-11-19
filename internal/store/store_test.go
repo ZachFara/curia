@@ -465,7 +465,7 @@ func TestMarkSeen(t *testing.T) {
 	upsert(t, s, model.Session{ID: "other", Agent: "claude", Pane: "%4", State: model.StateWaiting})
 
 	at := time.Date(2026, 11, 11, 15, 0, 0, 123_456_789, time.UTC)
-	if err := s.MarkSeen(ctx, "%3", at); err != nil {
+	if err := s.MarkSeen(ctx, "%3", "", at); err != nil {
 		t.Fatal(err)
 	}
 	if got := get(t, s, "live").SeenAt; !got.Equal(at) {
@@ -491,7 +491,7 @@ func TestEndOthersInPane(t *testing.T) {
 	}
 
 	at := time.Date(2026, 11, 11, 15, 0, 0, 0, time.UTC)
-	if err := s.EndOthersInPane(ctx, "%3", "B", at); err != nil {
+	if err := s.EndOthersInPane(ctx, "%3", "", "B", at); err != nil {
 		t.Fatal(err)
 	}
 	gotA := get(t, s, "A")
@@ -515,10 +515,10 @@ func TestPaneUpdatesIgnoreSessionsWithoutPane(t *testing.T) {
 	upsert(t, s, x)
 	upsert(t, s, y)
 	at := time.Date(2026, 11, 11, 15, 0, 0, 0, time.UTC)
-	if err := s.MarkSeen(ctx, "", at); err != nil {
+	if err := s.MarkSeen(ctx, "", "", at); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EndOthersInPane(ctx, "", "y", at); err != nil {
+	if err := s.EndOthersInPane(ctx, "", "", "y", at); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []model.Session{x, y} {
@@ -786,7 +786,7 @@ func TestUpdateSessionPreservesConcurrentMarkSeen(t *testing.T) {
 		t.Fatal(err)
 	}
 	seen := time.Date(2026, 11, 11, 15, 0, 0, 42, time.UTC)
-	if err := s.MarkSeen(ctx, "%3", seen); err != nil {
+	if err := s.MarkSeen(ctx, "%3", "", seen); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateSession(ctx, "a", setState(model.StateIdle)); err != nil {
@@ -835,5 +835,49 @@ func TestUpdateSessionRejectsChangedID(t *testing.T) {
 	}
 	if _, ok, err := s.GetSession(ctx, "b"); err != nil || ok {
 		t.Errorf("GetSession(b) = ok %v, err %v; want nothing written", ok, err)
+	}
+}
+
+// TestMarkSeenOnlyThisServer: marking a pane seen on one tmux server leaves
+// the session in the same pane id of another server unseen; a session with
+// no recorded server, and a call that knows no server, behave as before.
+func TestMarkSeenOnlyThisServer(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	upsert(t, s, model.Session{ID: "here", Agent: "claude", Pane: "%0", State: model.StateWaiting, Socket: "/tmp/tmux-501/a"})
+	upsert(t, s, model.Session{ID: "there", Agent: "claude", Pane: "%0", State: model.StateWaiting, Socket: "/tmp/tmux-501/b"})
+	upsert(t, s, model.Session{ID: "unknown", Agent: "claude", Pane: "%0", State: model.StateWaiting})
+	at := time.Date(2026, 11, 11, 15, 0, 0, 0, time.UTC)
+	if err := s.MarkSeen(ctx, "%0", "/tmp/tmux-501/a", at); err != nil {
+		t.Fatal(err)
+	}
+	for id, seen := range map[string]bool{"here": true, "there": false, "unknown": true} {
+		if got := !get(t, s, id).SeenAt.IsZero(); got != seen {
+			t.Errorf("%s seen = %v, want %v", id, got, seen)
+		}
+	}
+	if err := s.MarkSeen(ctx, "%0", "", at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(t, s, "there").SeenAt; !got.Equal(at.Add(time.Minute)) {
+		t.Errorf("no server given: there SeenAt = %v, want marked", got)
+	}
+}
+
+// TestEndOthersInPaneOnlyThisServer: a SessionStart on one tmux server ends
+// the other live sessions in its pane of that server only.
+func TestEndOthersInPaneOnlyThisServer(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	upsert(t, s, model.Session{ID: "here", Agent: "claude", Pane: "%0", State: model.StateIdle, Socket: "/tmp/tmux-501/a"})
+	upsert(t, s, model.Session{ID: "there", Agent: "claude", Pane: "%0", State: model.StateIdle, Socket: "/tmp/tmux-501/b"})
+	upsert(t, s, model.Session{ID: "unknown", Agent: "claude", Pane: "%0", State: model.StateIdle})
+	if err := s.EndOthersInPane(ctx, "%0", "/tmp/tmux-501/a", "new", time.Date(2026, 11, 11, 15, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]model.State{"here": model.StateEnded, "there": model.StateIdle, "unknown": model.StateEnded} {
+		if got := get(t, s, id).State; got != want {
+			t.Errorf("%s = %s, want %s", id, got, want)
+		}
 	}
 }

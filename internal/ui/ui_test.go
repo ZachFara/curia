@@ -2187,6 +2187,19 @@ func (p *dashPump) step(k tea.KeyMsg) tea.Cmd {
 	return cmd
 }
 
+// stepConfirm sends y and returns the action its confirmation starts, once
+// burstGap has passed with no other key, without running it.
+func (p *dashPump) stepConfirm() tea.Cmd {
+	p.t.Helper()
+	wait := p.step(key("y"))
+	if wait == nil {
+		return nil
+	}
+	var cmd tea.Cmd
+	p.m, cmd = p.m.Update(wait())
+	return cmd
+}
+
 // child is the review view the dashboard shows, or fails.
 func (p *dashPump) child() ReviewModel {
 	p.t.Helper()
@@ -2209,7 +2222,12 @@ func realReviewFactory(src ReviewSource, now func() time.Time) (func(string) tea
 	return func(id string) tea.Model {
 		opened = append(opened, id)
 		rm := NewReview(src, now, ReviewOptions{TaskID: id, Embedded: true})
-		rm.tick = func(time.Duration, tea.Msg) tea.Cmd { return nil }
+		rm.tick = func(_ time.Duration, msg tea.Msg) tea.Cmd {
+			if c, ok := msg.(reviewConfirmMsg); ok { // burstGap passes with no other key
+				return func() tea.Msg { return c }
+			}
+			return nil
+		}
 		return rm
 	}, &opened
 }
@@ -2321,7 +2339,7 @@ func TestEmbeddedReviewApproveInFlight(t *testing.T) {
 	clk.advance(reviewGap)
 	p.key(key("a"))
 	clk.advance(time.Second)
-	approve := p.step(key("y"))
+	approve := p.stepConfirm()
 	if approve == nil {
 		t.Fatal("y started nothing")
 	}
@@ -2411,4 +2429,55 @@ func TestReviewReadyRowsFitEveryWidth(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestKillAndJumpRefuseOtherServer: the dashboard neither kills nor jumps to
+// this server's pane that has the id of a session recorded on another tmux
+// server; a session recorded on this server, or on none, is reachable.
+func TestKillAndJumpRefuseOtherServer(t *testing.T) {
+	ss := threeSessions()
+	ss[0].Socket = "/tmp/tmux-501/default"
+	ss[1].Socket = "/tmp/tmux-501/other" // b, in %5, which this server also has
+	m, fake, _ := newTest(t, ModePopup, ss...)
+	for i := range fake.Panes {
+		fake.Panes[i].Socket = "/tmp/tmux-501/default"
+	}
+	m = refresh(t, m)
+	m = selectID(t, m, "b")
+	m, _ = press(m, "x", "y")
+	m, cmd := press(m, "enter")
+	if got := append(calls(fake, "KillPane"), calls(fake, "SwitchTo")...); len(got) != 0 {
+		t.Errorf("tmux calls %q for a session on another server", got)
+	}
+	if cmd != nil && isQuit(cmd) {
+		t.Error("the popup quit as after a jump")
+	}
+	if v := m.View(); !strings.Contains(v, "on another tmux server") {
+		t.Errorf("the view does not say why:\n%s", v)
+	}
+	m = selectID(t, m, "a")
+	_, _ = press(m, "x", "y")
+	if got := calls(fake, "KillPane"); !slices.Equal(got, []string{"KillPane %3"}) {
+		t.Errorf("this server's session: kill calls %q", got)
+	}
+}
+
+// selectID moves the selection down to the row of session id.
+func selectID(t *testing.T, m tea.Model, id string) tea.Model {
+	t.Helper()
+	for range 10 {
+		m, _ = press(m, "up")
+	}
+	for range 10 {
+		mm, ok := m.(Model)
+		if !ok {
+			t.Fatalf("model is %T", m)
+		}
+		if r, ok := mm.current(); ok && r.s.ID == id {
+			return m
+		}
+		m, _ = press(m, "down")
+	}
+	t.Fatalf("no row for %s", id)
+	return m
 }

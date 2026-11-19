@@ -94,6 +94,31 @@ ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE meta.value <= ?`,
 	return true, nil
 }
 
+// RenewRestore dates this Store's restore claim at at, which may be in the future: the claim then holds until
+// at plus the hold ClaimRestore is given. It changes only the claim this Store holds, in one statement, and
+// reports false, changing nothing, when the claim was taken over or released.
+func (s *Store) RenewRestore(ctx context.Context, at time.Time) (bool, error) {
+	s.restoreMu.Lock()
+	defer s.restoreMu.Unlock()
+	if s.restoreClaim == "" || at.IsZero() {
+		return false, nil
+	}
+	value := at.UTC().Format(timeLayout)
+	res, err := s.db.ExecContext(ctx, `UPDATE meta SET value = ? WHERE key = ? AND value = ?`, value, restoreKey, s.restoreClaim)
+	if err != nil {
+		return false, fmt.Errorf("store: renew restore: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: renew restore: %w", err)
+	}
+	if n != 1 {
+		return false, nil
+	}
+	s.restoreClaim = value
+	return true, nil
+}
+
 // ReleaseRestore gives the claim up.
 //
 // It deletes the key only while it still holds the value this Store's last

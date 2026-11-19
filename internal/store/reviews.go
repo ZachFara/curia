@@ -16,6 +16,9 @@ import (
 var (
 	ErrNoReview     = errors.New("store: no such review")
 	ErrReviewClosed = errors.New("store: review is not pending")
+	// ErrReviewBusy: an approval of the review is in flight (its recorded
+	// intent is younger than the hold the caller gave).
+	ErrReviewBusy = errors.New("store: an approval of the review is in flight")
 )
 
 // ReviewFilter selects which reviews ListReviews returns.
@@ -32,6 +35,18 @@ type ReviewClose struct {
 	DiffStat, Head, PRURL string             // for approved and merged
 	Notes                 string             // for changes_requested
 	Via                   model.AnsweredVia
+	// IntentHold, for changes_requested and dropped, refuses the close with
+	// ErrReviewBusy while an approval's intent younger than it stands
+	// (ClaimReviewIntent); zero does not look. An approval closes over its
+	// own intent.
+	IntentHold time.Duration
+}
+
+// ReviewIntent is what an approval records on the pending review before it
+// runs git: how, the commit it approves and the diff stat at that commit.
+type ReviewIntent struct {
+	How            model.ApproveHow
+	Head, DiffStat string
 }
 
 // TaskRun sums up the sessions ever linked to a task.
@@ -46,7 +61,7 @@ type TaskRun struct {
 // empty, the review or task it was on. The review errors and ErrNoTask are
 // returned as they are.
 func failReview(op, id string, err error) error {
-	if errors.Is(err, ErrNoReview) || errors.Is(err, ErrReviewClosed) || errors.Is(err, ErrNoTask) {
+	if errors.Is(err, ErrNoReview) || errors.Is(err, ErrReviewClosed) || errors.Is(err, ErrReviewBusy) || errors.Is(err, ErrNoTask) {
 		return err
 	}
 	return fail(op, id, err)
@@ -82,6 +97,9 @@ func scanReview(sc scanner) (model.Review, error) {
 			return model.Review{}, fmt.Errorf("review %s: undecodable time: %w", r.ID, err)
 		}
 		*f.dst = v
+	}
+	if r.Status == model.ReviewPending { // closed_at holds an approval's intent
+		r.IntentAt, r.ClosedAt = r.ClosedAt, time.Time{}
 	}
 	return r, nil
 }
@@ -307,7 +325,8 @@ func (s *Store) PendingReviews(ctx context.Context) (int, error) {
 
 // The statements of CloseReview. closePending's parameters: the status,
 // approved_how, diff_stat, head, pr_url, my_notes, closed_via, updated_at,
-// closed_at, then the review id. expireTaskAssumptions' parameters: now
+// closed_at, the review id, then whether an intent is ignored and the time
+// at or before which an intent no longer counts. expireTaskAssumptions' parameters: now
 // (closed_at), the task id, now (the ticket is open at now: an assume
 // ticket already past its deadline is the sweep's, closed at its deadline).
 // dropReviewTask's: now, the task id.
@@ -315,7 +334,7 @@ const (
 	closePending = `
 UPDATE reviews SET status = ?, approved_how = ?, diff_stat = ?, head = ?, pr_url = ?, my_notes = ?,
   closed_via = ?, updated_at = ?, closed_at = ?
-WHERE id = ? AND status = 'pending'
+WHERE id = ? AND status = 'pending' AND (? OR closed_at IS NULL OR closed_at <= ?)
 RETURNING task_id`
 	expireTaskAssumptions = `
 UPDATE decisions SET status = 'expired', closed_at = ?
@@ -326,7 +345,7 @@ WHERE task_id = ? AND mode = 'assume' AND status = 'open' AND (expires_at IS NUL
 // closing is what closing a review with c writes: c with only the fields
 // its status records.
 func closing(c ReviewClose) (ReviewClose, error) {
-	w := ReviewClose{Status: c.Status, Via: c.Via}
+	w := ReviewClose{Status: c.Status, Via: c.Via, IntentHold: c.IntentHold}
 	switch c.Status {
 	case model.ReviewApproved, model.ReviewMerged:
 		w.How, w.DiffStat, w.Head, w.PRURL = c.How, c.DiffStat, c.Head, c.PRURL
@@ -367,9 +386,10 @@ func (s *Store) CloseReview(ctx context.Context, id string, c ReviewClose, now t
 // closeIn is CloseReview inside its transaction.
 func closeIn(ctx context.Context, tx *sql.Tx, id string, w ReviewClose, now time.Time) (int, error) {
 	at := formatTime(now)
+	approving := w.Status == model.ReviewApproved || w.Status == model.ReviewMerged
 	var taskID string
 	err := tx.QueryRowContext(ctx, closePending, w.Status, w.How, w.DiffStat, w.Head, w.PRURL, w.Notes, w.Via,
-		at, at, id).Scan(&taskID)
+		at, at, id, approving || w.IntentHold <= 0, formatTime(now.Add(-w.IntentHold))).Scan(&taskID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, notPending(ctx, tx, id)
 	}
@@ -397,16 +417,92 @@ func expireAssumptions(ctx context.Context, tx *sql.Tx, taskID string, at any) (
 }
 
 // notPending is the error for review id when an UPDATE that expected it
-// pending matched nothing: ErrNoReview or ErrReviewClosed.
+// pending matched nothing: ErrNoReview, ErrReviewClosed, or ErrReviewBusy
+// when it is pending (an intent stood in the way).
 func notPending(ctx context.Context, tx *sql.Tx, id string) error {
-	_, found, err := getReview(ctx, tx, id)
+	r, found, err := getReview(ctx, tx, id)
 	switch {
 	case err != nil:
 		return err
 	case !found:
 		return ErrNoReview
+	case r.Status == model.ReviewPending:
+		return ErrReviewBusy
 	}
 	return ErrReviewClosed
+}
+
+// The statements of ClaimReviewIntent and ReleaseReviewIntent. claimIntent's
+// parameters: approved_how, head, diff_stat, the intent's time (closed_at),
+// the review id, then the time at or before which an intent no longer counts.
+// releaseIntent's: the review id and the intent's time.
+const (
+	claimIntent = `
+UPDATE reviews SET approved_how = ?, head = ?, diff_stat = ?, closed_at = ?
+WHERE id = ? AND status = 'pending' AND (closed_at IS NULL OR closed_at <= ?)`
+	releaseIntent = `
+UPDATE reviews SET approved_how = '', head = '', diff_stat = '', closed_at = NULL
+WHERE id = ? AND status = 'pending' AND closed_at = ?`
+	restoreIntent = `
+UPDATE reviews SET approved_how = ?, head = ?, diff_stat = ?, closed_at = ?
+WHERE id = ? AND status = 'pending' AND closed_at = ?`
+)
+
+// ClaimReviewIntent records in on pending review id at now, in one conditional statement, before an approval
+// runs git: it is the approval's claim on the review. While an intent younger than hold stands it changes
+// nothing and returns ErrReviewBusy with the review as stored (its IntentAt says since when); an older intent,
+// left by an approval whose process was killed, is replaced. ErrNoReview; ErrReviewClosed.
+func (s *Store) ClaimReviewIntent(ctx context.Context, id string, in ReviewIntent, now time.Time, hold time.Duration) (model.Review, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return model.Review{}, failReview("claim review", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, claimIntent, in.How, in.Head, in.DiffStat, formatTime(now), id, formatTime(now.Add(-hold)))
+	var n int64
+	if err == nil {
+		n, err = res.RowsAffected()
+	}
+	if err == nil && n == 0 {
+		err = notPending(ctx, tx, id)
+	}
+	var r model.Review
+	if err == nil || errors.Is(err, ErrReviewBusy) {
+		var found bool
+		if r, found, _ = getReview(ctx, tx, id); !found {
+			r = model.Review{ID: id}
+		}
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	if err != nil {
+		return r, failReview("claim review", id, err)
+	}
+	return r, nil
+}
+
+// ReleaseReviewIntent clears the intent recorded at at on pending review id, after its approval failed with
+// nothing done. Another approval's intent, and a review no longer pending, are left alone.
+func (s *Store) ReleaseReviewIntent(ctx context.Context, id string, at time.Time) error {
+	if _, err := s.db.ExecContext(ctx, releaseIntent, id, formatTime(at)); err != nil {
+		return fail("release review", id, err)
+	}
+	return nil
+}
+
+// RestoreReviewIntent puts back prev, the intent recorded at prevAt that the claim made at at replaced, on
+// pending review id, after the claiming approval failed with nothing done: an earlier approval whose process
+// died may still have git running, and its merge must stay recordable. Like ReleaseReviewIntent it changes
+// only the claim made at at; a zero prevAt clears it instead.
+func (s *Store) RestoreReviewIntent(ctx context.Context, id string, at time.Time, prev ReviewIntent, prevAt time.Time) error {
+	if prevAt.IsZero() {
+		return s.ReleaseReviewIntent(ctx, id, at)
+	}
+	if _, err := s.db.ExecContext(ctx, restoreIntent, prev.How, prev.Head, prev.DiffStat, formatTime(prevAt), id, formatTime(at)); err != nil {
+		return fail("restore review", id, err)
+	}
+	return nil
 }
 
 // SetReviewNoteMessage records the message that carries a change request,
@@ -425,7 +521,7 @@ func (s *Store) SetReviewNoteMessage(ctx context.Context, id, messageID string) 
 		n, err = res.RowsAffected()
 	}
 	if err == nil && n == 0 {
-		if err = notPending(ctx, tx, id); errors.Is(err, ErrReviewClosed) {
+		if err = notPending(ctx, tx, id); errors.Is(err, ErrReviewClosed) || errors.Is(err, ErrReviewBusy) {
 			err = errors.New("the review is not changes_requested")
 		}
 	}

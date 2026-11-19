@@ -36,6 +36,7 @@ import (
 const (
 	reviewsNested = "55555555-5555-4555-8555-555555555555" // ended by the next session in its pane: no reason recorded
 	reviewsExited = "66666666-6666-4666-8666-666666666666" // ended by the user's own exit
+	reviewsClosed = "77777777-7777-4777-8777-777777777777" // its pane closed while tmux kept running
 )
 
 const (
@@ -191,7 +192,8 @@ func (r *reviewsRun) firstReview(t *testing.T) {
 	r.wantBadge(t, "R1", "with R-1 pending")
 	r.wantMarker(t, "blue", "with R-1 pending")
 	r.wantPush(t, r.ntfy.wait(t, 1)[0], "push_r1.golden.json")
-	if out := r.h.mustRun(t, "reviews", "ls"); !strings.Contains(out, "R-1") || !strings.Contains(out, "agent: passed") {
+	if out := r.h.mustRun(t, "reviews", "ls"); !strings.Contains(out, "R-1") || !strings.Contains(out, "AGENT TESTS") ||
+		!strings.Contains(out, " passed ") {
 		t.Errorf("curia reviews ls =\n%s\nwant R-1 with the agent's test report", out)
 	}
 }
@@ -214,6 +216,14 @@ func (r *reviewsRun) blockingPushes(t *testing.T) {
 func (r *reviewsRun) answerFromPhone(t *testing.T) {
 	t.Helper()
 	r.serve = r.startServe(t)
+	for _, want := range []string{
+		"curia serve: loopback only: put tailscale serve in front of it so your phone reaches it (never Funnel)\n",
+		"Keep the ntfy topic private (self-hosted or access-controlled) and this endpoint on your tailnet\n",
+	} {
+		if out := reviewsRead(r.serve.out); !strings.Contains(out, want) {
+			t.Errorf("curia serve's start-up lines:\n%s\nwant them to hold %q", out, want)
+		}
+	}
 	answer := r.serve.base + "/v1/answer"
 	ok, refused := `{"decision":"D-2","key":"B"}`, `{"error":"unauthorized"}`
 	if code, body := reviewsPost(t, answer, r.token, ok); code != http.StatusOK ||
@@ -287,6 +297,7 @@ func (r *reviewsRun) approveByMerge(t *testing.T) {
 	r.wantBadge(t, "R1", "with R-2 pending")
 	r.wantMarker(t, "blue", "with R-2 pending")
 	r.checkAgentClient(t)
+	r.approveFlagNeedsHead(t)
 
 	printed, head := r.approveInView(t)
 	for _, want := range []string{
@@ -344,10 +355,12 @@ func (r *reviewsRun) approveInView(t *testing.T) (printed, head string) {
 	}
 	r.screen(t, pane, "branch at "+head[:7]) // the refusal shows the new state
 	time.Sleep(reviewsAfterAction)
+	started := r.mergeHook(t)
 	r.keys(t, pane, "a")
 	r.screen(t, pane, "into main? y confirms")
 	time.Sleep(reviewsKeyPause)
 	r.keys(t, pane, "y")
+	r.secondApprover(t, started, head)
 	r.screen(t, pane, "R-2 approved: merged")
 	r.keys(t, pane, "q")
 	return r.screen(t, pane, "curia exited"), head
@@ -360,6 +373,7 @@ func (r *reviewsRun) approveInView(t *testing.T) (printed, head string) {
 func (r *reviewsRun) restore(t *testing.T) {
 	t.Helper()
 	r.otherSessions(t)
+	r.closedOnLiveServer(t)
 	r.tmuxGoesDown(t)
 	plan := r.user(t, "restore", "--dry-run")
 	r.wantPlan(t, plan)
@@ -1097,4 +1111,72 @@ func latencyComplete(t *testing.T, h *home, repo string, n int) {
 		t.Fatalf("complete_task for %s = %s, want R-%d", task, resp, n)
 	}
 	c.close(t)
+}
+
+// approveFlagNeedsHead: the flag form approves nothing without --head; it
+// prints the branch's head and the command that approves exactly that
+// commit. A --head the branch has moved on from is refused.
+func (r *reviewsRun) approveFlagNeedsHead(t *testing.T) {
+	t.Helper()
+	head := r.branchHead(t)
+	if stderr := r.userFails(t, "review", "T-1", "--approve"); !strings.Contains(stderr, "--approve needs --head <commit>") ||
+		!strings.Contains(stderr, "curia review R-2 --approve --head "+head) {
+		t.Errorf("curia review T-1 --approve without --head: stderr %q, want the head %s and the command", stderr, head)
+	}
+	r.git(t, r.worktree, "commit", "-q", "--allow-empty", "-m", "after the user looked")
+	if stderr := r.userFails(t, "review", "T-1", "--approve", "--head", head); !strings.Contains(stderr, "the branch changed since you looked") {
+		t.Errorf("curia review T-1 --approve --head <the head before the commit>: stderr %q, want the moved-branch refusal", stderr)
+	}
+	if merges := r.git(t, r.repo, "log", "--merges", "--format=%H", "main"); merges != "" {
+		t.Errorf("main has merges %q after the refused approvals", merges)
+	}
+}
+
+// mergeHook makes the main checkout's pre-merge-commit hook mark that it
+// started and hold the merge for 3 s, and returns the marker's path.
+func (r *reviewsRun) mergeHook(t *testing.T) string {
+	t.Helper()
+	dir, marker := filepath.Join(r.tmp, "hooks"), filepath.Join(r.tmp, "merge-started")
+	tasksWrite(t, filepath.Join(dir, "pre-merge-commit"), "#!/bin/sh\ntouch '"+marker+"'\nsleep 3\n")
+	r.git(t, dir, "init", "-q")
+	r.git(t, dir, "add", "pre-merge-commit")
+	r.git(t, dir, "update-index", "--chmod=+x", "pre-merge-commit") // a checkout gives the file its mode
+	r.git(t, dir, "-c", "user.name=Curia Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "hook")
+	if err := os.Remove(filepath.Join(dir, "pre-merge-commit")); err != nil {
+		t.Fatal(err)
+	}
+	r.git(t, dir, "checkout", "--", "pre-merge-commit")
+	r.git(t, r.repo, "config", "core.hooksPath", dir)
+	return marker
+}
+
+// secondApprover: while the view's merge is held in its hook, a second
+// approval of the same commit from another terminal (its --head accepted)
+// is refused by the first one's claim, and changes nothing.
+func (r *reviewsRun) secondApprover(t *testing.T, started, head string) {
+	t.Helper()
+	for deadline := time.Now().Add(reviewsWait); !exists(started); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the view's merge never reached its hook")
+		}
+	}
+	stderr := r.userFails(t, "review", "T-1", "--approve", "--head", head)
+	if !strings.Contains(stderr, "R-2 is being approved (merge at "+head[:7]+") by another curia since ") {
+		t.Errorf("a second approval during the merge: stderr %q, want the refusal naming the approval in flight", stderr)
+	}
+}
+
+// closedOnLiveServer: a session whose pane is closed while the agents' tmux
+// server keeps running (Claude Code ends it with reason "other", as on a
+// crash) is not offered by curia restore, which says how to reopen it.
+func (r *reviewsRun) closedOnLiveServer(t *testing.T) {
+	t.Helper()
+	dir := filepath.Join(r.tmp, "src")
+	missing := filepath.Join(r.tmp, "transcripts", reviewsClosed+".jsonl") // never written: skipped after the crash too
+	r.paneHook(t, reviewsClosed, dir, "%2", "", "SessionStart", map[string]any{"source": "startup", "transcript_path": missing})
+	r.paneHook(t, reviewsClosed, dir, "%2", "", "SessionEnd", map[string]any{"reason": "other"})
+	plan := r.user(t, "restore", "--dry-run")
+	if !strings.Contains(plan, "skip: its pane was closed while tmux kept running; reopen it with claude --resume "+reviewsClosed) {
+		t.Errorf("curia restore --dry-run with tmux still running:\n%s\nwant %s skipped as closed, not crashed", plan, reviewsClosed[:8])
+	}
 }

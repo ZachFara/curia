@@ -89,9 +89,9 @@
           "type": "object",
           "required": ["summary", "tests_status"],
           "properties": {
-            "summary": {"type": "string"},
+            "summary": {"type": "string", "maxLength": 2000},
             "tests_status": {"type": "string", "enum": ["passed", "failed", "not_run"]},
-            "tests_detail": {"type": "string"}
+            "tests_detail": {"type": "string", "maxLength": 200}
           }
         },
         "name": "complete_task"
