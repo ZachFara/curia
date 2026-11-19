@@ -324,7 +324,7 @@ There is deliberately no tool to answer a ticket. Answers only come through `cur
 
 **Review view** (`r` in the dashboard or `curia review T-42`): agent summary, `git diff --stat` against base, test status, decisions made on this task, open assumptions (F8) at the top in red, session cost and duration.
 
-**Actions:** `o` opens the full diff in my configured tool (lazygit, delta, or nvim), `a` approves (merge to base, or open a PR with `gh pr create` per config), `c` requests changes (my note is delivered to the agent as in F7, task returns to `running`), `x` drops the task.
+**Actions:** `o` opens the full diff in my configured tool (lazygit, delta, or nvim), `a` approves (merge to base, or open a PR with `gh pr create` per config; amended, Ruling 125: the approval is bound to the commit the view showed, and a branch that moved since is refused; amended, Ruling 126: the flag form `curia review <id> --approve` needs `--head <full commit id>`; amended, Ruling 131: an existing pull request is adopted only when it is provably this approval's, and Curia never edits one it did not create; amended, Ruling 128: Curia undoes only its own interrupted merge, and only when the index provably holds nothing but that merge (pending the re-review round)), `c` requests changes (my note is delivered to the agent as in F7, task returns to `running`), `x` drops the task.
 
 ### F11. Notifications and remote access
 
@@ -332,14 +332,14 @@ There is deliberately no tool to answer a ticket. Answers only come through `cur
 
 - **Push:** ntfy (self-hosted or ntfy.sh with a private topic) on new blocking tickets and new reviews. The message includes ticket id, question, options and recommendation. Assume-mode tickets don't push, by default.
 - **Answer from phone, minimum path:** SSH (over Tailscale) from a phone terminal app and run `curia decide`. The popup works at phone width.
-- **Answer from phone, convenient path:** ntfy action buttons hit `curia serve` (a small HTTP endpoint bound to the Tailscale interface only) with option keys. Requires a per-device token. Off by default.
+- **Answer from phone, convenient path:** ntfy action buttons hit `curia serve` (a small HTTP endpoint bound to the Tailscale interface only; amended, Ruling 127: it listens on 127.0.0.1:8787 by default with no address detection, a non-loopback address only when set explicitly and limited to the Tailscale ranges, reached through `tailscale serve`) with option keys. Requires a per-device token (amended, Ruling 129: a one-time token per push, bound to one ticket and device, which rests on the ntfy topic and is accepted on two written conditions: a self-hosted or access-controlled topic, and an endpoint reachable from the tailnet only). Off by default.
 - **Quiet hours:** no pushes in a configured window; blocking tickets queue until morning.
 
 ### F12. Persistence and restore
 
 **What:** a reboot or tmux crash costs minutes, not context.
 
-**How:** the store already has every session's pane, worktree, branch, agent and session id. `curia restore` recreates tmux sessions and windows, then relaunches each non-ended agent with `claude --resume <session_id>` in its worktree. Works alongside tmux-resurrect but does not require it.
+**How:** the store already has every session's pane, worktree, branch, agent and session id. `curia restore` recreates tmux sessions and windows, then relaunches each non-ended agent with `claude --resume <session_id>` in its worktree (amended, Ruling 124: also each agent whose session ended with reason `other`, which is what Claude Code reports when its terminal goes away; amended, Ruling 130: not one whose pane was closed while the tmux server kept running, unless `--include-closed`). Works alongside tmux-resurrect but does not require it.
 
 **Teams:** Agent Teams teammates cannot resume, so restore relaunches only each team's lead with its session id and tells it to respawn its team from the shared task list.
 
@@ -459,7 +459,7 @@ The rule behind all of these: agents can propose and report, but only I can deci
 - **Text injected into panes is treated as hostile input.** Answers and review notes sent with `send-keys` are passed with the literal flag, stripped of control characters and escape sequences, and capped in length, so a crafted ticket can't smuggle keystrokes.
 - **`curia send` targets registered agent panes only.** An agent can't use it to type into my shell, an editor or an SSH session.
 - **No auto-accept by default.** Unlike Claude Squad's experimental `--autoyes`, `curia spawn` launches agents with their normal permission settings. A per-repo opt-in can relax this for sandboxed repos.
-- **Network surface is opt-in.** `curia serve` is off by default, binds only to the Tailscale interface, and requires a per-device token. ntfy messages contain ticket text, so use a private topic or a self-hosted server.
+- **Network surface is opt-in.** `curia serve` is off by default, binds only to the Tailscale interface (amended, Ruling 127: to loopback by default, and to a Tailscale address only when set explicitly), and requires a per-device token (amended, Ruling 129: a one-time token per push, readable by anyone who can read the topic). ntfy messages contain ticket text and that token, so use a self-hosted server or an access-controlled topic; never expose the endpoint with Tailscale Funnel.
 - **Hook installs are reversible.** `curia install` backs up `settings.json` first; `curia uninstall` removes only the entries it added.
 - **Ticket content is data.** Ticket text shown in the popup, notifications or Obsidian export is never executed or interpreted as commands.
 
