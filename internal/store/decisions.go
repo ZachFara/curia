@@ -611,18 +611,30 @@ WHERE n = ?`,
 }
 
 // ExportQueue returns decided decisions whose note is due, in id order: never
-// exported, or exported before their answer or supersession. With all set it
-// returns every decided decision. A positive limit caps the count (the
+// exported, or exported before their answer or supersession, and not skipped
+// for a foreign note (see ExportQueueWith). With all set it returns every
+// decided decision that is not skipped. A positive limit caps the count (the
 // lowest ids); zero or less means no limit. Withdrawn, expired and open
 // tickets are never returned.
 func (s *Store) ExportQueue(ctx context.Context, all bool, limit int) ([]model.Decision, error) {
+	return s.ExportQueueWith(ctx, all, false, limit)
+}
+
+// ExportQueueWith is ExportQueue; with retrySkipped it also returns the
+// decisions skipped because a foreign file holds their note's path. A skip
+// lapses by itself when the decision is answered or superseded again after
+// it, or rescoped.
+func (s *Store) ExportQueueWith(ctx context.Context, all, retrySkipped bool, limit int) ([]model.Decision, error) {
 	if limit <= 0 {
 		limit = -1
 	}
 	rows, err := s.db.QueryContext(ctx, selectDecisions+`
 FROM decisions d
 WHERE `+decided+` AND (? OR d.exported_at IS NULL OR d.exported_at < d.answered_at OR d.exported_at < d.superseded_at)
-ORDER BY d.n LIMIT ?`, all, limit)
+  AND (? OR NOT EXISTS (SELECT 1 FROM meta k WHERE k.key = '`+exportSkipPrefix+`' || d.id
+    AND substr(k.value, 32) = d.scope
+    AND substr(k.value, 1, 30) >= COALESCE(d.answered_at, '') AND substr(k.value, 1, 30) >= COALESCE(d.superseded_at, '')))
+ORDER BY d.n LIMIT ?`, all, retrySkipped, limit)
 	if err != nil {
 		return nil, fail("export queue", "", err)
 	}
