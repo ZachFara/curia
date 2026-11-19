@@ -917,6 +917,7 @@ const spawnResets = time.Hour + 50*time.Minute
 // resetting spawnResets after the fixture's start.
 func (f *spawnFixture) spawnIngest(at time.Time, pct float64) {
 	f.t.Helper()
+	usageFeedSession(f.t, f.st, "usage-feed")
 	if _, err := f.st.Ingest(context.Background(), store.Reading{
 		SessionID: "usage-feed", At: at,
 		Limits: []model.UsageSample{{Window: model.WindowFiveHour, UsedPct: pct, ResetsAt: f.start.Add(spawnResets)}},
