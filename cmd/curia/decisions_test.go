@@ -1069,6 +1069,7 @@ var userNotOnlyCommands = map[string]string{
 	"curia status":                "prints the badge",
 	"curia task ls":               "reads the tasks only",
 	"curia ui":                    "a view; its user actions go through the guard (uiUserActions)",
+	"curia usage":                 "reads the samples and tasks and prints numbers; it pauses nothing, and the pause it suggests is typed by the user",
 	"curia version":               "prints the version",
 	"curia help":                  "cobra's help",
 	"curia completion":            "cobra's shell completion scripts",
