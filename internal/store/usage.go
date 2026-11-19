@@ -448,6 +448,63 @@ func (s *Store) UsageSince(ctx context.Context, since time.Time) ([]model.UsageS
 	return out, nil
 }
 
+// usageReadings is UsageReadings' statement, run once per window; its
+// parameters are the window and since ("" for the beginning). Every column
+// it names is in usage_samples_forecast (n is the rowid), so SQLite answers
+// it from that index alone without visiting a table row, and it has no
+// ORDER BY, so nothing is sorted. used_pct >= 0 is that partial index's
+// WHERE (always true under the table's CHECK): it lets this statement use
+// the index.
+const usageReadings = `
+SELECT n, at, used_pct, resets_at FROM usage_samples
+WHERE window = ? AND at >= ? AND used_pct >= 0`
+
+// UsageReadings returns the usage samples taken at or after since, as
+// UsageSince does, but without SessionID and in no particular order (in
+// fact five_hour's first): only what usage.Forecasts reads. It is the read
+// on curia status's path, which tmux runs on every status refresh. A zero
+// since returns every sample.
+func (s *Store) UsageReadings(ctx context.Context, since time.Time) ([]model.UsageSample, error) {
+	var out []model.UsageSample
+	for _, w := range []model.UsageWindow{model.WindowFiveHour, model.WindowSevenDay} {
+		var err error
+		if out, err = s.usageWindowReadings(ctx, out, w, since); err != nil {
+			return nil, fail("usage readings", "", err)
+		}
+	}
+	return out, nil
+}
+
+// usageWindowReadings appends window w's samples since since to out.
+func (s *Store) usageWindowReadings(ctx context.Context, out []model.UsageSample, w model.UsageWindow, since time.Time) ([]model.UsageSample, error) {
+	rows, err := s.db.QueryContext(ctx, usageReadings, string(w), sinceArg(since))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var last sql.NullString // a window's reset repeats from sample to sample: parsed once per change
+	var lastResets time.Time
+	for rows.Next() {
+		u := model.UsageSample{Window: w}
+		var at, resets sql.NullString
+		if err = rows.Scan(&u.N, &at, &u.UsedPct, &resets); err != nil {
+			return nil, err
+		}
+		if u.At, err = parseTime(at); err != nil {
+			return nil, err
+		}
+		if resets != last {
+			if lastResets, err = parseTime(resets); err != nil {
+				return nil, err
+			}
+			last = resets
+		}
+		u.ResetsAt = lastResets
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 // costSince is CostSince's statement: per session (walked down the index),
 // its samples at or after since, and its newest sample before since.
 // Parameters: since, since.
