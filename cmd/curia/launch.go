@@ -44,7 +44,7 @@ const launchFailMax = 300
 func init() {
 	cmd := &cobra.Command{
 		Use:    "launch <id>",
-		Short:  "Start a task's agent (run by curia spawn inside the task's window)",
+		Short:  "Start a task's agent, claude or codex (run by curia spawn inside the task's window)",
 		Hidden: true,
 		Args:   cobra.ArbitraryArgs,
 		// launch prints its own one line: nothing else is visible in the window.
@@ -53,7 +53,7 @@ func init() {
 	}
 	cmd.Flags().StringVar(&launchModel, "model", "", "the model the agent uses")
 	cmd.Flags().BoolVar(&launchTeam, "team", false, "let the agent lead an agent team")
-	cmd.Flags().StringVar(&launchResume, "resume", "", "resume this Claude Code session instead of starting with the brief")
+	cmd.Flags().StringVar(&launchResume, "resume", "", "resume this agent session instead of starting with the brief")
 	cmd.Flags().BoolVar(&launchAfterPause, "after-pause", false, "tell the agent its work is in the pause's WIP commit")
 	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error { return launchFail(c, launchConfig(), err) })
 	rootCmd.AddCommand(cmd)
@@ -69,8 +69,8 @@ func launchConfig() config.Config {
 	return cfg
 }
 
-// runLaunch replaces this process with claude for the task. It returns
-// only on failure, after launchFail.
+// runLaunch replaces this process with the task's agent (claude or codex).
+// It returns only on failure, after launchFail.
 func runLaunch(cmd *cobra.Command, args []string) error {
 	cfg, err := loadConfig()
 	if err == nil {
@@ -103,7 +103,9 @@ func launchCheckArgs(args []string) (string, error) {
 	return args[0], spawnCheckOptions(args[0], spawnOptions{Model: launchModel, Resume: launchResume})
 }
 
-// launchAgent loads the task and execs claude with launchArgv in launchEnv.
+// launchAgent loads the task and execs its agent with launchArgv or
+// launchCodexArgv in launchEnv. The binary is one of two fixed names chosen
+// by the task's stored agent; the team switch is only ever Claude Code's.
 func launchAgent(ctx context.Context, cfg config.Config, args []string) error {
 	id, err := launchCheckArgs(args)
 	if err != nil {
@@ -113,15 +115,23 @@ func launchAgent(ctx context.Context, cfg config.Config, args []string) error {
 	if err != nil {
 		return err
 	}
-	argv, err := launchArgv(t, launchModel, launchTeam, launchResume, launchAfterPause)
+	var argv []string
+	switch t.Agent {
+	case "", model.AgentClaude:
+		argv, err = launchArgv(t, launchModel, launchTeam, launchResume, launchAfterPause)
+	case model.AgentCodex:
+		argv, err = launchCodexArgv(t, launchModel, launchTeam, launchResume, launchAfterPause)
+	default:
+		err = fmt.Errorf("%s has agent %q, which curia launch does not start", id, sanitize.Line(t.Agent, 40))
+	}
 	if err != nil {
 		return err
 	}
-	path, err := launchLookPath("claude")
+	path, err := launchLookPath(argv[0])
 	if err != nil {
-		return fmt.Errorf("claude not found: %w", err)
+		return fmt.Errorf("%s not found: %w", argv[0], err)
 	}
-	if err = launchExec(path, argv, launchEnv(os.Environ(), id, launchTeam)); err != nil {
+	if err = launchExec(path, argv, launchEnv(os.Environ(), id, launchTeam && argv[0] == model.AgentClaude)); err != nil {
 		return fmt.Errorf("start %s: %w", path, err)
 	}
 	return nil
@@ -175,8 +185,44 @@ func launchArgv(t model.Task, modelName string, team bool, resume string, afterP
 		}
 		return argv, nil
 	}
+	brief, err := launchBrief(t, team, afterPause)
+	if err != nil {
+		return nil, err
+	}
+	return append(argv, brief), nil
+}
+
+// launchCodexArgv is codex's argument vector (section 4.10): "codex resume
+// <session>" to resume, with launchAfterPauseNote as its prompt after a
+// pause, else the model and the brief as the one positional argument. An
+// agent team is refused, and no sandbox or approval flag is ever added.
+func launchCodexArgv(t model.Task, modelName string, team bool, resume string, afterPause bool) ([]string, error) {
+	if team {
+		return nil, errors.New("agent teams are Claude Code's: " + t.ID + " runs codex")
+	}
+	argv := []string{model.AgentCodex}
+	if resume != "" {
+		argv = append(argv, "resume", resume)
+		if afterPause {
+			argv = append(argv, launchAfterPauseNote(t.ID))
+		}
+		return argv, nil
+	}
+	if modelName != "" {
+		argv = append(argv, "--model", modelName)
+	}
+	brief, err := launchBrief(t, false, afterPause)
+	if err != nil {
+		return nil, err
+	}
+	return append(argv, brief), nil
+}
+
+// launchBrief is the task's brief, ending with launchAfterPauseNote after a
+// pause; a task with no branch yet has none.
+func launchBrief(t model.Task, team, afterPause bool) (string, error) {
 	if !task.ValidBranch(t.Branch) || !task.ValidBranch(t.BaseBranch) {
-		return nil, errors.New(t.ID + " has no branch and base branch yet: start it with curia spawn " + t.ID)
+		return "", errors.New(t.ID + " has no branch and base branch yet: start it with curia spawn " + t.ID)
 	}
 	// Stored text is clean already; cleaning again is free (idempotent) and
 	// keeps the rule that untrusted text is cleaned wherever it is sent.
@@ -186,7 +232,7 @@ func launchArgv(t model.Task, modelName string, team bool, resume string, afterP
 	if afterPause {
 		brief += "\n\n" + launchAfterPauseNote(t.ID)
 	}
-	return append(argv, brief), nil
+	return brief, nil
 }
 
 // launchEnv is env with CURIA_TASK_ID set to id and, with team, the agent
