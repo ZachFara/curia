@@ -156,7 +156,9 @@ func spawnCheckOptions(id string, o spawnOptions) error {
 
 // spawnCheck is step 1 before the claim: the options are valid, the task
 // exists, is not dropped, is not paused (unless this is curia resume) and
-// is not running. o.Model becomes the task's stored model when not given.
+// is not running; for an agent (ReadyOnly) it is stored ready and, by its
+// newest review, neither in review nor done (I7). o.Model becomes the
+// task's stored model when not given.
 func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.Config, id string, o *spawnOptions) (model.Task, error) {
 	if err := spawnCheckOptions(id, *o); err != nil {
 		return model.Task{}, err
@@ -175,6 +177,11 @@ func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 		return model.Task{}, fmt.Errorf("%s is %s: an agent may spawn only a task the user marked ready (curia task ready %s)",
 			id, t.Status, id)
 	}
+	if o.ReadyOnly {
+		if err = spawnCheckReviewed(ctx, st, t); err != nil {
+			return model.Task{}, err
+		}
+	}
 	if o.Model == "" {
 		o.Model = t.AgentModel
 	}
@@ -182,6 +189,21 @@ func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 		return model.Task{}, err
 	}
 	return t, spawnCheckIdle(ctx, st, tm, cfg, t)
+}
+
+// spawnCheckReviewed refuses a task whose newest review makes it review or
+// done (task.Derive): its stored status stays ready for its whole life, so
+// that alone would let an agent start finished work again.
+func spawnCheckReviewed(ctx context.Context, st *store.Store, t model.Task) error {
+	rs, err := st.ListReviews(ctx, store.ReviewFilter{TaskID: t.ID, Limit: 1})
+	if err != nil || len(rs) == 0 {
+		return err
+	}
+	if s := task.Derive(t, nil, 0, rs[0].Status); s == model.TaskReview || s == model.TaskDone {
+		return fmt.Errorf("%s is %s (%s is %s): an agent may spawn only a task the user marked ready that is neither in review nor done",
+			t.ID, s, rs[0].ID, reviewStatusWord(rs[0].Status))
+	}
+	return nil
 }
 
 // spawnCheckIdle refuses a task with a live linked session, or whose
@@ -217,7 +239,7 @@ func spawnCheckIdle(ctx context.Context, st *store.Store, tm tmux.Client, cfg co
 // lists it and it is not a recycled id (lifecyclePaneStateOf), or it is
 // listed and cannot be told apart.
 func spawnPaneOpen(panes []tmux.Pane, perr error, t model.Task) bool {
-	switch lifecyclePaneStateOf(panes, perr, t.Pane, t.LaunchedAt) {
+	switch lifecyclePaneStateOf(panes, perr, t.Pane, "", t.LaunchedAt) {
 	case lifecyclePaneOurs:
 		return true
 	case lifecyclePaneUnknown:

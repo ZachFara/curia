@@ -296,7 +296,7 @@ func (m *markerHook) seen() {
 		m.t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
-	if err := st.MarkSeen(context.Background(), "%1", time.Now()); err != nil {
+	if err := st.MarkSeen(context.Background(), "%1", "", time.Now()); err != nil {
 		m.t.Fatal(err)
 	}
 }

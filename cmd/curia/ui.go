@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -95,7 +96,15 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 		m, closeLog = dashboardPopupViews(m, st, client, cfg, refused)
 		defer func() { _ = closeLog() }()
 	}
-	return runProgram(m, opts...)
+	// A hang-up or SIGTERM ends the dashboard, but an approval (or another
+	// review action) in flight finishes and is recorded first (C1).
+	sig, stop := reviewHoldSignals(false)
+	defer stop()
+	err = reviewProgramErr(sig, runProgram(m, append(opts, tea.WithContext(sig))...))
+	if werr := reviewAfterProgram(sig, os.Stderr); err == nil {
+		err = werr
+	}
+	return err
 }
 
 // dashboardPopupViews gives the popup's m its decide view (only when the

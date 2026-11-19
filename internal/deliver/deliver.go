@@ -495,7 +495,7 @@ func (r *delivery) mark(ctx context.Context, sessionID string) {
 	}
 	for _, w := range windows {
 		actx, cancel := settled(ctx, tmuxTimeout)
-		if err := attention.Apply(actx, r.tm, r.st, w); err != nil && !errors.Is(err, tmux.ErrNoWindow) {
+		if err := attention.Apply(actx, r.tm, r.st, w, fleet.Socket(r.live)); err != nil && !errors.Is(err, tmux.ErrNoWindow) {
 			r.log.Warn("deliver: attention marker", "window", w, "err", err.Error())
 		}
 		cancel()

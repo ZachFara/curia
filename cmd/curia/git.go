@@ -118,10 +118,13 @@ func requireRegular(fi os.FileInfo, err error) error {
 	return nil
 }
 
-// gitResult is the outcome of one git call.
+// gitResult is the outcome of one git call. out and stderr are trimmed;
+// raw is stdout as git wrote it (runGit only), for output whose leading
+// spaces mean something, such as a diff stat's column alignment.
 type gitResult struct {
 	args        []string
 	out, stderr string
+	raw         string
 	err         error
 	timedOut    bool
 }
@@ -152,7 +155,111 @@ func runGit(ctx context.Context, cwd string, args ...string) gitResult {
 	res := gitResult{args: args}
 	res.err = cmd.Run()
 	res.timedOut = ctx.Err() != nil
-	res.out, res.stderr = strings.TrimSpace(out.String()), strings.TrimSpace(stderr.String())
+	res.raw = out.String()
+	res.out, res.stderr = strings.TrimSpace(res.raw), strings.TrimSpace(stderr.String())
+	return res
+}
+
+// groupGrace is how long a child run by runGroup has to stop after SIGTERM
+// before its process group is killed. Tests shorten it.
+var groupGrace = 5 * time.Second
+
+// groupMaxOut bounds what runGroup keeps of a child's stdout and of its
+// stderr, each.
+const groupMaxOut = 64 << 10
+
+// runGroup runs the program at path with args in dir and env, for the git
+// and gh calls of an approval, which change the user's repository or a
+// remote and must not be cut short by accident. The child runs in a process
+// group of its own, so a hang-up or a Ctrl-C meant for Curia's group never
+// reaches it, with stdin from the null device and stdout and stderr in
+// unlinked temporary files rather than pipes, so should Curia die the child
+// finishes instead of dying on its next write. When ctx ends, the group gets
+// SIGTERM, and SIGKILL after groupGrace; once a stopped child has exited,
+// whatever is left of its group (a hook that ignored SIGTERM) is killed too.
+// stdout and stderr are kept up to groupMaxOut bytes each.
+func runGroup(ctx context.Context, dir string, env []string, path string, args ...string) (stdout, stderr string, err error) {
+	outF, err := groupTempFile()
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = outF.Close() }()
+	errF, err := groupTempFile()
+	if err != nil {
+		return "", "", err
+	}
+	defer func() { _ = errF.Close() }()
+	cmd := exec.Command(path, args...)
+	cmd.Dir, cmd.Env = dir, env
+	cmd.Stdout, cmd.Stderr = outF, errF
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err = cmd.Start(); err != nil {
+		return "", "", err
+	}
+	err = groupWait(ctx, cmd)
+	return groupRead(outF), groupRead(errF), err
+}
+
+// groupWait waits for cmd, which leads its own process group, and stops the
+// group when ctx ends first: SIGTERM, then SIGKILL after groupGrace.
+func groupWait(ctx context.Context, cmd *exec.Cmd) error {
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+	}
+	pgid := cmd.Process.Pid
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	timer := time.NewTimer(groupGrace)
+	defer timer.Stop()
+	var err error
+	select {
+	case err = <-done:
+	case <-timer.C:
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		err = <-done
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL) // what is left of the group; ESRCH when nothing is
+	return err
+}
+
+// groupTempFile is a new temporary file, already unlinked, so that nothing
+// is left behind whatever happens to Curia.
+func groupTempFile() (*os.File, error) {
+	f, err := os.CreateTemp("", "curia-out-")
+	if err != nil {
+		return nil, err
+	}
+	if err = os.Remove(f.Name()); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// groupRead is what the child wrote to f, at most groupMaxOut bytes,
+// trimmed.
+func groupRead(f *os.File) string {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return ""
+	}
+	b, _ := io.ReadAll(io.LimitReader(f, groupMaxOut))
+	return strings.TrimSpace(string(b))
+}
+
+// runGitGroup is runGit through runGroup: git -C cwd args, in a process
+// group of its own, stopped with SIGTERM and then killed when ctx ends.
+func runGitGroup(ctx context.Context, cwd string, args ...string) gitResult {
+	res := gitResult{args: args}
+	path, err := exec.LookPath("git")
+	if err != nil {
+		res.err = err
+		return res
+	}
+	res.out, res.stderr, res.err = runGroup(ctx, "", gitEnv(), path, append([]string{"-C", cwd}, args...)...)
+	res.timedOut = ctx.Err() != nil
 	return res
 }
 

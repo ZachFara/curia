@@ -136,6 +136,10 @@ type ReviewModel struct {
 	pending     ReviewDetail
 	promptSince time.Time     // when the prompt opened, or a y too early restarted its wait
 	promptWait  time.Duration // dwell, then quietPeriod after a y too early
+	keyAt       time.Time     // when the last key came, acted on or not
+	prevKeyAt   time.Time     // when the key before it came
+	confirmAt   time.Time     // when a "y" was taken, waiting out burstGap before it acts; zero when none
+	confirmSeq  int           // the reviewConfirmMsg the taken "y" waits for
 	inputSince  time.Time     // when the note input opened, or an Enter too early restarted it
 	lastEnter   time.Time     // when the last Enter came, acted on or not
 	burst       time.Time     // when the last burst of several typed runes came into the note
@@ -169,6 +173,10 @@ type reviewQueueMsg struct {
 }
 
 type reviewTickMsg struct{}
+
+// reviewConfirmMsg acts on the "y" taken as confirmSeq once burstGap has
+// passed with no other key.
+type reviewConfirmMsg struct{ seq int }
 
 type reviewDetailTickMsg struct{}
 
@@ -251,13 +259,26 @@ func (m ReviewModel) update(msg tea.Msg) (ReviewModel, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
+	case reviewConfirmMsg:
+		return m.applyConfirm(msg)
 	case tea.KeyMsg:
-		if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste && m.mode != reviewNote {
-			return m.updateRunes(msg)
-		}
-		return m.updateKey(msg, false)
+		return m.keyMsg(msg)
 	}
 	return m, nil
+}
+
+// keyMsg handles a key message: the time it came is recorded for the burst
+// rule (inBurst), a key while a "y" waits out burstGap is keyAfterConfirm's,
+// and several runes of one read are taken one by one.
+func (m ReviewModel) keyMsg(msg tea.KeyMsg) (ReviewModel, tea.Cmd) {
+	m.prevKeyAt, m.keyAt = m.keyAt, m.now()
+	if !m.confirmAt.IsZero() {
+		return m.keyAfterConfirm()
+	}
+	if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste && m.mode != reviewNote {
+		return m.updateRunes(msg)
+	}
+	return m.updateKey(msg, false)
 }
 
 // current is the shown row, and false when the queue is empty.
@@ -670,12 +691,12 @@ func (m ReviewModel) openPrompt(mode reviewMode, d ReviewDetail) ReviewModel {
 	return m
 }
 
-// confirmKey acts on a "y" that came as a key of its own, the wait after
-// the prompt opened, while the review is still as it was shown. A "y" too
-// soon is ignored and restarts the wait, now as long as the quiet period,
-// so the repeats of a held key never confirm (a held key's first repeat
-// comes 375 to 660 ms after the press). Any other key, a "y" in a burst
-// and a paste cancel; a paste also starts the quiet period.
+// confirmKey takes a "y" that came as a key of its own, the wait after the prompt opened, while the review
+// is still as it was shown; it acts once burstGap has passed with no other key (applyConfirm). A "y" too soon,
+// or within burstGap after another key (the burst rule, inBurst), is ignored and restarts the wait, now as
+// long as the quiet period, so the repeats of a held key and a "y" pasted without bracketing never confirm
+// (a held key's first repeat comes 375 to 660 ms after the press). Any other key, a "y" in a burst of one
+// read and a paste cancel; a paste also starts the quiet period.
 func (m ReviewModel) confirmKey(msg tea.KeyMsg, split bool) (ReviewModel, tea.Cmd) {
 	if msg.Paste || split || msg.String() != "y" {
 		m.mode, m.pending, m.shownSince = reviewBrowse, ReviewDetail{}, m.now()
@@ -684,11 +705,40 @@ func (m ReviewModel) confirmKey(msg tea.KeyMsg, split bool) (ReviewModel, tea.Cm
 		}
 		return m, nil
 	}
-	if now := m.now(); now.Sub(m.promptSince) < m.promptWait {
+	if now := m.now(); now.Sub(m.promptSince) < m.promptWait || inBurst(now, m.prevKeyAt) {
 		m.promptSince, m.promptWait = now, quietPeriod
 		m.notice = noticeTooSoon
 		return m, nil
 	}
+	m.confirmAt, m.confirmSeq = m.now(), m.confirmSeq+1
+	return m, m.tick(burstGap, reviewConfirmMsg{seq: m.confirmSeq})
+}
+
+// keyAfterConfirm handles a key that came while a taken "y" waits out burstGap. Within burstGap of the "y"
+// it arrived with it (the burst rule): the "y" is refused and the prompt's wait restarts. Later (the wait's
+// message is late) the "y" acts and the key is ignored, as every key is while an action runs.
+func (m ReviewModel) keyAfterConfirm() (ReviewModel, tea.Cmd) {
+	if inBurst(m.keyAt, m.confirmAt) {
+		m.confirmAt = time.Time{}
+		m.promptSince, m.promptWait = m.keyAt, quietPeriod
+		m.notice = noticeTooSoon
+		return m, nil
+	}
+	return m.confirm()
+}
+
+// applyConfirm acts on the "y" msg waited for, when it still waits.
+func (m ReviewModel) applyConfirm(msg reviewConfirmMsg) (ReviewModel, tea.Cmd) {
+	if msg.seq != m.confirmSeq || m.confirmAt.IsZero() {
+		return m, nil
+	}
+	return m.confirm()
+}
+
+// confirm runs the prompt's action on the review it opened on, unless that
+// review changed meanwhile.
+func (m ReviewModel) confirm() (ReviewModel, tea.Cmd) {
+	m.confirmAt = time.Time{}
 	if m.selectedID() != m.pendingID || m.face() != m.pendingFace {
 		return m.cancelChanged(), nil
 	}

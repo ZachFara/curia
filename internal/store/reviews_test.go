@@ -505,7 +505,7 @@ func TestSessionEndReasonClearedOnResume(t *testing.T) {
 		}
 	}
 	upsert(t, s, model.Session{ID: "live", Agent: "claude", Pane: "%7", State: model.StateIdle})
-	if err := s.EndOthersInPane(ctx, "%7", "new", reviewT0); err != nil {
+	if err := s.EndOthersInPane(ctx, "%7", "", "new", reviewT0); err != nil {
 		t.Fatal(err)
 	}
 	if got := get(t, s, "live"); got.State != model.StateEnded || got.EndReason != "" {
@@ -1247,5 +1247,142 @@ func TestReviewQueriesUseIndexes(t *testing.T) {
 			}
 		}
 		t.Logf("%s:\n%s", q.name, plan)
+	}
+}
+
+// TestClaimReviewIntent: an approval's intent is recorded on the pending
+// review in one conditional statement and is its claim: a second claim is
+// refused while it is younger than the hold, an older one is replaced, a
+// release clears only its own, and a change request or a drop that asks is
+// refused while it stands.
+func TestClaimReviewIntent(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, dbPath(t))
+	r := reviewFor(t, s, "Claim me")
+	at, hold := reviewT0.Add(time.Hour), 10*time.Minute
+	in := store.ReviewIntent{How: model.ApproveMerge, Head: strings.Repeat("a", 40), DiffStat: " a.go | 1 +"}
+	got, err := s.ClaimReviewIntent(ctx, r.ID, in, at, hold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.ReviewPending || !got.IntentAt.Equal(at) || !got.ClosedAt.IsZero() ||
+		got.ApprovedHow != in.How || got.Head != in.Head || got.DiffStat != in.DiffStat {
+		t.Errorf("claimed review = %+v, want pending with the intent at %s", got, at)
+	}
+	assertReview(t, getReview(t, s, r.ID), got)
+
+	// A second approver, within the hold: refused, the first intent kept.
+	other := store.ReviewIntent{How: model.ApprovePR, Head: strings.Repeat("b", 40)}
+	busy, err := s.ClaimReviewIntent(ctx, r.ID, other, at.Add(hold-time.Second), hold)
+	if !errors.Is(err, store.ErrReviewBusy) || !busy.IntentAt.Equal(at) || busy.Head != in.Head {
+		t.Errorf("second claim = %+v, %v; want ErrReviewBusy with the first intent", busy, err)
+	}
+	for _, st := range []model.ReviewStatus{model.ReviewChanges, model.ReviewDropped} {
+		_, _, cerr := s.CloseReview(ctx, r.ID, store.ReviewClose{Status: st, Notes: "n", Via: model.AnsweredCLI, IntentHold: hold},
+			at.Add(time.Minute))
+		if !errors.Is(cerr, store.ErrReviewBusy) {
+			t.Errorf("%s during the approval: %v, want ErrReviewBusy", st, cerr)
+		}
+	}
+	if g := getReview(t, s, r.ID); g.Status != model.ReviewPending || g.Head != in.Head {
+		t.Errorf("after the refusals: %+v", g)
+	}
+	claimReleaseAndRetake(t, s, r, in, other, at, hold)
+}
+
+// claimReleaseAndRetake is the second half of TestClaimReviewIntent: r has
+// intent in, claimed at at.
+func claimReleaseAndRetake(t *testing.T, s *store.Store, r model.Review, in, other store.ReviewIntent, at time.Time, hold time.Duration) {
+	t.Helper()
+	ctx := context.Background()
+	// Another's release leaves it; its own clears it.
+	if err := s.ReleaseReviewIntent(ctx, r.ID, at.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if g := getReview(t, s, r.ID); g.Head != in.Head {
+		t.Errorf("another's release cleared the intent: %+v", g)
+	}
+	if err := s.ReleaseReviewIntent(ctx, r.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	if g := getReview(t, s, r.ID); !g.IntentAt.IsZero() || g.Head != "" || g.ApprovedHow != "" || g.DiffStat != "" {
+		t.Errorf("after its release: %+v, want no intent", g)
+	}
+
+	claimRetakeAndClose(t, s, r, in, other, at, hold)
+}
+
+// claimRetakeAndClose is the end of TestClaimReviewIntent: r has no intent.
+func claimRetakeAndClose(t *testing.T, s *store.Store, r model.Review, in, other store.ReviewIntent, at time.Time, hold time.Duration) {
+	t.Helper()
+	ctx := context.Background()
+	// An intent older than the hold (its approval was killed) is replaced.
+	if _, err := s.ClaimReviewIntent(ctx, r.ID, in, at, hold); err != nil {
+		t.Fatal(err)
+	}
+	later := at.Add(hold)
+	if got, err := s.ClaimReviewIntent(ctx, r.ID, other, later, hold); err != nil || !got.IntentAt.Equal(later) || got.Head != other.Head {
+		t.Errorf("claim over a stale intent = %+v, %v", got, err)
+	}
+	// An approval closes over its own intent; closed_at is then the close.
+	closed, _ := closeReview(t, s, r.ID, store.ReviewClose{Status: model.ReviewMerged, How: model.ApproveMerge, Head: other.Head, Via: model.AnsweredCLI},
+		later.Add(time.Minute))
+	if closed.Status != model.ReviewMerged || !closed.ClosedAt.Equal(later.Add(time.Minute)) || !closed.IntentAt.IsZero() {
+		t.Errorf("closed = %+v", closed)
+	}
+	if _, err := s.ClaimReviewIntent(ctx, r.ID, in, later.Add(hold), hold); !errors.Is(err, store.ErrReviewClosed) {
+		t.Errorf("claim of a closed review: %v, want ErrReviewClosed", err)
+	}
+	if _, err := s.ClaimReviewIntent(ctx, "R-99", in, later, hold); !errors.Is(err, store.ErrNoReview) {
+		t.Errorf("claim of no review: %v, want ErrNoReview", err)
+	}
+}
+
+// TestDropWithoutHoldIgnoresIntent: a close that gives no hold (zero) does
+// not look at an intent.
+func TestDropWithoutHoldIgnoresIntent(t *testing.T) {
+	s := open(t, dbPath(t))
+	r := reviewFor(t, s, "Drop me")
+	if _, err := s.ClaimReviewIntent(context.Background(), r.ID, store.ReviewIntent{How: model.ApproveMerge, Head: "h"}, reviewT0, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := closeReview(t, s, r.ID, store.ReviewClose{Status: model.ReviewDropped, Via: model.AnsweredCLI}, reviewT0.Add(time.Minute)); got.Status != model.ReviewDropped || got.Head != "" {
+		t.Errorf("dropped = %+v", got)
+	}
+}
+
+// TestRestoreReviewIntent: a claim that replaced an earlier (stale) intent
+// puts that intent back exactly when its approval fails; it changes only its
+// own claim, and with no earlier intent it clears its own.
+func TestRestoreReviewIntent(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, dbPath(t))
+	r := reviewFor(t, s, "Restore me")
+	old := store.ReviewIntent{How: model.ApproveMerge, Head: strings.Repeat("a", 40), DiffStat: "old stat"}
+	oldAt, hold := reviewT0, 10*time.Minute
+	if _, err := s.ClaimReviewIntent(ctx, r.ID, old, oldAt, hold); err != nil {
+		t.Fatal(err)
+	}
+	newAt := oldAt.Add(11 * time.Minute)
+	if _, err := s.ClaimReviewIntent(ctx, r.ID, store.ReviewIntent{How: model.ApproveMerge, Head: strings.Repeat("a", 40), DiffStat: "new"}, newAt, hold); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RestoreReviewIntent(ctx, r.ID, newAt.Add(time.Second), old, oldAt); err != nil { // not its claim
+		t.Fatal(err)
+	}
+	if g := getReview(t, s, r.ID); !g.IntentAt.Equal(newAt) {
+		t.Errorf("another's restore changed the claim: %+v", g)
+	}
+	if err := s.RestoreReviewIntent(ctx, r.ID, newAt, old, oldAt); err != nil {
+		t.Fatal(err)
+	}
+	if g := getReview(t, s, r.ID); !g.IntentAt.Equal(oldAt) || g.Head != old.Head || g.DiffStat != "old stat" || g.ApprovedHow != old.How {
+		t.Errorf("after the restore: %+v, want the earlier intent at %v", g, oldAt)
+	}
+	if err := s.RestoreReviewIntent(ctx, r.ID, oldAt, store.ReviewIntent{}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if g := getReview(t, s, r.ID); !g.IntentAt.IsZero() || g.Head != "" {
+		t.Errorf("a restore with no earlier intent: %+v, want none", g)
 	}
 }

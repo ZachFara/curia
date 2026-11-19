@@ -253,7 +253,7 @@ func TestReviewPushWording(t *testing.T) {
 	if n.Topic != ntfyTopic || n.Title != "R-3 T-42: ready for review" || n.Priority != 3 || len(n.Actions) != 0 {
 		t.Errorf("push = %+v", n)
 	}
-	want := "Retry failed uploads\nTests (the agent's report): passed\nAdded the retry loop.\nAll callers updated."
+	want := "Retry failed uploads\nTests (the agent's report): passed\nSummary (the agent's):\nAdded the retry loop.\nAll callers updated."
 	if n.Message != want {
 		t.Errorf("message = %q, want %q", n.Message, want)
 	}

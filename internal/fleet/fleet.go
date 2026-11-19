@@ -70,6 +70,21 @@ func OtherServer(live []tmux.Pane, s model.Session) bool {
 	return newServer(live).elsewhere(s)
 }
 
+// Socket is the socket of the tmux server whose panes are live: the first
+// non-empty Socket among them, "" when none reports one.
+func Socket(live []tmux.Pane) string {
+	return newServer(live).socket
+}
+
+// OtherSocket is OtherServer's rule for a caller that knows the socket of
+// its tmux server ("" when it does not) rather than its panes: s's Socket
+// is known and differs from socket. It is the one rule for telling apart
+// two servers' panes with the same id; the store's SQL (EndOthersInPane,
+// MarkSeen, sharesPane) repeats it.
+func OtherSocket(socket string, s model.Session) bool {
+	return s.Socket != "" && socket != "" && s.Socket != socket
+}
+
 // server is what Reconcile knows of the live tmux server.
 type server struct {
 	alive  map[string]bool
@@ -107,7 +122,7 @@ func (srv server) goneFrom(s model.Session, pane string) bool {
 // elsewhere reports whether s was recorded on another server than srv:
 // both sockets are known and differ.
 func (srv server) elsewhere(s model.Session) bool {
-	return s.Socket != "" && srv.socket != "" && s.Socket != srv.socket
+	return OtherSocket(srv.socket, s)
 }
 
 // markStale marks the session listed as stale, deciding again from the
@@ -209,7 +224,8 @@ type Counts struct {
 // been seen, and takes Decisions from openBlocking, the number of open
 // blocking tickets across all sessions (Plan 2 section 4.10), not from
 // needs_decision sessions, and Undelivered from undelivered, the answers
-// the agents have not got yet (Ruling 89). Reviews stays 0 until Plan 4.
+// the agents have not got yet (Ruling 89). Reviews is not counted here: the
+// caller sets it from store.PendingReviews.
 func Count(s []model.Session, openBlocking, undelivered int) Counts {
 	c := Counts{Decisions: openBlocking, Undelivered: undelivered}
 	for _, x := range s {

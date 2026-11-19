@@ -218,12 +218,18 @@ func pushEnq(t *testing.T, st *store.Store, cfg config.Config, kind model.PushKi
 	}
 }
 
+// pushFlusherFor is the flusher the loop builds, on the test publisher and
+// clock now, logging nowhere.
+func pushFlusherFor(st *store.Store, cfg config.Config, now func() time.Time) pushFlusher {
+	return pushFlusher{st: st, cfg: cfg, pub: pushTestPublisher(cfg), now: now, log: slog.New(slog.DiscardHandler)}
+}
+
 // pushFlushAt flushes at now and returns how many it sent.
 func pushFlushAt(t *testing.T, st *store.Store, cfg config.Config, now time.Time) int {
 	t.Helper()
-	n, err := pushFlush(context.Background(), st, cfg, pushTestPublisher(cfg), func() time.Time { return now })
+	n, err := pushFlusherFor(st, cfg, func() time.Time { return now }).flush(context.Background())
 	if err != nil {
-		t.Fatalf("pushFlush: %v", err)
+		t.Fatalf("flush: %v", err)
 	}
 	return n
 }
@@ -436,7 +442,7 @@ func TestFlushSendsDuePushes(t *testing.T) {
 	cfg := pushCfg(srv.URL, pushTwoDevices, "", "")
 	pushEnq(t, st, cfg, model.PushDecision, d.ID, pushT0)
 	if n := pushFlushAt(t, st, cfg, pushT0); n != 2 {
-		t.Errorf("pushFlush sent %d, want 2", n)
+		t.Errorf("flush sent %d, want 2", n)
 	}
 	reqs := srv.requests()
 	var topics []string
@@ -807,7 +813,7 @@ func TestTwoFlushersSendOnce(t *testing.T) {
 	for _, h := range []*store.Store{st, other} {
 		wg.Go(func() {
 			for range 50 { // busy-retry, bounded
-				n, err := pushFlush(context.Background(), h, cfg, pushTestPublisher(cfg), func() time.Time { return pushT0 })
+				n, err := pushFlusherFor(h, cfg, func() time.Time { return pushT0 }).flush(context.Background())
 				total.Add(int64(n))
 				if err == nil {
 					return
@@ -856,7 +862,7 @@ func TestFlushReviewPush(t *testing.T) {
 		t.Fatalf("sent %d, want 1", n)
 	}
 	b := srv.requests()[0].Body
-	want := "Retry webhooks\nTests (the agent's report): passed\nAdded retries with backoff."
+	want := "Retry webhooks\nTests (the agent's report): passed\nSummary (the agent's):\nAdded retries with backoff."
 	if b.Title != "R-1 T-1: ready for review" || len(b.Actions) != 0 || b.Priority != 3 || b.Message != want {
 		t.Errorf("review push = %+v", b)
 	}
@@ -1292,5 +1298,60 @@ func TestFlushStakesWithLongQuestionStaysUnderTheBound(t *testing.T) {
 			!strings.HasSuffix(got, "\nanswer within 12m to keep cache warm (rebuild ≈ $1.68)") {
 			t.Errorf("fill %q: %d bytes, %d runes, ends %q", fill, len(got), utf8.RuneCountInString(got), got[max(0, len(got)-70):])
 		}
+	}
+}
+
+// TestRetryRespectsQuietHours: a retry whose time (the backoff, or a 429's
+// Retry-After) falls inside quiet hours waits for their end, as a new push
+// does (M3).
+func TestRetryRespectsQuietHours(t *testing.T) {
+	srv := pushServer(t, pushStatus(http.StatusTooManyRequests, "300"))
+	st, db := pushStore(t)
+	d := pushTicket(t, st, "Which queue?", model.ReversCostly, 2)
+	start := pushT0.Add(time.Minute).Truncate(time.Minute) // quiet from 12:01 to 13:01
+	end := start.Add(time.Hour)
+	quiet := fmt.Sprintf("%02d:%02d-%02d:%02d", start.Hour(), start.Minute(), end.Hour(), end.Minute())
+	cfg := pushCfg(srv.URL, map[string]string{"phone": "curia-phone-k3j9"}, quiet, "")
+	pushEnq(t, st, cfg, model.PushDecision, d.ID, pushT0) // 12:00, outside: due at once
+	if n := pushFlushAt(t, st, cfg, pushT0); n != 0 || len(srv.requests()) != 1 {
+		t.Fatalf("first send: sent %d, %d requests", n, len(srv.requests()))
+	}
+	row := pushRows(t, db)[0]
+	if row.Status != "pending" || !row.NotBefore.Equal(end) {
+		t.Errorf("retry due %v (Retry-After 300 s: 12:05, inside quiet hours), want their end %v", row.NotBefore, end)
+	}
+	if n := pushFlushAt(t, st, cfg, pushT0.Add(5*time.Minute)); n != 0 || len(srv.requests()) != 1 {
+		t.Errorf("retried at 12:05, inside quiet hours")
+	}
+}
+
+// TestNoTokenHashWithoutButtons: with [serve] public_url set, a push that
+// carries no button (a review, an irreversible ticket) keeps no token hash;
+// a reversible ticket's push, which has buttons, keeps its own (M4).
+func TestNoTokenHashWithoutButtons(t *testing.T) {
+	srv := pushServer(t, nil)
+	st, db := pushStore(t)
+	cfg := pushCfg(srv.URL, map[string]string{"phone": "curia-phone-k3j9"}, "", "https://curia.example.ts.net")
+	reversible := pushTicket(t, st, "Which queue?", model.ReversCostly, 2)
+	irreversible := pushTicket(t, st, "Drop the table?", model.ReversIrreversible, 2)
+	tk := mcpTask(t, st, "Retry webhooks")
+	r, _, err := st.CompleteTask(context.Background(), model.Review{TaskID: tk, SessionID: "S1", Summary: "Done.", Tests: model.TestsPassed, CreatedAt: pushT0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushEnq(t, st, cfg, model.PushDecision, reversible.ID, pushT0)
+	pushEnq(t, st, cfg, model.PushDecision, irreversible.ID, pushT0)
+	pushEnq(t, st, cfg, model.PushReview, r.ID, pushT0)
+	if n := pushFlushAt(t, st, cfg, pushT0); n != 3 {
+		t.Fatalf("sent %d, want 3", n)
+	}
+	for _, row := range pushRows(t, db) {
+		if wantHash := row.Ref == reversible.ID; (row.TokenHash != "") != wantHash || row.Status != "sent" {
+			t.Errorf("%s %s: status %s, token hash %q; want a hash %v", row.Kind, row.Ref, row.Status, row.TokenHash, wantHash)
+		}
+	}
+	reqs := srv.requests()
+	if withActions := slices.IndexFunc(reqs, func(q pushReq) bool { return len(q.Body.Actions) > 0 }); withActions < 0 {
+		t.Error("the reversible ticket's push has no button")
 	}
 }

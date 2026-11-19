@@ -200,7 +200,7 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 		// A window that is gone (a session's previous window after pause
 		// closed it, say) has no marker to set: not an error (live check B
 		// defect 8), as in reconcile.
-		if aerr := attention.Apply(actx, client, st, w); aerr != nil && !errors.Is(aerr, tmux.ErrNoWindow) {
+		if aerr := attention.Apply(actx, client, st, w, sess.Socket); aerr != nil && !errors.Is(aerr, tmux.ErrNoWindow) {
 			logger.Error("hook attention marker", "window", w, "err", aerr.Error())
 		}
 		cancel()
@@ -240,7 +240,7 @@ func seenIfFocused(ctx context.Context, client tmux.Client, st *store.Store, bef
 		return sess
 	}
 	now := time.Now()
-	if err := st.MarkSeen(ctx, sess.Pane, now); err != nil {
+	if err := st.MarkSeen(ctx, sess.Pane, sess.Socket, now); err != nil {
 		logger.Error("hook mark focused pane seen", "pane", sess.Pane, "err", err.Error())
 		return sess
 	}
