@@ -430,13 +430,28 @@ func (r *costRun) exports(t *testing.T) {
 	mine := filepath.Join(r.vault, "D-3 mine.md")
 	tasksWrite(t, mine, "# My own note on D-3\n\nNot Curia's: no front matter.\n")
 	before := readFile(t, mine)
-	r.user(t, "decide", "D-3", "--option", "A", "--reason", "r")
+	// The sweep that curia decide D-3 runs is the first to meet the foreign
+	// note: it marks the decision skipped (#139), logs it and prints nothing
+	// (only the export command prints the skip line); the file is left be.
+	skip := "skipped D-3: a note of yours is at " + mine + " (not Curia's; left alone). Rename or remove it, or run with --retry-skipped\n"
+	if got := r.user(t, "decide", "D-3", "--option", "A", "--reason", "r"); strings.Contains(got, "skipped") {
+		t.Errorf("curia decide D-3 printed %q, want no skip line (the after-answer sweep logs it)", got)
+	}
 	r.waitTyped(t, 3)
 	if got := readFile(t, mine); got != before {
 		t.Errorf("D-3 mine.md after curia decide D-3 = %q, want it unchanged %q", got, before)
 	}
-	if got, want := r.user(t, "export", "obsidian", "--all"), "exported 0 notes to "+r.vault+" (1 foreign note left alone: D-3)\n"; got != want {
-		t.Errorf("curia export obsidian --all = %q, want %q", got, want)
+	// A later sweep passes over the skipped decision.
+	if got := r.user(t, "export", "obsidian", "--all"); got != "nothing to export\n" {
+		t.Errorf("curia export obsidian --all after the skip = %q, want %q", got, "nothing to export\n")
+	}
+	// --retry-skipped tries it anew and reports the foreign note again.
+	retry := "exported 0 notes to " + r.vault + " (1 foreign note left alone: D-3)\n" + skip
+	if got := r.user(t, "export", "obsidian", "--retry-skipped"); got != retry {
+		t.Errorf("curia export obsidian --retry-skipped = %q, want %q", got, retry)
+	}
+	if got := readFile(t, mine); got != before {
+		t.Errorf("D-3 mine.md after --retry-skipped = %q, want it unchanged %q", got, before)
 	}
 	if got := r.vaultNames(t); !slices.Equal(got, []string{"D-1 Which database should the audit log write to.md", "D-2 Should errors be wrapped with w at every package boundary.md", "D-3 mine.md"}) {
 		t.Errorf("the vault holds %q, want D-1's and D-2's notes and the user's D-3 mine.md", got)
