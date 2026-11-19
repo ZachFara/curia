@@ -27,11 +27,14 @@ func TestParseCapturedFiles(t *testing.T) {
 		want Imported
 	}{
 		{"task-1 - Add login page.md", Imported{Ref: "task-1", Title: "Add login page", Tags: []string{"auth", "web"}}},
-		{"task-2 - Fix 'auth' refresh.md", Imported{Ref: "task-2", Title: "Fix: the 'auth' refresh", Tags: []string{"bug", "needs-review"}}},
+		// The fixture's name has no apostrophe (Go rejects one in a module zip);
+		// the parser still gets the Backlog.md name that has one, below.
+		{"task-2 - Fix auth refresh.md", Imported{Ref: "task-2", Title: "Fix: the 'auth' refresh", Tags: []string{"bug", "needs-review"}}},
 		{"task-3 - Old chore.md", Imported{Ref: "task-3", Title: "Old chore", Done: true}},
 	}
 	for _, tc := range tests {
-		got, err := ParseBacklogMD(tc.file, readFixture(t, tc.file))
+		name := strings.Replace(tc.file, "Fix auth", "Fix 'auth'", 1)
+		got, err := ParseBacklogMD(name, readFixture(t, tc.file))
 		if err != nil {
 			t.Fatalf("%s: %v", tc.file, err)
 		}

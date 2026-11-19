@@ -1,0 +1,26 @@
+{
+  "topic": "curia-e2e",
+  "title": "D-3 api-server: decision needed",
+  "message": "How long should a rotated refresh token stay valid?\nA: Thirty days\nB: Seven days\nRecommended: A\nanswer within <n>m to keep cache warm (rebuild ≈ $1.68)",
+  "priority": 4,
+  "actions": [
+    {
+      "action": "http",
+      "label": "A: Thirty days",
+      "url": "http://localhost:8787/v1/answer",
+      "method": "POST",
+      "headers": {"Authorization": "Bearer TOKEN", "Content-Type": "application/json"},
+      "body": "{\"decision\":\"D-3\",\"key\":\"A\"}",
+      "clear": true
+    },
+    {
+      "action": "http",
+      "label": "B: Seven days",
+      "url": "http://localhost:8787/v1/answer",
+      "method": "POST",
+      "headers": {"Authorization": "Bearer TOKEN", "Content-Type": "application/json"},
+      "body": "{\"decision\":\"D-3\",\"key\":\"B\"}",
+      "clear": true
+    }
+  ]
+}

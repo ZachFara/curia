@@ -18,3 +18,5 @@ Curia assumes one tmux server. With two (a second `-L` socket, or a view run ins
 
 - A session started before the upgrade is protected only after its next SessionStart.
 - Plan section 4.9 and decision 21 of section 13 carry the detail.
+
+Amended 2026-11-19 (Plan 4 final records; Ruling 133 in `PROGRESS.md`): the final review found six more places that used a pane id without its server, and the rule above was extended to all of them. One rule, `fleet.OtherServer` (built on `fleet.OtherSocket`; the store's SQL repeats it as `sameServer`), is now used by the hook (`EndOthersInPane`: a SessionStart no longer ends another server's session in a pane with the same id), the dashboard and the board (jump and kill refuse "on another tmux server"), `curia next`, `pause` and `clean` (a pane of another server is never "ours"), `curia seen`, delivery (`sharesPane`, `MarkSeen`), the attention markers and the user guard, as well as reconcile, `deliver` and restore. A session with no recorded server behaves as before. Still open: markers applied by the review and settle paths carry no known server.
