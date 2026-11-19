@@ -131,7 +131,8 @@ func dashboardPopupViews(m ui.Model, st *store.Store, client tmux.Client, cfg co
 		}
 		return m.WithoutReview("reviews cannot be opened here: the log file cannot be opened"), func() error { return nil }
 	}
-	dsrc, via := newDecideSource(st, client, logger), decideVia()
+	bg := &exportBackground{st: st, cfg: cfg}
+	dsrc, via := ui.DecideSource(exportKickSource{DecideSource: newDecideSource(st, client, logger), bg: bg}), decideVia()
 	if refused == nil {
 		m = m.WithDecide(func(id string) tea.Model {
 			return ui.NewDecide(dsrc, clock, ui.DecideOptions{SessionID: id, Embedded: true, Via: via})
@@ -141,7 +142,10 @@ func dashboardPopupViews(m ui.Model, st *store.Store, client tmux.Client, cfg co
 	m = m.WithReview(func(id string) tea.Model {
 		return ui.NewReview(rsrc, clock, ui.ReviewOptions{TaskID: id, Embedded: true})
 	})
-	return m, closeLog
+	return m, func() error {
+		bg.Wait() // a sweep after an answer finishes (bounded) before the log and store close
+		return closeLog()
+	}
 }
 
 // storeSource is the dashboard's ui.Source: on every read it reconciles

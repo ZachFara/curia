@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -363,14 +366,63 @@ func reviewMerge(ctx context.Context, t model.Task, head string) error {
 	if err != nil {
 		return err
 	}
+	if err = reviewCheckOnDisk(ctx, t, tree, head); err != nil {
+		return err
+	}
 	mctx, cancel := context.WithTimeout(ctx, reviewMergeLimit)
 	defer cancel()
-	res := runGitGroup(mctx, t.Repo, "merge", "--no-ff", "--no-edit", "--no-autostash",
+	res := runGitGroupEnv(mctx, t.Repo, reviewMergeEnv(t, tree), "merge", "--no-ff", "--commit", "--no-edit", "--no-autostash",
 		"-m", "Merge branch '"+t.Branch+"' into "+t.BaseBranch, head)
 	if res.err == nil {
-		return nil
+		return reviewMergeDone(ctx, t, head, before)
 	}
 	return reviewMergeFailed(ctx, t, res, before, tree)
+}
+
+// reviewMergeEnv is the configuration the approval's git merge runs with, given in the environment (as git -c
+// would, read after every config file; git 2.31 or later) so that the developer's merge configuration cannot
+// make it a different merge (C-1): branch.<base>.mergeOptions emptied (--no-commit, --squash, -s, -X and the
+// rest are not applied), and, when git merge-tree computed the merge's tree (git 2.38 or later, whose default
+// strategy is ort), pull.twohead set to ort, the strategy merge-tree uses. The command line adds --no-ff and
+// --commit, which win over merge.ff and any --no-commit.
+func reviewMergeEnv(t model.Task, tree string) []string {
+	env := []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=branch." + t.BaseBranch + ".mergeOptions", "GIT_CONFIG_VALUE_0="}
+	if tree != "" {
+		env[0] = "GIT_CONFIG_COUNT=2"
+		env = append(env, "GIT_CONFIG_KEY_1=pull.twohead", "GIT_CONFIG_VALUE_1=ort")
+	}
+	return env
+}
+
+// reviewMergeDone is the check after git merge exited 0: the base must then contain head, or the merge is not
+// recorded (C-1). On a context detached from the caller's; when the base does not contain head, Curia runs
+// nothing and the error, wrapping errReviewLeft, says what is there and what the user can run.
+func reviewMergeDone(ctx context.Context, t model.Task, head string, before reviewState) error {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 4*worktreeGitLimit)
+	defer cancel()
+	n, err := reviewAhead(actx, t, head)
+	if err == nil && n == 0 {
+		return nil
+	}
+	repo := sanitize.Line(t.Repo, 300)
+	found := "its commits could not be counted: " + sanitize.Line(fmt.Sprint(err), 200)
+	if err == nil {
+		after, serr := reviewRepoState(actx, t.Repo)
+		found = reviewStateDiff(before, after)
+		switch {
+		case serr != nil:
+			found = "git status could not be read"
+		case found == "":
+			found = "git status as before"
+		}
+		if sit, ierr := reviewInspect(actx, t.Repo); ierr == nil && sit.underWay {
+			found += "; a merge is under way (MERGE_HEAD)"
+		}
+	}
+	return fmt.Errorf("git merge reported success, but %s does not contain %s (%s): nothing is recorded merged and Curia ran "+
+		"nothing there. Look with git -C %s status and git -C %s log; while a merge is under way there, git -C %s commit "+
+		"completes it (approving again then records it) and git -C %s merge --abort ends it. The review stays pending: %w",
+		t.BaseBranch, reviewShort(head), found, repo, repo, repo, repo, errReviewLeft)
 }
 
 // reviewConflictsShown bounds the conflicting paths a refusal names.
@@ -395,12 +447,99 @@ func reviewMergeTree(ctx context.Context, t model.Task, head string) (string, er
 			paths = append(paths[:reviewConflictsShown], fmt.Sprintf("%d more", n))
 		}
 		return "", fmt.Errorf("merging %s into %s would conflict in %s: resolve it on the branch first (merge %s into it in its "+
-			"worktree). Nothing was merged", t.Branch, t.BaseBranch, sanitize.Line(strings.Join(paths, ", "), reviewGitErrMax),
+			"worktree). Curia's merge uses git's default strategy and options, so git's own merge may differ if this branch has "+
+			"custom merge options. Nothing was merged", t.Branch, t.BaseBranch, sanitize.Line(strings.Join(paths, ", "), reviewGitErrMax),
 			t.BaseBranch)
 	case code == 129:
 		return "", nil // no --write-tree
 	}
 	return "", worktreeGitError(res, worktreeGitLimit)
+}
+
+// reviewCheckOnDisk refuses a merge that would add a path that already exists in t's checkout, untracked or
+// ignored (I-2): git merge replaces an ignored file without a word, and an undo of a merge cut short would then
+// delete it. The paths added are those of tree (the merge's result; head itself on a git without merge-tree
+// --write-tree) that HEAD does not have; one is in the way when it, or a part of its path that is not a directory,
+// exists on disk (os.Lstat, which on a case-insensitive disk also finds a name in another case), unless what is
+// there is a file HEAD tracks under a name that differs only in case (reviewTrackedAs), as when the branch
+// renames Notes.txt to notes.txt. Whatever else answers is refused, untracked, ignored or unknown: it fails closed.
+func reviewCheckOnDisk(ctx context.Context, t model.Task, tree, head string) error {
+	to := tree
+	if to == "" {
+		to = head
+	}
+	gctx, cancel := context.WithTimeout(ctx, 2*worktreeGitLimit)
+	defer cancel()
+	res := runGit(gctx, t.Repo, "diff-tree", "-r", "-z", "--name-only", "--no-renames", "--diff-filter=A", "HEAD", to, "--")
+	if res.err != nil {
+		return worktreeGitError(res, worktreeGitLimit)
+	}
+	var near []string
+	for p := range strings.SplitSeq(strings.TrimSuffix(res.raw, "\x00"), "\x00") {
+		if q := reviewInTheWay(t.Repo, p); q != "" && !slices.Contains(near, q) {
+			near = append(near, q)
+		}
+	}
+	if len(near) == 0 {
+		return nil
+	}
+	res = runGit(gctx, t.Repo, "ls-tree", "-r", "-z", "--name-only", "HEAD")
+	if res.err != nil {
+		return worktreeGitError(res, worktreeGitLimit)
+	}
+	tracked := strings.Split(strings.TrimSuffix(res.raw, "\x00"), "\x00")
+	found := slices.DeleteFunc(near, func(q string) bool { return reviewTrackedAs(t.Repo, q, tracked) })
+	if len(found) == 0 {
+		return nil
+	}
+	exist, it := "exists", "it"
+	if len(found) > 1 {
+		exist, it = "exist", "them"
+	}
+	if n := len(found) - reviewConflictsShown; n > 0 {
+		found = append(found[:reviewConflictsShown:reviewConflictsShown], fmt.Sprintf("%d more", n))
+	}
+	repo := sanitize.Line(t.Repo, 300)
+	return fmt.Errorf("merging %s into %s would add %s, which already %s in %s, untracked or ignored, and not in %s: git would "+
+		"replace %s. Move %s out of the way there, then approve again. Nothing was merged", t.Branch, t.BaseBranch,
+		sanitize.Line(strings.Join(found, ", "), reviewGitErrMax), exist, repo, t.BaseBranch, it, it)
+}
+
+// reviewTrackedAs reports whether what repo's disk holds at q is a file of tracked (HEAD's paths) whose name
+// differs from q only in case: the two names lead to the same file (os.SameFile), the disk's own answer.
+func reviewTrackedAs(repo, q string, tracked []string) bool {
+	qi, err := os.Lstat(filepath.Join(repo, filepath.FromSlash(q)))
+	if err != nil {
+		return false
+	}
+	for _, p := range tracked {
+		if p != q && strings.EqualFold(p, q) {
+			if pi, perr := os.Lstat(filepath.Join(repo, filepath.FromSlash(p))); perr == nil && os.SameFile(qi, pi) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// reviewInTheWay is the part of path p (p itself, or a leading part of it that is not a directory) that exists
+// in repo's working tree, or "".
+func reviewInTheWay(repo, p string) string {
+	if p == "" {
+		return ""
+	}
+	parts := strings.Split(p, "/")
+	for i := 1; i <= len(parts); i++ {
+		q := strings.Join(parts[:i], "/")
+		fi, err := os.Lstat(filepath.Join(repo, filepath.FromSlash(q)))
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return ""
+		case err != nil || i == len(parts) || !fi.IsDir():
+			return q
+		}
+	}
+	return ""
 }
 
 // reviewCheckCheckout refuses a merge unless the user's checkout has t's
@@ -468,11 +607,11 @@ func reviewInProgress(ctx context.Context, repo string) (string, error) {
 }
 
 // reviewState is what an interrupted merge must leave as it found: HEAD's commit, git status, whether the
-// index held staged changes, and the tracked files whose working tree differed from the index, by content.
+// index held staged changes, and the tracked paths whose working tree differed from the index, by what each holds.
 type reviewState struct {
 	head, status string
 	staged       bool
-	modified     map[string]string // path -> git hash-object of the working tree file; nil when it cannot be read
+	modified     map[string]string // path -> reviewWorkingPath's account of it; nil with more than reviewModifiedMax
 }
 
 func reviewRepoState(ctx context.Context, repo string) (reviewState, error) {
@@ -489,6 +628,9 @@ func reviewRepoState(ctx context.Context, repo string) (reviewState, error) {
 		return reviewState{}, err
 	}
 	modified, err := reviewModified(ctx, repo)
+	if errors.Is(err, errReviewTooManyModified) {
+		err = nil // the merge may run; only an undo needs the comparison (reviewUnproven)
+	}
 	return reviewState{head: head, status: status, staged: staged, modified: modified}, err
 }
 
@@ -506,41 +648,97 @@ func reviewStaged(ctx context.Context, repo, tree string) (bool, error) {
 	return false, worktreeGitError(res, worktreeGitLimit)
 }
 
-// reviewModifiedMax bounds the files reviewModified hashes; with more the state cannot be told exactly.
+// reviewModifiedMax bounds the paths reviewModified reads; with more, an interrupted merge is never undone.
 const reviewModifiedMax = 500
 
-// errReviewTooManyModified is reviewModified's refusal of a working tree with more than reviewModifiedMax
-// modified files.
-var errReviewTooManyModified = errors.New("too many modified files to compare")
+// errReviewTooManyModified is reviewModified's answer for a working tree with more than reviewModifiedMax
+// modified paths.
+var errReviewTooManyModified = fmt.Errorf("more than %d modified files", reviewModifiedMax)
 
-// reviewModified maps each tracked file of repo whose working tree differs from the index (git diff
-// --name-only -z) to the hash of its content (git hash-object), so that an edit made while a merge ran is seen
-// even in a file that was modified before.
+// reviewTooMany is why an undo is not attempted in a checkout with more than reviewModifiedMax modified paths.
+var reviewTooMany = fmt.Sprintf("the checkout has more than %d modified files, too many for Curia to prove that undoing "+
+	"the merge touches nothing else", reviewModifiedMax)
+
+// reviewUnread starts reviewWorkingPath's account of a path it could not read; such a path proves nothing.
+const reviewUnread = "unreadable: "
+
+// reviewModified maps each tracked path of repo whose working tree differs from the index (git diff --raw) to
+// what the working tree holds there, by kind (reviewWorkingPath), so that an edit made while a merge ran is seen
+// even in a file that was modified before (I-1: a deleted file, a symlink or a gitlink is no error).
 func reviewModified(ctx context.Context, repo string) (map[string]string, error) {
-	out, err := worktreeRun(ctx, worktreeGitLimit, repo, "diff", "--name-only", "-z", "--no-ext-diff")
-	if err != nil {
-		return nil, err
+	gctx, cancel := context.WithTimeout(ctx, worktreeGitLimit)
+	defer cancel()
+	res := runGit(gctx, repo, "diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff")
+	if res.err != nil {
+		return nil, worktreeGitError(res, worktreeGitLimit)
 	}
-	paths := slices.DeleteFunc(strings.Split(strings.Trim(out, "\x00"), "\x00"), func(p string) bool { return p == "" })
-	if len(paths) > reviewModifiedMax {
+	fields := strings.Split(strings.TrimSuffix(res.raw, "\x00"), "\x00")
+	if res.raw == "" {
+		fields = nil
+	}
+	if len(fields)%2 != 0 {
+		return nil, fmt.Errorf("git diff --raw printed %d fields", len(fields))
+	}
+	if len(fields)/2 > reviewModifiedMax {
 		return nil, errReviewTooManyModified
 	}
-	m := make(map[string]string, len(paths))
-	if len(paths) == 0 {
-		return m, nil
-	}
-	hashes, err := worktreeRun(ctx, worktreeGitLimit, repo, append([]string{"hash-object", "--"}, paths...)...)
-	if err != nil {
-		return nil, err
-	}
-	ids := strings.Split(hashes, "\n")
-	if len(ids) != len(paths) {
-		return nil, fmt.Errorf("git hash-object printed %d ids for %d files", len(ids), len(paths))
-	}
-	for i, p := range paths {
-		m[p] = ids[i]
+	m := make(map[string]string, len(fields)/2)
+	for i := 0; i < len(fields); i += 2 {
+		meta := strings.Fields(strings.TrimPrefix(fields[i], ":"))
+		if len(meta) != 5 || fields[i+1] == "" {
+			return nil, fmt.Errorf("git diff --raw printed %q", sanitize.Line(fields[i], 80))
+		}
+		m[fields[i+1]] = reviewWorkingPath(ctx, repo, fields[i+1], meta[0])
 	}
 	return m, nil
+}
+
+// reviewWorkingPath says what repo's working tree holds at path p, whose index entry has mode: "deleted", the
+// target of a symlink, the commit a gitlink's repository has checked out, or a regular file's mode and the
+// SHA-256 of its content. Anything else, or a read that fails, is reviewUnread and a reason.
+func reviewWorkingPath(ctx context.Context, repo, p, mode string) string {
+	full := filepath.Join(repo, filepath.FromSlash(p))
+	fi, err := os.Lstat(full)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "deleted"
+	case err != nil:
+		return reviewUnread + err.Error()
+	case fi.Mode()&os.ModeSymlink != 0:
+		target, rerr := os.Readlink(full)
+		if rerr != nil {
+			return reviewUnread + rerr.Error()
+		}
+		return "symlink to " + target
+	case fi.IsDir() && mode == "160000":
+		commit, gerr := worktreeRun(ctx, worktreeGitLimit, full, "rev-parse", "--verify", "HEAD")
+		if gerr != nil {
+			return reviewUnread + "its repository's HEAD: " + gerr.Error()
+		}
+		return "gitlink at " + commit
+	case !fi.Mode().IsRegular():
+		return reviewUnread + "not a regular file (" + fi.Mode().Type().String() + ")"
+	}
+	f, err := os.Open(filepath.Clean(full))
+	if err != nil {
+		return reviewUnread + err.Error()
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err = io.Copy(h, f); err != nil {
+		return reviewUnread + err.Error()
+	}
+	return fmt.Sprintf("file %v %s", fi.Mode().Perm()&0o111 != 0, hex.EncodeToString(h.Sum(nil)))
+}
+
+// reviewReadable reports whether every path of m was read (none is reviewUnread).
+func reviewReadable(m map[string]string) bool {
+	for _, v := range m {
+		if strings.HasPrefix(v, reviewUnread) {
+			return false
+		}
+	}
+	return true
 }
 
 // errReviewLeft marks the outcome of an interrupted merge that Curia left as it found it, because it could not
@@ -660,7 +858,7 @@ func reviewCutShort(res gitResult, before reviewState) bool {
 // HEAD, git status with untracked files, and the content of every modified file.
 func reviewSame(before, after reviewState) bool {
 	return after.head == before.head && after.staged == before.staged && after.status == before.status &&
-		before.modified != nil && after.modified != nil && maps.Equal(before.modified, after.modified)
+		before.modified != nil && after.modified != nil && reviewReadable(before.modified) && maps.Equal(before.modified, after.modified)
 }
 
 // reviewUndoProven runs the undo (git merge --abort, or git reset --merge) only when the checkout provably
@@ -686,17 +884,23 @@ func reviewUnproven(ctx context.Context, t model.Task, before reviewState, sit r
 	case sit.locked:
 		return sanitize.Line(filepath.Join(sit.gitDir, "index.lock"), 300) + " exists: a git was killed, or one still runs"
 	case before.modified == nil:
-		return "the working tree could not be read before the merge"
+		return reviewTooMany
 	}
 	if differs, err := reviewStaged(ctx, t.Repo, target); err != nil || differs {
 		return "the index holds changes that are not the merge's (something was staged while the merge ran)"
 	}
 	now, err := reviewModified(ctx, t.Repo)
-	if err != nil {
+	switch {
+	case errors.Is(err, errReviewTooManyModified):
+		return reviewTooMany
+	case err != nil:
 		return "the working tree could not be read: " + sanitize.Line(err.Error(), 200)
 	}
-	for p, id := range now {
-		if before.modified[p] != id {
+	for _, p := range slices.Sorted(maps.Keys(now)) {
+		switch id := now[p]; {
+		case strings.HasPrefix(id, reviewUnread):
+			return "Curia could not read " + sanitize.Line(p, 200) + " in the working tree (" + sanitize.Line(strings.TrimPrefix(id, reviewUnread), 200) + ")"
+		case before.modified[p] != id:
 			return "files changed in the working tree while the merge ran (" + sanitize.Line(p, 200) + ")"
 		}
 	}
@@ -705,6 +909,10 @@ func reviewUnproven(ctx context.Context, t model.Task, before reviewState, sit r
 
 // reviewUndo runs git undo... (merge --abort, or reset --merge: the only two Curia runs, never --hard,
 // checkout or clean) and reports whether the checkout is then as it was before the merge (reviewSame).
+// Accepted residual window (M-c): between reviewUnproven's last read and the start of the undo there is only
+// process start-up, a few tens of milliseconds after an interrupted merge; a change staged exactly then is lost
+// with the merge's, and "is as it was" is then not true of it. git offers no way to hold its index lock across a
+// check, so it cannot be closed from outside git.
 func reviewUndo(ctx context.Context, t model.Task, msg string, before reviewState, undo ...string) error {
 	repo := sanitize.Line(t.Repo, 300)
 	cmd := strings.Join(undo, " ")
@@ -795,6 +1003,9 @@ func reviewStateDiff(before, after reviewState) string {
 	}
 	if added := only(is, was); len(added) > 0 {
 		parts = append(parts, "new in git status: "+strings.Join(added, ", "))
+	}
+	if (before.modified == nil || after.modified == nil) && after.head != "" { // after.head "": after could not be read
+		parts = append(parts, "the content of modified files not compared ("+errReviewTooManyModified.Error()+")")
 	}
 	return sanitize.Line(strings.Join(parts, "; "), reviewGitErrMax)
 }

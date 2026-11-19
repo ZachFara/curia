@@ -1,6 +1,6 @@
 # 0026. Restore by resume
 
-Status: accepted (Plan 4 setup). Probes R1 to R3 have not run; their results can amend this record and Task 18.
+Status: accepted (Plan 4 setup). Probes R1 to R3 ran on 2026-11-14 and amended it (see the amendment below).
 
 ## Context
 
@@ -20,3 +20,10 @@ Spec F12: after a reboot or a tmux crash the agents should come back with their 
 - Probe R1 decides whether the same id comes back, whether a dialog comes first and whether the idle prompt is recognized; R2 whether a resumed session keeps its model (else `--model` is added for an unlinked session); R3 what a resumed lead sees of its former teammates. Each has its fallback in plan section 14.
 - A session idle for more than a day before the crash needs `--since`.
 - Plan section 4.10 and decisions 22 to 26 of section 13 carry the detail.
+
+Amended 2026-11-19 (Plan 4 final records; Rulings in `PROGRESS.md`):
+
+- Probes R1 to R3 (Claude Code 2.1.325, tmux 3.8): a resume keeps the session id, fires SessionStart with source `resume` about a second after the window opens, and keeps the session's own model (the resume payload has no model field); no dialog comes first in a trusted directory (the trust dialog in an untrusted one, `/rate-limit-options` after a usage limit); for 10 to 18 seconds the footer reads `· ← for agents`, which is not an empty prompt; a missing directory is no error for `tmux new-window -c` (it starts in HOME) and the resume still works, so restore's directory check is the only guard; two windows can resume one id with no warning. After a lost server Claude Code deletes the team directory, the resumed lead re-creates it listing only itself and respawns its teammates when told, as new sessions in new panes; teammate panes take the tmux server's global environment, not the lead's.
+- Ruling 124: "classifies every session that is not `ended`" above is amended: tmux kill, a killed window and SIGTERM make Claude Code fire SessionEnd with reason `other`, so a session is a candidate when it is not ended or ended with reason `other`. `sessions.end_reason` stores why a session ended (a missing reason is stored as `other`).
+- Ruling 130: a session whose pane was closed while the tmux server kept running (it started at or after the listed server's start, and is not on another server) is skipped with "its pane was closed while tmux kept running; reopen it with claude --resume <id> in <dir>" unless `--include-closed`.
+- Fixes from the final review and Task 18: a window opened for a session with no task ends the row in the same guarded update, so a second `curia restore` opens no second window; the restore claim is taken again for 10 minutes after the confirmation; the team columns of stale rows are left as they are, so a taskless team's teammates are not offered as sessions of their own; the lead's team notice is delivered by the usual message path and, when the lead's prompt is not yet empty, arrives at its next Stop or through `check_messages`.

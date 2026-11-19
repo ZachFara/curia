@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/ZachFara/curia/internal/export"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/ui"
 )
 
 // exportSpec is one seeded decision: decided ones are answered B with a
@@ -51,7 +53,7 @@ func exportHome(t *testing.T, vault string, specs ...exportSpec) (string, *expor
 	clock = c.now
 	t.Cleanup(func() {
 		clock = prev
-		exportAll = false
+		exportAll, exportRetry = false, false
 		decisionsStatus, decisionsJSON, decisionsScope = "open", false, ""
 		decisionsSupersede, decisionsSupersededBy = false, ""
 	})
@@ -127,7 +129,7 @@ func exportRun(t *testing.T, args ...string) (stdout, stderr string, err error) 
 		rootCmd.SetErr(nil)
 		rootCmd.SetArgs(nil)
 	})
-	exportAll = false
+	exportAll, exportRetry = false, false
 	err = rootCmd.Execute()
 	return out.String(), errOut.String(), err
 }
@@ -436,7 +438,11 @@ func TestExportLeavesForeignNote(t *testing.T) {
 	before := exportSnapshot(t, vault)
 
 	out := exportObsidianOK(t)
-	if want := "exported 1 note to " + vault + " (3 foreign notes left alone: D-2, D-3, D-4)"; out != want {
+	want := "exported 1 note to " + vault + " (3 foreign notes left alone: D-2, D-3, D-4)\n" +
+		"skipped D-2: a note of yours is at " + filepath.Join(vault, "D-2 my own notes.md") + " (not Curia's; left alone). Rename or remove it, or run with --retry-skipped\n" +
+		"skipped D-3: a note of yours is at " + filepath.Join(vault, export.NoteName(d3)) + " (not Curia's; left alone). Rename or remove it, or run with --retry-skipped\n" +
+		"skipped D-4: a note of yours is at " + filepath.Join(vault, export.NoteName(d4)) + " (not Curia's; left alone). Rename or remove it, or run with --retry-skipped"
+	if out != want {
 		t.Errorf("output %q, want %q", out, want)
 	}
 	after := exportSnapshot(t, vault)
@@ -446,8 +452,8 @@ func TestExportLeavesForeignNote(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"D-2", "D-3", "D-4"} {
-		if d := exportGet(t, db, id); !d.ExportedAt.IsZero() || !exportIsDue(t, db, id) {
-			t.Errorf("%s marked exported though its note is foreign", id)
+		if d := exportGet(t, db, id); !d.ExportedAt.IsZero() || exportIsDue(t, db, id) {
+			t.Errorf("%s marked exported though its note is foreign, or not skipped", id)
 		}
 	}
 	if !strings.Contains(strings.Join(exportNames(t, vault), "|"), "D-1 ") {
@@ -494,7 +500,7 @@ func TestExportStaysInsideFolder(t *testing.T) {
 	outBefore := exportSnapshot(t, outside)
 	parentBefore := exportSnapshot(t, filepath.Dir(vault))
 
-	out := exportObsidianOK(t)
+	out, _, _ := strings.Cut(exportObsidianOK(t), "\n")
 	if want := "exported 2 notes to " + vault + " (4 foreign notes left alone: D-3, D-4, D-5, D-6)"; out != want {
 		t.Errorf("output %q, want %q", out, want)
 	}
@@ -654,17 +660,16 @@ func TestExportNeverMarksStaleNote(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 	ctx := context.Background()
-	d, _, err := st.GetDecision(ctx, "D-1")
+	built, _, err := st.GetDecision(ctx, "D-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	built := export.Note(d)
 
-	// A rescope lands between building the note and marking it.
+	// A rescope lands between reading the decision and marking it.
 	if _, err := st.EditDecision(ctx, "D-1", model.DecisionEdit{Scope: model.ScopeGlobal}, c.t); err != nil {
 		t.Fatal(err)
 	}
-	if err := exportMark(ctx, st, "D-1", built, c.t); err != nil {
+	if err := exportMark(ctx, st, built, c.t); err != nil {
 		t.Fatal(err)
 	}
 	if !exportIsDue(t, db, "D-1") {
@@ -672,12 +677,202 @@ func TestExportNeverMarksStaleNote(t *testing.T) {
 	}
 
 	// A note built from the current state is marked.
-	d, _, _ = st.GetDecision(ctx, "D-1")
-	if err := exportMark(ctx, st, "D-1", export.Note(d), c.t); err != nil {
+	d, _, _ := st.GetDecision(ctx, "D-1")
+	if err := exportMark(ctx, st, d, c.t); err != nil {
 		t.Fatal(err)
 	}
 	if exportIsDue(t, db, "D-1") {
 		t.Error("a current note was not marked")
+	}
+}
+
+// A crash after the note is written and before the mark leaves the decision
+// unmarked; the next sweep must treat the note as Curia's own (by its
+// marker), update it when the decision changed meanwhile, and mark it.
+func TestExportCrashBeforeMarkRecognizesOwnNote(t *testing.T) {
+	vault := t.TempDir()
+	db, c := exportHome(t, vault,
+		exportSpec{question: "Postgres or Redis for events?", decided: true},
+		exportSpec{question: "Which index?", decided: true})
+	exportObsidianOK(t)
+	names := exportNames(t, vault)
+	// The crash: both notes are in the vault, neither is marked; D-2 also
+	// changed before the next sweep.
+	raw := rawExportDB(t, db)
+	if _, err := raw.Exec(`UPDATE decisions SET exported_at = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EditDecision(context.Background(), "D-2", model.DecisionEdit{Scope: model.ScopeGlobal}, c.t); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	out := exportObsidianOK(t)
+	if want := "exported 1 note to " + vault; out != want {
+		t.Errorf("after the crash: %q, want %q (D-2 updated, D-1 confirmed, none foreign)", out, want)
+	}
+	if got := exportNames(t, vault); !slices.Equal(got, names) {
+		t.Errorf("vault names changed: %q -> %q", names, got)
+	}
+	if !strings.Contains(string(exportRead(t, filepath.Join(vault, export.NoteName(exportGet(t, db, "D-2"))))), "scope: global") {
+		t.Error("D-2's own earlier note was not updated")
+	}
+	for _, id := range []string{"D-1", "D-2"} {
+		if exportIsDue(t, db, id) {
+			t.Errorf("%s still due after the recovering sweep", id)
+		}
+	}
+}
+
+// A decision that changes between the sweep's read and its mark is not
+// marked: it stays due, and the next sweep writes it again.
+func TestExportChangeBetweenWriteAndMarkStaysDue(t *testing.T) {
+	vault := t.TempDir()
+	db, c := exportHome(t, vault, exportSpec{question: "Postgres or Redis for events?", decided: true})
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	d, _, _ := st.GetDecision(ctx, "D-1")
+	root, err := os.OpenRoot(vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if _, _, err := exportWrite(root, nil, d, export.Note(d)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EditDecision(ctx, "D-1", model.DecisionEdit{Supersede: true}, c.t); err != nil {
+		t.Fatal(err)
+	}
+	if err := exportMark(ctx, st, d, c.t.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if !exportIsDue(t, db, "D-1") {
+		t.Fatal("a superseded decision was marked with the older note")
+	}
+	if out := exportObsidianOK(t); out != "exported 1 note to "+vault {
+		t.Errorf("next sweep: %q", out)
+	}
+	if !strings.Contains(string(exportRead(t, filepath.Join(vault, export.NoteName(exportGet(t, db, "D-1"))))), "status: superseded") {
+		t.Error("the note was not rewritten as superseded")
+	}
+}
+
+func rawExportDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func TestExportSkipsForeignAndMovesOn(t *testing.T) {
+	vault := t.TempDir()
+	db, c := exportHome(t, vault,
+		exportSpec{question: "Which index?", decided: true},
+		exportSpec{question: "Which queue?", decided: true})
+	d1 := exportGet(t, db, "D-1")
+	foreign := filepath.Join(vault, export.NoteName(d1))
+	if err := os.WriteFile(foreign, []byte("mine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := exportObsidianOK(t)
+	if !strings.Contains(out, "skipped D-1: a note of yours is at "+foreign) || strings.Contains(out, "D-2:") {
+		t.Errorf("first run: %q", out)
+	}
+	// The next sweep passes it by, silently; --all too.
+	for _, args := range [][]string{nil, {"--all"}} {
+		if out := exportObsidianOK(t, args...); strings.Contains(out, "D-1") {
+			t.Errorf("sweep %v mentions the skipped decision: %q", args, out)
+		}
+	}
+	// --retry-skipped tries it again (and it is still foreign).
+	if out := exportObsidianOK(t, "--retry-skipped"); !strings.Contains(out, "skipped D-1:") {
+		t.Errorf("--retry-skipped: %q", out)
+	}
+	// The user moves the file away; a retry writes the note.
+	if err := os.Rename(foreign, filepath.Join(vault, "moved by me.md")); err != nil {
+		t.Fatal(err)
+	}
+	if out := exportObsidianOK(t); strings.Contains(out, "exported 1") {
+		t.Errorf("a skipped decision was retried without --retry-skipped: %q", out)
+	}
+	if out := exportObsidianOK(t, "--retry-skipped"); out != "exported 1 note to "+vault {
+		t.Errorf("retry after moving the file away: %q", out)
+	}
+	if got := exportRead(t, foreign); !strings.Contains(string(got), "curia_id: D-1") {
+		t.Errorf("note not written: %q", got)
+	}
+	_ = c
+}
+
+func TestExportSkipLapsesOnChange(t *testing.T) {
+	vault := t.TempDir()
+	db, c := exportHome(t, vault, exportSpec{question: "Which index?", decided: true})
+	foreign := filepath.Join(vault, export.NoteName(exportGet(t, db, "D-1")))
+	if err := os.WriteFile(foreign, []byte("mine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exportObsidianOK(t)
+	if exportIsDue(t, db, "D-1") {
+		t.Fatal("not skipped")
+	}
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	if _, err := st.EditDecision(context.Background(), "D-1", model.DecisionEdit{Scope: model.ScopeGlobal}, c.t.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if !exportIsDue(t, db, "D-1") {
+		t.Error("a rescope did not make the skipped decision eligible again")
+	}
+	if out := exportObsidianOK(t); !strings.Contains(out, "skipped D-1:") {
+		t.Errorf("sweep after the change did not look at it again: %q", out)
+	}
+	if got := exportRead(t, foreign); string(got) != "mine\n" {
+		t.Errorf("foreign note changed: %q", got)
+	}
+}
+
+// 500 decisions with foreign notes no longer block the ones after them.
+func TestExportForeignNotesDoNotStarveLaterDecisions(t *testing.T) {
+	vault := t.TempDir()
+	specs := make([]exportSpec, exportMaxNotes+2)
+	for i := range specs {
+		specs[i] = exportSpec{question: fmt.Sprintf("Question %d?", i+1), decided: true}
+	}
+	db, _ := exportHome(t, vault, specs...)
+	for i := 1; i <= exportMaxNotes; i++ {
+		d := exportGet(t, db, fmt.Sprintf("D-%d", i))
+		if err := os.WriteFile(filepath.Join(vault, export.NoteName(d)), []byte("mine\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exportObsidianOK(t) // skips the first 500
+	for _, args := range [][]string{nil, {"--all"}} {
+		out := exportObsidianOK(t, args...)
+		if !strings.HasPrefix(out, "exported 2 notes to "+vault) && args == nil {
+			t.Errorf("sweep %v: %.80q", args, out)
+		}
+		if strings.Contains(out, "skipped") {
+			t.Errorf("sweep %v re-reports skipped decisions", args)
+		}
+	}
+	for _, id := range []string{fmt.Sprintf("D-%d", exportMaxNotes+1), fmt.Sprintf("D-%d", exportMaxNotes+2)} {
+		if exportIsDue(t, db, id) {
+			t.Errorf("%s still due behind the foreign notes", id)
+		}
 	}
 }
 
@@ -811,5 +1006,90 @@ func TestExportCreateNeverReplaces(t *testing.T) {
 	}
 	if got := exportNames(t, vault); !slices.Equal(got, []string{"D-1 x.md"}) {
 		t.Errorf("vault holds %q: the temporary file was left behind", got)
+	}
+}
+
+// exportFakeDecide is a decide source whose Answer returns err (or succeeds).
+type exportFakeDecide struct {
+	ui.DecideSource
+	err error
+}
+
+func (f exportFakeDecide) Answer(context.Context, string, model.Answer) (model.Outcome, error) {
+	return model.Outcome{}, f.err
+}
+
+// exportBackgroundFor opens the store and config of exportHome's setup.
+func exportBackgroundFor(t *testing.T) *exportBackground {
+	t.Helper()
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := openStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return &exportBackground{st: st, cfg: cfg}
+}
+
+// An answer in the dashboard's decide view starts the sweep in the
+// background; the answer's own result is untouched, and the source returns
+// before the sweep has necessarily run.
+func TestExportDashboardAnswerStartsSweep(t *testing.T) {
+	vault := t.TempDir()
+	exportHome(t, vault, exportSpec{question: "Which index?", decided: true})
+	bg := exportBackgroundFor(t)
+	src := exportKickSource{DecideSource: exportFakeDecide{}, bg: bg}
+	if _, err := src.Answer(context.Background(), "D-1", model.Answer{}); err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+	bg.Wait()
+	if n := len(exportNames(t, vault)); n != 1 {
+		t.Errorf("vault holds %d notes after the dashboard answer, want 1", n)
+	}
+}
+
+func TestExportDashboardFailedAnswerOrNoVaultStartsNothing(t *testing.T) {
+	vault := t.TempDir()
+	exportHome(t, vault, exportSpec{question: "Which index?", decided: true})
+	bg := exportBackgroundFor(t)
+	boom := errors.New("no such ticket")
+	src := exportKickSource{DecideSource: exportFakeDecide{err: boom}, bg: bg}
+	if _, err := src.Answer(context.Background(), "D-1", model.Answer{}); !errors.Is(err, boom) {
+		t.Errorf("the answer's error was changed: %v", err)
+	}
+	bg.Wait()
+	if n := len(exportNames(t, vault)); n != 0 {
+		t.Errorf("a failed answer started a sweep: %d notes", n)
+	}
+	bg.cfg.Obsidian.Dir = ""
+	bg.Kick()
+	bg.Wait()
+	if n := len(exportNames(t, vault)); n != 0 {
+		t.Errorf("a sweep ran with export unconfigured: %d notes", n)
+	}
+}
+
+// A broken vault is logged and never fails the answer, and a burst of
+// answers does not pile up sweeps.
+func TestExportDashboardSweepErrorIsOnlyLogged(t *testing.T) {
+	vault := filepath.Join(t.TempDir(), "missing")
+	exportHome(t, vault, exportSpec{question: "Which index?", decided: true})
+	bg := exportBackgroundFor(t)
+	src := exportKickSource{DecideSource: exportFakeDecide{}, bg: bg}
+	for range 20 {
+		if _, err := src.Answer(context.Background(), "D-1", model.Answer{}); err != nil {
+			t.Fatalf("answer failed because of the vault: %v", err)
+		}
+	}
+	bg.Wait()
+	log, _ := os.ReadFile(bg.cfg.LogPath)
+	if n := strings.Count(string(log), "obsidian export failed"); n < 1 || n > 20 {
+		t.Errorf("log holds %d failure lines, want at least one and a bounded number:\n%s", n, log)
+	}
+	if bg.running.Load() {
+		t.Error("a sweep is still marked running after Wait")
 	}
 }
