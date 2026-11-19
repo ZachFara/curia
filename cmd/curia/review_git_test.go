@@ -1733,3 +1733,63 @@ func (f *reviewFixture) wantOrphanRefusal(name, again, head, line string, err er
 		f.t.Errorf("after the %s: R-1 = %+v, want the earlier intent, untouched", name, r)
 	}
 }
+
+// TestMergeRefusesToReplaceFilesOnDisk: a path the merge would add already
+// exists in the main checkout, untracked or ignored, so git would replace it
+// (git merge overwrites an ignored file without a word, and a merge cut short
+// then deletes it). Curia refuses before merging, names the path, and nothing
+// on disk changes (I-2).
+func TestMergeRefusesToReplaceFilesOnDisk(t *testing.T) {
+	for _, c := range []struct {
+		name, ignore, onDisk, adds, named string
+	}{
+		{"ignored file", "local.cfg", "local.cfg", "local.cfg", "local.cfg"},
+		{"untracked file", "", "local.cfg", "local.cfg", "local.cfg"},
+		{"ignored directory where a file is added", "cache", "cache/x", "cache", "cache"},
+		{"ignored file where a directory is added", "conf", "conf", "conf/app.cfg", "conf"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := reviewNew(t)
+			if c.ignore != "" {
+				worktreeWrite(t, filepath.Join(f.repo, ".git", "info", "exclude"), c.ignore+"\n")
+			}
+			worktreeWrite(t, filepath.Join(f.wt, c.adds), "branch version\n")
+			gitRun(t, f.wt, "add", "-f", c.adds)
+			gitRun(t, f.wt, "commit", "-q", "-m", "add "+c.adds)
+			mine := filepath.Join(f.repo, c.onDisk)
+			worktreeWrite(t, mine, "developer secret\n")
+			before, status := f.head(f.repo, "HEAD"), f.status()
+			calls := reviewRecordGit(t)
+			_, err := f.approve(model.ApproveMerge, "")
+			if err == nil || !strings.Contains(err.Error(), "would add "+c.named+", which already exists in "+f.repo) ||
+				!strings.Contains(err.Error(), "git would replace it") || !strings.HasSuffix(err.Error(), "Nothing was merged") {
+				t.Fatalf("approve error = %v, want the merge refused, naming %s", err, c.named)
+			}
+			if m := reviewGitCalls(calls(), "merge"); len(m) != 0 {
+				t.Errorf("git merge ran: %q", m)
+			}
+			if got := lifecycleRead(t, mine); got != "developer secret\n" {
+				t.Errorf("%s = %q, want the developer's kept", c.onDisk, got)
+			}
+			f.wantAsBefore(before, status)
+			if r := f.review(); r.Status != model.ReviewPending || !r.IntentAt.IsZero() {
+				t.Errorf("R-1 = %+v, want pending with no intent", r)
+			}
+		})
+	}
+}
+
+// TestMergeCaseRenameIsNotInTheWay: a branch that renames a tracked file to
+// a name differing only in case merges; on a case-insensitive disk the old,
+// tracked file answers for the new name, and it is not in the way (I-2).
+func TestMergeCaseRenameIsNotInTheWay(t *testing.T) {
+	f := reviewNew(t)
+	f.commitOnMain("Notes.txt", "a\n", "notes")
+	gitRun(t, f.wt, "merge", "-q", "main")
+	gitRun(t, f.wt, "mv", "-f", "Notes.txt", "notes.txt")
+	gitRun(t, f.wt, "commit", "-q", "-m", "rename")
+	line, err := f.approve(model.ApproveMerge, "")
+	if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main") {
+		t.Fatalf("approve = %q, %v; want the merge", line, err)
+	}
+}

@@ -366,6 +366,9 @@ func reviewMerge(ctx context.Context, t model.Task, head string) error {
 	if err != nil {
 		return err
 	}
+	if err = reviewCheckOnDisk(ctx, t, tree, head); err != nil {
+		return err
+	}
 	mctx, cancel := context.WithTimeout(ctx, reviewMergeLimit)
 	defer cancel()
 	res := runGitGroupEnv(mctx, t.Repo, reviewMergeEnv(t, tree), "merge", "--no-ff", "--commit", "--no-edit", "--no-autostash",
@@ -450,6 +453,80 @@ func reviewMergeTree(ctx context.Context, t model.Task, head string) (string, er
 		return "", nil // no --write-tree
 	}
 	return "", worktreeGitError(res, worktreeGitLimit)
+}
+
+// reviewCheckOnDisk refuses a merge that would add a path that already exists in t's checkout, untracked or
+// ignored (I-2): git merge replaces an ignored file without a word, and an undo of a merge cut short would then
+// delete it. The paths added are those of tree (the merge's result; head itself on a git without merge-tree
+// --write-tree) that HEAD does not have; one is in the way when it, or a part of its path that is not a directory,
+// exists on disk and git ls-files --others (which lists ignored files too) lists it, so a tracked file that only
+// differs in case on a case-insensitive disk is not.
+func reviewCheckOnDisk(ctx context.Context, t model.Task, tree, head string) error {
+	to := tree
+	if to == "" {
+		to = head
+	}
+	gctx, cancel := context.WithTimeout(ctx, 2*worktreeGitLimit)
+	defer cancel()
+	res := runGit(gctx, t.Repo, "diff-tree", "-r", "-z", "--name-only", "--no-renames", "--diff-filter=A", "HEAD", to, "--")
+	if res.err != nil {
+		return worktreeGitError(res, worktreeGitLimit)
+	}
+	var near []string
+	for p := range strings.SplitSeq(strings.TrimSuffix(res.raw, "\x00"), "\x00") {
+		if q := reviewInTheWay(t.Repo, p); q != "" && !slices.Contains(near, q) {
+			near = append(near, q)
+		}
+	}
+	if len(near) == 0 {
+		return nil
+	}
+	args := []string{"ls-files", "-z", "--others", "--"}
+	for _, q := range near {
+		args = append(args, ":(literal)"+q)
+	}
+	res = runGit(gctx, t.Repo, args...)
+	if res.err != nil {
+		return worktreeGitError(res, worktreeGitLimit)
+	}
+	others := strings.Split(strings.TrimSuffix(res.raw, "\x00"), "\x00")
+	found := slices.DeleteFunc(near, func(q string) bool {
+		return !slices.ContainsFunc(others, func(o string) bool { return o == q || strings.HasPrefix(o, q+"/") })
+	})
+	if len(found) == 0 {
+		return nil
+	}
+	exist, it := "exists", "it"
+	if len(found) > 1 {
+		exist, it = "exist", "them"
+	}
+	if n := len(found) - reviewConflictsShown; n > 0 {
+		found = append(found[:reviewConflictsShown:reviewConflictsShown], fmt.Sprintf("%d more", n))
+	}
+	repo := sanitize.Line(t.Repo, 300)
+	return fmt.Errorf("merging %s into %s would add %s, which already %s in %s, untracked or ignored, and not in %s: git would "+
+		"replace %s. Move %s out of the way there, then approve again. Nothing was merged", t.Branch, t.BaseBranch,
+		sanitize.Line(strings.Join(found, ", "), reviewGitErrMax), exist, repo, t.BaseBranch, it, it)
+}
+
+// reviewInTheWay is the part of path p (p itself, or a leading part of it that is not a directory) that exists
+// in repo's working tree, or "".
+func reviewInTheWay(repo, p string) string {
+	if p == "" {
+		return ""
+	}
+	parts := strings.Split(p, "/")
+	for i := 1; i <= len(parts); i++ {
+		q := strings.Join(parts[:i], "/")
+		fi, err := os.Lstat(filepath.Join(repo, filepath.FromSlash(q)))
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return ""
+		case err != nil || i == len(parts) || !fi.IsDir():
+			return q
+		}
+	}
+	return ""
 }
 
 // reviewCheckCheckout refuses a merge unless the user's checkout has t's
