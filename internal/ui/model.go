@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math"
 	"reflect"
 	"slices"
 	"strconv"
@@ -47,6 +48,15 @@ type Source interface {
 	// Reviews returns the id of the pending review of each task, by task
 	// id, for the r key; only the popup reads it.
 	Reviews(ctx context.Context) (map[string]string, error)
+	// Budget returns what the dashboard shows about usage, for the status
+	// line and the b key; only the popup reads it.
+	Budget(ctx context.Context) (Budget, error)
+}
+
+// Budget is what the dashboard shows about usage. Every string in it is already rendered by Curia.
+type Budget struct {
+	Status string             // the forecast warning or the API projection; "" when there is none
+	Burn   map[string]float64 // USD per hour by session id; nil when unknown
 }
 
 // Mode is how the dashboard is shown.
@@ -106,6 +116,7 @@ type Model struct {
 	counts   map[string]model.OpenCount // the last good OpenDecisions read; replaced, never mutated
 	tasks    map[string]model.Task      // the last good Tasks read; replaced, never mutated
 	reviews  map[string]string          // the last good Reviews read; replaced, never mutated
+	budget   Budget                     // the last good Budget read; replaced, never mutated
 	names    map[string]string          // window id to window name; replaced, never mutated
 	live     []tmux.Pane                // the panes of the last window-name read: the server jumps and kills reach
 	expanded map[string]bool            // team ids shown expanded; replaced, never mutated
@@ -119,6 +130,7 @@ type Model struct {
 
 	filter    string
 	filtering bool   // typing into the filter
+	burnSort  bool   // units ordered by their burn (b), not by rank
 	killPane  string // pane awaiting kill confirmation, if any
 	notice    string // message for the last key, cleared by the next one
 	err       error  // the last refresh's error, cleared by a good one
@@ -167,6 +179,15 @@ type rowKey struct {
 
 func (r row) key() rowKey { return rowKey{id: r.s.ID, group: r.kind == rowGroup} }
 
+// unit is a group row's team as a fleet.Unit: its lead, its teammates and
+// its worst member.
+func (r row) unit() fleet.Unit {
+	if len(r.members) == 0 {
+		return fleet.Unit{Lead: r.s, Worst: r.s}
+	}
+	return fleet.Unit{Lead: r.members[0], Teammates: r.members[1:], Worst: r.worst}
+}
+
 // target is the session Enter jumps to: a group row's worst member, else
 // the row's own session.
 func (r row) target() model.Session {
@@ -182,12 +203,14 @@ type refreshMsg struct {
 	counts     map[string]model.OpenCount
 	tasks      map[string]model.Task
 	reviews    map[string]string
+	budget     Budget
 	names      map[string]string
 	live       []tmux.Pane
 	err        error
 	countsErr  error
 	tasksErr   error
 	reviewsErr error
+	budgetErr  error
 	chain      int
 }
 
@@ -279,8 +302,8 @@ func (m Model) Init() tea.Cmd {
 }
 
 // refresh reads the Source and the window names off the event loop; the
-// popup also reads the open decision counts, the tasks and the pending
-// reviews.
+// popup also reads the open decision counts, the tasks, the pending
+// reviews and the budget.
 func (m Model) refresh() tea.Cmd {
 	src, tm, chain, popup := m.src, m.tm, m.chain, m.mode == ModePopup
 	return func() tea.Msg {
@@ -292,6 +315,7 @@ func (m Model) refresh() tea.Cmd {
 			msg.counts, msg.countsErr = src.OpenDecisions(ctx)
 			msg.tasks, msg.tasksErr = src.Tasks(ctx)
 			msg.reviews, msg.reviewsErr = src.Reviews(ctx)
+			msg.budget, msg.budgetErr = src.Budget(ctx)
 		}
 		msg.names, msg.live = windowNames(tm)
 		return msg
@@ -347,10 +371,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// applyRefresh keeps the last good sessions, counts, tasks and reviews
-// when a read fails, and shows the first error.
+// applyRefresh keeps the last good sessions, counts, tasks, reviews and
+// budget when a read fails, and shows the first error.
 func (m Model) applyRefresh(msg refreshMsg) Model {
-	m.names, m.live, m.err = msg.names, msg.live, cmp.Or(msg.err, msg.countsErr, msg.tasksErr, msg.reviewsErr)
+	m.names, m.live = msg.names, msg.live
+	m.err = cmp.Or(msg.err, msg.countsErr, msg.tasksErr, msg.reviewsErr, msg.budgetErr)
 	if msg.err == nil {
 		m.sessions = msg.sessions
 	}
@@ -362,6 +387,9 @@ func (m Model) applyRefresh(msg refreshMsg) Model {
 	}
 	if msg.reviewsErr == nil {
 		m.reviews = msg.reviews
+	}
+	if msg.budgetErr == nil {
+		m.budget = msg.budget
 	}
 	return m.reselect()
 }
@@ -542,13 +570,18 @@ func (m Model) findSelected() int {
 	return slices.IndexFunc(m.rows, func(r row) bool { return r.team == m.selTeam })
 }
 
-// buildRows lays out the units of the sessions that pass the filter: a
-// solo session as one row, a team as its group row or, when expanded, its
-// lead's row and its teammates' rows. A team is shown when any member
-// passes the filter, and is shown expanded while a filter is set.
+// buildRows lays out the units of the sessions that pass the filter, in
+// the Source's order or, with the burn sort on, by burn: a solo session as
+// one row, a team as its group row or, when expanded, its lead's row and
+// its teammates' rows. A team is shown when any member passes the filter,
+// and is shown expanded while a filter is set.
 func (m Model) buildRows() []row {
+	units := sourceUnits(m.sessions)
+	if m.burnSort {
+		units = burnOrder(units, m.budget.Burn)
+	}
 	var rows []row
-	for _, u := range sourceUnits(m.sessions) {
+	for _, u := range units {
 		members := append([]model.Session{u.Lead}, u.Teammates...)
 		if !slices.ContainsFunc(members, func(s model.Session) bool { return matches(s, m.filter) }) {
 			continue
@@ -589,6 +622,43 @@ func sourceUnits(sessions []model.Session) []fleet.Unit {
 	units := fleet.Units(sessions)
 	slices.SortStableFunc(units, func(a, b fleet.Unit) int { return cmp.Compare(first(a), first(b)) })
 	return units
+}
+
+// burnOrder orders units by their members' summed burn, highest first.
+// A unit none of whose members has a burn follows those that have one, and
+// such units, like ties, keep their order. A burn that is not a finite,
+// positive number counts as zero.
+func burnOrder(units []fleet.Unit, burn map[string]float64) []fleet.Unit {
+	type burning struct {
+		u   fleet.Unit
+		has bool
+		usd float64
+	}
+	bs := make([]burning, len(units))
+	for i, u := range units {
+		bs[i].u = u
+		for _, s := range append([]model.Session{u.Lead}, u.Teammates...) {
+			v, ok := burn[s.ID]
+			bs[i].has = bs[i].has || ok
+			if ok && v > 0 && !math.IsInf(v, 1) {
+				bs[i].usd += v
+			}
+		}
+	}
+	slices.SortStableFunc(bs, func(a, b burning) int {
+		if a.has != b.has {
+			if a.has {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(b.usd, a.usd)
+	})
+	out := make([]fleet.Unit, len(bs))
+	for i, b := range bs {
+		out[i] = b.u
+	}
+	return out
 }
 
 // matches reports whether the repo cell as shown ("repo@branch", the repo
@@ -730,8 +800,20 @@ func (m Model) commandKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.openBoard(noticePickTask)
 	case "r":
 		return m.openReview()
+	case "b":
+		return m.toggleBurn(), nil
 	}
 	return m, nil
+}
+
+// toggleBurn turns the burn sort on or off in the popup; the selection
+// stays on its row. The sidebar has no burn sort.
+func (m Model) toggleBurn() Model {
+	if m.mode != ModePopup {
+		return m
+	}
+	m.burnSort = !m.burnSort
+	return m.reselect()
 }
 
 // filterKey edits the filter: typed text is appended, Backspace deletes,

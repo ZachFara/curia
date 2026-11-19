@@ -19,6 +19,7 @@ import (
 	"github.com/ZachFara/curia/internal/task"
 	"github.com/ZachFara/curia/internal/tmux"
 	"github.com/ZachFara/curia/internal/ui"
+	"github.com/ZachFara/curia/internal/usage"
 )
 
 // runProgram runs the dashboard in the terminal; tests replace it, so no
@@ -40,7 +41,10 @@ func init() {
 			"inside an agent session) and r the review waiting for its task (read-only\n" +
 			"inside an agent session), t opens\n" +
 			"the task board (n there spawns a task), / filters on repo, branch, last\n" +
-			"update and member name, x then y kills the pane, q or Esc quits.",
+			"update and member name, x then y kills the pane, q or Esc quits. From 100\n" +
+			"columns COST and CACHE show each session's cost and prompt cache; b sorts\n" +
+			"by burn (dollars an hour) and back, and the status line shows a usage\n" +
+			"limit warning or, on the API, the spend projected for the next two hours.",
 		Args: cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			return runDashboard(ui.ModePopup, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -182,6 +186,55 @@ func (s storeSource) Tasks(ctx context.Context) (map[string]model.Task, error) {
 // dropped, by task id, for the r key.
 func (s storeSource) Reviews(ctx context.Context) (map[string]string, error) {
 	return s.st.PendingReviewTasks(ctx)
+}
+
+// Budget reads the usage and cost samples of the burn window: Status is
+// the forecast warning's badge text, else in API mode (no usage sample in
+// the window) the projection of the live sessions' spend, and Burn each
+// session's burn; a zero Budget when nothing was ingested in the window.
+func (s storeSource) Budget(ctx context.Context) (ui.Budget, error) {
+	now := clock()
+	since := now.Add(-usage.BurnWindow)
+	samples, err := s.st.UsageSince(ctx, since)
+	if err != nil {
+		return ui.Budget{}, err
+	}
+	cost, err := s.st.CostSince(ctx, since)
+	if err != nil {
+		return ui.Budget{}, err
+	}
+	var b ui.Budget
+	if burn := usage.Burns(cost, now); len(burn) > 0 {
+		b.Burn = burn
+	}
+	if w, ok := usage.Warning(usage.Forecasts(samples, now), now); ok {
+		b.Status = usage.BadgeText(w, now)
+		return b, nil
+	}
+	if len(cost) == 0 {
+		return b, nil
+	}
+	live, err := uiLiveSessions(ctx, s.st)
+	if err != nil {
+		return ui.Budget{}, err
+	}
+	if usd, ok := usage.APIProjection(samples, cost, live, now); ok {
+		b.Status = "next 2h ≈ " + usage.CostCell(usd, true) + " at the current rate"
+	}
+	return b, nil
+}
+
+// uiLiveSessions are the ids of the sessions that have not ended.
+func uiLiveSessions(ctx context.Context, st *store.Store) (map[string]bool, error) {
+	sessions, err := st.ListSessions(ctx, store.ListFilter{})
+	if err != nil {
+		return nil, err
+	}
+	live := make(map[string]bool, len(sessions))
+	for _, s := range sessions {
+		live[s.ID] = true
+	}
+	return live, nil
 }
 
 // boardSource is the task board's ui.BoardSource over the store.

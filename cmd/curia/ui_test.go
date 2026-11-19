@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
+	"github.com/ZachFara/curia/internal/ui"
 )
 
 // dashboardRun is what one fake run of the dashboard program saw: the
@@ -718,5 +720,93 @@ func TestBoardSourceRefusesForANonUser(t *testing.T) {
 	}
 	if err := b.SetStatus(context.Background(), "T-1", model.TaskReady); err == nil || f.get("T-1").Status != model.TaskBacklog {
 		t.Errorf("SetStatus = %v, T-1 %s: want the refusal and backlog", err, f.get("T-1").Status)
+	}
+}
+
+// uiCost is one ingested reading of TestStoreSourceBudget's world: a
+// session's running cost at a time before fleetNow, and the five-hour
+// window's percentage when pct is not negative.
+type uiCost struct {
+	session string
+	ago     time.Duration
+	usd     float64
+	pct     float64
+}
+
+// uiBudgetSource opens the store of a fleetHome world of
+// dashboardSessions, ingests readings, and returns the dashboard's source.
+func uiBudgetSource(t *testing.T, readings ...uiCost) storeSource {
+	t.Helper()
+	db, fake := fleetHome(t, []string{"%1", "%2"}, dashboardSessions()...)
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	for _, r := range readings {
+		usd := r.usd
+		in := store.Reading{SessionID: r.session, At: fleetNow.Add(-r.ago), CostUSD: &usd}
+		if r.pct >= 0 {
+			in.Limits = []model.UsageSample{{Window: model.WindowFiveHour, UsedPct: r.pct, ResetsAt: fleetNow.Add(110 * time.Minute)}}
+		}
+		if _, err = st.Ingest(context.Background(), in, fleetNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return storeSource{st: st, tm: fake, cfg: config.Default()}
+}
+
+func TestStoreSourceBudget(t *testing.T) {
+	got, err := uiBudgetSource(t).Budget(context.Background())
+	if err != nil || !reflect.DeepEqual(got, ui.Budget{}) {
+		t.Errorf("Budget with no samples = %+v, %v, want the zero Budget", got, err)
+	}
+	// The five-hour window goes from 50% to 62% in 16 minutes (45%/h): the
+	// limit in about 50 minutes, before the reset in 1h50m. working's cost
+	// rises $1 in the window, waiting's $0.50 since its sample before it.
+	src := uiBudgetSource(t,
+		uiCost{"waiting", 25 * time.Minute, 0.5, -1},
+		uiCost{"working", 16 * time.Minute, 1, 50},
+		uiCost{"waiting", 5 * time.Minute, 1, -1},
+		uiCost{"working", 0, 2, 62},
+	)
+	got, err = src.Budget(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ui.Budget{
+		Status: "5h 62% → limit ~50m (resets 1h50m)",
+		Burn:   map[string]float64{"working": 3, "waiting": 1.5},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Budget = %+v, want %+v", got, want)
+	}
+}
+
+func TestStoreSourceBudgetAPIMode(t *testing.T) {
+	// No usage sample: API mode. working's cost rises $1.50 in 15 minutes,
+	// $9.00 over the next two hours; ended's rise is not a live session's.
+	readings := []uiCost{
+		{"working", 15 * time.Minute, 1, -1},
+		{"ended", 15 * time.Minute, 1, -1},
+		{"working", 0, 2.5, -1},
+		{"ended", 0, 6, -1},
+	}
+	got, err := uiBudgetSource(t, readings...).Budget(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "next 2h ≈ $9.00 at the current rate"; got.Status != want {
+		t.Errorf("Status = %q, want %q", got.Status, want)
+	}
+	if want := map[string]float64{"working": 4.5, "ended": 15}; !maps.Equal(got.Burn, want) {
+		t.Errorf("Burn = %v, want %v", got.Burn, want)
+	}
+	// A usage sample in the window is a subscription: no projection, and
+	// with no warning no status at all.
+	readings = append(readings, uiCost{"waiting", time.Minute, 0, 10})
+	got, err = uiBudgetSource(t, readings...).Budget(context.Background())
+	if err != nil || got.Status != "" || len(got.Burn) != 3 {
+		t.Errorf("Budget with a steady usage window = %+v, %v, want no status and three burns", got, err)
 	}
 }
