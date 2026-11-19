@@ -46,7 +46,6 @@ check:
 ## check-fast: the pre-commit gate, no lock: static gates, build, tests of the staged packages only
 ## (no latency tests, no full suite; CI's `make check` runs those)
 check-fast: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script
-	@sh scripts/staged_tests_test.sh
 	@echo "==> go build ./..."
 	@go build ./...
 	@scripts/staged-tests.sh
@@ -145,10 +144,11 @@ layout:
 	@echo "==> layout check"
 	scripts/check-layout.sh
 
-## install-script: offline tests of scripts/install.sh (no network, no real home)
+## install-script: offline tests of scripts/install.sh (no network, no real home) and of the staged-package mapping
 install-script:
 	@echo "==> install.sh tests"
 	@sh scripts/install_test.sh
+	@sh scripts/staged_tests_test.sh
 
 ## test: all tests under the race detector, in two steps
 # Several packages hold latency gates (the hook's 20 ms budget, the end-to-end
