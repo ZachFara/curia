@@ -221,6 +221,7 @@ func ReviewPush(r model.Review, t model.Task, topic string) Notification {
 	lines := []string{
 		sanitize.Line(t.Title, MaxPushText),
 		"Tests (the agent's report): " + tests,
+		"Summary (the agent's):",
 		sanitize.Text(r.Summary, maxReviewText),
 	}
 	return Notification{

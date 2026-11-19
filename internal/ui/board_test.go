@@ -507,7 +507,7 @@ func TestBoardEnterJumpsToLeadPane(t *testing.T) {
 	m = bpress(t, m, "l")
 	boardClock.advance(keyGap)
 	_, cmd := m.Update(bkey("enter"))
-	if want := []string{"SwitchTo %5"}; !slices.Equal(tm.Calls, want) {
+	if want := []string{"ListPanes", "SwitchTo %5"}; !slices.Equal(tm.Calls, want) { // the panes tell the server
 		t.Errorf("tmux calls = %q, want %q", tm.Calls, want)
 	}
 	if !isQuitCmd(cmd) {
@@ -1021,7 +1021,7 @@ func TestBoardEnterJumpsFromReviewCard(t *testing.T) {
 	m := newBoard(t, src, tm, 120, false)
 	boardClock.advance(keyGap)
 	_, cmd := m.Update(bkey("enter"))
-	if want := []string{"SwitchTo %6"}; !slices.Equal(tm.Calls, want) {
+	if want := []string{"ListPanes", "SwitchTo %6"}; !slices.Equal(tm.Calls, want) {
 		t.Errorf("tmux calls = %q, want %q", tm.Calls, want)
 	}
 	if !isQuitCmd(cmd) {
@@ -1199,5 +1199,33 @@ func TestBoardReviewAndDoneTextCannotDrawEscapes(t *testing.T) {
 				t.Errorf("width %d %q: no line holds T-6 and its title on one line:\n%s", width, keys, view)
 			}
 		}
+	}
+}
+
+// TestBoardJumpRefusesOtherServer: a card whose session is recorded on
+// another tmux server is not jumped to, though this server has a pane with
+// the same id; a session with no recorded server is, as before.
+func TestBoardJumpRefusesOtherServer(t *testing.T) {
+	src := &fakeBoardSource{}
+	c := card(6, model.TaskRunning, "%6")
+	c.Sessions[0].Socket = "/tmp/tmux-501/other"
+	src.set(c)
+	tm := &tmux.Fake{Panes: []tmux.Pane{{ID: "%6", Socket: "/tmp/tmux-501/default"}}}
+	m := newBoard(t, src, tm, 120, false)
+	boardClock.advance(keyGap)
+	m, cmd := m.Update(bkey("enter"))
+	if slices.ContainsFunc(tm.Calls, func(c string) bool { return strings.HasPrefix(c, "SwitchTo") }) || isQuitCmd(cmd) {
+		t.Errorf("tmux calls = %q: jumped to this server's %%6", tm.Calls)
+	}
+	if s := lastLine(m); !strings.Contains(s, "T-6 is on another tmux server") {
+		t.Errorf("status line = %q", s)
+	}
+	c.Sessions[0].Socket = ""
+	src.set(c)
+	tm.Calls = nil
+	m = newBoard(t, src, tm, 120, false)
+	boardClock.advance(keyGap)
+	if _, _ = m.Update(bkey("enter")); !slices.Contains(tm.Calls, "SwitchTo %6") {
+		t.Errorf("no recorded server: tmux calls = %q, want the jump", tm.Calls)
 	}
 }

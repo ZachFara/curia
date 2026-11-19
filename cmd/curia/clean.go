@@ -125,7 +125,7 @@ func cleanCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 		return t, "", false, fmt.Errorf("%s has a live session %s in %s: end it first (or curia pause %s). Nothing was removed",
 			id, spawnShortID(live[0].ID), spawnWhere(panes, live[0].Pane), id)
 	}
-	if t.Pane != "" && lifecyclePaneStateOf(panes, perr, t.Pane, t.LaunchedAt) != lifecyclePaneGone {
+	if t.Pane != "" && lifecyclePaneStateOf(panes, perr, t.Pane, "", t.LaunchedAt) != lifecyclePaneGone {
 		return t, "", false, fmt.Errorf("%s's window %s is still open (or tmux cannot tell): close it first. Nothing was removed",
 			id, spawnWhere(panes, t.Pane))
 	}

@@ -16,7 +16,10 @@ import (
 const (
 	completeName        = "complete_task"
 	completeDescription = "Tell the user the task is finished and ready for review. Call it once everything is committed, with a short summary and the state of the tests."
-	completeSchema      = `{"type":"object","required":["summary","tests_status"],"properties":{"summary":{"type":"string"},"tests_status":{"type":"string","enum":["passed","failed","not_run"]},"tests_detail":{"type":"string"}}}`
+	// completeSchema states the limits complete_task checks (task.MaxSummary,
+	// task.MaxTestsDetail, in characters), so an agent need not learn them from
+	// a refusal (live check defect 4; TestCompleteSchemaStatesLimits).
+	completeSchema = `{"type":"object","required":["summary","tests_status"],"properties":{"summary":{"type":"string","maxLength":2000},"tests_status":{"type":"string","enum":["passed","failed","not_run"]},"tests_detail":{"type":"string","maxLength":200}}}`
 
 	instrComplete = "The review is waiting for the user. Make sure everything is committed, then end your turn. Do not merge or push. If the user asks for changes, their note arrives as a message."
 	msgDoneLead   = "You are a teammate in an agent team. Tell your team lead you are done; only the lead completes the task."

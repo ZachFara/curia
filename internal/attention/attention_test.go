@@ -73,7 +73,7 @@ func TestApplySetsWindowOption(t *testing.T) {
 		model.Session{ID: "b", Pane: "%2", TmuxWindow: "@7", State: model.StateWorking, UpdatedAt: t0},
 	)
 	fake := &tmux.Fake{}
-	if err := Apply(context.Background(), fake, st, "@7"); err != nil {
+	if err := Apply(context.Background(), fake, st, "@7", ""); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"SetWindowOption @7 @curia_marker red"}
@@ -89,7 +89,7 @@ func TestApplyIgnoresOtherWindowsEndedAndStale(t *testing.T) {
 		model.Session{ID: "c", TmuxWindow: "@7", State: model.StateStale, UpdatedAt: t0},
 	)
 	fake := &tmux.Fake{}
-	if err := Apply(context.Background(), fake, st, "@7"); err != nil {
+	if err := Apply(context.Background(), fake, st, "@7", ""); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"SetWindowOption @7 @curia_marker "}
@@ -102,10 +102,10 @@ func TestSeenClearsMarker(t *testing.T) {
 	st := openStore(t, model.Session{ID: "a", Pane: "%1", TmuxWindow: "@7", State: model.StateWaiting, UpdatedAt: t0})
 	ctx := context.Background()
 	fake := &tmux.Fake{}
-	if err := st.MarkSeen(ctx, "%1", t0.Add(time.Minute)); err != nil {
+	if err := st.MarkSeen(ctx, "%1", "", t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := Apply(ctx, fake, st, "@7"); err != nil {
+	if err := Apply(ctx, fake, st, "@7", ""); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"SetWindowOption @7 @curia_marker "}
@@ -117,7 +117,7 @@ func TestSeenClearsMarker(t *testing.T) {
 func TestApplyEmptyWindowDoesNothing(t *testing.T) {
 	st := openStore(t, model.Session{ID: "a", State: model.StateWaiting, UpdatedAt: t0})
 	fake := &tmux.Fake{}
-	if err := Apply(context.Background(), fake, st, ""); err != nil {
+	if err := Apply(context.Background(), fake, st, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.Calls) != 0 {
@@ -179,7 +179,7 @@ func TestWindowMarkerRedBeatsBlue(t *testing.T) {
 func applyCalls(t *testing.T, st *store.Store) []string {
 	t.Helper()
 	fake := &tmux.Fake{}
-	if err := Apply(context.Background(), fake, st, "@7"); err != nil {
+	if err := Apply(context.Background(), fake, st, "@7", ""); err != nil {
 		t.Fatal(err)
 	}
 	return fake.Calls
@@ -215,7 +215,7 @@ func TestApplySetsBlueFromPendingReview(t *testing.T) {
 	if got := applyCalls(t, st); !slices.Equal(got, blue) {
 		t.Errorf("pending review: calls = %q, want %q", got, blue)
 	}
-	if err = st.MarkSeen(ctx, "%1", t0.Add(time.Minute)); err != nil {
+	if err = st.MarkSeen(ctx, "%1", "", t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if got := applyCalls(t, st); !slices.Equal(got, unmarked) {
@@ -261,7 +261,7 @@ func TestApplyWithoutReviewsTableStillAppliesRed(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &tmux.Fake{}
-	err = Apply(ctx, fake, st, "@7")
+	err = Apply(ctx, fake, st, "@7", "")
 	if err == nil || !strings.Contains(err.Error(), "pending reviews") {
 		t.Errorf("Apply with no reviews table = %v, want the pending reviews read's error", err)
 	}
@@ -302,14 +302,37 @@ func TestApplyWithoutTasksSkipsReviewRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &tmux.Fake{}
-	if err = Apply(ctx, fake, st, "@7"); err != nil {
+	if err = Apply(ctx, fake, st, "@7", ""); err != nil {
 		t.Errorf("Apply on a window with no task = %v, want no reviews read and no error", err)
 	}
-	if err = Apply(ctx, fake, st, "@8"); err == nil || !strings.Contains(err.Error(), "pending reviews") {
+	if err = Apply(ctx, fake, st, "@8", ""); err == nil || !strings.Contains(err.Error(), "pending reviews") {
 		t.Errorf("Apply on a window with a task = %v, want the pending reviews read's error", err)
 	}
 	want := []string{"SetWindowOption @7 @curia_marker red", "SetWindowOption @8 @curia_marker "}
 	if !slices.Equal(fake.Calls, want) {
 		t.Errorf("calls = %q, want %q", fake.Calls, want)
+	}
+}
+
+// TestApplyOnlyThisServer: window ids are per tmux server, so a waiting
+// session recorded in window @7 of another server does not turn this
+// server's @7 red; with no socket given, or none recorded, it counts.
+func TestApplyOnlyThisServer(t *testing.T) {
+	st := openStore(t,
+		model.Session{ID: "a", Pane: "%1", TmuxWindow: "@7", State: model.StateWorking, Socket: "/tmp/tmux-501/a", UpdatedAt: t0},
+		model.Session{ID: "b", Pane: "%1", TmuxWindow: "@7", State: model.StateWaiting, Socket: "/tmp/tmux-501/b", UpdatedAt: t0},
+	)
+	for socket, want := range map[string]string{
+		"/tmp/tmux-501/a": "SetWindowOption @7 @curia_marker ",
+		"/tmp/tmux-501/b": "SetWindowOption @7 @curia_marker red",
+		"":                "SetWindowOption @7 @curia_marker red",
+	} {
+		fake := &tmux.Fake{}
+		if err := Apply(context.Background(), fake, st, "@7", socket); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(fake.Calls, []string{want}) {
+			t.Errorf("socket %q: calls = %q, want %q", socket, fake.Calls, want)
+		}
 	}
 }

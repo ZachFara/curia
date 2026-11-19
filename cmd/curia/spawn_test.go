@@ -862,3 +862,49 @@ func TestAgentSpawnNeedsReady(t *testing.T) {
 		t.Errorf("T-3 status = %s, want ready", got)
 	}
 }
+
+// TestAgentCannotSpawnReviewedOrDoneTask: a task stored ready whose newest
+// review is pending, approved or merged is in review or done, and an agent
+// may not start it again; one whose newest review asked for changes may be
+// started, and the user may start any of them.
+func TestAgentCannotSpawnReviewedOrDoneTask(t *testing.T) {
+	for _, c := range []struct {
+		status model.ReviewStatus
+		want   string // "" when the spawn is allowed
+	}{
+		{model.ReviewPending, "T-1 is review (R-1 is pending)"},
+		{model.ReviewApproved, "T-1 is done (R-1 is approved)"},
+		{model.ReviewMerged, "T-1 is done (R-1 is merged)"},
+		{model.ReviewChanges, ""},
+	} {
+		t.Run(string(c.status), func(t *testing.T) { spawnReviewedCase(t, c.status, c.want) })
+	}
+}
+
+// spawnReviewedCase is one case of TestAgentCannotSpawnReviewedOrDoneTask.
+func spawnReviewedCase(t *testing.T, status model.ReviewStatus, want string) {
+	ctx := context.Background()
+	f := spawnNewFixture(t)
+	f.task("Finished", "")
+	f.update("T-1", func(tk *model.Task) { tk.Status = model.TaskReady })
+	if _, _, err := f.st.CompleteTask(ctx, model.Review{TaskID: "T-1", Summary: "done", Tests: model.TestsPassed, CreatedAt: f.now}); err != nil {
+		t.Fatal(err)
+	}
+	if status != model.ReviewPending {
+		if _, _, err := f.st.CloseReview(ctx, "R-1", store.ReviewClose{Status: status, How: model.ApproveMerge, Via: model.AnsweredCLI}, f.now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	userTerminalAs(t, false) // an agent's tool shell
+	out, err := spawnRun(t, "T-1")
+	if want == "" {
+		if err != nil {
+			t.Fatalf("agent spawn after changes were requested: %v\n%s", err, out)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), want+": an agent may spawn only a task the user marked ready that is neither in review nor done") {
+		t.Fatalf("agent spawn = %v (%q), want the refusal", err, out)
+	}
+	f.wantNothingStarted("T-1")
+}

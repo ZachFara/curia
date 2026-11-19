@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/task"
@@ -480,6 +481,12 @@ func (m BoardModel) jump() (BoardModel, tea.Cmd) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxTimeout)
 	defer cancel()
+	// The card's pane is its first session's; on another tmux server that id
+	// names another pane here (fleet.OtherServer).
+	if live, err := m.tm.ListPanes(ctx); err == nil && len(c.Sessions) > 0 && fleet.OtherServer(live, c.Sessions[0]) {
+		m.notice = cardID(c) + " is " + noticeOtherServer
+		return m, nil
+	}
 	if err := m.tm.SwitchTo(ctx, c.Pane); err != nil {
 		m.notice, m.noticeErr = "jump failed: "+err.Error(), true
 		return m, nil

@@ -1,0 +1,14 @@
+# The configuration of e2e/reviews_test.go, written to the temp home's
+# .config/curia/config.toml with <ntfy_url> replaced by the test's stand-in
+# ntfy server (an httptest server on 127.0.0.1). public_url is what the push
+# buttons carry; curia serve listens on the address --listen gives, as it
+# does behind tailscale serve, so the two differ and nothing ever connects
+# to public_url.
+[ntfy]
+url = "<ntfy_url>"
+
+[ntfy.devices]
+phone = "curia-e2e"
+
+[serve]
+public_url = "http://localhost:8787"

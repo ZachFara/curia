@@ -20,6 +20,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ZachFara/curia/internal/attention"
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/deliver"
 	"github.com/ZachFara/curia/internal/fleet"
@@ -43,6 +44,7 @@ const (
 	restoreEnded        restoreAction = "ended"
 	restoreOtherServer  restoreAction = "other server"
 	restoreOutside      restoreAction = "outside tmux"
+	restoreClosedHere   restoreAction = "closed here"
 	restoreTeammate     restoreAction = "teammate"
 	restoreNotClaude    restoreAction = "not Claude Code"
 	restoreBadID        restoreAction = "bad id"
@@ -73,10 +75,13 @@ var (
 )
 
 const (
-	restoreWait     = 30 * time.Second
-	restorePoll     = 250 * time.Millisecond
-	restoreMax      = 32
-	restoreHold     = 2 * time.Minute
+	restoreWait = 30 * time.Second
+	restorePoll = 250 * time.Millisecond
+	restoreMax  = 32
+	restoreHold = 2 * time.Minute
+	// restoreExecHold is how long the claim is held from the confirmation:
+	// the windows, the wait for them and the notices (I6).
+	restoreExecHold = 10 * time.Minute
 	restoreLeadText = "Curia restored this session after a restart. Your teammates did not survive it: respawn your team from the shared task list, then continue."
 )
 
@@ -98,9 +103,10 @@ var restoreNameRun = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
 
 // The flags of curia restore.
 var (
-	restoreDryRun bool
-	restoreYes    bool
-	restoreSince  time.Duration
+	restoreDryRun        bool
+	restoreYes           bool
+	restoreIncludeClosed bool
+	restoreSince         time.Duration
 )
 
 func init() {
@@ -111,15 +117,18 @@ func init() {
 			"(killed, or ended when tmux went down) and that were active within --since\n" +
 			"(restore.max_age, 24h, by default), shows the plan, and on confirmation opens\n" +
 			"one tmux window per session with claude --resume (curia launch for a task's\n" +
-			"session). It never touches a window that exists and types nothing itself; a\n" +
-			"restored team lead gets a message asking it to respawn its team. Refuses to\n" +
-			"run inside an agent session.",
+			"session). A session whose pane was closed while the tmux server kept running\n" +
+			"(it started after the server did: you closed it, or killed it from the\n" +
+			"dashboard) is skipped unless --include-closed is given. It never touches a\n" +
+			"window that exists and types nothing itself; a restored team lead gets a\n" +
+			"message asking it to respawn its team. Refuses to run inside an agent session.",
 		Annotations: userOnlyMark(),
 		Args:        cobra.NoArgs,
 		RunE:        runRestore,
 	}
 	c.Flags().BoolVar(&restoreDryRun, "dry-run", false, "print the plan and change nothing")
 	c.Flags().BoolVar(&restoreYes, "yes", false, "restore without asking")
+	c.Flags().BoolVar(&restoreIncludeClosed, "include-closed", false, "also restore sessions whose pane was closed while tmux kept running")
 	c.Flags().DurationVar(&restoreSince, "since", 0, "how far back to look (default: restore.max_age)")
 	rootCmd.AddCommand(c)
 }
@@ -198,6 +207,12 @@ func restoreRun(ctx context.Context, e restoreEnv, cfg config.Config, since time
 	if clock().Sub(claimed) > restoreHold {
 		return fmt.Errorf("the answer took longer than %v, so another restore may have started: run curia restore again", restoreHold)
 	}
+	// Hold the claim for the windows, the wait and the notices, not just the
+	// question: a claim older than restoreHold is taken over, so it is dated
+	// that much before the end of restoreExecHold.
+	if ok, err := e.st.RenewRestore(ctx, clock().Add(restoreExecHold-restoreHold)); err != nil || !ok {
+		return cmp.Or(err, errors.New("another curia restore took the claim over: run curia restore again"))
+	}
 	return restoreExecute(ctx, e, rows, todo)
 }
 
@@ -214,7 +229,7 @@ func restoreListPanes(ctx context.Context, tm tmux.Client, limit time.Duration) 
 func restoreLoad(ctx context.Context, e restoreEnv, cfg config.Config, panes []tmux.Pane, now time.Time, since time.Duration) ([]restoreRow, error) {
 	if !restoreDryRun {
 		windows, err := fleet.Reconcile(ctx, e.st, panes, now)
-		applyMarkers(ctx, e.tm, e.st, cfg.LogPath, "restore attention marker", windows)
+		applyMarkers(ctx, e.tm, e.st, cfg.LogPath, "restore attention marker", fleet.Socket(panes), windows)
 		if err != nil {
 			return nil, err
 		}
@@ -264,9 +279,10 @@ func restoreNewServer(live []tmux.Pane) restoreServer {
 	return srv
 }
 
-// otherServer reports whether s was recorded on another tmux server.
+// otherServer reports whether s was recorded on another tmux server: the
+// shared rule, fleet.OtherSocket.
 func (srv restoreServer) otherServer(s model.Session) bool {
-	return s.Socket != "" && srv.socket != "" && s.Socket != srv.socket
+	return fleet.OtherSocket(srv.socket, s)
 }
 
 // live reports whether s runs in a pane of this server: it is not ended,
@@ -327,7 +343,7 @@ type restoreCheck func(r restoreRow, srv restoreServer, now time.Time, since tim
 
 // restoreChecks are the classes, in the table's order.
 var restoreChecks = []restoreCheck{
-	restoreCheckEnded, restoreCheckLive, restoreCheckServer, restoreCheckOutside, restoreCheckTeammate,
+	restoreCheckEnded, restoreCheckLive, restoreCheckServer, restoreCheckOutside, restoreCheckClosed, restoreCheckTeammate,
 	restoreCheckAgent, restoreCheckID, restoreCheckPaused, restoreCheckDir, restoreCheckTranscript, restoreCheckAge,
 }
 
@@ -380,6 +396,19 @@ func restoreCheckOutside(r restoreRow, _ restoreServer, _ time.Time, _ time.Dura
 		return restoreOutside, "it ran outside tmux"
 	}
 	return "", ""
+}
+
+// restoreCheckClosed skips, unless --include-closed, a session that started at or after the listed server
+// did and is not on another server (restoreCheckServer comes first): its pane closed while the server it ran
+// on kept running, because the user closed it (or killed it from the dashboard), not because tmux went down
+// (Ruling P4-R7). Claude Code reports "other" either way, so the end reason cannot tell.
+func restoreCheckClosed(r restoreRow, srv restoreServer, _ time.Time, _ time.Duration) (restoreAction, string) {
+	s := r.Session
+	if restoreIncludeClosed || srv.start.IsZero() || s.StartedAt.IsZero() || s.StartedAt.Before(srv.start) {
+		return "", ""
+	}
+	return restoreClosedHere, "its pane was closed while tmux kept running; reopen it with claude --resume " +
+		sanitize.Line(s.ID, 60) + " in " + sanitize.Line(restoreDir(r), 300) + ", or run curia restore --include-closed"
 }
 
 func restoreCheckTeammate(r restoreRow, _ restoreServer, _ time.Time, _ time.Duration) (restoreAction, string) {
@@ -677,6 +706,7 @@ func restoreExecute(ctx context.Context, e restoreEnv, rows, todo []restoreRow) 
 			_, _ = fmt.Fprintln(e.out, "tmux did not list its panes, so restore ended no other row")
 		} else {
 			restoreEndOthers(ctx, e, rows, l, srv)
+			restoreKeepUnseen(ctx, e, l, fleet.Socket(panes))
 		}
 		if l.row.Session.TeamRole == model.RoleLead {
 			restoreNotice(ctx, e, l)
@@ -698,24 +728,15 @@ func restoreExecute(ctx context.Context, e restoreEnv, rows, todo []restoreRow) 
 // that the directory exists: tmux starts a window whose directory is
 // missing in the home directory, and claude --resume works from anywhere.
 func restoreOpen(ctx context.Context, e restoreEnv, r restoreRow, tools restoreTools) (*restoreLaunch, error) {
+	if !r.Linked {
+		return restoreOpenUnlinked(ctx, e, r, tools)
+	}
 	cur, found, err := e.st.GetSession(ctx, r.Session.ID)
 	if err != nil {
 		return nil, err
 	}
-	if !found || cur.State != r.Session.State || cur.Pane != r.Session.Pane || !cur.UpdatedAt.Equal(r.Session.UpdatedAt) {
-		return nil, errors.New("it changed since the plan (it may be running again); run curia restore again")
-	}
-	if !r.Linked {
-		spec, serr := restoreSpec(r, tools.bin, tools.claude)
-		if serr != nil {
-			return nil, serr
-		}
-		opened := clock()
-		pane, werr := e.tm.NewWindow(ctx, spec)
-		if werr != nil {
-			return nil, fmt.Errorf("open the window: %w", werr)
-		}
-		return &restoreLaunch{row: r, pane: pane, opened: opened}, nil
+	if !found || !restoreAsPlanned(cur, r.Session) {
+		return nil, errRestoreChanged
 	}
 	claimed, err := restoreClaimTask(ctx, e.st, r.Task)
 	if err != nil {
@@ -727,6 +748,60 @@ func restoreOpen(ctx context.Context, e restoreEnv, r restoreRow, tools restoreT
 		return nil, spawnRelease(ctx, e.st, claimed, err)
 	}
 	return l, nil
+}
+
+// errRestoreChanged refuses a row that is no longer as the plan read it.
+var errRestoreChanged = errors.New("it changed since the plan (it may be running again); run curia restore again")
+
+// restoreAsPlanned reports whether cur is still the row the plan read.
+func restoreAsPlanned(cur, planned model.Session) bool {
+	return cur.State == planned.State && cur.Pane == planned.Pane && cur.UpdatedAt.Equal(planned.UpdatedAt)
+}
+
+// restoreOpenUnlinked opens the window of a row with no task. In the update that re-checks the row it is set
+// ended with restoreEndReason, so that until the resumed session's SessionStart revives it (while its window
+// sits at a dialog, say) no second restore offers it again (I6); a linked row is guarded by its task's pane.
+// When the window cannot be opened the row is put back as it was.
+func restoreOpenUnlinked(ctx context.Context, e restoreEnv, r restoreRow, tools restoreTools) (*restoreLaunch, error) {
+	spec, err := restoreSpec(r, tools.bin, tools.claude)
+	if err != nil {
+		return nil, err
+	}
+	opened, planned := clock(), r.Session
+	changed := false
+	err = e.st.UpdateSession(ctx, planned.ID, func(cur model.Session, found bool) model.Session {
+		if changed = !found || !restoreAsPlanned(cur, planned); changed {
+			return cur
+		}
+		cur.State, cur.EndReason, cur.UpdatedAt = model.StateEnded, restoreEndReason, opened
+		return cur
+	})
+	switch {
+	case err != nil:
+		return nil, err
+	case changed:
+		return nil, errRestoreChanged
+	}
+	pane, err := e.tm.NewWindow(ctx, spec)
+	if err != nil {
+		restorePutBack(ctx, e, planned, opened)
+		return nil, fmt.Errorf("open the window: %w", err)
+	}
+	return &restoreLaunch{row: r, pane: pane, opened: opened}, nil
+}
+
+// restorePutBack gives row planned back its state, end reason and update time, unless something changed it
+// after restoreOpenUnlinked ended it at opened. A failure is logged.
+func restorePutBack(ctx context.Context, e restoreEnv, planned model.Session, opened time.Time) {
+	err := e.st.UpdateSession(context.WithoutCancel(ctx), planned.ID, func(cur model.Session, found bool) model.Session {
+		if found && cur.State == model.StateEnded && cur.EndReason == restoreEndReason && cur.UpdatedAt.Equal(opened) {
+			cur.State, cur.EndReason, cur.UpdatedAt = planned.State, planned.EndReason, planned.UpdatedAt
+		}
+		return cur
+	})
+	if err != nil {
+		e.log.Warn("restore: put a row back", "session", planned.ID, "err", err.Error())
+	}
 }
 
 // restoreClaimTask checks that t's worktree is still its worktree on its
@@ -829,6 +904,36 @@ func restoreLine(l *restoreLaunch) string {
 	}
 	return fmt.Sprintf("%s did not report within %v; look at %s: it may be waiting at a dialog (such as the trust dialog). "+
 		"Answer it there rather than running curia restore again", short, restoreWait, where)
+}
+
+// restoreKeepUnseen gives a restored session back the "not looked at" it had before the crash: the resumed
+// session's SessionStart marks it seen, so a task's review-ready (blue) marker, or a red one, would not come
+// back (live check defect 6). When the planned row had not been looked at since its last activity (its
+// transcript's last write: reconcile's stale mark moved updated_at), the live row's seen time is cleared,
+// unless it was looked at after the resume, and its window's marker is applied again. A failure is logged.
+func restoreKeepUnseen(ctx context.Context, e restoreEnv, l *restoreLaunch, socket string) {
+	planned := l.row.Session
+	if !planned.SeenAt.Before(l.row.LastActive) {
+		return
+	}
+	id := cmp.Or(l.newID, planned.ID)
+	var window string
+	err := e.st.UpdateSession(ctx, id, func(cur model.Session, found bool) model.Session {
+		if found && cur.Pane == l.pane.ID && !cur.SeenAt.After(cur.StartedAt) {
+			cur.SeenAt, window = time.Time{}, cur.TmuxWindow
+		}
+		return cur
+	})
+	if err == nil && window != "" {
+		actx, cancel := context.WithTimeout(ctx, subprocessTimeout)
+		defer cancel()
+		if err = attention.Apply(actx, e.tm, e.st, window, socket); errors.Is(err, tmux.ErrNoWindow) {
+			err = nil
+		}
+	}
+	if err != nil {
+		e.log.Warn("restore: keep a restored session unseen", "session", id, "err", err.Error())
+	}
 }
 
 // restoreEndOthers sets ended the rows a restored session replaces: its old

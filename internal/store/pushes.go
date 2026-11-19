@@ -223,8 +223,10 @@ RETURNING `+pushColumns,
 	return p, found, nil
 }
 
-// FinishPush records the result of the claimed push n: sent (sets sent_at), dropped, failed, or pending again
-// with not_before = retryAt. errText is stored cut to 200 bytes. It changes only a row that is sending.
+// FinishPush records the result of the claim of push n whose attempt number was attempt (the claimed row's
+// Attempts): sent (sets sent_at), dropped, failed, or pending again with not_before = retryAt. errText is
+// stored cut to 200 bytes. It changes only a row that is sending under that same attempt, so a sender that
+// stalled past PushReclaim cannot finish the row another sender has claimed again since (M5).
 //
 // It is one statement. sent keeps the row's token hash; every other status
 // clears it, so the token of a push that was not sent can never be spent.
@@ -233,7 +235,7 @@ RETURNING `+pushColumns,
 // other than those four, a pending result without retryAt or a sent one
 // without now is an error and changes nothing. Finishing a row that is not
 // sending (or does not exist) changes nothing and is not an error.
-func (s *Store) FinishPush(ctx context.Context, n int64, status model.PushStatus, errText string, retryAt, now time.Time) error {
+func (s *Store) FinishPush(ctx context.Context, n int64, attempt int, status model.PushStatus, errText string, retryAt, now time.Time) error {
 	retry, sent := status == model.PushPending, status == model.PushSent
 	switch {
 	case status != model.PushSent && status != model.PushDropped && status != model.PushFailed && !retry:
@@ -257,10 +259,20 @@ UPDATE pushes SET
   token_hash = CASE WHEN ? THEN token_hash ELSE '' END,
   sent_at = COALESCE(?, sent_at),
   not_before = COALESCE(?, not_before)
-WHERE n = ? AND status = 'sending'`,
-		retry, PushMaxAttempts, status, cutPushError(errText), sent, sentAt, notBefore, n)
+WHERE n = ? AND status = 'sending' AND attempts = ?`,
+		retry, PushMaxAttempts, status, cutPushError(errText), sent, sentAt, notBefore, n, attempt)
 	if err != nil {
 		return fmt.Errorf("store: finish push %d: %w", n, err)
+	}
+	return nil
+}
+
+// ClearPushToken drops the token hash of push n, claimed and being sent, when
+// its notification turned out to carry no button (M4): a hash no push
+// carries is never left spendable. It changes only a row that is sending.
+func (s *Store) ClearPushToken(ctx context.Context, n int64) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE pushes SET token_hash = '' WHERE n = ? AND status = 'sending'`, n); err != nil {
+		return fmt.Errorf("store: clear push token %d: %w", n, err)
 	}
 	return nil
 }
@@ -313,6 +325,23 @@ RETURNING `+pushColumns, formatTime(now), n, tokenHash, decisionID, oldest))
 		return model.Push{}, fmt.Errorf("store: use push token: %w", err)
 	}
 	return p, nil
+}
+
+// MatchPushToken reports, with nil, that tokenHash is the token of a spendable push of decisionID (every
+// condition of UsePushToken), and spends nothing; otherwise ErrBadToken itself. The endpoint matches a
+// token first and spends it with UsePushToken only once the answer has been checked.
+func (s *Store) MatchPushToken(ctx context.Context, tokenHash, decisionID string, now time.Time) error {
+	if !validTokenHash(tokenHash) || decisionID == "" || now.IsZero() {
+		return ErrBadToken
+	}
+	n, err := matchPushToken(ctx, s.db, tokenHash, decisionID, formatTime(now.Add(-PushTokenTTL)))
+	if err != nil {
+		return fmt.Errorf("store: match push token: %w", err)
+	}
+	if n == 0 {
+		return ErrBadToken
+	}
+	return nil
 }
 
 // matchPushToken returns the n of the spendable push of decisionID whose

@@ -66,3 +66,28 @@ func TestSeenBadStoreLogsAndSucceeds(t *testing.T) {
 		t.Errorf("log = %q, want one line", res.log)
 	}
 }
+
+// TestSeenOnlyThisServer: curia seen marks seen the pane's session on the
+// tmux server named by TMUX (the server running the focus hook), not the
+// session in the same pane id of another server.
+func TestSeenOnlyThisServer(t *testing.T) {
+	db, _ := fleetHome(t, nil,
+		model.Session{ID: "here", Agent: "claude", State: model.StateWaiting, Pane: "%0", TmuxWindow: "@1", Socket: "/tmp/tmux-501/a", UpdatedAt: at(10, 0)},
+		model.Session{ID: "there", Agent: "claude", State: model.StateWaiting, Pane: "%0", TmuxWindow: "@1", Socket: "/tmp/tmux-501/b", UpdatedAt: at(10, 0)},
+	)
+	t.Setenv("TMUX", "/tmp/tmux-501/a,123,0")
+	if _, err := runRoot(t, "seen", "%0"); err != nil {
+		t.Fatal(err)
+	}
+	if s := getSession(t, db, "here"); s.SeenAt.IsZero() {
+		t.Error("here is not seen")
+	}
+	if s := getSession(t, db, "there"); !s.SeenAt.IsZero() {
+		t.Error("the session on another server was marked seen")
+	}
+	for in, want := range map[string]string{"/tmp/tmux-501/a,123,0": "/tmp/tmux-501/a", "": "", "relative,1,0": "", "/x": ""} {
+		if got := seenSocket(in); got != want {
+			t.Errorf("seenSocket(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

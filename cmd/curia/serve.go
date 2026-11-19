@@ -34,12 +34,14 @@ import (
 
 // The endpoint's bounds (plan section 4.8).
 const (
-	// servePort is the port of a listen address found on a Tailscale interface.
-	servePort = 8787
+	// serveDefaultListen is the address with no --listen and no [serve]
+	// listen (Ruling P4-R9): loopback only, reached through tailscale serve.
+	serveDefaultListen = "127.0.0.1:8787"
 	// serveMaxBody bounds the body of POST /v1/answer, in bytes.
 	serveMaxBody = 1 << 10
 	// serveMaxFailures is how many token checks may fail in one minute of
-	// the clock; after that every answer is 429 until the minute ends.
+	// the clock; after that a request whose token does not match is 429
+	// instead of 401 until the minute ends. A valid token always works.
 	serveMaxFailures = 10
 	// serveShutdownLimit bounds the wait for requests in flight when the
 	// command is told to stop.
@@ -50,9 +52,6 @@ const (
 	// serveMaxNote bounds the delivery note of a 200, in runes.
 	serveMaxNote = 200
 )
-
-// serveInterfaceAddrs lists this machine's addresses. Tests replace it.
-var serveInterfaceAddrs = net.InterfaceAddrs
 
 // serveListen opens the listener. Tests replace it to prove that a refused
 // address is never listened on.
@@ -73,20 +72,21 @@ func init() {
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Answer blocking tickets from phone push buttons (the user only)",
-		Long: "Listens on a loopback or Tailscale address, never on any other, and answers a\n" +
-			"blocking ticket when a push button presents its one-time token: POST\n" +
-			"/v1/answer with one of the ticket's options, through the same path as curia\n" +
-			"decide. An irreversible ticket is never answered here. The address is\n" +
-			"--listen, else [serve] listen, else this machine's first Tailscale address\n" +
-			"with port 8787. [serve] public_url must be set. There is no TLS: use the\n" +
-			"Tailscale tunnel, or tailscale serve in front of a loopback address. With\n" +
-			"[ntfy] configured it also sends the queued phone pushes. Refuses to run\n" +
-			"inside an agent session.",
+		Long: "Answers a blocking ticket when a push button presents its one-time token:\n" +
+			"POST /v1/answer with one of the ticket's options, through the same path as\n" +
+			"curia decide. An irreversible ticket is never answered here. It listens on\n" +
+			"127.0.0.1:8787 unless --listen or [serve] listen names another address, which\n" +
+			"must be loopback or this machine's Tailscale address; nothing is detected.\n" +
+			"There is no TLS: put tailscale serve in front of the loopback address (never\n" +
+			"Funnel), so only your tailnet reaches it. The token is the only check, and it\n" +
+			"travels in the push: keep the ntfy topic private (self-hosted or\n" +
+			"access-controlled). [serve] public_url must be set. With [ntfy] configured it\n" +
+			"also sends the queued phone pushes. Refuses to run inside an agent session.",
 		Annotations: userOnlyMark(),
 		Args:        cobra.NoArgs,
 		RunE:        runServe,
 	}
-	cmd.Flags().StringVar(&serveListenFlag, "listen", "", "the ip:port to listen on (loopback or Tailscale only)")
+	cmd.Flags().StringVar(&serveListenFlag, "listen", "", "the ip:port to listen on (loopback or Tailscale only; default "+serveDefaultListen+")")
 	rootCmd.AddCommand(cmd)
 }
 
@@ -102,11 +102,7 @@ func runServe(cmd *cobra.Command, _ []string) error {
 	if cfg.Serve.PublicURL == "" {
 		return errors.New("curia serve needs [serve] public_url in ~/.config/curia/config.toml: the URL your phone reaches this endpoint at, such as https://<machine>.<tailnet>.ts.net")
 	}
-	addrs, err := serveInterfaceAddrs()
-	if err != nil {
-		addrs = nil // only a flag or [serve] listen can then give the address
-	}
-	addr, err := serveListenAddr(serveListenFlag, cfg.Serve, addrs)
+	addr, err := serveListenAddr(serveListenFlag, cfg.Serve)
 	if err != nil {
 		return err
 	}
@@ -140,9 +136,7 @@ func serveRunServer(cmd *cobra.Command, ln net.Listener, st *store.Store, cfg co
 	srv := serveNewServer(h, logger)
 	where := ln.Addr().String()
 	logger.Info("serve: listening", "addr", where)
-	out := cmd.OutOrStdout()
-	_, _ = fmt.Fprintf(out, "curia serve: listening on %s\n", where)
-	_, _ = fmt.Fprintln(out, "curia serve: plain HTTP, no TLS here: anyone who can reach this address and holds an unspent push token can answer that token's ticket")
+	serveStartLines(cmd.OutOrStdout(), where)
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	select {
@@ -180,32 +174,32 @@ func serveNewServer(h http.Handler, logger *slog.Logger) *http.Server {
 	}
 }
 
-// serveListenAddr is the address to listen on: flag, else cfg, else the first Tailscale address in addrs with port 8787.
-// It returns an error for an address that is neither loopback nor Tailscale, and when none is found.
-// An address must be an IP literal and a port, with no zone; an IPv4
-// address written as IPv6 is used as IPv4.
-func serveListenAddr(flag string, cfg config.Serve, addrs []net.Addr) (string, error) {
+// serveStartLines prints where the endpoint listens and what that means (Rulings P4-R6, P4-R9).
+func serveStartLines(out io.Writer, where string) {
+	_, _ = fmt.Fprintf(out, "curia serve: listening on %s\n", where)
+	if ap, err := netip.ParseAddrPort(where); err == nil && !ap.Addr().IsLoopback() {
+		_, _ = fmt.Fprintf(out, "curia serve: listening on a non-loopback address: make sure %s is this machine's Tailscale address. "+
+			"Anyone who can reach it and read your ntfy topic can answer the ticket a push names, once\n", ap.Addr())
+	} else {
+		_, _ = fmt.Fprintln(out, "curia serve: loopback only: put tailscale serve in front of it so your phone reaches it (never Funnel)")
+	}
+	_, _ = fmt.Fprintln(out, "curia serve: plain HTTP, no TLS here: a push's one-time token is the only check, so anyone who can "+
+		"reach this address and holds an unspent token can answer that token's ticket. Keep the ntfy topic private "+
+		"(self-hosted or access-controlled) and this endpoint on your tailnet")
+}
+
+// serveListenAddr is the address to listen on: flag, else cfg, else serveDefaultListen. It returns an
+// error for an address that is neither loopback nor Tailscale. Nothing is detected: a non-loopback address
+// is used only when the user names it (Ruling P4-R9). An address must be an IP literal and a port, with no
+// zone; an IPv4 address written as IPv6 is used as IPv4.
+func serveListenAddr(flag string, cfg config.Serve) (string, error) {
 	switch {
 	case flag != "":
 		return serveCheckAddr("--listen", flag)
 	case cfg.Listen != "":
 		return serveCheckAddr("[serve] listen", cfg.Listen)
 	}
-	var v6 netip.Addr
-	for _, a := range addrs {
-		ip := serveIP(a)
-		switch {
-		case !config.TailscaleAddr(ip):
-		case ip.Is4():
-			return netip.AddrPortFrom(ip, servePort).String(), nil
-		case !v6.IsValid():
-			v6 = ip
-		}
-	}
-	if v6.IsValid() {
-		return netip.AddrPortFrom(v6, servePort).String(), nil
-	}
-	return "", errors.New("curia serve: no Tailscale address on this machine: set [serve] listen (such as 127.0.0.1:8787, behind tailscale serve) or pass --listen")
+	return serveDefaultListen, nil
 }
 
 // serveCheckAddr checks the listen address s, named by what.
@@ -219,22 +213,6 @@ func serveCheckAddr(what, s string) (string, error) {
 		return "", fmt.Errorf("curia serve: %s must be a loopback or Tailscale address, got %q; refusing to listen", what, sanitize.Line(s, 64))
 	}
 	return netip.AddrPortFrom(a, ap.Port()).String(), nil
-}
-
-// serveIP is a's IP, unmapped, or the zero Addr.
-func serveIP(a net.Addr) netip.Addr {
-	var ip net.IP
-	switch v := a.(type) {
-	case *net.IPNet:
-		ip = v.IP
-	case *net.IPAddr:
-		ip = v.IP
-	}
-	addr, ok := netip.AddrFromSlice(ip)
-	if !ok {
-		return netip.Addr{}
-	}
-	return addr.Unmap()
 }
 
 // The fixed response bodies.
@@ -347,12 +325,12 @@ func serveMethod(m string) string {
 	return "other"
 }
 
-// answer is POST /v1/answer, section 4.8's steps in their order.
+// answer is POST /v1/answer, section 4.8's steps in their order, except that the token is first only
+// matched: the ticket and the option are checked before it is spent, so a refused option costs no token
+// (M1), and only a request whose token does not match counts against the limiter or is refused by it, so
+// a valid token always works (M2).
 func (e *serveEndpoint) answer(w http.ResponseWriter, r *http.Request) serveReply {
 	now := e.d.Now()
-	if e.limited(now) {
-		return serveReply{status: http.StatusTooManyRequests, body: serveTooMany, why: "too many failed token checks this minute"}
-	}
 	req, rep := serveReadRequest(w, r)
 	if rep.status != 0 {
 		return rep
@@ -360,18 +338,19 @@ func (e *serveEndpoint) answer(w http.ResponseWriter, r *http.Request) serveRepl
 	// Once the token is spent the answer must be stored whatever the
 	// client does, so a hang-up does not cancel what follows.
 	ctx := context.WithoutCancel(r.Context())
-	if rep := e.spend(ctx, r.Header, req.Decision, now); rep.status != 0 {
+	hash, rep := e.match(ctx, r.Header, req.Decision, now)
+	if rep.status != 0 {
 		return rep
 	}
 	id := req.Decision
-	d, found, err := e.d.Store.GetDecision(ctx, id)
-	switch {
-	case err != nil:
+	if rep := e.checkTicket(ctx, id, req.Key, now); rep.status != 0 {
+		return rep
+	}
+	if _, err := e.d.Store.UsePushToken(ctx, hash, id, now); err != nil {
+		if errors.Is(err, store.ErrBadToken) { // spent by a request a moment ago
+			return serveReply{status: http.StatusUnauthorized, body: serveUnauth, id: id, why: "token refused"}
+		}
 		return e.internal(id, err)
-	case !found:
-		return serveReply{status: http.StatusConflict, body: serveNotOpen(id), id: id, why: "not open"}
-	case d.Reversibility == model.ReversIrreversible:
-		return serveReply{status: http.StatusUnprocessableEntity, body: serveIrreversible, id: id, why: "irreversible"}
 	}
 	out, err := deliver.Answer(ctx, e.d.Store, e.d.Tmux, e.d.Log, id, model.Answer{Key: req.Key, Via: model.AnsweredNtfy}, now)
 	switch {
@@ -385,22 +364,42 @@ func (e *serveEndpoint) answer(w http.ResponseWriter, r *http.Request) serveRepl
 	return serveReply{status: http.StatusOK, body: serveAnswered(out), id: id}
 }
 
-// spend is step 3: the bearer token is hashed at once and spent for id.
-// A malformed header still costs a lookup (of a hash no push holds), so
-// every refusal does the same work; each is the same 401 and counts as a
-// failure.
-func (e *serveEndpoint) spend(ctx context.Context, h http.Header, id string, now time.Time) serveReply {
-	token, ok := serveBearer(h)
-	hash := notify.HashToken(token) // "" when malformed: NewToken never makes it
-	_, err := e.d.Store.UsePushToken(ctx, hash, id, now)
+// checkTicket refuses, before the token is spent, a ticket that does not exist, an irreversible one and an
+// option it does not offer (decision.Resolve's own rule).
+func (e *serveEndpoint) checkTicket(ctx context.Context, id, key string, now time.Time) serveReply {
+	d, found, err := e.d.Store.GetDecision(ctx, id)
 	switch {
-	case !ok || errors.Is(err, store.ErrBadToken):
-		e.failed(now)
-		return serveReply{status: http.StatusUnauthorized, body: serveUnauth, id: id, why: "token refused"}
 	case err != nil:
 		return e.internal(id, err)
+	case !found:
+		return serveReply{status: http.StatusConflict, body: serveNotOpen(id), id: id, why: "not open"}
+	case d.Reversibility == model.ReversIrreversible:
+		return serveReply{status: http.StatusUnprocessableEntity, body: serveIrreversible, id: id, why: "irreversible"}
+	}
+	if _, err := decision.Resolve(d, model.Answer{Key: key, Via: model.AnsweredNtfy}, now); errors.Is(err, decision.ErrBadAnswer) {
+		return serveReply{status: http.StatusUnprocessableEntity, body: serveUnknownKey, id: id, why: "unknown option"}
 	}
 	return serveReply{}
+}
+
+// match is step 3 without the spend: the bearer token is hashed at once and matched for id; the hash
+// comes back for the spend. A malformed header still costs a lookup (of a hash no push holds), so every
+// refusal does the same work; each is the same 401 and counts as a failure, or is 429 once
+// serveMaxFailures have failed this minute.
+func (e *serveEndpoint) match(ctx context.Context, h http.Header, id string, now time.Time) (string, serveReply) {
+	token, ok := serveBearer(h)
+	hash := notify.HashToken(token) // "" when malformed: NewToken never makes it
+	err := e.d.Store.MatchPushToken(ctx, hash, id, now)
+	switch {
+	case ok && err == nil:
+		return hash, serveReply{}
+	case ok && !errors.Is(err, store.ErrBadToken):
+		return "", e.internal(id, err)
+	case e.limited(now):
+		return "", serveReply{status: http.StatusTooManyRequests, body: serveTooMany, id: id, why: "too many failed token checks this minute"}
+	}
+	e.failed(now)
+	return "", serveReply{status: http.StatusUnauthorized, body: serveUnauth, id: id, why: "token refused"}
 }
 
 // internal is a 500; its cause goes only to the log.

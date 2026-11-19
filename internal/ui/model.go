@@ -107,6 +107,7 @@ type Model struct {
 	tasks    map[string]model.Task      // the last good Tasks read; replaced, never mutated
 	reviews  map[string]string          // the last good Reviews read; replaced, never mutated
 	names    map[string]string          // window id to window name; replaced, never mutated
+	live     []tmux.Pane                // the panes of the last window-name read: the server jumps and kills reach
 	expanded map[string]bool            // team ids shown expanded; replaced, never mutated
 	rows     []row                      // the units that pass the filter, as rows
 	cursor   int                        // index of the selected row
@@ -182,6 +183,7 @@ type refreshMsg struct {
 	tasks      map[string]model.Task
 	reviews    map[string]string
 	names      map[string]string
+	live       []tmux.Pane
 	err        error
 	countsErr  error
 	tasksErr   error
@@ -291,25 +293,26 @@ func (m Model) refresh() tea.Cmd {
 			msg.tasks, msg.tasksErr = src.Tasks(ctx)
 			msg.reviews, msg.reviewsErr = src.Reviews(ctx)
 		}
-		msg.names = windowNames(tm)
+		msg.names, msg.live = windowNames(tm)
 		return msg
 	}
 }
 
-// windowNames maps each window id on the server to its name; nil when tmux
-// cannot list its panes, so every window shows its stored id.
-func windowNames(tm tmux.Client) map[string]string {
+// windowNames maps each window id on the server to its name, and returns
+// the panes it listed; nil when tmux cannot list its panes, so every window
+// shows its stored id.
+func windowNames(tm tmux.Client) (map[string]string, []tmux.Pane) {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxTimeout)
 	defer cancel()
 	panes, err := tm.ListPanes(ctx)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	names := make(map[string]string, len(panes))
 	for _, p := range panes {
 		names[p.WindowID] = p.WindowName
 	}
-	return names
+	return names, panes
 }
 
 // Update handles one message. While the decide view or the board is shown,
@@ -347,7 +350,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // applyRefresh keeps the last good sessions, counts, tasks and reviews
 // when a read fails, and shows the first error.
 func (m Model) applyRefresh(msg refreshMsg) Model {
-	m.names, m.err = msg.names, cmp.Or(msg.err, msg.countsErr, msg.tasksErr, msg.reviewsErr)
+	m.names, m.live, m.err = msg.names, msg.live, cmp.Or(msg.err, msg.countsErr, msg.tasksErr, msg.reviewsErr)
 	if msg.err == nil {
 		m.sessions = msg.sessions
 	}
@@ -763,7 +766,7 @@ func (m Model) jump() (Model, tea.Cmd) {
 		return m, nil
 	}
 	s := r.target()
-	if m.notice = unreachable(s); m.notice != "" {
+	if m.notice = unreachable(s, m.live); m.notice != "" {
 		return m, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxTimeout)
@@ -793,7 +796,7 @@ func (m Model) askKill() Model {
 		m.notice = noticeKillGroup
 		return m
 	}
-	if m.notice = unreachable(r.s); m.notice == "" {
+	if m.notice = unreachable(r.s, m.live); m.notice == "" {
 		m.killPane = r.s.Pane
 	}
 	return m
@@ -801,17 +804,25 @@ func (m Model) askKill() Model {
 
 // unreachable says why s's pane cannot be jumped to or killed, or is empty
 // when it can. A stale session's pane is gone; after a tmux server restart
-// its id may name an unrelated pane, so it is never used.
-func unreachable(s model.Session) string {
+// its id may name an unrelated pane, so it is never used. A session
+// recorded on another tmux server than the one whose panes are live
+// (fleet.OtherServer) has a pane id that names another pane here.
+func unreachable(s model.Session, live []tmux.Pane) string {
 	switch {
 	case s.Pane == "":
 		return "not in tmux"
 	case s.State == model.StateStale:
 		return "pane gone"
+	case fleet.OtherServer(live, s):
+		return noticeOtherServer
 	default:
 		return ""
 	}
 }
+
+// noticeOtherServer refuses a jump to, or a kill of, the pane of a session
+// recorded on another tmux server.
+const noticeOtherServer = "on another tmux server: open the dashboard there"
 
 // confirmKill kills the pane on "y"; any other key cancels. The row
 // disappears or changes on a later refresh; the store is not edited here.

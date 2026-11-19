@@ -1,12 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -177,11 +180,11 @@ func pauseMakePlan(ctx context.Context, st *store.Store, tm tmux.Client, cfg con
 	plan := pausePlan{resume: pauseResumeSession(linked)}
 	var unknown []string
 	for _, tg := range pauseTargets(t, live) {
-		switch lifecyclePaneStateOf(panes, perr, tg.pane, tg.since) {
+		switch lifecyclePaneStateOf(panes, perr, tg.pane, tg.socket, tg.since) {
 		case lifecyclePaneOurs:
 			plan.kill = append(plan.kill, tg)
 		case lifecyclePaneUnknown:
-			unknown = append(unknown, pauseUnknown(tg, perr))
+			unknown = append(unknown, pauseUnknown(tg, panes, perr))
 		}
 	}
 	if len(unknown) > 0 && !force {
@@ -231,22 +234,27 @@ func pauseTargets(t model.Task, live []model.Session) []lifecycleTarget {
 			out = append(out, tg)
 		}
 	}
+	socket := "" // the task's window is on the server its sessions were recorded on
 	for _, s := range live {
-		add(lifecycleTarget{pane: s.Pane, since: s.StartedAt, what: "session " + spawnShortID(s.ID)})
+		add(lifecycleTarget{pane: s.Pane, socket: s.Socket, since: s.StartedAt, what: "session " + spawnShortID(s.ID)})
+		socket = cmp.Or(socket, s.Socket)
 	}
 	if t.Pane != "" {
-		add(lifecycleTarget{pane: t.Pane, since: t.LaunchedAt, what: t.ID + "'s window"})
+		add(lifecycleTarget{pane: t.Pane, socket: socket, since: t.LaunchedAt, what: t.ID + "'s window"})
 	}
 	return out
 }
 
 // pauseUnknown says why target's agent cannot be stopped.
-func pauseUnknown(tg lifecycleTarget, perr error) string {
+func pauseUnknown(tg lifecycleTarget, panes []tmux.Pane, perr error) string {
 	switch {
 	case tg.pane == "":
 		return tg.what + ", which runs outside tmux"
 	case perr != nil:
 		return tg.what + " in pane " + sanitize.Line(tg.pane, 20) + " (tmux cannot list its panes: " + sanitize.Line(perr.Error(), 200) + ")"
+	case lifecycleOtherServer(panes, tg.socket):
+		return tg.what + " in pane " + sanitize.Line(tg.pane, 20) + " of another tmux server (" +
+			sanitize.Line(filepath.Base(tg.socket), 60) + "): run curia pause from that server"
 	}
 	return tg.what + ": pane " + sanitize.Line(tg.pane, 20) + " is open but nothing shows it is still the agent's"
 }
@@ -263,7 +271,7 @@ func pauseStop(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.
 			return pauseStopError(t, closed, fmt.Errorf("list tmux panes: %w", err))
 		}
 		i := slices.IndexFunc(panes, func(p tmux.Pane) bool { return p.ID == tg.pane })
-		if lifecyclePaneStateOf(panes, nil, tg.pane, tg.since) != lifecyclePaneOurs {
+		if lifecyclePaneStateOf(panes, nil, tg.pane, tg.socket, tg.since) != lifecyclePaneOurs {
 			_, _ = fmt.Fprintf(out, "Pane %s of %s is already gone\n", sanitize.Line(tg.pane, 20), tg.what)
 			continue
 		}
@@ -334,7 +342,7 @@ func pauseCheckStopped(ctx context.Context, st *store.Store, tm tmux.Client, t m
 	}
 	panes, perr := lifecycleListPanes(ctx, tm)
 	for _, s := range live {
-		if lifecyclePaneStateOf(panes, perr, s.Pane, s.StartedAt) == lifecyclePaneOurs {
+		if lifecyclePaneStateOf(panes, perr, s.Pane, s.Socket, s.StartedAt) == lifecyclePaneOurs {
 			return pauseStopError(t, closed, fmt.Errorf("session %s of %s is running in %s", spawnShortID(s.ID), t.ID,
 				spawnWhere(panes, s.Pane)))
 		}
@@ -466,12 +474,13 @@ var lifecyclePaneID = regexp.MustCompile(`^%[0-9]+$`)
 // lifecycleIgnoredShown is how many ignored entries a message names.
 const lifecycleIgnoredShown = 5
 
-// lifecycleTarget is a pane to close: its id, the time the agent in it is
-// known to have been there since, and whose it is.
+// lifecycleTarget is a pane to close: its id, the socket of the tmux server
+// it was recorded on ("" when unknown), the time the agent in it is known to
+// have been there since, and whose it is.
 type lifecycleTarget struct {
-	pane  string
-	since time.Time
-	what  string
+	pane, socket string
+	since        time.Time
+	what         string
 }
 
 // lifecyclePaneState is what tmux shows of a pane an agent was in.
@@ -483,17 +492,20 @@ const (
 	lifecyclePaneUnknown                           // listed (or tmux cannot list), and nothing proves it is the agent's
 )
 
-// lifecyclePaneStateOf places pane, where an agent has been since since. tmux
-// never reuses a pane id within one server, and a restarted server starts
-// from %0 again, so a pane listed by a server that started no later than
-// since is the agent's; one listed by a server started after since is
-// another pane. With no since, a listed pane is unknown.
-func lifecyclePaneStateOf(panes []tmux.Pane, perr error, pane string, since time.Time) lifecyclePaneState {
+// lifecyclePaneStateOf places pane, recorded on the tmux server at socket ("" when unknown), where an agent
+// has been since since. tmux never reuses a pane id within one server, and a restarted server starts from %0
+// again, so a pane listed by a server that started no later than since is the agent's; one listed by a server
+// started after since is another pane. With no since, a listed pane is unknown; and a pane recorded on another
+// server than the listed one (fleet.OtherSocket) is never "ours": the id names another pane here, while the
+// agent's may still be open there, so it is unknown.
+func lifecyclePaneStateOf(panes []tmux.Pane, perr error, pane, socket string, since time.Time) lifecyclePaneState {
 	if pane == "" || perr != nil {
 		return lifecyclePaneUnknown
 	}
 	i := slices.IndexFunc(panes, func(p tmux.Pane) bool { return p.ID == pane })
 	switch {
+	case lifecycleOtherServer(panes, socket):
+		return lifecyclePaneUnknown
 	case i < 0:
 		return lifecyclePaneGone
 	case since.IsZero() || !lifecyclePaneID.MatchString(panes[i].ID):
@@ -502,6 +514,12 @@ func lifecyclePaneStateOf(panes []tmux.Pane, perr error, pane string, since time
 		return lifecyclePaneGone
 	}
 	return lifecyclePaneOurs
+}
+
+// lifecycleOtherServer reports whether socket is known and is not the
+// socket of the server that listed panes (fleet.OtherSocket).
+func lifecycleOtherServer(panes []tmux.Pane, socket string) bool {
+	return fleet.OtherSocket(fleet.Socket(panes), model.Session{Socket: socket})
 }
 
 // lifecycleListPanes lists tmux's panes within subprocessTimeout.
@@ -590,7 +608,7 @@ func lifecycleLaunching(t model.Task, linked []model.Session, panes []tmux.Pane,
 	if slices.ContainsFunc(linked, func(s model.Session) bool { return !s.StartedAt.Before(t.LaunchedAt) }) {
 		return nil
 	}
-	if lifecyclePaneStateOf(panes, perr, t.Pane, t.LaunchedAt) == lifecyclePaneOurs {
+	if lifecyclePaneStateOf(panes, perr, t.Pane, "", t.LaunchedAt) == lifecyclePaneOurs {
 		return nil
 	}
 	return fmt.Errorf("a spawn of %s started at %s may still be under way (no agent has reported and no window of it is open). "+

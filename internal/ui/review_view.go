@@ -316,12 +316,14 @@ func diffLines(d ReviewDetail, w int) []bodyLine {
 }
 
 // decidedLines are "D-4 answered: <question> → <answer>", one per decided
-// ticket of the task.
+// ticket of the task, under a heading that says they are the decided ones,
+// so that "none" under an open assumption above it does not read as a
+// contradiction (live check defect 8).
 func decidedLines(ds []model.Decision, w int) []bodyLine {
 	if len(ds) == 0 {
-		return []bodyLine{{text: "Decisions on this task: none", kind: lineHead}, {}}
+		return []bodyLine{{text: "Decided tickets on this task: none", kind: lineHead}, {}}
 	}
-	out := []bodyLine{{text: "Decisions on this task:", kind: lineHead}}
+	out := []bodyLine{{text: "Decided tickets on this task:", kind: lineHead}}
 	for _, d := range ds {
 		word := sanitize.Line(string(d.Status), maxWordCells)
 		if word == "" {

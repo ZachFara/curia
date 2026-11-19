@@ -1,0 +1,5 @@
+argc 2
+arg --resume
+arg 00000001-0000-4000-8000-000000000001
+cwd <worktree>
+task T-1

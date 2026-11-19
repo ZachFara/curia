@@ -1,0 +1,40 @@
+[
+  {
+    "id": "R-1",
+    "task_id": "T-1",
+    "session_id": "00000001-0000-4000-8000-000000000001",
+    "summary": "Rotated the refresh token on every use and added a test for the expired case.\nTested with go test ./auth/..., which passes.\nLeft open: tokens issued before the fix are not revoked.",
+    "tests_status": "passed",
+    "tests_detail": "go test ./auth/... (12 tests)",
+    "status": "changes_requested",
+    "approved_how": "",
+    "diff_stat": "",
+    "head": "",
+    "pr_url": "",
+    "my_notes": "handle the empty list",
+    "note_message": "M-1",
+    "closed_via": "cli",
+    "created_at": "<time>",
+    "updated_at": "<time>",
+    "closed_at": "<time>"
+  },
+  {
+    "id": "R-2",
+    "task_id": "T-1",
+    "session_id": "00000001-0000-4000-8000-000000000001",
+    "summary": "Handled the empty token list as the review asked.",
+    "tests_status": "passed",
+    "tests_detail": "",
+    "status": "merged",
+    "approved_how": "merge",
+    "diff_stat": " auth/refresh.go      | 3 +++\n auth/refresh_test.go | 3 +++\n 2 files changed, 6 insertions(+)",
+    "head": "<commit>",
+    "pr_url": "",
+    "my_notes": "",
+    "note_message": "",
+    "closed_via": "popup",
+    "created_at": "<time>",
+    "updated_at": "<time>",
+    "closed_at": "<time>"
+  }
+]
