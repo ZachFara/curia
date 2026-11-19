@@ -2778,3 +2778,172 @@ func TestSessionStartLeavesOtherServersSession(t *testing.T) {
 		t.Errorf("B = %s after C started on another server, want idle", sb.State)
 	}
 }
+
+// Codex sessions (plan section 4.10): the same hook, with the agent named
+// on the command line.
+
+// codexEnv is f's env in pane %3 with the agent codex.
+func codexEnv(f *fakeEnv) hook.Env {
+	env := f.env("%3")
+	env.Agent = model.AgentCodex
+	return env
+}
+
+// codexFixtures are the hand-built Codex payloads under testdata/codex:
+// Claude Code's fields with a Codex-style transcript path. Probe X1, which
+// would capture real ones, has not run.
+var codexFixtures = struct{ start, tool, stop string }{
+	"codex/built-session-start", "codex/built-pre-tool-use", "codex/built-stop",
+}
+
+func TestCodexSessionIsRecorded(t *testing.T) {
+	st := openStore(t)
+	f := &fakeEnv{socket: "/tmp/tmux-1/default"}
+	env := codexEnv(f)
+	const id = "0199f3a2-7c41-7d10-9b2e-5a8c3e1f4d67"
+	const tr = "/Users/dev/.codex/sessions/2026/11/19/rollout-2026-11-19T09-00-00-0199f3a2-7c41-7d10-9b2e-5a8c3e1f4d67.jsonl"
+
+	run(t, st, env, model.SessionStart, fixtureFile(t, codexFixtures.start))
+	want := model.Session{
+		ID: id, Agent: model.AgentCodex, Pane: "%3", TmuxSession: "work", TmuxWindow: "@7",
+		Socket: "/tmp/tmux-1/default", Cwd: "/repo", Repo: "/src/curia", Branch: "feat/hook",
+		TranscriptPath: tr, State: model.StateIdle, StartedAt: t0, UpdatedAt: t0, SeenAt: t0,
+	}
+	if got := get(t, st, id); got != want {
+		t.Errorf("after SessionStart:\n %+v\nwant\n %+v", got, want)
+	}
+
+	run(t, st, env, model.PreToolUse, fixtureFile(t, codexFixtures.tool))
+	want.State, want.LastUpdate = model.StateWorking, "Bash go test ./..."
+	if got := get(t, st, id); got != want {
+		t.Errorf("after PreToolUse:\n %+v\nwant\n %+v", got, want)
+	}
+
+	res, err := hook.Run(context.Background(), model.Stop, fixtureFile(t, codexFixtures.stop), env, st, config.Default())
+	if err != nil {
+		t.Fatalf("Run(Stop): %v", err)
+	}
+	want.State, want.LastUpdate = model.StateIdle, "All tests pass."
+	if got := get(t, st, id); got != want || res.Session != want {
+		t.Errorf("after Stop: stored\n %+v\nreturned\n %+v\nwant\n %+v", got, res.Session, want)
+	}
+	if res.Stdout != nil {
+		t.Errorf("Stop Stdout = %q, want nil", res.Stdout)
+	}
+	if len(f.gitCalls) != 1 || len(f.paneCalls) != 1 {
+		t.Errorf("Git called %d times, PaneInfo %d times, want once each", len(f.gitCalls), len(f.paneCalls))
+	}
+}
+
+// A Codex session's transcript is not read, even when its path names a
+// file of Claude Code transcript lines: no model, no context, offset 0.
+func TestCodexTranscriptNotRead(t *testing.T) {
+	st := openStore(t)
+	tr := writeTranscript(t)
+	env := codexEnv(&fakeEnv{})
+	for _, kind := range []model.EventKind{
+		model.SessionStart, model.UserPromptSubmit, model.PreToolUse, model.PostToolUse,
+		model.Notification, model.Stop,
+	} {
+		got := run(t, st, env, kind, payload("A", tr, `,"tool_name":"Edit","message":"Needs approval"`))
+		if got.Model != "" || got.ContextUsed != 0 || got.ContextMax != 0 || got.TranscriptOffset != 0 {
+			t.Errorf("after %s: model %q, context %d/%d, offset %d; want none read",
+				kind, got.Model, got.ContextUsed, got.ContextMax, got.TranscriptOffset)
+		}
+	}
+	// The Stop's message is not the transcript's last text either.
+	if got := get(t, st, "A"); got.LastUpdate == "Fixed the login bug." || got.State != model.StateIdle {
+		t.Errorf("after Stop: %+v, want idle without the transcript's text", got)
+	}
+}
+
+// codexQueued returns a store holding session A, working in pane %3 and
+// started by env, with an answer and a message queued for it.
+func codexQueued(t *testing.T, env hook.Env) (*store.Store, model.Decision, model.Message) {
+	t.Helper()
+	st := openStore(t)
+	run(t, st, env, model.SessionStart, payload("A", "", ""))
+	run(t, st, env, model.UserPromptSubmit, payload("A", "", ""))
+	d := queue(t, st, "A", "Which store for events?", "we already run it")
+	m := say(t, st, "A", "use pnpm, not npm", model.SenderUser)
+	return st, d, m
+}
+
+func TestCodexStopClaimsNothing(t *testing.T) {
+	st, d, m := codexQueued(t, codexEnv(&fakeEnv{}))
+	res := stopRun(t, st, codexEnv(&fakeEnv{}), "A", `,"last_assistant_message":"Done."`)
+	if res.Stdout != nil || res.Claimed != nil || res.ClaimedMessages != nil {
+		t.Errorf("Stdout %q, claimed %q and %q; want nothing", res.Stdout, res.Claimed, res.ClaimedMessages)
+	}
+	wantState(t, st, res, model.StateIdle)
+	if res.Session.LastUpdate != "Done." {
+		t.Errorf("LastUpdate = %q, want the payload's message", res.Session.LastUpdate)
+	}
+	wantQueued(t, st, d.ID)
+	wantMessage(t, st, m.ID, model.MsgQueued, "")
+	// A second Stop claims nothing either.
+	if res = stopRun(t, st, codexEnv(&fakeEnv{}), "A", ""); res.Stdout != nil {
+		t.Errorf("second Stop Stdout = %q, want nil", res.Stdout)
+	}
+	wantQueued(t, st, d.ID)
+	wantMessage(t, st, m.ID, model.MsgQueued, "")
+}
+
+func TestCodexStopWithOpenBlockingTicket(t *testing.T) {
+	env := codexEnv(&fakeEnv{})
+	st, d, m := codexQueued(t, env)
+	raise(t, st, "A", "Which queue for jobs?", model.ModeBlocking)
+	res := stopRun(t, st, env, "A", "")
+	if res.Stdout != nil || res.Claimed != nil || res.ClaimedMessages != nil {
+		t.Errorf("Stdout %q, claimed %q and %q; want nothing", res.Stdout, res.Claimed, res.ClaimedMessages)
+	}
+	wantState(t, st, res, model.StateNeedsDecision)
+	wantQueued(t, st, d.ID)
+	wantMessage(t, st, m.ID, model.MsgQueued, "")
+}
+
+// The same queue for a Claude Code session (Env.Agent empty) is handed over
+// with the block line, as before Codex.
+func TestClaudeStopUnchanged(t *testing.T) {
+	env := (&fakeEnv{}).env("%3")
+	st, d, m := codexQueued(t, env)
+	res := stopRun(t, st, env, "A", "")
+	want := `{"decision":"block","reason":"Curia: decisions answered while you were working.\nDecision D-1 answered: option A [Postgres table]. Reasoning: we already run it. Continue.\nCuria: messages for you.\nMessage M-1 from the user: use pnpm, not npm."}` + "\n"
+	if string(res.Stdout) != want {
+		t.Errorf("Stdout =\n %q\nwant\n %q", res.Stdout, want)
+	}
+	if !slices.Equal(res.Claimed, []string{d.ID}) || !slices.Equal(res.ClaimedMessages, []string{m.ID}) {
+		t.Errorf("claimed %q and %q, want %s and %s", res.Claimed, res.ClaimedMessages, d.ID, m.ID)
+	}
+	wantState(t, st, res, model.StateWorking)
+	if res.Session.Agent != model.AgentClaude {
+		t.Errorf("agent = %q, want claude", res.Session.Agent)
+	}
+	wantDelivered(t, st, d.ID)
+	wantStopDelivered(t, st, m.ID, t0)
+}
+
+// The agent flag adds no git or tmux call: SessionStart asks each once, as
+// for Claude Code, and the next five events ask nothing.
+func TestCodexHookAddsNoCall(t *testing.T) {
+	for _, agent := range []string{model.AgentCodex, ""} {
+		st := openStore(t)
+		f := &fakeEnv{}
+		env := f.env("%3")
+		env.Agent = agent
+		run(t, st, env, model.SessionStart, payload("A", "", ""))
+		if len(f.gitCalls) != 1 || len(f.paneCalls) != 1 {
+			t.Errorf("agent %q: SessionStart made %d Git and %d PaneInfo calls, want one each",
+				agent, len(f.gitCalls), len(f.paneCalls))
+		}
+		for _, kind := range []model.EventKind{
+			model.UserPromptSubmit, model.PreToolUse, model.PostToolUse, model.Notification, model.Stop,
+		} {
+			run(t, st, env, kind, payload("A", "", `,"tool_name":"Edit"`))
+		}
+		if len(f.gitCalls) != 1 || len(f.paneCalls) != 1 {
+			t.Errorf("agent %q: after five more events %d Git and %d PaneInfo calls, want still one each",
+				agent, len(f.gitCalls), len(f.paneCalls))
+		}
+	}
+}
