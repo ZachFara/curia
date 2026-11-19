@@ -48,6 +48,19 @@ type fakeSource struct {
 	budget     Budget // the zero value unless a test sets one
 	budgetErr  error
 	budgetRead int // calls of Budget
+
+	pause  func(id string) (string, error) // nil: a call of Pause fails the test
+	paused []string                        // the ids Pause was called with
+}
+
+// Pause records the call and answers with f.pause. A test that sets no
+// pause allows none: the call panics, which fails the test.
+func (f *fakeSource) Pause(_ context.Context, id string) (string, error) {
+	if f.pause == nil {
+		panic("Pause(" + id + ") called on a source whose test allows no pause")
+	}
+	f.paused = append(f.paused, id)
+	return f.pause(id)
 }
 
 func (f *fakeSource) Budget(context.Context) (Budget, error) {
@@ -3015,6 +3028,439 @@ func TestFitKeepsGraphemeWidths(t *testing.T) {
 			}
 			if got := lipgloss.Width(truncate(s, w)); got > w {
 				t.Errorf("truncate(%q, %d) = %q, %d cells", s, w, truncate(s, w), got)
+			}
+		}
+	}
+}
+
+// pauseBudget is a Budget under a limit forecast that suggests pausing T-7.
+func pauseBudget() Budget {
+	return Budget{
+		Status: "5h 62% → limit ~48m (resets 1h50m)", Burn: map[string]float64{"s1": 0.5, "s2": 3},
+		PauseTask: "T-7", PauseLabel: "T-7 (P3) api-server", PauseTitle: "Fix the auth refresh", PauseLimit: "limit ~48m",
+	}
+}
+
+// The notice line and the prompt of section 4.5 for pauseBudget.
+const (
+	pauseNoticeText = "limit ~48m before reset: P pauses T-7 (P3) api-server"
+	pausePromptText = `pause T-7 "Fix the auth refresh"? it commits work in progress and closes its pane  y/N`
+	pauseLineText   = "Paused T-7: curia resume T-7 brings it back"
+)
+
+// newPauseTest returns the popup over costSessions and budget, with pausing
+// enabled unless setup says otherwise (nil: WithPause), 120 x 20, on clk,
+// after its first refresh, and its source, whose Pause answers pauseLineText.
+func newPauseTest(t *testing.T, clk *sayClock, mode Mode, budget Budget, setup func(Model) Model) (*dashPump, *fakeSource) {
+	t.Helper()
+	src := &fakeSource{sessions: costSessions(), budget: budget}
+	src.pause = func(string) (string, error) { return pauseLineText, nil }
+	m := New(src, &tmux.Fake{}, config.Default(), clk.now, mode)
+	if setup == nil {
+		setup = Model.WithPause
+	}
+	m = setup(m)
+	tm := refresh(t, m)
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	return &dashPump{t: t, m: tm}, src
+}
+
+// pauseOpen presses P and lets the dwell pass.
+func pauseOpen(p *dashPump, clk *sayClock) {
+	p.t.Helper()
+	p.key(key("P"))
+	if s := statusLine(p.m); s != pausePromptText {
+		p.t.Fatalf("after P status line = %q, want the prompt %q", s, pausePromptText)
+	}
+	clk.advance(300 * time.Millisecond)
+}
+
+func TestPauseNoticeShown(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	lines := strings.Split(p.m.View(), "\n")
+	if len(lines) != 20 || lines[len(lines)-2] != pauseNoticeText {
+		t.Errorf("the line above the status line = %q, want %q:\n%s", lines[len(lines)-2], pauseNoticeText, p.m.View())
+	}
+	if s := lines[len(lines)-1]; !strings.HasPrefix(s, "5h 62% → limit ~48m (resets 1h50m)") {
+		t.Errorf("status line = %q, want the forecast warning still", s)
+	}
+	// The table keeps its alignment above the notice.
+	if _, rows, _ := costTable(t, p.m); len(rows) != 3 {
+		t.Errorf("rows = %q, want the three sessions", rows)
+	}
+	// Without a suggestion there is no such line, and the table gets it back.
+	p2, _ := newPauseTest(t, clk, ModePopup, Budget{Status: "5h 62% → limit ~48m (resets 1h50m)"}, nil)
+	if v := p2.m.View(); strings.Contains(v, "P pauses") || len(strings.Split(v, "\n")) != 20 {
+		t.Errorf("without a suggestion the view shows a pause notice or the wrong height:\n%s", v)
+	}
+	// A refresh that removes the suggestion removes the line.
+	src.budget = Budget{}
+	p.m = refresh(t, p.m)
+	if v := p.m.View(); strings.Contains(v, "P pauses") {
+		t.Errorf("after the suggestion went the notice stays:\n%s", v)
+	}
+}
+
+func TestPauseNeedsKeyThenConfirm(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	if len(src.paused) != 0 {
+		t.Fatalf("P alone paused %q", src.paused)
+	}
+	p.key(key("y"))
+	if !slices.Equal(src.paused, []string{"T-7"}) {
+		t.Fatalf("Pause calls = %q, want [T-7]", src.paused)
+	}
+	if s := statusLine(p.m); s != pauseLineText {
+		t.Errorf("status line = %q, want the pause's line %q", s, pauseLineText)
+	}
+	// The prompt is closed: another y does nothing.
+	clk.advance(time.Second)
+	p.key(key("y"))
+	if len(src.paused) != 1 {
+		t.Errorf("a second y paused again: %q", src.paused)
+	}
+}
+
+func TestPauseAnyOtherKeyCancels(t *testing.T) {
+	for _, k := range []string{"n", "esc", "enter", "P", "x", "j"} {
+		clk := &sayClock{t: testNow}
+		p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+		pauseOpen(p, clk)
+		cmd := p.step(key(k))
+		if isQuit(cmd) {
+			t.Errorf("%s in the prompt quit the dashboard", k)
+		}
+		p.run(cmd)
+		if s := statusLine(p.m); s != "pause canceled" {
+			t.Errorf("%s in the prompt: status line = %q, want pause canceled", k, s)
+		}
+		clk.advance(time.Second)
+		p.key(key("y"))
+		if len(src.paused) != 0 {
+			t.Errorf("%s then y paused %q", k, src.paused)
+		}
+	}
+	// A click cancels too, and jumps nowhere.
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	var cmd tea.Cmd
+	p.m, cmd = p.m.Update(tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionPress, Y: 1})
+	if isQuit(cmd) || statusLine(p.m) != "pause canceled" {
+		t.Errorf("a click in the prompt: quit %v, status %q", isQuit(cmd), statusLine(p.m))
+	}
+	clk.advance(time.Second)
+	p.key(key("y"))
+	if len(src.paused) != 0 {
+		t.Errorf("a click then y paused %q", src.paused)
+	}
+}
+
+func TestPauseConfirmHonorsDwell(t *testing.T) {
+	// P and y in one read: the prompt opens and the y is dropped.
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	p.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Py")})
+	if s := statusLine(p.m); s != pausePromptText || len(src.paused) != 0 {
+		t.Errorf("Py in one read: status %q, calls %q, want the prompt and no call", s, src.paused)
+	}
+	// The rest of a read after the P is dropped: the user has not seen the
+	// prompt yet, so a j behind it does not cancel it either.
+	p2, _ := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	p2.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Pj")})
+	if s := statusLine(p2.m); s != pausePromptText {
+		t.Errorf("Pj in one read: status %q, want the prompt", s)
+	}
+	// A y in a read of several runes into the open prompt never confirms.
+	clk.advance(time.Second)
+	p.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("yy")})
+	if len(src.paused) != 0 || statusLine(p.m) != "pause canceled" {
+		t.Errorf("yy in one read: calls %q, status %q", src.paused, statusLine(p.m))
+	}
+	// y 100 ms after P: too soon; the wait restarts as the quiet period, so
+	// a held y's repeats never confirm.
+	p.key(key("P"))
+	for range 3 {
+		clk.advance(100 * time.Millisecond)
+		p.key(key("y"))
+		if s := statusLine(p.m); s != pausePromptText || len(src.paused) != 0 {
+			t.Fatalf("y 100 ms after the last key: status %q, calls %q, want the prompt still open", s, src.paused)
+		}
+	}
+	clk.advance(500 * time.Millisecond) // within the quiet period of the last y
+	if p.key(key("y")); len(src.paused) != 0 {
+		t.Fatalf("y 500 ms after a y too soon paused %q", src.paused)
+	}
+	clk.advance(quietPeriod)
+	if p.key(key("y")); !slices.Equal(src.paused, []string{"T-7"}) {
+		t.Errorf("y after the quiet period: calls %q, want [T-7]", src.paused)
+	}
+}
+
+func TestPausePasteDoesNotConfirm(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	p.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Py"), Paste: true})
+	if s := statusLine(p.m); strings.Contains(s, "pause T-7") || len(src.paused) != 0 {
+		t.Errorf("a pasted Py: status %q, calls %q, want nothing", s, src.paused)
+	}
+	pauseOpen(p, clk)
+	p.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y"), Paste: true})
+	if s := statusLine(p.m); s != "pause canceled" || len(src.paused) != 0 {
+		t.Errorf("a pasted y: status %q, calls %q", s, src.paused)
+	}
+	clk.advance(time.Second)
+	p.key(key("y"))
+	if len(src.paused) != 0 {
+		t.Errorf("a y after the canceled prompt paused %q", src.paused)
+	}
+}
+
+// The burst rule (inBurst): a y followed within burstGap by another key, as
+// an unbracketed paste of "y" and a line break arrives, is refused and the
+// prompt stays open, its wait restarted; the confirmation it waited for
+// does nothing.
+func TestPauseConfirmInBurstRefused(t *testing.T) {
+	for _, next := range []string{"enter", "y", "a"} {
+		clk := &sayClock{t: testNow}
+		p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+		pauseOpen(p, clk)
+		wait := p.step(key("y"))
+		if wait == nil {
+			t.Fatal("y after the dwell started no wait")
+		}
+		clk.advance(10 * time.Millisecond)
+		p.key(key(next))
+		p.run(wait)
+		if len(src.paused) != 0 || statusLine(p.m) != pausePromptText {
+			t.Errorf("y then %s 10 ms later: calls %q, status %q", next, src.paused, statusLine(p.m))
+		}
+		clk.advance(10 * time.Millisecond)
+		if p.key(key("y")); len(src.paused) != 0 {
+			t.Errorf("y then %s then y: calls %q", next, src.paused)
+		}
+		clk.advance(time.Second)
+		if p.key(key("y")); !slices.Equal(src.paused, []string{"T-7"}) {
+			t.Errorf("after %s: a y on its own, later, calls %q, want [T-7]", next, src.paused)
+		}
+	}
+	// A key that comes after burstGap, while the wait's message is late,
+	// does not stop the pause, which runs once.
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	wait := p.step(key("y"))
+	clk.advance(time.Second)
+	p.key(key("j"))
+	p.run(wait)
+	if !slices.Equal(src.paused, []string{"T-7"}) {
+		t.Errorf("a late key: calls %q, want [T-7] once", src.paused)
+	}
+}
+
+func TestPausePromptCanceledWhenSuggestionChanges(t *testing.T) {
+	t9 := pauseBudget()
+	t9.PauseTask, t9.PauseLabel, t9.PauseTitle = "T-9", "T-9 (P3) web", "Speed up the build"
+	none := pauseBudget()
+	none.PauseTask, none.PauseLabel, none.PauseTitle, none.PauseLimit = "", "", "", ""
+	retitled := pauseBudget()
+	retitled.PauseTitle = "Drop the auth tables"
+	for _, c := range []struct {
+		name string
+		next Budget
+		want string
+	}{
+		{"another task", t9, "the suggestion changed: now T-9 (P3) web"},
+		{"none", none, "the suggestion changed: nothing to pause now"},
+		{"retitled", retitled, "the suggestion changed: now T-7 (P3) api-server"},
+	} {
+		clk := &sayClock{t: testNow}
+		p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+		pauseOpen(p, clk)
+		src.budget = c.next
+		p.m = refresh(t, p.m)
+		if s := statusLine(p.m); s != c.want {
+			t.Errorf("%s: status line = %q, want %q", c.name, s, c.want)
+		}
+		clk.advance(time.Second)
+		p.key(key("y"))
+		if len(src.paused) != 0 {
+			t.Errorf("%s: y after the change paused %q", c.name, src.paused)
+		}
+	}
+	// A y taken before the change waits out burstGap: the change still
+	// cancels it.
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	wait := p.step(key("y"))
+	src.budget = t9
+	p.m = refresh(t, p.m)
+	p.run(wait)
+	if len(src.paused) != 0 || !strings.HasPrefix(statusLine(p.m), "the suggestion changed") {
+		t.Errorf("a change while y waits: calls %q, status %q", src.paused, statusLine(p.m))
+	}
+	// The same suggestion with a later limit (a minute passed) keeps the
+	// prompt open.
+	clk = &sayClock{t: testNow}
+	p, src = newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	src.budget.PauseLimit, src.budget.Status = "limit ~47m", "5h 63% → limit ~47m (resets 1h49m)"
+	p.m = refresh(t, p.m)
+	if s := statusLine(p.m); s != pausePromptText {
+		t.Errorf("a new limit for the same task: status %q, want the prompt", s)
+	}
+	if p.key(key("y")); !slices.Equal(src.paused, []string{"T-7"}) {
+		t.Errorf("y: calls %q, want [T-7]", src.paused)
+	}
+}
+
+func TestPauseWithoutSuggestion(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, _ := newPauseTest(t, clk, ModePopup, Budget{Status: "next 2h ≈ $9.00 at the current rate"}, nil)
+	p.key(key("P"))
+	if s := statusLine(p.m); s != "nothing to pause: no limit forecast" {
+		t.Errorf("status line = %q", s)
+	}
+	clk.advance(time.Second)
+	p.key(key("y")) // no prompt: nothing to confirm (the source allows no pause)
+}
+
+func TestPauseDisabledInSidebarAndWithoutWithPause(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		mode  Mode
+		setup func(Model) Model
+		want  string
+	}{
+		{"popup without WithPause", ModePopup, func(m Model) Model { return m }, "pausing is not available here"},
+		{
+			"popup read-only", ModePopup, func(m Model) Model {
+				return m.WithoutPause("curia ui cannot run inside an agent session (CLAUDECODE is set)")
+			},
+			"curia ui cannot run inside an agent session (CLAUDECODE is set)",
+		},
+		{"WithoutPause after WithPause", ModePopup, func(m Model) Model { return m.WithPause().WithoutPause("no terminal") }, "no terminal"},
+		{"sidebar", ModeSidebar, Model.WithPause, "pausing is not available here"},
+	} {
+		clk := &sayClock{t: testNow}
+		p, src := newPauseTest(t, clk, c.mode, pauseBudget(), c.setup)
+		src.pause = nil // any call fails the test
+		if v := p.m.View(); strings.Contains(v, "P pauses") {
+			t.Errorf("%s: the view offers P:\n%s", c.name, v)
+		}
+		p.key(key("P"))
+		if s := statusLine(p.m); s != c.want {
+			t.Errorf("%s: status line = %q, want %q", c.name, s, c.want)
+		}
+		clk.advance(time.Second)
+		p.key(key("y"))
+	}
+}
+
+func TestPauseErrorShown(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	fail := true
+	src.pause = func(string) (string, error) {
+		if fail {
+			return "", errors.New("T-7 not paused: the WIP commit failed: \x1b[31mhook said no\x1b[0m\nsecond line")
+		}
+		return pauseLineText, nil
+	}
+	before := strings.Split(p.m.View(), "\n")
+	pauseOpen(p, clk)
+	p.key(key("y"))
+	view := p.m.View()
+	wantClean(t, view)
+	if s := statusLine(p.m); s != "T-7 not paused: the WIP commit failed: ?[31mhook said no?[0m?second line" {
+		t.Errorf("status line = %q, want the error cleaned", s)
+	}
+	after := strings.Split(view, "\n")
+	if !slices.Equal(before[:len(before)-1], after[:len(after)-1]) {
+		t.Errorf("a failed pause changed the view:\n%s\nwas:\n%s", view, strings.Join(before, "\n"))
+	}
+	fail = false
+	clk.advance(time.Second)
+	pauseOpen(p, clk)
+	p.key(key("y"))
+	if !slices.Equal(src.paused, []string{"T-7", "T-7"}) || statusLine(p.m) != pauseLineText {
+		t.Errorf("a second P: calls %q, status %q", src.paused, statusLine(p.m))
+	}
+}
+
+func TestPauseNeverCalledWithoutKeys(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	for range 100 {
+		clk.advance(time.Second)
+		p.m = refresh(t, p.m)
+	}
+	if len(src.paused) != 0 || src.budgetRead < 100 {
+		t.Errorf("after 100 refreshes: calls %q, budget reads %d", src.paused, src.budgetRead)
+	}
+}
+
+// While a pause runs, every key but Ctrl+C is refused, so its result is
+// seen and a second pause cannot start; the result arrives even then.
+func TestPauseInFlightRefusesKeys(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	wait := p.step(key("y"))
+	var call tea.Cmd
+	p.m, call = p.m.Update(wait())
+	if call == nil {
+		t.Fatal("the confirmation started no pause")
+	}
+	for _, k := range []string{"P", "y", "q", "esc", "t", "enter"} {
+		clk.advance(time.Second)
+		cmd := p.step(key(k))
+		if isQuit(cmd) || statusLine(p.m) != "a pause is running; wait for its result" {
+			t.Errorf("%s while pausing: quit %v, status %q", k, isQuit(cmd), statusLine(p.m))
+		}
+	}
+	if !isQuit(p.step(tea.KeyMsg{Type: tea.KeyCtrlC})) {
+		t.Error("ctrl+c while pausing does not quit")
+	}
+	p.run(call)
+	if !slices.Equal(src.paused, []string{"T-7"}) || statusLine(p.m) != pauseLineText {
+		t.Errorf("after the pause: calls %q, status %q", src.paused, statusLine(p.m))
+	}
+}
+
+// The notice line and the prompt fit every width, with wide and hostile
+// text, and the table above them keeps its alignment and the height.
+func TestPauseNoticeFitsEveryWidth(t *testing.T) {
+	sessions, fake, tasks := costWide()
+	b := pauseBudget()
+	b.PauseLabel, b.PauseTitle = "T-7 (P3) リポジトリ👍🏽-"+hostile, "認証✈️の修正 "+hostile
+	for _, width := range []int{1, 8, 30, 40, 60, 80, 99, 100, 120, 200} {
+		for _, prompt := range []bool{false, true} {
+			clk := &sayClock{t: testNow}
+			src := &fakeSource{sessions: sessions, counts: teamCounts(), tasks: tasks, budget: b}
+			m := refresh(t, New(src, fake, config.Default(), clk.now, ModePopup).WithPause())
+			m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: 12})
+			if prompt {
+				m, _ = press(m, "P")
+			}
+			view := m.View()
+			lines := strings.Split(view, "\n")
+			for _, l := range lines {
+				if w := lipgloss.Width(l); w > width {
+					t.Errorf("width %d prompt %v: line is %d cells: %q", width, prompt, w, l)
+				}
+			}
+			wantClean(t, view)
+			if len(lines) != 12 {
+				t.Errorf("width %d prompt %v: %d lines, want the height 12", width, prompt, len(lines))
+			}
+			costTable(t, m)
+			if s := lines[len(lines)-1]; width >= 80 && prompt && !strings.HasSuffix(s, "y/N") {
+				t.Errorf("width %d: the prompt %q does not end in y/N", width, s)
 			}
 		}
 	}
