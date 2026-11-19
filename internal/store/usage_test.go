@@ -188,8 +188,8 @@ func TestMigrationAddsCostTables(t *testing.T) {
 	if err := ftsIntegrity(db); err != nil {
 		t.Errorf("decisions_fts integrity-check: %v", err)
 	}
-	if n := countMigrations(t, path); n != 7 {
-		t.Errorf("schema_migrations has %d rows, want 7", n)
+	if n := countMigrations(t, path); n != 8 {
+		t.Errorf("schema_migrations has %d rows, want 8", n)
 	}
 }
 
@@ -282,9 +282,9 @@ func TestMigrationOnPlan4Database(t *testing.T) {
 	s := open(t, path)
 	if names := migrationNames(t, db); !reflect.DeepEqual(names, []string{
 		"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql",
-		"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql",
+		"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql",
 	}) {
-		t.Errorf("migrations = %v, want 0001 to 0006 (both 0005 files)", names)
+		t.Errorf("migrations = %v, want 0001 to 0007 (both 0005 files)", names)
 	}
 	var priority int
 	var agent string
@@ -1139,6 +1139,85 @@ func TestUsageSinceOrderAndBound(t *testing.T) {
 	none, err := s.UsageSince(ctx, usageNow.Add(21*time.Minute))
 	if err != nil || len(none) != 0 {
 		t.Errorf("UsageSince(after the last) = %+v, %v; want none", none, err)
+	}
+}
+
+// UsageReadings returns what UsageSince returns, except the session id and
+// the order: the same samples, with the same n, time, window, percentage
+// and reset, so usage.Forecasts computes the same forecast from either.
+func TestUsageReadingsMatchUsageSince(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	now := usageNow.Add(time.Hour)
+	resets := usageNow.Add(3 * time.Hour)
+	for _, r := range []store.Reading{
+		{SessionID: "a", At: usageNow.Add(10 * time.Minute), Limits: []model.UsageSample{{Window: model.WindowFiveHour, UsedPct: 3, ResetsAt: resets}}},
+		{SessionID: "a", At: usageNow, Limits: []model.UsageSample{{Window: model.WindowFiveHour, UsedPct: 1, ResetsAt: resets}}},
+		{SessionID: "b", At: usageNow.Add(5 * time.Minute), Limits: []model.UsageSample{
+			{Window: model.WindowFiveHour, UsedPct: 2}, {Window: model.WindowSevenDay, UsedPct: 50, ResetsAt: usageNow.Add(48 * time.Hour)},
+		}},
+		// A tie on at with b's seven_day reading.
+		{SessionID: "c", At: usageNow.Add(5 * time.Minute), Limits: []model.UsageSample{{Window: model.WindowSevenDay, UsedPct: 49.5}}},
+		{SessionID: "a", At: usageNow.Add(20 * time.Minute), Limits: []model.UsageSample{{Window: model.WindowFiveHour, UsedPct: 4, ResetsAt: resets}}},
+	} {
+		usageIngest(t, s, r, now)
+	}
+	byN := func(u []model.UsageSample) []model.UsageSample {
+		out := slices.Clone(u)
+		for i := range out {
+			out[i].SessionID = ""
+		}
+		slices.SortFunc(out, func(a, b model.UsageSample) int { return int(a.N - b.N) })
+		return out
+	}
+	for _, since := range []time.Time{{}, usageNow.Add(5 * time.Minute), usageNow.Add(21 * time.Minute)} {
+		want, err := s.UsageSince(ctx, since)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.UsageReadings(ctx, since)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, u := range got {
+			if u.SessionID != "" {
+				t.Errorf("UsageReadings(%v) read a session id: %+v", since, u)
+			}
+		}
+		if !reflect.DeepEqual(byN(got), byN(want)) {
+			t.Errorf("UsageReadings(%v) =\n %+v\nwant (UsageSince without session ids)\n %+v", since, byN(got), byN(want))
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UsageReadings(ctx, usageNow); err == nil {
+		t.Error("UsageReadings on a closed store: no error")
+	}
+}
+
+// The badge's read (UsageReadings) is answered from usage_samples_forecast
+// alone: it searches that index and never visits the table rows, on an
+// empty file and on a filled and analyzed one.
+func TestUsageReadingsReadOnlyTheCoveringIndex(t *testing.T) {
+	at := "2026-11-15T12:00:00.000000000Z"
+	for _, c := range []struct {
+		name          string
+		fill, analyze bool
+	}{{"empty", false, false}, {"filled", true, false}, {"filled and analyzed", true, true}} {
+		t.Run(c.name, func(t *testing.T) {
+			path := dbPath(t)
+			open(t, path)
+			db := rawDB(t, path)
+			if c.fill {
+				usageFill(t, db, 15_000, 30, 1_000, 2_000, c.analyze)
+			}
+			plan := queryPlan(t, db, store.UsageReadingsQuery, "five_hour", at)
+			usageAssertPlan(t, "UsageReadings", plan, []string{"COVERING INDEX usage_samples_forecast"})
+			if strings.Contains(plan, "TEMP B-TREE") {
+				t.Errorf("UsageReadings sorts:\n%s", plan)
+			}
+		})
 	}
 }
 

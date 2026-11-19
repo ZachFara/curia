@@ -361,8 +361,9 @@ func CostCell(usd float64, known bool) string {
 // CacheCell renders a session's prompt cache for the dashboard, only for an
 // idle, waiting or needs_decision session (blank otherwise): "12m" while warm
 // (at least "1m"), "cold $1.68" once the expiry has passed and a rebuild cost
-// of at least a cent is known, "cold" when it is not, and blank when the
-// cache state is unknown. At most 12 characters.
+// of at least a cent is known, else "cold 85k tok" when the tokens a rebuild
+// re-writes are known (Ruling P5-R2: never an invented dollar figure), else
+// "cold", and blank when the cache state is unknown. At most 14 characters.
 func CacheCell(s model.Session, now time.Time) string {
 	switch s.State {
 	case model.StateIdle, model.StateWaiting, model.StateNeedsDecision:
@@ -378,6 +379,11 @@ func CacheCell(s model.Session, now time.Time) string {
 	known := !math.IsNaN(s.CacheRebuildUSD) && math.Round(s.CacheRebuildUSD*100) > 0
 	if c := CostCell(s.CacheRebuildUSD, known); c != "" {
 		return "cold " + c
+	}
+	// Above a billion every count reads ">999M tok", so the clamp changes no
+	// text and keeps the conversion exact on a 32-bit int.
+	if t := TokensCell(int(min(s.CacheRecacheTokens, 1<<30)), s.CacheRecacheTokens > 0); t != "" {
+		return "cold " + t
 	}
 	return "cold"
 }

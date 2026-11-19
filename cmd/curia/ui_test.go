@@ -6,7 +6,9 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
+	"github.com/ZachFara/curia/internal/ui"
 )
 
 // dashboardRun is what one fake run of the dashboard program saw: the
@@ -590,6 +593,19 @@ var uiUserActions = []struct {
 	{"review: a then y approves (merges)", uiReviewWorld, []string{"r", "a", "y"}, uiReviewClosed},
 	{"review: c, a note, Enter requests changes", uiReviewWorld, []string{"r", "c", "fix the tests", "enter"}, uiReviewClosed},
 	{"review: x then y drops", uiReviewWorld, []string{"r", "x", "y"}, uiReviewClosed},
+	{"P then y pauses the suggested task", uiPauseWorld, []string{"P", "y"}, func(f *spawnFixture) bool {
+		return !f.get("T-1").PausedAt.IsZero()
+	}},
+}
+
+// uiPauseWorld is lifecycleWithLead (T-1 spawned, its lead idle in pane
+// %100) under a limit forecast (spawnWarning), so the dashboard suggests
+// pausing T-1.
+func uiPauseWorld(t *testing.T) *spawnFixture {
+	t.Helper()
+	f := lifecycleWithLead(t)
+	f.spawnWarning()
+	return f
 }
 
 // uiReviewWorld is reviewWithLead: T-1 spawned with a commit on its branch
@@ -611,8 +627,9 @@ func uiReviewClosed(f *spawnFixture) bool {
 
 // uiRunActions runs curia ui on f and presses keys, two seconds apart (past
 // the board's dwell and quiet periods), and returns the view after each key.
-// With pump, each key's commands are run to the end (reviewPump), as the
-// review view needs; otherwise only the messages they give are fed.
+// With pump, each key's commands are run to the end, waiting for an action
+// in flight (reviewPumpActions), as the review view and a pause need;
+// otherwise only the messages they give are fed.
 func uiRunActions(t *testing.T, f *spawnFixture, keys []string, pump bool) string {
 	t.Helper()
 	var view string
@@ -628,7 +645,7 @@ func uiRunActions(t *testing.T, f *spawnFixture, keys []string, pump bool) strin
 			var cmd tea.Cmd
 			m, cmd = m.Update(msg)
 			if pump {
-				m = reviewPump(t, m, cmd)
+				m = reviewPumpActions(t, m, cmd)
 			} else {
 				m = uiFeed(m, cmd)
 			}
@@ -718,5 +735,272 @@ func TestBoardSourceRefusesForANonUser(t *testing.T) {
 	}
 	if err := b.SetStatus(context.Background(), "T-1", model.TaskReady); err == nil || f.get("T-1").Status != model.TaskBacklog {
 		t.Errorf("SetStatus = %v, T-1 %s: want the refusal and backlog", err, f.get("T-1").Status)
+	}
+}
+
+// uiCost is one ingested reading of TestStoreSourceBudget's world: a
+// session's running cost at a time before fleetNow, and the five-hour
+// window's percentage when pct is not negative.
+type uiCost struct {
+	session string
+	ago     time.Duration
+	usd     float64
+	pct     float64
+}
+
+// uiBudgetSource opens the store of a fleetHome world of
+// dashboardSessions, ingests readings, and returns the dashboard's source.
+func uiBudgetSource(t *testing.T, readings ...uiCost) storeSource {
+	t.Helper()
+	db, fake := fleetHome(t, []string{"%1", "%2"}, dashboardSessions()...)
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	for _, r := range readings {
+		usd := r.usd
+		in := store.Reading{SessionID: r.session, At: fleetNow.Add(-r.ago), CostUSD: &usd}
+		if r.pct >= 0 {
+			in.Limits = []model.UsageSample{{Window: model.WindowFiveHour, UsedPct: r.pct, ResetsAt: fleetNow.Add(110 * time.Minute)}}
+		}
+		if _, err = st.Ingest(context.Background(), in, fleetNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return storeSource{st: st, tm: fake, cfg: config.Default()}
+}
+
+func TestStoreSourceBudget(t *testing.T) {
+	got, err := uiBudgetSource(t).Budget(context.Background())
+	if err != nil || !reflect.DeepEqual(got, ui.Budget{}) {
+		t.Errorf("Budget with no samples = %+v, %v, want the zero Budget", got, err)
+	}
+	// The five-hour window goes from 50% to 62% in 16 minutes (45%/h): the
+	// limit in about 50 minutes, before the reset in 1h50m. working's cost
+	// rises $1 in the window, waiting's $0.50 since its sample before it.
+	src := uiBudgetSource(t,
+		uiCost{"waiting", 25 * time.Minute, 0.5, -1},
+		uiCost{"working", 16 * time.Minute, 1, 50},
+		uiCost{"waiting", 5 * time.Minute, 1, -1},
+		uiCost{"working", 0, 2, 62},
+	)
+	got, err = src.Budget(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ui.Budget{
+		Status: "5h 62% → limit ~50m (resets 1h50m)",
+		Burn:   map[string]float64{"working": 3, "waiting": 1.5},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Budget = %+v, want %+v", got, want)
+	}
+}
+
+func TestStoreSourceBudgetAPIMode(t *testing.T) {
+	// No usage sample: API mode. working's cost rises $1.50 in 15 minutes,
+	// $9.00 over the next two hours; ended's rise is not a live session's.
+	readings := []uiCost{
+		{"working", 15 * time.Minute, 1, -1},
+		{"ended", 15 * time.Minute, 1, -1},
+		{"working", 0, 2.5, -1},
+		{"ended", 0, 6, -1},
+	}
+	got, err := uiBudgetSource(t, readings...).Budget(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "next 2h ≈ $9.00 at the current rate"; got.Status != want {
+		t.Errorf("Status = %q, want %q", got.Status, want)
+	}
+	if want := map[string]float64{"working": 4.5, "ended": 15}; !maps.Equal(got.Burn, want) {
+		t.Errorf("Burn = %v, want %v", got.Burn, want)
+	}
+	// A usage sample in the window is a subscription: no projection, and
+	// with no warning no status at all.
+	readings = append(readings, uiCost{"waiting", time.Minute, 0, 10})
+	got, err = uiBudgetSource(t, readings...).Budget(context.Background())
+	if err != nil || got.Status != "" || len(got.Burn) != 3 {
+		t.Errorf("Budget with a steady usage window = %+v, %v, want no status and three burns", got, err)
+	}
+}
+
+func TestStoreSourceBudgetSuggestsPause(t *testing.T) {
+	// The series of curia usage's test: 50, 56 and 62% over 14 minutes, the
+	// limit in about 43 minutes, before the reset in 1h50m. T-1 (P2) and T-2
+	// (P3) are running.
+	db := usageWarningHome(t)
+	usageTask(t, db, "/src/web", 2, "sa", "w1")
+	usageTask(t, db, "/src/api", 3, "sb", "w2")
+	usageCost(t, db, "sa", 11.5)
+	usageCost(t, db, "sb", 10.3)
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	src := storeSource{st: st, tm: &tmux.Fake{}, cfg: config.Default()}
+	got, err := src.Budget(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PauseTask != "T-2" || got.PauseLabel != "T-2 (P3) api" || got.PauseTitle != "Fix sb" || got.PauseLimit != "limit ~43m" {
+		t.Errorf("Budget = %+v, want T-2 (P3) api \"Fix sb\", limit ~43m", got)
+	}
+	if got.Status != "5h 62% → limit ~43m (resets 1h50m)" || len(got.Burn) != 2 {
+		t.Errorf("Budget = %+v, want the warning and both burns as before", got)
+	}
+	// The same suggestion as curia usage's, from the same function.
+	rep, err := usageBuild(context.Background(), st, clock())
+	if err != nil || rep.PauseTask != got.PauseTask || rep.PauseLabel != got.PauseLabel || rep.PauseTitle != got.PauseTitle {
+		t.Errorf("usageBuild = %+v, %v; Budget = %+v", rep, err, got)
+	}
+}
+
+func TestStoreSourceBudgetNoPauseWithoutWarning(t *testing.T) {
+	db, _ := fleetHome(t, nil)
+	usageSeries(t, db, fleetNow.Add(20*time.Minute), 50, 56, 62) // resets first
+	usageTask(t, db, "/src/api", 3, "sb", "w2")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	got, err := storeSource{st: st, tm: &tmux.Fake{}, cfg: config.Default()}.Budget(context.Background())
+	if err != nil || got.PauseTask != "" || got.PauseLabel != "" || got.PauseTitle != "" || got.PauseLimit != "" || got.Status != "" {
+		t.Errorf("Budget without a warning = %+v, %v, want no status and no suggestion", got, err)
+	}
+}
+
+func TestStoreSourcePauseRunsPause(t *testing.T) {
+	f := uiPauseWorld(t)
+	src := storeSource{st: f.st, tm: f.fake, cfg: f.cfg}
+	ctx := context.Background()
+	if b, err := src.Budget(ctx); err != nil || b.PauseTask != "T-1" {
+		t.Fatalf("Budget = %+v, %v, want T-1 suggested", b, err)
+	}
+	// Only the suggested task: another id is refused and nothing is done.
+	if _, err := src.Pause(ctx, "T-2"); err == nil || !strings.Contains(err.Error(), "the suggestion changed") ||
+		!strings.Contains(err.Error(), "T-1") {
+		t.Errorf("Pause(T-2) = %v, want a refusal naming the suggestion T-1", err)
+	}
+	refused := src
+	refused.refused = errors.New("curia ui cannot run inside an agent session (CLAUDECODE is set)")
+	if _, err := refused.Pause(ctx, "T-1"); err == nil || !strings.Contains(err.Error(), "CLAUDECODE is set") {
+		t.Errorf("Pause for a refused caller = %v, want the guard's reason", err)
+	}
+	lifecycleWantKept(f)
+	if got := lifecycleKills(f); len(got) != 0 {
+		t.Fatalf("a refused pause killed %q", got)
+	}
+	wt := f.worktree("T-1")
+	line, err := src.Pause(ctx, "T-1")
+	if err != nil {
+		t.Fatalf("Pause(T-1): %v", err)
+	}
+	if want := "Paused T-1: curia resume T-1 brings it back (it continues session " + spawnShortID(lifecycleLead) + ")"; line != want {
+		t.Errorf("line = %q, want the pause's last line %q", line, want)
+	}
+	if worktreeExists(wt) {
+		t.Errorf("worktree %s still on disk", wt)
+	}
+	if got := worktreeGit(t, f.repo, "branch", "--list", lifecycleBranch); !strings.Contains(got, lifecycleBranch) {
+		t.Errorf("branch %s is gone: %q", lifecycleBranch, got)
+	}
+	if tk := f.get("T-1"); !tk.PausedAt.Equal(f.now) {
+		t.Errorf("paused_at = %v, want %v", tk.PausedAt, f.now)
+	}
+	if got := lifecycleKills(f); !slices.Equal(got, []string{"KillPane %100"}) {
+		t.Errorf("kills = %q, want the task's pane", got)
+	}
+}
+
+// Without a warning nothing is suggested, so nothing is paused, and pause's
+// own refusals (a working agent, without --force) come back as the error.
+func TestStoreSourcePauseRefusals(t *testing.T) {
+	f := lifecycleWithLead(t)
+	src := storeSource{st: f.st, tm: f.fake, cfg: f.cfg}
+	if _, err := src.Pause(context.Background(), "T-1"); err == nil || !strings.Contains(err.Error(), "nothing is suggested") {
+		t.Errorf("Pause without a warning = %v, want a refusal", err)
+	}
+	lifecycleWantKept(f)
+	f.spawnWarning()
+	lifecycleSession(f, lifecycleLead, "%100", model.StateWorking, f.now)
+	_, err := src.Pause(context.Background(), "T-1")
+	if err == nil || !strings.Contains(err.Error(), "is working") || !strings.Contains(err.Error(), "--force") {
+		t.Errorf("Pause of a working agent = %v, want pause's refusal", err)
+	}
+	lifecycleWantKept(f)
+	if got := lifecycleKills(f); len(got) != 0 {
+		t.Errorf("kills = %q, want none", got)
+	}
+}
+
+// uiPauseHome is a fleetHome under curia usage's warning series with
+// T-1 (P2, /src/web) and T-2 (P3, /src/api) running: their working sessions
+// sa and sb are in the live panes %1 and %2, so the dashboard's reconcile
+// keeps them.
+func uiPauseHome(t *testing.T) {
+	t.Helper()
+	db, _ := fleetHome(t, []string{"%1", "%2"})
+	usageSeries(t, db, fleetNow.Add(110*time.Minute), 50, 56, 62)
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	for i, c := range []struct {
+		repo, sid string
+		priority  int
+	}{{"/src/web", "sa", 2}, {"/src/api", "sb", 3}} {
+		tk, err := st.CreateTask(context.Background(), model.Task{
+			Title: "Fix " + c.sid, Repo: c.repo, Status: model.TaskReady, Priority: c.priority, CreatedAt: fleetNow.Add(-time.Hour),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = st.UpsertSession(context.Background(), model.Session{
+			ID: c.sid, Agent: "claude", State: model.StateWorking, Pane: "%" + strconv.Itoa(i+1), TmuxSession: "work",
+			TmuxWindow: "@1", TaskID: tk.ID, Repo: c.repo, StartedAt: fleetNow.Add(-time.Hour), UpdatedAt: fleetNow.Add(-time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The popup run by the user offers P (its notice line names the suggestion
+// and P opens the prompt); the sidebar and the popup inside an agent session
+// do not.
+func TestDashboardOffersPauseInPopupOnly(t *testing.T) {
+	for _, c := range []struct {
+		name, cmd, claudecode string
+		notice                bool
+		want                  string
+	}{
+		{"popup", "ui", "", true, `pause T-2 "Fix sb"?`},
+		{"sidebar", "sidebar", "", false, "pausing is not available here"},
+		{"agent", "ui", "1", false, "CLAUDECODE is set"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			uiPauseHome(t)
+			t.Setenv("CLAUDECODE", c.claudecode)
+			var table string
+			run := uiDriveProgram(t, func(m tea.Model) tea.Model {
+				m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+				table = m.View()
+				return uiPress(m, "P")
+			})
+			if _, err := runRoot(t, c.cmd); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(table, "before reset: P pauses T-2 (P3) api"); got != c.notice {
+				t.Errorf("notice line shown: %v, want %v:\n%s", got, c.notice, table)
+			}
+			lines := strings.Split(run.view, "\n")
+			if s := lines[len(lines)-1]; !strings.Contains(s, c.want) {
+				t.Errorf("after P the status line = %q, want %q", s, c.want)
+			}
+		})
 	}
 }

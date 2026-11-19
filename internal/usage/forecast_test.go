@@ -616,6 +616,12 @@ func fcSession(state model.State, expires time.Duration, rebuild float64) model.
 	return s
 }
 
+// fcTokens is s with tokens as its cold-cache rebuild in tokens.
+func fcTokens(s model.Session, tokens int64) model.Session {
+	s.CacheRecacheTokens = tokens
+	return s
+}
+
 func TestCacheCell(t *testing.T) {
 	cases := []struct {
 		name string
@@ -639,6 +645,14 @@ func TestCacheCell(t *testing.T) {
 		{"waiting cold", fcSession(model.StateWaiting, -time.Minute, 1.68), "cold $1.68"},
 		{"needs_decision warm", fcSession(model.StateNeedsDecision, 12*time.Minute+30*time.Second, 1.68), "12m"},
 		{"needs_decision cold", fcSession(model.StateNeedsDecision, -time.Minute, 0), "cold"},
+		// Ruling P5-R2: with no rebuild cost in dollars, the tokens a rebuild re-writes.
+		{"expired, tokens only", fcTokens(fcSession(model.StateIdle, -time.Minute, 0), 84_600), "cold 85k tok"},
+		{"expired, rebuild under a cent, tokens", fcTokens(fcSession(model.StateIdle, -time.Minute, 0.004), 999), "cold 999 tok"},
+		{"expired, dollars and tokens", fcTokens(fcSession(model.StateIdle, -time.Minute, 1.68), 84_600), "cold $1.68"},
+		{"expired, most tokens", fcTokens(fcSession(model.StateWaiting, -time.Minute, 0), 10_000_000_000), "cold >999M tok"},
+		{"warm with tokens", fcTokens(fcSession(model.StateIdle, 12*time.Minute+30*time.Second, 0), 84_600), "12m"},
+		{"working cold with tokens", fcTokens(fcSession(model.StateWorking, -time.Minute, 0), 84_600), ""},
+		{"expired, negative tokens", fcTokens(fcSession(model.StateIdle, -time.Minute, 0), -5), "cold"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -790,8 +804,11 @@ func TestForecastPropertyNoNaNOrInf(t *testing.T) {
 		d := time.Duration(r.next() >> 1)
 		fcCellOK(t, "Short", Short(d), 10)
 		fcCellOK(t, "CostCell", CostCell(r.usd(), true), 7)
-		s := model.Session{State: model.StateIdle, CacheExpiresAt: now.Add(r.offset()), CacheRebuildUSD: r.usd()}
-		fcCellOK(t, "CacheCell", CacheCell(s, now), 12)
+		s := model.Session{
+			State: model.StateIdle, CacheExpiresAt: now.Add(r.offset()), CacheRebuildUSD: r.usd(),
+			CacheRecacheTokens: int64(r.next() >> 1),
+		}
+		fcCellOK(t, "CacheCell", CacheCell(s, now), 14)
 		fcCellOK(t, "TokensCell", TokensCell(int(r.next()>>1), true), 9)
 	}
 }

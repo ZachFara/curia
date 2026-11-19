@@ -3,7 +3,9 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
+	"math"
 	"os/exec"
 	"reflect"
 	"regexp"
@@ -42,6 +44,33 @@ type fakeSource struct {
 	reviews    map[string]string
 	reviewsErr error
 	reviewRead int // calls of Reviews
+
+	budget     Budget // the zero value unless a test sets one
+	budgetErr  error
+	budgetRead int // calls of Budget
+
+	pause  func(id string) (string, error) // nil: a call of Pause fails the test
+	paused []string                        // the ids Pause was called with
+}
+
+// Pause records the call and answers with f.pause. A test that sets no
+// pause allows none: the call panics, which fails the test.
+func (f *fakeSource) Pause(_ context.Context, id string) (string, error) {
+	if f.pause == nil {
+		panic("Pause(" + id + ") called on a source whose test allows no pause")
+	}
+	f.paused = append(f.paused, id)
+	return f.pause(id)
+}
+
+func (f *fakeSource) Budget(context.Context) (Budget, error) {
+	f.budgetRead++
+	if f.budgetErr != nil {
+		return Budget{}, f.budgetErr
+	}
+	b := f.budget
+	b.Burn = maps.Clone(f.budget.Burn)
+	return b, nil
 }
 
 func (f *fakeSource) Reviews(context.Context) (map[string]string, error) {
@@ -236,13 +265,13 @@ func TestViewShowsRankedRows(t *testing.T) {
 	if prev != 0 {
 		t.Fatalf("header not on the first line:\n%s", view)
 	}
-	if len(popupColumns) != 10 {
-		t.Errorf("popup has %d columns, want 10", len(popupColumns))
+	if len(popupColumns) != 12 {
+		t.Errorf("popup has %d columns, want 12", len(popupColumns))
 	}
 	if h := strings.Fields(strings.Split(view, "\n")[0]); !slices.Equal(h, []string{
-		"SESSION:WINDOW", "REPO@BRANCH", "TASK", "MODEL", "CTX", "SUB", "DEC", "LAST", "UPDATE", "AGE",
+		"SESSION:WINDOW", "REPO@BRANCH", "TASK", "MODEL", "CTX", "SUB", "DEC", "COST", "CACHE", "LAST", "UPDATE", "AGE",
 	}) {
-		t.Errorf("header = %q, want DEC between SUB and LAST UPDATE", h)
+		t.Errorf("header = %q, want DEC between SUB and COST, CACHE, LAST UPDATE", h)
 	}
 	for _, cells := range rows {
 		i := lineWith(view, cells[3]) // the model names are distinct
@@ -1264,9 +1293,11 @@ func TestColumnsDropAsWidthShrinks(t *testing.T) {
 		width int
 		want  []string
 	}{
-		{130, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "MODEL", "CTX", "SUB", "DEC", "LAST", "UPDATE", "AGE"}},
-		{120, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "MODEL", "CTX", "SUB", "DEC", "LAST", "UPDATE", "AGE"}},
-		{100, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "LAST", "UPDATE", "AGE"}},
+		{130, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "MODEL", "CTX", "SUB", "DEC", "COST", "CACHE", "LAST", "UPDATE", "AGE"}},
+		{120, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "MODEL", "CTX", "SUB", "DEC", "COST", "CACHE", "LAST", "UPDATE", "AGE"}},
+		{119, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "COST", "CACHE", "LAST", "UPDATE", "AGE"}},
+		{100, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "COST", "CACHE", "LAST", "UPDATE", "AGE"}},
+		{99, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "LAST", "UPDATE", "AGE"}},
 		{90, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "LAST", "UPDATE", "AGE"}},
 		{70, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "AGE"}},
 		{60, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "AGE"}},
@@ -2480,4 +2511,957 @@ func selectID(t *testing.T, m tea.Model, id string) tea.Model {
 	}
 	t.Fatalf("no row for %s", id)
 	return m
+}
+
+// costSessions: s1 idle with a cost and a cache 12m30s from expiry, s2
+// working with a cost and a warm cache, s3 idle with neither; each in its
+// own window (work:@1 to work:@3), in this Source order.
+func costSessions() []model.Session {
+	s := func(n int, state model.State) model.Session {
+		id := "s" + strconv.Itoa(n)
+		return model.Session{
+			ID: id, Pane: "%" + strconv.Itoa(n), TmuxSession: "work", TmuxWindow: "@" + strconv.Itoa(n),
+			State: state, Model: "model-" + id, UpdatedAt: testNow,
+		}
+	}
+	s1, s2, s3 := s(1, model.StateIdle), s(2, model.StateWorking), s(3, model.StateIdle)
+	s1.CostUSD, s1.CostKnown, s1.CacheExpiresAt = 4.12, true, testNow.Add(12*time.Minute+30*time.Second)
+	s2.CostUSD, s2.CostKnown, s2.CacheExpiresAt = 0.07, true, testNow.Add(12*time.Minute)
+	return []model.Session{s1, s2, s3}
+}
+
+// newCostTest returns the dashboard in mode over sessions and budget after
+// its first refresh, width columns wide (0: no WindowSizeMsg).
+func newCostTest(t *testing.T, mode Mode, width int, budget Budget, sessions ...model.Session) (tea.Model, *fakeSource) {
+	t.Helper()
+	src := &fakeSource{sessions: sessions, budget: budget}
+	m := refresh(t, New(src, &tmux.Fake{}, config.Default(), func() time.Time { return testNow }, mode))
+	if width > 0 {
+		m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: 20})
+	}
+	return m, src
+}
+
+// costSplit cuts a drawn line into cells of the given widths, separated by
+// gap spaces, measuring as the table does (lipgloss.Width), and returns
+// what follows the last cell. A cell drawn wider or narrower than its
+// column, which shifts every column after it, is an error. A line clipped
+// at the window's edge ends early.
+func costSplit(line string, widths []int, gap int) ([]string, string, error) {
+	runes := []rune(line)
+	i := 0
+	var cells []string
+	for c, w := range widths {
+		for k := 0; c > 0 && k < gap; k++ {
+			if i == len(runes) {
+				return cells, "", nil
+			}
+			if runes[i] != ' ' {
+				return nil, "", fmt.Errorf("column %d starts at %q, not after the gap", c, string(runes[i:]))
+			}
+			i++
+		}
+		cur := ""
+		for i < len(runes) && lipgloss.Width(cur+string(runes[i])) <= w {
+			cur += string(runes[i])
+			i++
+		}
+		if i < len(runes) && lipgloss.Width(cur) != w {
+			return nil, "", fmt.Errorf("column %d is %d cells, drawn %q (%d cells)", c, w, cur, lipgloss.Width(cur))
+		}
+		cells = append(cells, strings.TrimSpace(cur))
+	}
+	return cells, string(runes[i:]), nil
+}
+
+// costTable reads m's table back from its view: the header's titles, each
+// row's cells, and what the header shows after its last title. It fails
+// the test when a line's columns do not line up with the header's.
+func costTable(t *testing.T, m tea.Model) (titles []string, rows [][]string, note string) {
+	t.Helper()
+	mm, ok := m.(Model)
+	if !ok {
+		t.Fatalf("model is %T", m)
+	}
+	lay := mm.layout(mm.now())
+	lines := strings.Split(m.View(), "\n")
+	titles, rest, err := costSplit(lines[0], lay.widths, lay.gap)
+	if err != nil {
+		t.Fatalf("width %d: header %q: %v", mm.width, lines[0], err)
+	}
+	for i := range lay.cells {
+		cells, after, err := costSplit(lines[1+i], lay.widths, lay.gap)
+		if err != nil || after != "" {
+			t.Fatalf("width %d: row %q: %v, then %q\nheader %q", mm.width, lines[1+i], err, after, lines[0])
+		}
+		rows = append(rows, cells)
+	}
+	return titles, rows, strings.TrimSpace(rest)
+}
+
+// costCell is the cell under title of the row that has a cell equal to
+// key, such as its window "work:@1".
+func costCell(t *testing.T, m tea.Model, key, title string) string {
+	t.Helper()
+	titles, rows, _ := costTable(t, m)
+	col := slices.Index(titles, title)
+	if col < 0 {
+		t.Fatalf("no %s column in %q", title, titles)
+	}
+	for _, r := range rows {
+		if slices.Contains(r, key) {
+			return r[col]
+		}
+	}
+	t.Fatalf("no row %q in %q", key, rows)
+	return ""
+}
+
+func TestCostAndCacheColumns(t *testing.T) {
+	for _, width := range []int{120, 100, 0} {
+		m, _ := newCostTest(t, ModePopup, width, Budget{}, costSessions()...)
+		titles, _, _ := costTable(t, m)
+		if dec := slices.Index(titles, "DEC"); dec < 0 || !slices.Equal(titles[dec+1:dec+3], []string{"COST", "CACHE"}) {
+			t.Errorf("width %d: header %q, want COST and CACHE right after DEC", width, titles)
+		}
+		for _, c := range []struct{ window, cost, cache string }{
+			{"work:@1", "$4.12", "12m"}, // idle: the cache's time left
+			{"work:@2", "$0.07", ""},    // working: no cache cell
+			{"work:@3", "", ""},         // nothing known: blank, not $0.00
+		} {
+			if got := costCell(t, m, c.window, "COST"); got != c.cost {
+				t.Errorf("width %d: %s COST = %q, want %q", width, c.window, got, c.cost)
+			}
+			if got := costCell(t, m, c.window, "CACHE"); got != c.cache {
+				t.Errorf("width %d: %s CACHE = %q, want %q", width, c.window, got, c.cache)
+			}
+		}
+	}
+	// COST is right-aligned: a narrower cost ends where a wider one does.
+	m, _ := newCostTest(t, ModePopup, 120, Budget{}, costSessions()...)
+	view := m.View()
+	r1, r2 := rowOf(t, view, "work:@1"), rowOf(t, view, "work:@2")
+	if e1, e2 := lipgloss.Width(r1[:strings.Index(r1, "$4.12")+5]), lipgloss.Width(r2[:strings.Index(r2, "$0.07")+5]); e1 != e2 {
+		t.Errorf("COST cells end at %d and %d, want right-aligned:\n%s", e1, e2, view)
+	}
+}
+
+// Below 100 columns the table is exactly Plan 3's: the cost and cache
+// fields change nothing.
+func TestCostAndCacheHiddenBelow100(t *testing.T) {
+	plain := costSessions()
+	for i := range plain {
+		plain[i].CostUSD, plain[i].CostKnown, plain[i].CacheExpiresAt = 0, false, time.Time{}
+	}
+	for _, width := range []int{99, 90, 80, 60, 50, 20} {
+		m, _ := newCostTest(t, ModePopup, width, Budget{}, costSessions()...)
+		was, _ := newCostTest(t, ModePopup, width, Budget{}, plain...)
+		if m.View() != was.View() {
+			t.Errorf("width %d: the view changed:\n%s\nwant:\n%s", width, m.View(), was.View())
+		}
+		if v := m.View(); strings.Contains(v, "COST") || strings.Contains(v, "CACHE") || strings.Contains(v, "$4.12") {
+			t.Errorf("width %d shows the cost columns:\n%s", width, v)
+		}
+	}
+	m, _ := newCostTest(t, ModePopup, 99, Budget{}, costSessions()...)
+	if h := strings.Fields(strings.Split(m.View(), "\n")[0]); !titlesMatch(h, []string{"SESSION:WINDOW", "REPO@BRANCH", "TASK", "CTX", "DEC", "LAST", "UPDATE", "AGE"}) {
+		t.Errorf("width 99: header = %q, want Plan 3's", h)
+	}
+}
+
+func TestCacheCellStyles(t *testing.T) {
+	if got := cacheStyle(testNow.Add(4*time.Minute+59*time.Second), testNow).GetForeground(); got != lipgloss.Color("3") {
+		t.Errorf("4m left: color %v, want yellow", got)
+	}
+	for _, cold := range []time.Time{testNow.Add(-time.Minute), testNow} {
+		if st := cacheStyle(cold, testNow); !st.GetFaint() || st.GetForeground() != (lipgloss.NoColor{}) {
+			t.Errorf("cold at %v: faint %v color %v, want dim", cold, st.GetFaint(), st.GetForeground())
+		}
+	}
+	for _, plain := range []time.Time{testNow.Add(5 * time.Minute), testNow.Add(12 * time.Minute), {}} {
+		if st := cacheStyle(plain, testNow); st.GetFaint() || st.GetForeground() != (lipgloss.NoColor{}) {
+			t.Errorf("expiry %v: faint %v color %v, want plain", plain, st.GetFaint(), st.GetForeground())
+		}
+	}
+}
+
+// costTeam is a team in window @2: lead L (working, $1.00, a warm cache
+// that does not count while it works), alpha (idle, $2.50, 9m left) and
+// beta (waiting, no cost, 4m left); and a solo session in window @1.
+func costTeam() []model.Session {
+	mate := func(id, member string, state model.State) model.Session {
+		return model.Session{
+			ID: id, Pane: "%1" + id, TmuxSession: "work", TmuxWindow: "@2", State: state, Model: "model-" + id,
+			UpdatedAt: testNow, TeamID: "team-1", TeamRole: model.RoleTeammate, TeamMember: member,
+		}
+	}
+	lead, a, b := mate("L", "team-lead", model.StateWorking), mate("A", "alpha", model.StateIdle), mate("B", "beta", model.StateWaiting)
+	lead.TeamRole = model.RoleLead
+	lead.CostUSD, lead.CostKnown, lead.CacheExpiresAt = 1, true, testNow.Add(2*time.Minute)
+	a.CostUSD, a.CostKnown, a.CacheExpiresAt = 2.5, true, testNow.Add(9*time.Minute)
+	b.CacheExpiresAt = testNow.Add(4 * time.Minute)
+	solo := model.Session{ID: "solo", Pane: "%1", TmuxSession: "work", TmuxWindow: "@1", State: model.StateWorking, Model: "model-solo", UpdatedAt: testNow}
+	return fleet.Rank([]model.Session{solo, lead, a, b})
+}
+
+func TestGroupRowSumsCostAndShowsSoonestCache(t *testing.T) {
+	const group = "▸ work:@2 +2"
+	m, _ := newCostTest(t, ModePopup, 140, Budget{}, costTeam()...)
+	if got := costCell(t, m, group, "COST"); got != "$3.50" {
+		t.Errorf("group COST = %q, want the members' known costs summed", got)
+	}
+	if got := costCell(t, m, group, "CACHE"); got != "4m" {
+		t.Errorf("group CACHE = %q, want beta's 4m (the soonest among members not working)", got)
+	}
+	// Expanded, each member shows its own cells.
+	m, _ = press(m, " ")
+	for _, c := range []struct{ key, cost, cache string }{{"▾ work:@2", "$1.00", ""}, {"alpha", "$2.50", "9m"}, {"beta", "", "4m"}} {
+		if got := costCell(t, m, c.key, "COST"); got != c.cost {
+			t.Errorf("%s COST = %q, want %q", c.key, got, c.cost)
+		}
+		if got := costCell(t, m, c.key, "CACHE"); got != c.cache {
+			t.Errorf("%s CACHE = %q, want %q", c.key, got, c.cache)
+		}
+	}
+	// No member idle, waiting or needs_decision with a warm cache, and one
+	// cold (in any state): "cold"; with no cache state known at all: blank.
+	team := costTeam()
+	for i := range team {
+		switch team[i].ID {
+		case "A":
+			team[i].State = model.StateWorking
+		case "B":
+			team[i].State, team[i].CacheExpiresAt = model.StateWorking, testNow.Add(-time.Minute)
+		}
+	}
+	m, _ = newCostTest(t, ModePopup, 140, Budget{}, team...)
+	if got := costCell(t, m, group, "CACHE"); got != "cold" {
+		t.Errorf("group CACHE = %q, want cold", got)
+	}
+	for i := range team {
+		team[i].CacheExpiresAt, team[i].CostKnown, team[i].CostUSD = time.Time{}, false, 0
+	}
+	m, _ = newCostTest(t, ModePopup, 140, Budget{}, team...)
+	if c, k := costCell(t, m, group, "COST"), costCell(t, m, group, "CACHE"); c != "" || k != "" {
+		t.Errorf("group with nothing known: COST %q CACHE %q, want both blank", c, k)
+	}
+}
+
+// costOrder is the window cells of m's rows, top to bottom.
+func costOrder(t *testing.T, m tea.Model) []string {
+	t.Helper()
+	titles, rows, _ := costTable(t, m)
+	col := slices.Index(titles, "SESSION:WINDOW")
+	if col < 0 {
+		t.Fatalf("no window column in %q", titles)
+	}
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r[col]
+	}
+	return out
+}
+
+// costBurn is s1 0.5 and s2 3.0 dollars an hour; s3 has no burn.
+func costBurn() Budget { return Budget{Burn: map[string]float64{"s1": 0.5, "s2": 3.0}} }
+
+func TestBKeyTogglesBurnSort(t *testing.T) {
+	m, _ := newCostTest(t, ModePopup, 120, costBurn(), costSessions()...)
+	rank := []string{"work:@1", "work:@2", "work:@3"}
+	if got := costOrder(t, m); !slices.Equal(got, rank) {
+		t.Fatalf("rows = %q, want the rank order %q", got, rank)
+	}
+	if s := statusLine(m); !strings.Contains(s, "  b burn  ") {
+		t.Errorf("help = %q, want b burn", s)
+	}
+	m, _ = press(m, "b")
+	if got, want := costOrder(t, m), []string{"work:@2", "work:@1", "work:@3"}; !slices.Equal(got, want) {
+		t.Errorf("after b rows = %q, want %q (highest burn first, no burn last)", got, want)
+	}
+	if _, _, note := costTable(t, m); note != "sorted by burn (b)" {
+		t.Errorf("after b the header ends %q, want sorted by burn (b)", note)
+	}
+	m, _ = press(m, "b")
+	if got := costOrder(t, m); !slices.Equal(got, rank) {
+		t.Errorf("after b b rows = %q, want the rank order", got)
+	}
+	if _, _, note := costTable(t, m); note != "" {
+		t.Errorf("after b b the header ends %q, want no note", note)
+	}
+	// Units without a burn keep their rank order after those with one, and
+	// ties keep it too.
+	sessions := slices.Concat(costSessions(), []model.Session{
+		{ID: "s4", Pane: "%4", TmuxSession: "work", TmuxWindow: "@4", State: model.StateIdle, UpdatedAt: testNow},
+	})
+	m, _ = newCostTest(t, ModePopup, 120, Budget{Burn: map[string]float64{"s2": 1, "s4": 1}}, sessions...)
+	m, _ = press(m, "b")
+	if got, want := costOrder(t, m), []string{"work:@2", "work:@4", "work:@1", "work:@3"}; !slices.Equal(got, want) {
+		t.Errorf("ties and no burn: rows = %q, want %q", got, want)
+	}
+}
+
+func TestBurnSortKeepsSelection(t *testing.T) {
+	fake := &tmux.Fake{Panes: []tmux.Pane{{ID: "%1", Session: "work", WindowID: "@1"}, {ID: "%2", Session: "work", WindowID: "@2"}}}
+	src := &fakeSource{sessions: costSessions(), budget: costBurn()}
+	m := refresh(t, New(src, fake, config.Default(), func() time.Time { return testNow }, ModePopup))
+	m = selectID(t, m, "s1") // the first row; second once sorted by burn
+	m, _ = press(m, "b")
+	if mm, ok := m.(Model); !ok || mm.cursor != 1 {
+		t.Errorf("after b the cursor is on row %d, want s1's row 1", mm.cursor)
+	}
+	m, _ = press(m, "b")
+	_, _ = press(m, "enter")
+	if got := calls(fake, "SwitchTo"); !slices.Equal(got, []string{"SwitchTo %1"}) {
+		t.Errorf("SwitchTo calls = %q, want s1's pane after two re-sorts", got)
+	}
+}
+
+func TestBurnSortGroupsByUnit(t *testing.T) {
+	// The team's members burn 1.0, 1.0 and 1.5 (3.5 together), the solo
+	// session 2.0, the waiting session W none. In rank order the team is
+	// first (alpha needs a decision), then W, then solo.
+	waiting := model.Session{ID: "W", Pane: "%20", TmuxSession: "work", TmuxWindow: "@3", State: model.StateWaiting, UpdatedAt: testNow}
+	sessions := fleet.Rank(append(teamSessions(), waiting))
+	burn := Budget{Burn: map[string]float64{"A": 1, "B": 1, "C": 1.5, "solo": 2}}
+	m, _ := newCostTest(t, ModePopup, 200, burn, sessions...)
+	if got, want := costOrder(t, m), []string{"▸ work:@2 +3", "work:@3", "work:@1"}; !slices.Equal(got, want) {
+		t.Fatalf("rank order = %q, want %q", got, want)
+	}
+	m, _ = press(m, "b")
+	if got, want := costOrder(t, m), []string{"▸ work:@2 +3", "work:@1", "work:@3"}; !slices.Equal(got, want) {
+		t.Errorf("by burn = %q, want %q: the team's summed 3.5 before the solo 2.0", got, want)
+	}
+	// Expanded, the team's rows stay together where the unit stands.
+	m, _ = press(m, " ")
+	if got, want := costOrder(t, m), []string{"▾ work:@2", "alpha", "gamma", "beta", "work:@1", "work:@3"}; !slices.Equal(got, want) {
+		t.Errorf("expanded by burn = %q, want %q", got, want)
+	}
+	// A burn that is not a finite, non-negative number counts as zero.
+	burn.Burn["solo"], burn.Burn["W"] = math.NaN(), 0.5
+	m, _ = newCostTest(t, ModePopup, 200, burn, sessions...)
+	m, _ = press(m, "b")
+	if got, want := costOrder(t, m), []string{"▸ work:@2 +3", "work:@3", "work:@1"}; !slices.Equal(got, want) {
+		t.Errorf("NaN burn: rows = %q, want %q", got, want)
+	}
+}
+
+func TestBIsTextInTheFilter(t *testing.T) {
+	m, _ := newCostTest(t, ModePopup, 120, costBurn(), costSessions()...)
+	m, _ = press(m, "/", "b")
+	if s := statusLine(m); s != "/b" {
+		t.Errorf("status line = %q, want the filter /b", s)
+	}
+	m, _ = press(m, "enter") // keeps the filter, leaves the input
+	if _, _, note := costTable(t, m); note != "" {
+		t.Errorf("b typed into the filter sorted the table: header ends %q", note)
+	}
+	if s := statusLine(m); !strings.Contains(s, "match /b") {
+		t.Errorf("status line = %q, want the filter kept", s)
+	}
+}
+
+func TestPasteDoesNotToggleBurn(t *testing.T) {
+	m, _ := newCostTest(t, ModePopup, 120, costBurn(), costSessions()...)
+	rank := costOrder(t, m)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b"), Paste: true})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("bbb"), Paste: true})
+	if _, _, note := costTable(t, m); note != "" || !slices.Equal(costOrder(t, m), rank) {
+		t.Errorf("a pasted b sorted the table: header ends %q, rows %q", note, costOrder(t, m))
+	}
+	// Typed fast, b is still a key.
+	m, _ = m.Update(key("jb"))
+	if _, _, note := costTable(t, m); note != "sorted by burn (b)" {
+		t.Errorf("a typed b in a burst: header ends %q, want the sort", note)
+	}
+}
+
+func TestBudgetStatusLine(t *testing.T) {
+	const warning = "5h 62% → limit ~48m (resets 1h50m)"
+	m, src := newCostTest(t, ModePopup, 120, Budget{}, costSessions()...)
+	before := statusLine(m)
+	src.budget.Status = warning
+	m = refresh(t, m)
+	if s := statusLine(m); !strings.HasPrefix(s, warning) || !strings.Contains(s, "enter jump") {
+		t.Errorf("status line = %q, want the warning, then the help", s)
+	}
+	if src.budgetRead != 2 {
+		t.Errorf("Budget read %d times, want once per refresh", src.budgetRead)
+	}
+	// Narrow, the warning comes first and the help is cut.
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
+	if s := statusLine(m); !strings.HasPrefix(s, warning) || lipgloss.Width(s) > 40 {
+		t.Errorf("at 40 columns status line = %q", s)
+	}
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	// A notice, a filter or an error still takes the line.
+	if m2, _ := press(m, "/", "x"); statusLine(m2) != "/x" {
+		t.Errorf("filtering: status line = %q", statusLine(m2))
+	}
+	src.budget.Status = ""
+	m = refresh(t, m)
+	if s := statusLine(m); s != before {
+		t.Errorf("status line = %q with no status, want the one of before %q", s, before)
+	}
+}
+
+func TestBudgetErrorKeepsLastValue(t *testing.T) {
+	const warning = "5h 62% → limit ~48m (resets 1h50m)"
+	b := costBurn()
+	b.Status = warning
+	m, src := newCostTest(t, ModePopup, 120, b, costSessions()...)
+	m, _ = press(m, "b")
+	byBurn := costOrder(t, m)
+	src.budget, src.budgetErr = Budget{}, errors.New("database is locked")
+	m = refresh(t, m)
+	if s := statusLine(m); !strings.Contains(s, "refresh failed: database is locked") {
+		t.Errorf("status line = %q, want the error", s)
+	}
+	if got := costOrder(t, m); !slices.Equal(got, byBurn) {
+		t.Errorf("after a failed read rows = %q, want the last burns' order %q", got, byBurn)
+	}
+	src.budget, src.budgetErr = b, nil
+	m = refresh(t, m)
+	if s := statusLine(m); !strings.HasPrefix(s, warning) {
+		t.Errorf("after a good read status line = %q, want the warning", s)
+	}
+	src.budget = Budget{}
+	m = refresh(t, m)
+	if got := costOrder(t, m); !slices.Equal(got, []string{"work:@1", "work:@2", "work:@3"}) || strings.Contains(statusLine(m), warning) {
+		t.Errorf("after a good empty read: rows %q, status %q", got, statusLine(m))
+	}
+}
+
+func TestSidebarHasNoCostColumns(t *testing.T) {
+	b := costBurn()
+	b.Status = "5h 62% → limit ~48m (resets 1h50m)"
+	for _, width := range []int{0, 30, 200} {
+		m, src := newCostTest(t, ModeSidebar, width, b, costSessions()...)
+		view := m.View()
+		for _, absent := range []string{"COST", "CACHE", "$4.12", "12m", "limit", "b burn"} {
+			if strings.Contains(view, absent) {
+				t.Errorf("width %d: sidebar shows %q:\n%s", width, absent, view)
+			}
+		}
+		m, _ = press(m, "b")
+		if v := m.View(); v != view {
+			t.Errorf("width %d: b changed the sidebar:\n%s\nwas:\n%s", width, v, view)
+		}
+		m, _ = m.Update(tickMsg{})
+		_ = m
+		if src.budgetRead != 0 {
+			t.Errorf("width %d: sidebar read Budget %d times, want never", width, src.budgetRead)
+		}
+	}
+}
+
+func TestCostTextCannotDrawEscapes(t *testing.T) {
+	s := costSessions()
+	s[0].CostUSD = math.NaN() // a faulty source: never drawn as NaN
+	b := Budget{Status: "\x1b[2J5h\x1b]52;c;eA==\x07 \u202ewarn\n", Burn: map[string]float64{"s1": math.Inf(1)}}
+	m, _ := newCostTest(t, ModePopup, 120, b, s...)
+	m, _ = press(m, "b")
+	view := m.View()
+	wantClean(t, view)
+	if s := statusLine(m); !strings.HasPrefix(s, "?[2J5h?]52;c;eA==? ?warn?") {
+		t.Errorf("status line = %q, want the status drawn cleaned", s)
+	}
+	if strings.Contains(view, "NaN") || strings.Contains(view, "Inf") {
+		t.Errorf("view draws a non-number:\n%s", view)
+	}
+}
+
+// costWide are teamSessions with a cost and a cache, and wide and
+// combining text (CJK, emoji with a variation selector or a skin tone, a
+// flag, an accent) in every text cell.
+func costWide() ([]model.Session, *tmux.Fake, map[string]model.Task) {
+	sessions := teamSessions()
+	for i := range sessions {
+		sessions[i].TeamMember = "数据库迁移✈️" + sessions[i].ID
+		sessions[i].LastUpdate = "テスト✈️中🇺🇸 e\u0301 数据 " + sessions[i].ID
+		sessions[i].Repo = "/src/リポジトリ👍🏽"
+		sessions[i].Branch = "ブランチ☺️"
+		sessions[i].CostUSD, sessions[i].CostKnown = 12.34, true
+		sessions[i].CacheExpiresAt, sessions[i].CacheRecacheTokens = testNow.Add(-time.Minute), 84_600
+	}
+	fake := &tmux.Fake{Panes: []tmux.Pane{
+		{ID: "%3", Session: "work", WindowID: "@1", WindowName: "编辑器☺️"},
+		{ID: "%10", Session: "work", WindowID: "@2", WindowName: "サーバー✈️"},
+	}}
+	return sessions, fake, map[string]model.Task{"T-42": {ID: "T-42", Title: "認証✈️の修正"}}
+}
+
+// No column shifts at any width, collapsed or expanded, sorted or not,
+// with wide and combining text in the cells.
+func TestColumnsHoldWithWideNames(t *testing.T) {
+	sessions, fake, tasks := costWide()
+	burn := Budget{Burn: map[string]float64{"solo": 1}, Status: "5h 62% → limit ~48m (resets 1h50m)"}
+	for _, mode := range []Mode{ModePopup, ModeSidebar} {
+		for _, width := range []int{1, 8, 30, 40, 60, 80, 99, 100, 119, 120, 200} {
+			for _, keys := range [][]string{nil, {" "}, {"b"}, {"b", " "}} {
+				src := &fakeSource{sessions: sessions, counts: teamCounts(), tasks: tasks, budget: burn}
+				m := refresh(t, New(src, fake, config.Default(), func() time.Time { return testNow }, mode))
+				m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: 12})
+				m, _ = press(m, keys...)
+				titles, rows, _ := costTable(t, m)
+				for _, l := range strings.Split(m.View(), "\n") {
+					if w := lipgloss.Width(l); w > width {
+						t.Errorf("mode %v width %d keys %q: line is %d cells: %q", mode, width, keys, w, l)
+					}
+				}
+				if col := slices.Index(titles, "COST"); col >= 0 && len(rows) > 0 && len(rows[0]) > col && rows[0][col] != "$49.36" && rows[0][col] != "$12.34" {
+					t.Errorf("mode %v width %d keys %q: first row's COST %q", mode, width, keys, rows[0][col])
+				}
+			}
+		}
+	}
+}
+
+// A cut cell is exactly as wide as its column, whatever its text: a
+// variation selector widens the character before it.
+func TestFitKeepsGraphemeWidths(t *testing.T) {
+	for _, s := range []string{"✈️xabc", "☺️☺️☺️", "数据库迁移", "🇺🇸🇺🇸x", "e\u0301e\u0301e\u0301e\u0301", "👍🏽👍🏽"} {
+		for w := 0; w <= 8; w++ {
+			for _, right := range []bool{false, true} {
+				if got := lipgloss.Width(fit(s, w, right)); got != w {
+					t.Errorf("fit(%q, %d) = %q, %d cells", s, w, fit(s, w, right), got)
+				}
+			}
+			if got := lipgloss.Width(truncate(s, w)); got > w {
+				t.Errorf("truncate(%q, %d) = %q, %d cells", s, w, truncate(s, w), got)
+			}
+		}
+	}
+}
+
+// pauseBudget is a Budget under a limit forecast that suggests pausing T-7.
+func pauseBudget() Budget {
+	return Budget{
+		Status: "5h 62% → limit ~48m (resets 1h50m)", Burn: map[string]float64{"s1": 0.5, "s2": 3},
+		PauseTask: "T-7", PauseLabel: "T-7 (P3) api-server", PauseTitle: "Fix the auth refresh", PauseLimit: "limit ~48m",
+	}
+}
+
+// The notice line and the prompt of section 4.5 for pauseBudget.
+const (
+	pauseNoticeText = "limit ~48m before reset: P pauses T-7 (P3) api-server"
+	pausePromptText = `pause T-7 "Fix the auth refresh"? it commits work in progress and closes its pane  y/N`
+	pauseLineText   = "Paused T-7: curia resume T-7 brings it back"
+)
+
+// newPauseTest returns the popup over costSessions and budget, with pausing
+// enabled unless setup says otherwise (nil: WithPause), 120 x 20, on clk,
+// after its first refresh, and its source, whose Pause answers pauseLineText.
+func newPauseTest(t *testing.T, clk *sayClock, mode Mode, budget Budget, setup func(Model) Model) (*dashPump, *fakeSource) {
+	t.Helper()
+	src := &fakeSource{sessions: costSessions(), budget: budget}
+	src.pause = func(string) (string, error) { return pauseLineText, nil }
+	m := New(src, &tmux.Fake{}, config.Default(), clk.now, mode)
+	if setup == nil {
+		setup = Model.WithPause
+	}
+	m = setup(m)
+	tm := refresh(t, m)
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	return &dashPump{t: t, m: tm}, src
+}
+
+// pauseOpen presses P and lets the dwell pass.
+func pauseOpen(p *dashPump, clk *sayClock) {
+	p.t.Helper()
+	p.key(key("P"))
+	if s := statusLine(p.m); s != pausePromptText {
+		p.t.Fatalf("after P status line = %q, want the prompt %q", s, pausePromptText)
+	}
+	clk.advance(300 * time.Millisecond)
+}
+
+func TestPauseNoticeShown(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	lines := strings.Split(p.m.View(), "\n")
+	if len(lines) != 20 || lines[len(lines)-2] != pauseNoticeText {
+		t.Errorf("the line above the status line = %q, want %q:\n%s", lines[len(lines)-2], pauseNoticeText, p.m.View())
+	}
+	if s := lines[len(lines)-1]; !strings.HasPrefix(s, "5h 62% → limit ~48m (resets 1h50m)") {
+		t.Errorf("status line = %q, want the forecast warning still", s)
+	}
+	// The table keeps its alignment above the notice.
+	if _, rows, _ := costTable(t, p.m); len(rows) != 3 {
+		t.Errorf("rows = %q, want the three sessions", rows)
+	}
+	// Without a suggestion there is no such line, and the table gets it back.
+	p2, _ := newPauseTest(t, clk, ModePopup, Budget{Status: "5h 62% → limit ~48m (resets 1h50m)"}, nil)
+	if v := p2.m.View(); strings.Contains(v, "P pauses") || len(strings.Split(v, "\n")) != 20 {
+		t.Errorf("without a suggestion the view shows a pause notice or the wrong height:\n%s", v)
+	}
+	// A refresh that removes the suggestion removes the line.
+	src.budget = Budget{}
+	p.m = refresh(t, p.m)
+	if v := p.m.View(); strings.Contains(v, "P pauses") {
+		t.Errorf("after the suggestion went the notice stays:\n%s", v)
+	}
+}
+
+func TestPauseNeedsKeyThenConfirm(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	if len(src.paused) != 0 {
+		t.Fatalf("P alone paused %q", src.paused)
+	}
+	p.key(key("y"))
+	if !slices.Equal(src.paused, []string{"T-7"}) {
+		t.Fatalf("Pause calls = %q, want [T-7]", src.paused)
+	}
+	if s := statusLine(p.m); s != pauseLineText {
+		t.Errorf("status line = %q, want the pause's line %q", s, pauseLineText)
+	}
+	// The prompt is closed: another y does nothing.
+	clk.advance(time.Second)
+	p.key(key("y"))
+	if len(src.paused) != 1 {
+		t.Errorf("a second y paused again: %q", src.paused)
+	}
+}
+
+func TestPauseAnyOtherKeyCancels(t *testing.T) {
+	for _, k := range []string{"n", "esc", "enter", "P", "x", "j"} {
+		clk := &sayClock{t: testNow}
+		p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+		pauseOpen(p, clk)
+		cmd := p.step(key(k))
+		if isQuit(cmd) {
+			t.Errorf("%s in the prompt quit the dashboard", k)
+		}
+		p.run(cmd)
+		if s := statusLine(p.m); s != "pause canceled" {
+			t.Errorf("%s in the prompt: status line = %q, want pause canceled", k, s)
+		}
+		clk.advance(time.Second)
+		p.key(key("y"))
+		if len(src.paused) != 0 {
+			t.Errorf("%s then y paused %q", k, src.paused)
+		}
+	}
+	// A click cancels too, and jumps nowhere.
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	var cmd tea.Cmd
+	p.m, cmd = p.m.Update(tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionPress, Y: 1})
+	if isQuit(cmd) || statusLine(p.m) != "pause canceled" {
+		t.Errorf("a click in the prompt: quit %v, status %q", isQuit(cmd), statusLine(p.m))
+	}
+	clk.advance(time.Second)
+	p.key(key("y"))
+	if len(src.paused) != 0 {
+		t.Errorf("a click then y paused %q", src.paused)
+	}
+}
+
+func TestPauseConfirmHonorsDwell(t *testing.T) {
+	// P and y in one read: the prompt opens and the y is dropped.
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	p.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Py")})
+	if s := statusLine(p.m); s != pausePromptText || len(src.paused) != 0 {
+		t.Errorf("Py in one read: status %q, calls %q, want the prompt and no call", s, src.paused)
+	}
+	// The rest of a read after the P is dropped: the user has not seen the
+	// prompt yet, so a j behind it does not cancel it either.
+	p2, _ := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	p2.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Pj")})
+	if s := statusLine(p2.m); s != pausePromptText {
+		t.Errorf("Pj in one read: status %q, want the prompt", s)
+	}
+	// A y in a read of several runes into the open prompt never confirms.
+	clk.advance(time.Second)
+	p.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("yy")})
+	if len(src.paused) != 0 || statusLine(p.m) != "pause canceled" {
+		t.Errorf("yy in one read: calls %q, status %q", src.paused, statusLine(p.m))
+	}
+	// y 100 ms after P: too soon; the wait restarts as the quiet period, so
+	// a held y's repeats never confirm.
+	p.key(key("P"))
+	for range 3 {
+		clk.advance(100 * time.Millisecond)
+		p.key(key("y"))
+		if s := statusLine(p.m); s != pausePromptText || len(src.paused) != 0 {
+			t.Fatalf("y 100 ms after the last key: status %q, calls %q, want the prompt still open", s, src.paused)
+		}
+	}
+	clk.advance(500 * time.Millisecond) // within the quiet period of the last y
+	if p.key(key("y")); len(src.paused) != 0 {
+		t.Fatalf("y 500 ms after a y too soon paused %q", src.paused)
+	}
+	clk.advance(quietPeriod)
+	if p.key(key("y")); !slices.Equal(src.paused, []string{"T-7"}) {
+		t.Errorf("y after the quiet period: calls %q, want [T-7]", src.paused)
+	}
+}
+
+func TestPausePasteDoesNotConfirm(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	p.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Py"), Paste: true})
+	if s := statusLine(p.m); strings.Contains(s, "pause T-7") || len(src.paused) != 0 {
+		t.Errorf("a pasted Py: status %q, calls %q, want nothing", s, src.paused)
+	}
+	pauseOpen(p, clk)
+	p.key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y"), Paste: true})
+	if s := statusLine(p.m); s != "pause canceled" || len(src.paused) != 0 {
+		t.Errorf("a pasted y: status %q, calls %q", s, src.paused)
+	}
+	clk.advance(time.Second)
+	p.key(key("y"))
+	if len(src.paused) != 0 {
+		t.Errorf("a y after the canceled prompt paused %q", src.paused)
+	}
+}
+
+// The burst rule (inBurst): a y followed within burstGap by another key, as
+// an unbracketed paste of "y" and a line break arrives, is refused and the
+// prompt stays open, its wait restarted; the confirmation it waited for
+// does nothing.
+func TestPauseConfirmInBurstRefused(t *testing.T) {
+	for _, next := range []string{"enter", "y", "a"} {
+		clk := &sayClock{t: testNow}
+		p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+		pauseOpen(p, clk)
+		wait := p.step(key("y"))
+		if wait == nil {
+			t.Fatal("y after the dwell started no wait")
+		}
+		clk.advance(10 * time.Millisecond)
+		p.key(key(next))
+		p.run(wait)
+		if len(src.paused) != 0 || statusLine(p.m) != pausePromptText {
+			t.Errorf("y then %s 10 ms later: calls %q, status %q", next, src.paused, statusLine(p.m))
+		}
+		clk.advance(10 * time.Millisecond)
+		if p.key(key("y")); len(src.paused) != 0 {
+			t.Errorf("y then %s then y: calls %q", next, src.paused)
+		}
+		clk.advance(time.Second)
+		if p.key(key("y")); !slices.Equal(src.paused, []string{"T-7"}) {
+			t.Errorf("after %s: a y on its own, later, calls %q, want [T-7]", next, src.paused)
+		}
+	}
+	// A key that comes after burstGap, while the wait's message is late,
+	// does not stop the pause, which runs once.
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	wait := p.step(key("y"))
+	clk.advance(time.Second)
+	p.key(key("j"))
+	p.run(wait)
+	if !slices.Equal(src.paused, []string{"T-7"}) {
+		t.Errorf("a late key: calls %q, want [T-7] once", src.paused)
+	}
+}
+
+func TestPausePromptCanceledWhenSuggestionChanges(t *testing.T) {
+	t9 := pauseBudget()
+	t9.PauseTask, t9.PauseLabel, t9.PauseTitle = "T-9", "T-9 (P3) web", "Speed up the build"
+	none := pauseBudget()
+	none.PauseTask, none.PauseLabel, none.PauseTitle, none.PauseLimit = "", "", "", ""
+	retitled := pauseBudget()
+	retitled.PauseTitle = "Drop the auth tables"
+	for _, c := range []struct {
+		name string
+		next Budget
+		want string
+	}{
+		{"another task", t9, "the suggestion changed: now T-9 (P3) web"},
+		{"none", none, "the suggestion changed: nothing to pause now"},
+		{"retitled", retitled, "the suggestion changed: now T-7 (P3) api-server"},
+	} {
+		clk := &sayClock{t: testNow}
+		p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+		pauseOpen(p, clk)
+		src.budget = c.next
+		p.m = refresh(t, p.m)
+		if s := statusLine(p.m); s != c.want {
+			t.Errorf("%s: status line = %q, want %q", c.name, s, c.want)
+		}
+		clk.advance(time.Second)
+		p.key(key("y"))
+		if len(src.paused) != 0 {
+			t.Errorf("%s: y after the change paused %q", c.name, src.paused)
+		}
+	}
+	// A y taken before the change waits out burstGap: the change still
+	// cancels it.
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	wait := p.step(key("y"))
+	src.budget = t9
+	p.m = refresh(t, p.m)
+	p.run(wait)
+	if len(src.paused) != 0 || !strings.HasPrefix(statusLine(p.m), "the suggestion changed") {
+		t.Errorf("a change while y waits: calls %q, status %q", src.paused, statusLine(p.m))
+	}
+	// The same suggestion with a later limit (a minute passed) keeps the
+	// prompt open.
+	clk = &sayClock{t: testNow}
+	p, src = newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	src.budget.PauseLimit, src.budget.Status = "limit ~47m", "5h 63% → limit ~47m (resets 1h49m)"
+	p.m = refresh(t, p.m)
+	if s := statusLine(p.m); s != pausePromptText {
+		t.Errorf("a new limit for the same task: status %q, want the prompt", s)
+	}
+	if p.key(key("y")); !slices.Equal(src.paused, []string{"T-7"}) {
+		t.Errorf("y: calls %q, want [T-7]", src.paused)
+	}
+}
+
+func TestPauseWithoutSuggestion(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, _ := newPauseTest(t, clk, ModePopup, Budget{Status: "next 2h ≈ $9.00 at the current rate"}, nil)
+	p.key(key("P"))
+	if s := statusLine(p.m); s != "nothing to pause: no limit forecast" {
+		t.Errorf("status line = %q", s)
+	}
+	clk.advance(time.Second)
+	p.key(key("y")) // no prompt: nothing to confirm (the source allows no pause)
+}
+
+func TestPauseDisabledInSidebarAndWithoutWithPause(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		mode  Mode
+		setup func(Model) Model
+		want  string
+	}{
+		{"popup without WithPause", ModePopup, func(m Model) Model { return m }, "pausing is not available here"},
+		{
+			"popup read-only", ModePopup, func(m Model) Model {
+				return m.WithoutPause("curia ui cannot run inside an agent session (CLAUDECODE is set)")
+			},
+			"curia ui cannot run inside an agent session (CLAUDECODE is set)",
+		},
+		{"WithoutPause after WithPause", ModePopup, func(m Model) Model { return m.WithPause().WithoutPause("no terminal") }, "no terminal"},
+		{"sidebar", ModeSidebar, Model.WithPause, "pausing is not available here"},
+	} {
+		clk := &sayClock{t: testNow}
+		p, src := newPauseTest(t, clk, c.mode, pauseBudget(), c.setup)
+		src.pause = nil // any call fails the test
+		if v := p.m.View(); strings.Contains(v, "P pauses") {
+			t.Errorf("%s: the view offers P:\n%s", c.name, v)
+		}
+		p.key(key("P"))
+		if s := statusLine(p.m); s != c.want {
+			t.Errorf("%s: status line = %q, want %q", c.name, s, c.want)
+		}
+		clk.advance(time.Second)
+		p.key(key("y"))
+	}
+}
+
+func TestPauseErrorShown(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	fail := true
+	src.pause = func(string) (string, error) {
+		if fail {
+			return "", errors.New("T-7 not paused: the WIP commit failed: \x1b[31mhook said no\x1b[0m\nsecond line")
+		}
+		return pauseLineText, nil
+	}
+	before := strings.Split(p.m.View(), "\n")
+	pauseOpen(p, clk)
+	p.key(key("y"))
+	view := p.m.View()
+	wantClean(t, view)
+	if s := statusLine(p.m); s != "T-7 not paused: the WIP commit failed: ?[31mhook said no?[0m?second line" {
+		t.Errorf("status line = %q, want the error cleaned", s)
+	}
+	after := strings.Split(view, "\n")
+	if !slices.Equal(before[:len(before)-1], after[:len(after)-1]) {
+		t.Errorf("a failed pause changed the view:\n%s\nwas:\n%s", view, strings.Join(before, "\n"))
+	}
+	fail = false
+	clk.advance(time.Second)
+	pauseOpen(p, clk)
+	p.key(key("y"))
+	if !slices.Equal(src.paused, []string{"T-7", "T-7"}) || statusLine(p.m) != pauseLineText {
+		t.Errorf("a second P: calls %q, status %q", src.paused, statusLine(p.m))
+	}
+}
+
+func TestPauseNeverCalledWithoutKeys(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	for range 100 {
+		clk.advance(time.Second)
+		p.m = refresh(t, p.m)
+	}
+	if len(src.paused) != 0 || src.budgetRead < 100 {
+		t.Errorf("after 100 refreshes: calls %q, budget reads %d", src.paused, src.budgetRead)
+	}
+}
+
+// While a pause runs, every key but Ctrl+C is refused, so its result is
+// seen and a second pause cannot start; the result arrives even then.
+func TestPauseInFlightRefusesKeys(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	p, src := newPauseTest(t, clk, ModePopup, pauseBudget(), nil)
+	pauseOpen(p, clk)
+	wait := p.step(key("y"))
+	var call tea.Cmd
+	p.m, call = p.m.Update(wait())
+	if call == nil {
+		t.Fatal("the confirmation started no pause")
+	}
+	for _, k := range []string{"P", "y", "q", "esc", "t", "enter"} {
+		clk.advance(time.Second)
+		cmd := p.step(key(k))
+		if isQuit(cmd) || statusLine(p.m) != "a pause is running; wait for its result" {
+			t.Errorf("%s while pausing: quit %v, status %q", k, isQuit(cmd), statusLine(p.m))
+		}
+	}
+	if !isQuit(p.step(tea.KeyMsg{Type: tea.KeyCtrlC})) {
+		t.Error("ctrl+c while pausing does not quit")
+	}
+	p.run(call)
+	if !slices.Equal(src.paused, []string{"T-7"}) || statusLine(p.m) != pauseLineText {
+		t.Errorf("after the pause: calls %q, status %q", src.paused, statusLine(p.m))
+	}
+}
+
+// The notice line and the prompt fit every width, with wide and hostile
+// text, and the table above them keeps its alignment and the height.
+func TestPauseNoticeFitsEveryWidth(t *testing.T) {
+	sessions, fake, tasks := costWide()
+	b := pauseBudget()
+	b.PauseLabel, b.PauseTitle = "T-7 (P3) リポジトリ👍🏽-"+hostile, "認証✈️の修正 "+hostile
+	for _, width := range []int{1, 8, 30, 40, 60, 80, 99, 100, 120, 200} {
+		for _, prompt := range []bool{false, true} {
+			clk := &sayClock{t: testNow}
+			src := &fakeSource{sessions: sessions, counts: teamCounts(), tasks: tasks, budget: b}
+			m := refresh(t, New(src, fake, config.Default(), clk.now, ModePopup).WithPause())
+			m, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: 12})
+			if prompt {
+				m, _ = press(m, "P")
+			}
+			view := m.View()
+			lines := strings.Split(view, "\n")
+			for _, l := range lines {
+				if w := lipgloss.Width(l); w > width {
+					t.Errorf("width %d prompt %v: line is %d cells: %q", width, prompt, w, l)
+				}
+			}
+			wantClean(t, view)
+			if len(lines) != 12 {
+				t.Errorf("width %d prompt %v: %d lines, want the height 12", width, prompt, len(lines))
+			}
+			costTable(t, m)
+			if s := lines[len(lines)-1]; width >= 80 && prompt && !strings.HasSuffix(s, "y/N") {
+				t.Errorf("width %d: the prompt %q does not end in y/N", width, s)
+			}
+		}
+	}
 }

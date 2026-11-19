@@ -63,6 +63,7 @@ const (
 	PruneCostQuery           = pruneCost
 	PruneWalkQuery           = pruneWalkIDs
 	UsageSinceQuery          = usageSince
+	UsageReadingsQuery       = usageReadings
 	CostSinceQuery           = costSince
 )
 

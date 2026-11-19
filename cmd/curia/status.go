@@ -76,11 +76,12 @@ func statusBadge(ctx context.Context, args []string) (string, error) {
 	return fleet.Badge(counts), nil
 }
 
-// statusForecast is the badge's limit warning, already rendered: one indexed
-// read of the last 20 minutes of samples, no network, no process. Empty when
-// no window warns or when the read fails (the counts still print).
+// statusForecast is the badge's limit warning, already rendered: one read of
+// the last 20 minutes of samples from a covering index (UsageReadings), no
+// network, no process. Empty when no window warns or when the read fails
+// (the counts still print).
 func statusForecast(ctx context.Context, st *store.Store, now time.Time) string {
-	samples, err := st.UsageSince(ctx, now.Add(-usage.BurnWindow))
+	samples, err := st.UsageReadings(ctx, now.Add(-usage.BurnWindow))
 	if err != nil {
 		return ""
 	}
