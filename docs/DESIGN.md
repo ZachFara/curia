@@ -287,9 +287,13 @@ Twenty-eight features. F1 to F18 are V1, grouped by the four jobs from section 1
 
 **What:** model, context used, cost and subagents per session.
 
-**How:** model and token usage come from the transcript (JSONL at `transcript_path`). Context used = the latest assistant message's input tokens including cache reads and writes. Context max comes from a per-model table in config, so new models need one config line. (Amended, Ruling 142: the table gets a `fable` entry; its value is to be confirmed by a probe, section 9, and until it is set the default applies.) Cost comes from cost-lens when installed (F15), otherwise from the cost field in Claude Code's status-line JSON. Curia keeps no price table of its own. Parsing is incremental: `curia` stores a byte offset per transcript and reads only new lines.
+**How:** model and token usage come from the transcript (JSONL at `transcript_path`). Context used = the latest assistant message's input tokens including cache reads and writes. Context max comes from a per-model table in config, so new models need one config line. (Amended, Ruling 142, revised 2026-11-19: the context window and the used percentage come from Claude Code's status-line payload for that session when Curia has it, the same payload F15 and F16 ingest through `curia statusline`: the window from `context_window.context_window_size`, and the percentage is Claude Code's own `used_percentage`, clamped to 0..100. No table entry is needed for a new model. The `context_max` table and `default_context_max` remain only as the fallback for a session with no status-line data yet, because the status line is not installed or its first refresh has not come, and there the figure is computed from the transcript as before. Once a session has status-line context data, the status line is the only writer of its context fields.) Cost comes from cost-lens when installed (F15), otherwise from the cost field in Claude Code's status-line JSON. Curia keeps no price table of its own. Parsing is incremental: `curia` stores a byte offset per transcript and reads only new lines.
 
-**Display:** context as a percentage with color thresholds (green under 60%, yellow 60 to 85%, red above 85%, since compaction quality drops near the limit). (Amended, Ruling 142: a value over 100% means the configured maximum is wrong, not that the context is over full, so the dashboard, the status line and the web page show `?` instead of the number, uncolored, and `curia config doctor` names the model.)
+**Display:** context as a percentage with color thresholds (green under 60%, yellow 60 to 85%, red above 85%, since compaction quality drops near the limit). (Amended, Ruling 142, revised 2026-11-19: in the fallback, a value over 100% means the fallback window is wrong, not that the context is over full, so the dashboard, the status line and the web page show `?` instead of the number, uncolored, and `curia config doctor` names the model. A number above 100 is never shown anywhere. The same applies to the F3 context column.)
+
+**Acceptance:** a session whose model is missing from the table shows the correct percentage after one status-line refresh; nothing renders above 100.
+
+**Risks:** the payload's fields are Claude Code's and a release could rename or drop them; Curia then falls back and shows `?` rather than a wrong number. The payload is untrusted data and is range-checked (window positive, percentage clamped to 0..100). The percentage is null before the first response, and the fallback applies until then.
 
 ### F3. Dashboard
 
@@ -813,5 +817,4 @@ Everything ships in V1, but it's built in an order where each step is usable by 
 - The usage-limit stop: how a session stopped by the limit is recognized, and the reset time's reliability (F22).
 - A Bash call that runs in the background: how its start, process and end appear to hooks and the process tree (F27).
 - Whether a slash command fires UserPromptSubmit (F21's confirmation).
-- The `fable` model's context window and the model string Claude Code reports (F2, Ruling 142).
 - Paperclip: its README states an MIT license, budget policies with hard stops, and routines with run history (read on 2026-11-19). Nothing else about it was checked, and its LICENSE file was not read (section 3).
