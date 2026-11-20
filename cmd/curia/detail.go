@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
+	"strings"
+	"time"
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/transcript"
 	"github.com/ZachFara/curia/internal/ui"
+	"github.com/ZachFara/curia/internal/usage"
 )
 
 // The agent detail view's source (spec F24). It only reads: the store's
@@ -24,24 +27,6 @@ const (
 	detailMessageLimit = 10
 	detailDiffWidth    = 72
 )
-
-// errDetailNoActivity is what the activity source says until F27 exists.
-var errDetailNoActivity = errors.New("activity time is not available")
-
-// detailActivity is F27's data (time by class and the last 10 events), as lines. F27 is built apart: its
-// implementation replaces detailNoActivity; with an error the view shows no Activity section.
-type detailActivity interface {
-	Activity(ctx context.Context, sessionID string) ([]string, error)
-}
-
-type detailNoActivity struct{}
-
-func (detailNoActivity) Activity(context.Context, string) ([]string, error) {
-	return nil, errDetailNoActivity
-}
-
-// detailActivitySource is the activity source the view uses; tests replace it.
-var detailActivitySource detailActivity = detailNoActivity{}
 
 type detailSource struct {
 	st  *store.Store
@@ -76,9 +61,7 @@ func (d detailSource) Detail(ctx context.Context, id string) (ui.DetailData, err
 	if t, ok, _ := d.st.GetTask(ctx, s.TaskID); ok && s.TaskID != "" {
 		out.TaskCostUSD, out.TaskCostKnown = costlensTaskCost(d.cfg, t)
 	}
-	if lines, aerr := detailActivitySource.Activity(ctx, id); aerr == nil {
-		out.Activity, out.ActivityOK = lines, true
-	}
+	out.Activity, out.ActivityOK = d.activity(ctx, s)
 	return out, nil
 }
 
@@ -131,4 +114,42 @@ func (d detailSource) Diff(ctx context.Context, id string) (ui.DetailDiff, error
 	}
 	stat, note, _ := reviewDiffStat(ctx, t, detailDiffWidth)
 	return ui.DetailDiff{Has: true, Stat: stat, Note: note}, nil
+}
+
+// detailActivityWindow is how far back the Activity panel looks; detailActivityEvents is how many events it lists.
+const (
+	detailActivityWindow = 24 * time.Hour
+	detailActivityEvents = 10
+)
+
+// activity is F27's time by class for this one session (its own events in the
+// window only, with the user's and its repository's rules) and its last
+// events, as lines; false with no events. It runs in the view's background
+// read, under that read's deadline.
+func (d detailSource) activity(ctx context.Context, s model.Session) ([]string, bool) {
+	now := clock()
+	since := now.Add(-detailActivityWindow)
+	all, err := d.st.ActivityEvents(ctx, since, s.ID)
+	evs := all[s.ID]
+	if err != nil || len(evs) == 0 {
+		return nil, false
+	}
+	t := usage.ClassifyActivity(evs, activityRulesFor(d.cfg.Activity.Rules)(s.Repo), usage.ActivityOpts{
+		IdleCap: max(d.cfg.Activity.IdleCap, time.Minute), Since: since, Now: now,
+		Live: s.State != model.StateEnded && s.State != model.StateStale,
+	})
+	lines := []string{usage.ActivityHeadline(t.ByClass, usage.WallTime(t))}
+	var split []string
+	for _, c := range usage.ActivityClasses {
+		if dur := t.ByClass[c]; dur > 0 {
+			split = append(split, c+" "+usage.ActivityDuration(dur))
+		}
+	}
+	if len(split) > 0 {
+		lines = append(lines, strings.Join(split, " · "))
+	}
+	for _, e := range evs[max(len(evs)-detailActivityEvents, 0):] {
+		lines = append(lines, sanitize.Line(e.At.Local().Format("15:04:05")+" "+string(e.Kind)+" "+e.Tool, 80))
+	}
+	return lines, true
 }
