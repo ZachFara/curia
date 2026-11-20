@@ -518,7 +518,7 @@ func TestStatuslineProcessLatency(t *testing.T) {
 		t.Fatal(err)
 	}
 	const runs = 200
-	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+	latgate.Gate(t, "statusline process", 50*time.Millisecond, func() time.Duration {
 		d := make([]time.Duration, 0, runs)
 		for i := range runs {
 			payload := statuslineLivePayload(t, files[i%len(files)], ids[i%len(ids)], time.Now(), 20+float64(i)/100)
@@ -540,9 +540,6 @@ func TestStatuslineProcessLatency(t *testing.T) {
 		t.Logf("curia statusline as a process over %d runs: p50 %v, p95 %v, max %v", runs, d[runs/2], d[runs*95/100], d[runs-1])
 		return d[runs*95/100]
 	})
-	if p95 >= 50*time.Millisecond {
-		t.Errorf("statusline process median p95 = %v, want < 50ms", p95)
-	}
 	if got := ingestSnap(t, db, ids[(runs-1)%len(ids)]); !got.sess.CostKnown {
 		t.Errorf("nothing stored: %+v", got)
 	}
