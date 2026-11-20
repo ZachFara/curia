@@ -329,14 +329,29 @@ func prune(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
 	return int(usage + cost), err
 }
 
+// capProbe tells with two cheap seeks (MAX and MIN each alone, or SQLite scans) whether a table can hold rows beyond
+// its bound: the oldest rowid is that far behind the newest only then
+// (NULL for an empty table). It keeps the two DELETEs, whose planning cost
+// milliseconds on every ingest, for the rare run that needs them.
+const capProbe = `SELECT
+  (SELECT MAX(n) FROM usage_samples) - (SELECT MIN(n) FROM usage_samples) >= ?,
+  (SELECT MAX(n) FROM cost_samples) - (SELECT MIN(n) FROM cost_samples) >= ?`
+
 // pruneCapped deletes at most limit rows beyond UsageMaxRows, then beyond
 // CostMaxRows.
 func pruneCapped(ctx context.Context, tx *sql.Tx, limit int64) (int64, error) {
+	var over [2]sql.NullBool
+	if err := tx.QueryRowContext(ctx, capProbe, UsageMaxRows, CostMaxRows).Scan(&over[0], &over[1]); err != nil {
+		return 0, err
+	}
 	var total int64
-	for _, q := range []struct {
+	for i, q := range []struct {
 		sql  string
 		keep int
 	}{{pruneUsageCap, UsageMaxRows}, {pruneCostCap, CostMaxRows}} {
+		if !over[i].Bool {
+			continue
+		}
 		out, err := tx.ExecContext(ctx, q.sql, q.keep, limit-total)
 		if err != nil {
 			return 0, err
