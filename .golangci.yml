@@ -399,10 +399,11 @@ linters:
             - "**/internal/latency/**"
           allow:
             - $gostd
+            - modernc.org/sqlite
             - github.com/ZachFara/curia/internal/latency$
           deny:
             - pkg: github.com/ZachFara/curia
-              desc: "internal/latency imports the standard library only (docs/decisions/0012)"
+              desc: "internal/latency imports the standard library and the SQLite driver (the reference workload), no internal package (docs/decisions/0012)"
 
         tmux:
           list-mode: strict
@@ -695,6 +696,7 @@ linters:
             - "**/e2e/**"
           allow:
             - $gostd
+            - modernc.org/sqlite
           deny:
             - pkg: github.com/ZachFara/curia
               desc: "e2e drives the built binary only and imports no internal package (docs/decisions/0003)"
