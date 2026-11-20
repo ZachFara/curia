@@ -128,7 +128,7 @@
     "branch": "curia/T-3-add-the-audit-log",
     "worktree": "<root>/.curia-worktrees/api-server-T-3",
     "team": false,
-    "agent_model": "sonnet",
+    "agent_model": "",
     "pane": "%5",
     "resume_session": "",
     "sessions": [
