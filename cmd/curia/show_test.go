@@ -21,10 +21,12 @@ func showHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	db, _ := fleetHome(t, []string{"%7"},
-		model.Session{ID: "sa", Repo: "/src/web", Branch: "feat/x", TaskID: "T-1", Pane: "%7", State: model.StateIdle, TranscriptPath: tp, UpdatedAt: fleetNow},
+		model.Session{ID: "sa", Repo: "/src/web", Branch: "feat/x", TaskID: "T-1", Pane: "%7", Socket: "/tmp/tmux-1/a", State: model.StateIdle, TranscriptPath: tp, UpdatedAt: fleetNow},
+		model.Session{ID: "sd", Repo: "/src/web", Pane: "%7", Socket: "/tmp/tmux-1/b", State: model.StateIdle, UpdatedAt: fleetNow},
 		model.Session{ID: "sb", Repo: "/src/web", TaskID: "T-2", State: model.StateEnded, UpdatedAt: fleetNow},
 		model.Session{ID: "sc", Repo: "/src/web", TaskID: "T-2", State: model.StateEnded, UpdatedAt: fleetNow})
 	userTerminalAs(t, true)
+	t.Setenv("TMUX", "/tmp/tmux-1/a,1,0")
 	t.Cleanup(func() { showJSON = false })
 	st, err := store.Open(db)
 	if err != nil {
@@ -100,5 +102,26 @@ func TestShowRefusedInsideAnAgent(t *testing.T) {
 	userTerminalAs(t, false)
 	if _, err := runRoot(t, "show", "sa"); err == nil || !strings.Contains(err.Error(), "only the user may") {
 		t.Errorf("show without a terminal = %v", err)
+	}
+}
+
+func TestShowPaneIsMatchedWithItsServer(t *testing.T) {
+	showHome(t) // sa and sd both have pane %7, on servers a and b
+	for env, want := range map[string]string{"/tmp/tmux-1/a,1,0": `"id": "sa"`, "/tmp/tmux-1/b,1,0": `"id": "sd"`} {
+		t.Setenv("TMUX", env)
+		out, err := runRoot(t, "show", "%7", "--json")
+		if err != nil || !strings.Contains(out, want) {
+			t.Errorf("TMUX=%s: %v %q, want %s", env, err, out, want)
+		}
+	}
+	t.Setenv("TMUX", "/tmp/tmux-1/c,1,0") // a third server: it has no %7 of its own, yet both rows are "elsewhere"
+	if _, err := runRoot(t, "show", "%7"); err != nil {
+		t.Logf("third server: %v", err)
+	} else {
+		t.Error("a third server resolved a pane recorded on another")
+	}
+	t.Setenv("TMUX", "")
+	if _, err := runRoot(t, "show", "%7"); err == nil || !strings.Contains(err.Error(), "session id or a task id") {
+		t.Errorf("no TMUX = %v", err)
 	}
 }

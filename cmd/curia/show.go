@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -42,8 +45,7 @@ func showResolve(ctx context.Context, st *store.Store, arg string) (string, erro
 	}
 	switch {
 	case sendPanePattern.MatchString(arg):
-		s, err := sendPaneSession(ctx, st, arg)
-		return s.ID, err
+		return showPane(ctx, st, arg)
 	case task.ValidID(arg):
 		all, err := st.ListSessions(ctx, store.ListFilter{IncludeEnded: true})
 		if err != nil {
@@ -71,6 +73,32 @@ func showResolve(ctx context.Context, st *store.Store, arg string) (string, erro
 		return "", fmt.Errorf("task %s has more than one session (%s): name one", arg, sanitize.Line(strings.Join(linked, ", "), 200))
 	}
 	return "", fmt.Errorf("no session %q (a session id, T-<n> or a pane id like %%12)", sanitize.Line(arg, 40))
+}
+
+// showPane is the one live session in pane arg of the caller's own tmux
+// server (Ruling 133: a pane id is matched only with its server).
+func showPane(ctx context.Context, st *store.Store, pane string) (string, error) {
+	socket := seenSocket(os.Getenv("TMUX"))
+	if socket == "" {
+		return "", errors.New("a pane id names a pane on your tmux server, and TMUX is not set here: pass a session id or a task id instead")
+	}
+	all, err := st.ListSessions(ctx, store.ListFilter{})
+	if err != nil {
+		return "", err
+	}
+	var ids []string
+	for _, s := range all {
+		if s.Pane == pane && !fleet.OtherSocket(socket, s) && s.State != model.StateEnded && s.State != model.StateStale {
+			ids = append(ids, s.ID)
+		}
+	}
+	switch len(ids) {
+	case 0:
+		return "", fmt.Errorf("pane %s is not the pane of a live agent session on this tmux server", pane)
+	case 1:
+		return ids[0], nil
+	}
+	return "", fmt.Errorf("pane %s is shared by more than one live session (%s): name one", pane, sanitize.Line(strings.Join(ids, ", "), 200))
 }
 
 func runShow(cmd *cobra.Command, args []string) error {
