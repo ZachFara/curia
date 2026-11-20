@@ -49,7 +49,10 @@ type InboxClosedMsg struct{ Board bool }
 
 // InboxOpenMsg asks the dashboard to open the decide or review view for an
 // item, which the inbox has just re-read and found still waiting.
-type InboxOpenMsg struct{ Item InboxItem }
+type InboxOpenMsg struct {
+	Item  InboxItem
+	Index int // its place in the list, which the inbox is rebuilt at on return
+}
 
 // InboxNoticeMsg shows a notice on the inbox's status line.
 type InboxNoticeMsg struct{ Text string }
@@ -104,6 +107,13 @@ type InboxModel struct {
 // NewInbox returns the inbox over src; tm is used only to jump to a prompt's pane.
 func NewInbox(src InboxSource, tm tmux.Client, now func() time.Time) InboxModel {
 	return InboxModel{src: src, tm: tm, now: now, since: now(), wait: dwell}
+}
+
+// keep makes the first read select key, else the item now at index (the next
+// one took its place), else the last: the inbox rebuilt after a view closes.
+func (m InboxModel) keep(key string, index int) InboxModel {
+	m.selected, m.cursor = key, max(index, 0)
+	return m
 }
 
 // Init starts the first read and with it the one-second chain.
@@ -292,7 +302,8 @@ func (m InboxModel) acted(msg inboxActMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if msg.item.Kind != InboxPrompt {
-		return m, func() tea.Msg { return InboxOpenMsg{Item: msg.item} }
+		at := slices.IndexFunc(m.items, func(x InboxItem) bool { return x.Key == msg.item.Key && x.Kind == msg.item.Kind })
+		return m, func() tea.Msg { return InboxOpenMsg{Item: msg.item, Index: at} }
 	}
 	// A prompt is only jumped to: Curia does not answer it.
 	s, tm := msg.item.Session, m.tm

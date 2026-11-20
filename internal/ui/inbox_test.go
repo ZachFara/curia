@@ -298,3 +298,64 @@ func TestDetailFromTheListReachedByTabClosesToTheList(t *testing.T) {
 		t.Errorf("closing the detail view did not return to the session list:\n%s", v)
 	}
 }
+
+// Returning from a decide view opened from the inbox keeps the cursor on the
+// same item, else on the item that took its place, else on the last.
+func TestInboxCursorSurvivesTheRoundTrip(t *testing.T) {
+	two := func(items []InboxItem, key string) []InboxItem {
+		var out []InboxItem
+		for _, it := range items {
+			if it.Key != key {
+				out = append(out, it)
+			}
+		}
+		return out
+	}
+	for name, tc := range map[string]struct {
+		drop []string // answered while the decide view was open
+		want string
+	}{
+		"still there":                {nil, "R-1"},
+		"gone, next takes its place": {[]string{"R-1"}, "D-2"},
+		"gone and last":              {[]string{"R-1", "D-2"}, "S2"},
+		"all gone":                   {[]string{"D-1", "S2", "R-1", "D-2"}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clk := testNow
+			src := &fakeInbox{}
+			src.set(inboxItems()...)
+			tm := &tmux.Fake{}
+			now := func() time.Time { return clk }
+			d := New(&fakeSource{sessions: threeSessions()}, tm, config.Default(), now, ModePopup).
+				WithInbox(func() tea.Model { return NewInbox(src, tm, now) }).
+				WithReview(func(string) tea.Model { return stubChild{view: "REVIEW"} })
+			var m tea.Model = d
+			m, _ = m.Update(m.Init()())
+			m, _ = m.Update(dashboard(m).child.Init()())
+			m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+			m, _ = press(m, "j")
+			m, _ = press(m, "j") // R-1
+			clk = clk.Add(time.Minute)
+			m, cmd := press(m, "enter")
+			m = drain(m, cmd)
+			if !strings.Contains(m.View(), "REVIEW") {
+				t.Fatalf("review not open:\n%s", m.View())
+			}
+			cur := inboxItems()
+			for _, k := range tc.drop {
+				cur = two(cur, k)
+			}
+			src.set(cur...)
+			m, cmd = m.Update(childMsg{gen: dashboard(m).childGen, msg: ReviewClosedMsg{}})
+			m = drain(m, cmd)
+			in, ok := dashboard(m).child.(InboxModel)
+			if !ok {
+				t.Fatalf("not back on the inbox:\n%s", m.View())
+			}
+			it, _ := in.current()
+			if it.Key != tc.want {
+				t.Errorf("cursor on %q, want %q", it.Key, tc.want)
+			}
+		})
+	}
+}
