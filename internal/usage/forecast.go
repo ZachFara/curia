@@ -299,9 +299,10 @@ type Running struct {
 	N        int64
 	Priority int     // 1 to 3; 0 counts as 2
 	BurnUSD  float64 // per hour, summed over its sessions
+	Busy     bool    // an agent is mid-turn: pause would refuse it now
 }
 
-// SuggestPause picks the task to pause: the lowest priority, then the highest burn, then the newest.
+// SuggestPause picks the task to pause: the lowest priority, then one that is not Busy, then the highest burn, then the newest.
 // A priority outside 1 to 3 counts as 2; a burn that is not a finite,
 // non-negative number counts as 0. The caller asks only while Warning
 // reports a warning, and only the user acts on the answer.
@@ -318,6 +319,9 @@ func SuggestPause(r []Running) (taskID string, ok bool) {
 func pauseBefore(a, b Running) bool {
 	if pa, pb := pausePriority(a.Priority), pausePriority(b.Priority); pa != pb {
 		return pa > pb
+	}
+	if a.Busy != b.Busy {
+		return !a.Busy
 	}
 	if ba, bb := pauseBurn(a.BurnUSD), pauseBurn(b.BurnUSD); ba != bb {
 		return ba > bb

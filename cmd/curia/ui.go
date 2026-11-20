@@ -247,7 +247,7 @@ func uiSuggestPause(ctx context.Context, st *store.Store, b *ui.Budget, now time
 	if err != nil || !rep.Warn || rep.PauseTask == "" {
 		return err
 	}
-	b.PauseTask, b.PauseLabel, b.PauseTitle = rep.PauseTask, rep.PauseLabel, rep.PauseTitle
+	b.PauseTask, b.PauseLabel, b.PauseTitle, b.PauseBusy = rep.PauseTask, rep.PauseLabel, rep.PauseTitle, rep.PauseBusy
 	b.PauseLimit = "at limit"
 	if rep.Warning.LimitAt.After(now) {
 		b.PauseLimit = "limit ~" + usage.Short(rep.Warning.LimitAt.Sub(now))
@@ -266,7 +266,7 @@ func (s storeSource) Pause(ctx context.Context, id string) (string, error) {
 	if s.refused != nil {
 		return "", s.refused
 	}
-	defer reviewFlight.begin()()
+	defer reviewFlight.beginPause()()
 	ctx = context.WithoutCancel(ctx)
 	rep, err := usageBuild(ctx, s.st, clock())
 	if err != nil {
