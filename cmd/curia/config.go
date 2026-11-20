@@ -145,8 +145,8 @@ func runConfigList(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	for _, k := range config.Keys() {
-		_, _ = fmt.Fprintln(cmd.OutOrStdout(), configLine(c, rep, k))
+	for _, r := range settingsRows(c, rep) {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s = %s  (%s)\n", r.Key, r.Value, r.Source)
 	}
 	configPrintRefused(cmd.OutOrStdout(), rep, "")
 	return nil
@@ -206,22 +206,29 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	cur, err := configReadUser(path)
-	if err != nil {
-		return err
-	}
-	data, err := config.UpdateFile(cur, args[0], args[1])
-	if err != nil {
-		return err
-	}
-	old, _ := config.FileValue(cur, args[0])
-	nv, _ := config.FileValue(data, args[0])
-	n, err := configWrite(cmd.Context(), st, path, data, store.ConfigRevision{Actor: "cli", Key: args[0], Old: old, New: nv})
+	nv, n, err := configSetKey(cmd.Context(), st, path, args[0], args[1], "cli")
 	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s = %s (revision %d)\n", args[0], sanitize.Line(nv, 200), n)
 	return nil
+}
+
+// configSetKey is the one write of a scalar key, for `config set` and the
+// dashboard: validated, the old file kept when invalid, one revision.
+func configSetKey(ctx context.Context, st *store.Store, path, key, value, actor string) (string, int64, error) {
+	cur, err := configReadUser(path)
+	if err != nil {
+		return "", 0, err
+	}
+	data, err := config.UpdateFile(cur, key, value)
+	if err != nil {
+		return "", 0, err
+	}
+	old, _ := config.FileValue(cur, key)
+	nv, _ := config.FileValue(data, key)
+	n, err := configWrite(ctx, st, path, data, store.ConfigRevision{Actor: actor, Key: key, Old: old, New: nv})
+	return nv, n, err
 }
 
 func runConfigEdit(cmd *cobra.Command, _ []string) error {

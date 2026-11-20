@@ -606,6 +606,11 @@ var uiUserActions = []struct {
 	{"review: a then y approves (merges)", uiReviewWorld, []string{"r", "a", "y"}, uiReviewClosed},
 	{"review: c, a note, Enter requests changes", uiReviewWorld, []string{"r", "c", "fix the tests", "enter"}, uiReviewClosed},
 	{"review: x then y drops", uiReviewWorld, []string{"r", "x", "y"}, uiReviewClosed},
+	{"settings: e, a value, Enter, y changes a setting", uiActionWorld, []string{"S", "e", "20m", "enter", "y"}, func(*spawnFixture) bool {
+		home, _ := os.UserHomeDir()
+		b, _ := os.ReadFile(filepath.Clean(configFile(home)))
+		return strings.Contains(string(b), "20m")
+	}},
 	{"P then y pauses the suggested task", uiPauseWorld, []string{"P", "y"}, func(f *spawnFixture) bool {
 		return !f.get("T-1").PausedAt.IsZero()
 	}},
