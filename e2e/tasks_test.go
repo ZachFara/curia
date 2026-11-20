@@ -1085,7 +1085,7 @@ func TestStopHookLatencyWithMessages(t *testing.T) {
 	send("Warm-up message.")
 	latencyBlock(t, &hookH, stop) // warm-up, untimed
 	timedMessages := 0
-	p := medianP95(t.Logf, func() time.Duration {
+	latencyGate(t, "curia hook Stop with tasks and messages", func() time.Duration {
 		var runs []time.Duration
 		for len(runs) < latencyMessageRuns {
 			timedMessages++
@@ -1095,10 +1095,6 @@ func TestStopHookLatencyWithMessages(t *testing.T) {
 		t.Logf("%-12s %s (load average %s)", "Stop", stats(runs), loadAverage())
 		return percentile(runs, 95)
 	})
-	if p >= p95Budget {
-		t.Errorf("median p95 wall time of curia hook Stop with %d tasks and %d messages = %v, want under %v (load average %s)",
-			latencyTasks, latencyDelivered+timedMessages, p, p95Budget, loadAverage())
-	}
 	if out := h.mustRun(t, "messages", "ls", "--json"); out != "[]\n" {
 		t.Errorf("curia messages ls --json after the pass = %s, want no open message", out)
 	}
