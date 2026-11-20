@@ -97,17 +97,17 @@ fmt: tools
 ## lint: golangci-lint with the strict config in .golangci.yml
 lint: tools
 	@echo "==> golangci-lint (strict config, .golangci.yml)"
-	$(GOLANGCI_LINT) run --disable $(COMPLEXITY_LINTERS),$(BOUNDARY_LINTERS) ./...
+	$(GOLANGCI_LINT) run --allow-parallel-runners --disable $(COMPLEXITY_LINTERS),$(BOUNDARY_LINTERS) ./...
 
 ## complexity: complexity limits (thresholds in .golangci.yml, docs/decisions/0002)
 complexity: tools
 	@echo "==> complexity limits ($(COMPLEXITY_LINTERS))"
-	$(GOLANGCI_LINT) run --enable-only $(COMPLEXITY_LINTERS) ./...
+	$(GOLANGCI_LINT) run --allow-parallel-runners --enable-only $(COMPLEXITY_LINTERS) ./...
 
 ## boundaries: depguard package-boundary rules (docs/decisions/0003)
 boundaries: tools
 	@echo "==> package boundaries (depguard)"
-	$(GOLANGCI_LINT) run --enable-only $(BOUNDARY_LINTERS) ./...
+	$(GOLANGCI_LINT) run --allow-parallel-runners --enable-only $(BOUNDARY_LINTERS) ./...
 
 ## suppressions: no lint suppressions of any kind may exist in the tree
 suppressions:
