@@ -1669,3 +1669,20 @@ func TestRestoreSpecRefusesOtherAgents(t *testing.T) {
 		}
 	}
 }
+
+// A session in the same-numbered pane of another tmux server is not the
+// window's agent coming back.
+func TestRestoreCheckBackIgnoresOtherServer(t *testing.T) {
+	opened := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	l := &restoreLaunch{pane: tmux.Pane{ID: "%100", Socket: "/tmp/tmux-501/first"}, opened: opened}
+	other := model.Session{ID: "s1", Pane: "%100", Socket: "/tmp/tmux-501/second", StartedAt: opened.Add(time.Second)}
+	restoreCheckBack(l, []model.Session{other}, nil, false)
+	if l.state != restorePending {
+		t.Errorf("state = %v, want pending", l.state)
+	}
+	other.Socket = "/tmp/tmux-501/first"
+	restoreCheckBack(l, []model.Session{other}, nil, false)
+	if l.state != restoreBack {
+		t.Errorf("same server: state = %v, want back", l.state)
+	}
+}

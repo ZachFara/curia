@@ -280,11 +280,8 @@ func TestMigrationOnPlan4Database(t *testing.T) {
 	db := plan4Database(t, path, at)
 
 	s := open(t, path)
-	if names := migrationNames(t, db); !reflect.DeepEqual(names, []string{
-		"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql",
-		"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_context_live.sql", "0009_session_checked_cwd.sql",
-	}) {
-		t.Errorf("migrations = %v, want 0001 to 0009 (both 0005 files)", names)
+	if names := migrationNames(t, db); !reflect.DeepEqual(names, allMigrations) {
+		t.Errorf("migrations = %v, want every migration file (both 0005 files)", names)
 	}
 	var priority int
 	var agent string
