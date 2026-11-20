@@ -40,6 +40,8 @@ type Session struct {
 	StartedAt, UpdatedAt, SeenAt                                                                   time.Time
 	// TaskID is the task whose agent this is; Worktree its worktree. TeamID,
 	// TeamRole and TeamMember place the session in an agent team.
+	// CheckedCwd is the directory the hook last asked git about.
+	CheckedCwd                                     string
 	TaskID, Worktree, TeamID, TeamRole, TeamMember string
 	// Socket is the tmux server's socket path (stored). ReviewPending is
 	// never stored; fleet.WithReviews sets it.

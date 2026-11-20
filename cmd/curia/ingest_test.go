@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZachFara/curia/internal/config"
+	latgate "github.com/ZachFara/curia/internal/latency"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 )
@@ -254,7 +256,13 @@ func TestIngestLogsNamesNotValues(t *testing.T) {
 		`XYZZY-garbage-PLUGH`,
 		`{"schema_version":1,"session_id":"has space QQdocQQ","cost_usd":31337.5}`,
 	} {
-		if err := os.Remove(filepath.Join(filepath.Dir(db), ".local", "state", "curia", "curia.log")); err != nil {
+		logPath := filepath.Join(filepath.Dir(db), ".local", "state", "curia", "curia.log")
+		if err := os.Remove(logPath); err != nil {
+			t.Fatal(err)
+		}
+		// Each document is a new problem, as if a minute had passed: the
+		// rate limit's marker goes too.
+		if err := os.Remove(logPath + ingestThrottleFile); err != nil {
 			t.Fatal(err)
 		}
 		ingestExec(t, strings.NewReader(doc), "ingest")
@@ -383,10 +391,11 @@ func TestIngestPassesParserNowToStore(t *testing.T) {
 	}
 }
 
-// TestIngestUnknownSessionCreatesNoRow: an agent may name any session id.
-// Ingest never creates a session row and stores a cost only for a session
-// that exists; the usage windows are the account's and are kept.
-func TestIngestUnknownSessionCreatesNoRow(t *testing.T) {
+// TestIngestUnknownSessionStoresNothing: an agent may name any session id.
+// A reading is stored only for a session a hook created: for another id
+// nothing is stored (no row, no cost, no usage sample) and the log says
+// "unknown session" once. Once the session exists the same reading stores.
+func TestIngestUnknownSessionStoresNothing(t *testing.T) {
 	db := hookHome(t)
 	ingestSeed(t, db, "s1")
 	ingestFixClock(t, ingestSpecNow)
@@ -394,17 +403,19 @@ func TestIngestUnknownSessionCreatesNoRow(t *testing.T) {
 
 	ingestExec(t, strings.NewReader(ingestSpecDoc(t, "ghost")), "ingest")
 	got := ingestSnap(t, db, "ghost")
-	if got.found || got.cost != 0 {
-		t.Errorf("ghost: found %v, %d cost samples; want no row and no cost", got.found, got.cost)
+	if got.found || got.cost != 0 || got.usage != 0 {
+		t.Errorf("ghost: found %v, %d cost, %d usage samples; want nothing", got.found, got.cost, got.usage)
 	}
-	if got.usage != 2 {
-		t.Errorf("usage samples %d, want 2 (account windows)", got.usage)
+	if s1 := ingestSnap(t, db, "s1"); s1 != before {
+		t.Errorf("s1 changed: %+v", s1)
 	}
-	if s1 := ingestSnap(t, db, "s1"); s1.sess != before.sess {
-		t.Errorf("s1 changed: %+v", s1.sess)
+	if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "unknown session") {
+		t.Errorf("log = %q, want one line about an unknown session", log)
 	}
-	if log := readLog(t); log != nil {
-		t.Errorf("log = %q, want none", log)
+	ingestSeed(t, db, "ghost") // the first hook arrives
+	ingestExec(t, strings.NewReader(ingestSpecDoc(t, "ghost")), "ingest")
+	if got = ingestSnap(t, db, "ghost"); got.usage != 2 || got.cost != 1 {
+		t.Errorf("after the session exists: %d usage, %d cost samples, want 2 and 1", got.usage, got.cost)
 	}
 }
 
@@ -460,18 +471,17 @@ func TestIngestLatency(t *testing.T) {
 	if got := ingestSnap(t, db, "s0"); got.usage+got.cost != 5000 {
 		t.Fatalf("filled %d samples, want 5000", got.usage+got.cost)
 	}
+	// The captured status-line payload carries context_window, as every real one does.
 	doc := func(i int) string {
-		return fmt.Sprintf(`{"schema_version":1,"session_id":%q,"cost_usd":%g,"cache_expires_at":%q,"cache_rebuild_usd":1.5,`+
-			`"rate_limits":{"five_hour":{"used_percentage":%d,"resets_at":%d},"seven_day":{"used_percentage":31,"resets_at":%q}}}`,
-			ids[i%len(ids)], 10+float64(i)/100, now.Add(30*time.Minute).Format(time.RFC3339),
-			i%100, now.Add(2*time.Hour).Unix(), now.Add(72*time.Hour).Format(time.RFC3339))
+		return string(statuslineLivePayload(t, "statusline-captured.json", ids[i%len(ids)], time.Now(), 10+float64(i)/100))
 	}
 	const runs, gatedRuns = 200, 1000 // reported; gated (Ruling 114)
 	timed := func(from, runs int) []time.Duration {
 		d := make([]time.Duration, 0, runs)
 		for i := range runs {
+			in := strings.NewReader(doc(from + i)) // built before the clock starts
 			start := time.Now()
-			if _, err := ingestRun(context.Background(), strings.NewReader(doc(from+i)), false); err != nil {
+			if _, err := ingestRun(context.Background(), in, true); err != nil {
 				t.Fatal(err)
 			}
 			d = append(d, time.Since(start))
@@ -489,16 +499,20 @@ func TestIngestLatency(t *testing.T) {
 	prev := ingestOpen
 	ingestOpen = func() (*store.Store, func(), error) { return st, func() {}, nil }
 	t.Cleanup(func() { ingestOpen = prev })
-	d := timed(runs, gatedRuns)
+	from := runs
+	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+		d := timed(from, gatedRuns)
+		from += gatedRuns
+		t.Logf("ingest on an open store over %d runs: p50 %v, p95 %v, max %v", gatedRuns, d[gatedRuns/2], d[gatedRuns*95/100], d[gatedRuns-1])
+		return d[gatedRuns*95/100]
+	})
 
 	t.Logf("ingest opening the store each run, over %d runs (not gated): p50 %v, p95 %v, max %v",
 		runs, opening[runs/2], opening[runs*95/100], opening[runs-1])
-	p50, p95 := d[gatedRuns/2], d[gatedRuns*95/100]
-	t.Logf("ingest on an open store over %d runs: p50 %v, p95 %v, max %v", gatedRuns, p50, p95, d[gatedRuns-1])
 	if p95 >= 20*time.Millisecond {
-		t.Errorf("ingest p95 = %v, want < 20ms", p95)
+		t.Errorf("ingest median p95 = %v, want < 20ms", p95)
 	}
-	if got := ingestSnap(t, db, "s0"); got.cost != 5000/2+runs+gatedRuns {
+	if got := ingestSnap(t, db, "s0"); got.cost != 5000/2+from {
 		t.Errorf("%d cost samples, want every run stored (log %q)", got.cost, readLog(t))
 	}
 }
@@ -536,5 +550,133 @@ func ingestFillSamples(t *testing.T, db string, ids []string, now time.Time) {
 	}
 	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestIngestStatuslineSetsContextWindow(t *testing.T) {
+	db := hookHome(t)
+	ingestSeed(t, db, "s1")
+	ingestFixClock(t, time.Date(2026, 11, 15, 19, 0, 0, 0, time.UTC))
+	doc := strings.ReplaceAll(string(ingestFixture(t, "statusline-captured.json")), "5cd98763-d94d-417d-b2ee-d172b8f63e81", "s1")
+	ingestExec(t, strings.NewReader(doc), "ingest", "--statusline")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	s, _, _ := st.GetSession(context.Background(), "s1")
+	if s.ContextMax != 1000000 || s.ContextUsed*100/s.ContextMax != 4 {
+		t.Errorf("used %d max %d, want 4%% of 1000000", s.ContextUsed, s.ContextMax)
+	}
+}
+
+// ingestLogAt makes the log's rate limit see now, which the test moves.
+func ingestLogAt(t *testing.T, now *time.Time) {
+	t.Helper()
+	prev := ingestLogNow
+	ingestLogNow = func() time.Time { return *now }
+	t.Cleanup(func() { ingestLogNow = prev })
+}
+
+// TestIngestLogBoundedPerKind: a problem that persists is logged once per
+// interval per kind, across runs (each run is a process, so the state is a
+// file), the first time always, and again once it has been gone.
+func TestIngestLogBoundedPerKind(t *testing.T) {
+	db := hookHome(t)
+	ingestSeed(t, db, "s1")
+	ingestFixClock(t, ingestSpecNow)
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	ingestLogAt(t, &now)
+	run := func(doc string) { ingestExec(t, strings.NewReader(doc), "ingest") }
+
+	for range 6 { // three a second for two seconds
+		run("SECRET-PAYLOAD garbage")
+		now = now.Add(300 * time.Millisecond)
+	}
+	if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "refused") {
+		t.Fatalf("after 6 refused documents: log = %q, want one line", log)
+	}
+	run(ingestSpecDoc(t, "ghost")) // another kind: logged at once
+	if log := readLog(t); len(log) != 2 || !strings.Contains(log[1], "unknown session") {
+		t.Fatalf("unknown session: log = %q, want a second line naming it", log)
+	}
+	run(ingestSpecDoc(t, "ghost"))
+	run("SECRET-PAYLOAD garbage")
+	if log := readLog(t); len(log) != 2 {
+		t.Fatalf("repeats inside the interval: log = %q, want still two lines", log)
+	}
+	now = now.Add(time.Minute)
+	run("SECRET-PAYLOAD garbage")
+	if log := readLog(t); len(log) != 3 {
+		t.Fatalf("after the interval: log = %q, want a third line", log)
+	}
+	if strings.Contains(strings.Join(readLog(t), "\n"), "SECRET") {
+		t.Errorf("the log holds payload content: %q", readLog(t))
+	}
+}
+
+// TestIngestLogAgainWhenProblemReturns: a kind that was gone for a while
+// is logged when it returns, inside the interval; one that only alternates
+// with good runs (several sessions share the log) is not.
+func TestIngestLogAgainWhenProblemReturns(t *testing.T) {
+	db := hookHome(t)
+	ingestSeed(t, db, "s1")
+	ingestFixClock(t, ingestSpecNow)
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	ingestLogAt(t, &now)
+	run := func(doc string) { ingestExec(t, strings.NewReader(doc), "ingest") }
+
+	run("garbage")
+	now = now.Add(time.Second)
+	run(ingestSpecDoc(t, "s1")) // a good run in between
+	now = now.Add(time.Second)
+	run("garbage")
+	if log := readLog(t); len(log) != 1 {
+		t.Fatalf("alternating with a good run: log = %q, want one line", log)
+	}
+	now = now.Add(30 * time.Second) // gone for half a minute
+	run(ingestSpecDoc(t, "s1"))
+	now = now.Add(time.Second)
+	run("garbage")
+	if log := readLog(t); len(log) != 2 {
+		t.Fatalf("problem returned after it cleared: log = %q, want a second line", log)
+	}
+}
+
+// TestIngestLogMarkerCannotFailTheRun: a marker that cannot be read or
+// written changes nothing but the bound.
+func TestIngestLogMarkerCannotFailTheRun(t *testing.T) {
+	hookHome(t)
+	ingestFixClock(t, ingestSpecNow)
+	marker := config.Default().LogPath + ".throttle"
+	if err := os.MkdirAll(filepath.Join(marker, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr := ingestExec(t, strings.NewReader("garbage"), "ingest")
+	if stdout != "" || stderr != "" {
+		t.Errorf("stdout %q stderr %q, want both empty", stdout, stderr)
+	}
+	if log := readLog(t); len(log) != 1 {
+		t.Errorf("log = %q, want the line", log)
+	}
+}
+
+// TestIngestLogMarkerStaysSmall: the marker holds one entry per kind, never
+// anything from the payload.
+func TestIngestLogMarkerStaysSmall(t *testing.T) {
+	hookHome(t)
+	ingestFixClock(t, ingestSpecNow)
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	ingestLogAt(t, &now)
+	for i := range 50 {
+		ingestExec(t, strings.NewReader(fmt.Sprintf("garbage %d", i)), "ingest", fmt.Sprintf("--x%d", i))
+		now = now.Add(7 * time.Second)
+	}
+	b, err := os.ReadFile(config.Default().LogPath + ".throttle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) > 512 || strings.Contains(string(b), "garbage") {
+		t.Errorf("marker %q: too large or holds payload", b)
 	}
 }

@@ -37,14 +37,14 @@ BOUNDARY_LINTERS   := depguard
 # Every tracked or untracked-but-not-ignored Go file (skips .scratch/ etc.).
 GO_FILES = $$(git ls-files --cached --others --exclude-standard -- '*.go')
 
-.PHONY: check check-fast check-gates tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test build release-snapshot clean
+.PHONY: check check-fast check-gates check-static latency-names test-unit test-latency test-unit-cmd check-shards test-staged tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test build release-snapshot clean
 
 ## check: run every gate, in order, under the lock. CI runs this; run it by hand for the full gate.
 check:
 	@scripts/with-test-lock.sh $(MAKE) --no-print-directory check-gates
 
 ## check-fast: the pre-commit gate, no lock: static checks and build only. No tests: run `make test-staged` or a narrow `go test -run` yourself; CI runs every test and is required to merge.
-check-fast: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script
+check-fast: check-static
 	@echo "==> go build ./..."
 	@go build ./...
 	@echo "==> make check-fast: all gates passed"
@@ -54,8 +54,11 @@ test-staged:
 	@scripts/staged-tests.sh
 
 ## check-gates: the gates themselves; `check` runs them under the worktree lock
-check-gates: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test
+check-gates: check-static check-shards test
 	@echo "==> make check: all gates passed"
+
+## check-static: every gate that is not a test (CI job `static`; `check-gates` and `check-fast` run it too)
+check-static: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script
 
 ## tools: install the pinned tool versions into .bin/
 tools: $(BIN)/.golangci-lint-$(GOLANGCI_LINT_VERSION) \
@@ -99,17 +102,17 @@ fmt: tools
 ## lint: golangci-lint with the strict config in .golangci.yml
 lint: tools
 	@echo "==> golangci-lint (strict config, .golangci.yml)"
-	$(GOLANGCI_LINT) run --disable $(COMPLEXITY_LINTERS),$(BOUNDARY_LINTERS) ./...
+	$(GOLANGCI_LINT) run --allow-parallel-runners --disable $(COMPLEXITY_LINTERS),$(BOUNDARY_LINTERS) ./...
 
 ## complexity: complexity limits (thresholds in .golangci.yml, docs/decisions/0002)
 complexity: tools
 	@echo "==> complexity limits ($(COMPLEXITY_LINTERS))"
-	$(GOLANGCI_LINT) run --enable-only $(COMPLEXITY_LINTERS) ./...
+	$(GOLANGCI_LINT) run --allow-parallel-runners --enable-only $(COMPLEXITY_LINTERS) ./...
 
 ## boundaries: depguard package-boundary rules (docs/decisions/0003)
 boundaries: tools
 	@echo "==> package boundaries (depguard)"
-	$(GOLANGCI_LINT) run --enable-only $(BOUNDARY_LINTERS) ./...
+	$(GOLANGCI_LINT) run --allow-parallel-runners --enable-only $(BOUNDARY_LINTERS) ./...
 
 ## suppressions: no lint suppressions of any kind may exist in the tree
 suppressions:
@@ -165,12 +168,42 @@ install-script:
 # "Latency", plus TestReplayFiveSessions: name new ones accordingly
 # (scripts/check-latency-names.sh fails the gate otherwise).
 LATENCY_TESTS := Latency|TestReplayFiveSessions
-test:
+# CI-only shard counts (scripts/shard.sh); the matrices in ci.yml must list 0..N-1.
+LATENCY_SHARDS := 3
+CMD_SHARDS     := 4
+export LATENCY_TESTS LATENCY_SHARDS CMD_SHARDS
+# CI runs step 1 as two jobs by overriding UNIT_PKGS with a computed split
+# of `go list ./...`; the default is every package.
+UNIT_PKGS ?= ./...
+
+latency-names:
 	@scripts/check-latency-names.sh
-	@echo "==> go test -race ./... (all but the latency gates, packages in parallel)"
-	@scripts/with-test-lock.sh go test -race -skip '$(LATENCY_TESTS)' ./...
-	@echo "==> go test -race -p 1 ./... (the latency gates alone)"
-	@scripts/with-test-lock.sh go test -race -p 1 -run '$(LATENCY_TESTS)' ./...
+
+## test-unit: step 1 (CI jobs `unit-cmd` and `unit-rest` pass UNIT_PKGS)
+test-unit: latency-names
+	@echo "==> go test -race (all but the latency gates, packages in parallel): $(UNIT_PKGS)"
+	@scripts/with-test-lock.sh go test -race -skip '$(LATENCY_TESTS)' $(UNIT_PKGS)
+
+## test-unit-cmd: step 1 for ./cmd/curia only, shard SHARD of CMD_SHARDS by test name (CI job `unit-cmd`)
+test-unit-cmd: latency-names
+	@run="$$(scripts/shard.sh list cmd | scripts/shard.sh pick $(SHARD) $(CMD_SHARDS) | paste -sd '|' -)"; \
+	echo "==> go test -race ./cmd/curia, shard $(SHARD) of $(CMD_SHARDS)"; \
+	scripts/with-test-lock.sh go test -race -skip '$(LATENCY_TESTS)' -run "^($$run)$$" ./cmd/curia
+
+## test-latency: step 2; with SHARD set (CI job `latency`) only shard SHARD of LATENCY_SHARDS
+## of the packages that hold a latency gate, each still run alone with -p 1
+test-latency: latency-names
+	@pkgs=./...; \
+	if [ -n "$(SHARD)" ]; then pkgs="$$(scripts/shard.sh list latency | scripts/shard.sh pick $(SHARD) $(LATENCY_SHARDS))"; fi; \
+	echo "==> go test -race -p 1 $$pkgs (the latency gates alone)"; \
+	scripts/with-test-lock.sh go test -race -p 1 -timeout 30m -run '$(LATENCY_TESTS)' $$pkgs
+
+## check-shards: fail unless the CI shards partition the latency packages and cmd/curia tests (part of check-gates and CI job `static`)
+check-shards:
+	@echo "==> shard partition check"
+	@scripts/check-shards.sh
+
+test: test-unit test-latency
 
 ## build: build the curia binary into ./curia
 build:

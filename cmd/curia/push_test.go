@@ -1355,3 +1355,77 @@ func TestNoTokenHashWithoutButtons(t *testing.T) {
 		t.Error("the reversible ticket's push has no button")
 	}
 }
+
+// pushSetRecache sets session S1's recache_tokens by raw SQL (nil: unknown).
+func pushSetRecache(t *testing.T, db string, tokens any) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.Exec(`UPDATE sessions SET recache_tokens = ? WHERE id = 'S1'`, tokens); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFlushStakesShowsTokensWhenDollarsUnknown: the status line gives the
+// rebuild in tokens, not dollars (Ruling P5-R2). With no dollar figure the
+// stakes line shows the tokens as the dashboard does (usage.TokensCell),
+// never an invented dollar figure and never $0.00; with neither it leaves
+// the cost out; a dollar figure, when known, is shown as before.
+func TestFlushStakesShowsTokensWhenDollarsUnknown(t *testing.T) {
+	warm := pushStamp(pushT0.Add(12*time.Minute + 30*time.Second))
+	cold := pushStamp(pushT0.Add(-3 * time.Minute))
+	cases := []struct {
+		name    string
+		expires any
+		used    int64
+		rebuild any
+		tokens  any
+		want    string
+	}{
+		{"warm, tokens only", warm, 84000, nil, 85000, "answer within 12m to keep cache warm (rebuild ≈ 85k tok)"},
+		{"warm, zero dollars", warm, 84000, 0.0, 8400, "answer within 12m to keep cache warm (rebuild ≈ 8.4k tok)"},
+		{"warm, dollars and tokens", warm, 84000, 1.68, 85000, "answer within 12m to keep cache warm (rebuild ≈ $1.68)"},
+		{"warm, neither", warm, 84000, nil, nil, "answer within 12m to keep cache warm"},
+		{"warm, absurd tokens", warm, 84000, nil, int64(1) << 40, "answer within 12m to keep cache warm"},
+		{"warm, negative tokens", warm, 84000, nil, -5, "answer within 12m to keep cache warm"},
+		{"cold, tokens only", cold, 0, nil, 85000, "cache cold: next turn re-writes ~85k tok"},
+		{"cold, context known", cold, 84000, nil, 85000, "cache cold: next turn re-writes ~84k tokens"},
+		{"cold, neither", cold, 0, nil, nil, "cache cold"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := pushServer(t, nil)
+			st, db := pushStore(t)
+			d := pushTicket(t, st, "Store webhook events in Postgres or Redis?", model.ReversCostly, 2)
+			pushSetCache(t, st, db, c.expires, c.used, c.rebuild)
+			pushSetRecache(t, db, c.tokens)
+			got := pushStakesBody(t, srv, st, d, pushT0)
+			if want := pushPlainMessage + "\n" + c.want; got != want {
+				t.Errorf("message = %q, want %q", got, want)
+			}
+			if strings.Contains(got, "$0.00") {
+				t.Errorf("message shows $0.00: %q", got)
+			}
+		})
+	}
+}
+
+// TestFlushStakesTokensWithLongQuestionStaysUnderTheBound: the tokens form
+// of the line keeps the push's length bounds.
+func TestFlushStakesTokensWithLongQuestionStaysUnderTheBound(t *testing.T) {
+	for _, fill := range []string{"€", "😀", "a"} {
+		srv := pushServer(t, nil)
+		st, db := pushStore(t)
+		d := pushTicket(t, st, strings.Repeat(fill, 3000), model.ReversCostly, 2)
+		pushSetCache(t, st, db, pushStamp(pushT0.Add(12*time.Minute+30*time.Second)), 84000, nil)
+		pushSetRecache(t, db, 9_999_999)
+		got := pushStakesBody(t, srv, st, d, pushT0)
+		if len(got) >= 4096 || !utf8.ValidString(got) || utf8.RuneCountInString(got) > notify.MaxPushText ||
+			!strings.HasSuffix(got, "\nanswer within 12m to keep cache warm (rebuild ≈ 10M tok)") {
+			t.Errorf("fill %q: %d bytes, %d runes, ends %q", fill, len(got), utf8.RuneCountInString(got), got[max(0, len(got)-70):])
+		}
+	}
+}

@@ -356,8 +356,8 @@ func uiBacklogOrReady(s model.TaskStatus) bool {
 }
 
 // Spawn starts task id as curia spawn does, without waiting for the agent
-// to report, and returns spawnLine's line with any setup step that was
-// skipped (an unapproved script). The board bounds an action by a few
+// to report, and returns spawnLine's line with the spawn's note (the model
+// it chose) and any setup step that was skipped (an unapproved script). The board bounds an action by a few
 // seconds; a spawn runs to its own limits instead (git's, an approved setup
 // script's), so a slow checkout or setup is not cut short. The board runs
 // it off its update loop and refuses another action until it returns.
@@ -373,6 +373,9 @@ func (b boardSource) Spawn(ctx context.Context, id string) (string, error) {
 		return "", err
 	}
 	parts := []string{spawnLine(r)}
+	if r.Note != "" {
+		parts = append(parts, strings.Split(r.Note, "\n")...)
+	}
 	for _, l := range strings.Split(out.String(), "\n") {
 		if strings.HasPrefix(l, "Setup: ") && strings.Contains(l, "skipped") {
 			parts = append(parts, l)

@@ -21,6 +21,7 @@ import (
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/decision"
 	"github.com/ZachFara/curia/internal/hook"
+	latgate "github.com/ZachFara/curia/internal/latency"
 	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -863,20 +864,22 @@ func TestHookLatency(t *testing.T) {
 	body := payload("A", tr, `,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
 
 	const runs = latencyGateRuns
-	durations := make([]time.Duration, 0, runs)
-	for range runs {
-		appendLine(t, tr, `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}`)
-		start := time.Now()
-		if _, err := hook.Run(context.Background(), model.PostToolUse, body, env, st, config.Default()); err != nil {
-			t.Fatal(err)
+	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+		durations := make([]time.Duration, 0, runs)
+		for range runs {
+			appendLine(t, tr, `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}`)
+			start := time.Now()
+			if _, err := hook.Run(context.Background(), model.PostToolUse, body, env, st, config.Default()); err != nil {
+				t.Fatal(err)
+			}
+			durations = append(durations, time.Since(start))
 		}
-		durations = append(durations, time.Since(start))
-	}
-	slices.Sort(durations)
-	p50, p95 := durations[runs/2], durations[runs*95/100]
-	t.Logf("PostToolUse over %d runs: p50 %v, p95 %v, max %v", runs, p50, p95, durations[runs-1])
+		slices.Sort(durations)
+		t.Logf("PostToolUse over %d runs: p50 %v, p95 %v, max %v", runs, durations[runs/2], durations[runs*95/100], durations[runs-1])
+		return durations[runs*95/100]
+	})
 	if p95 >= 20*time.Millisecond {
-		t.Errorf("p95 = %v, want < 20ms", p95)
+		t.Errorf("median p95 = %v, want < 20ms", p95)
 	}
 }
 
@@ -1513,15 +1516,19 @@ func TestStopLatencyWithDecisions(t *testing.T) {
 	stopOnce() // warm-up, untimed
 
 	const runs = latencyGateRuns
-	durations := make([]time.Duration, 0, runs)
-	for range runs {
-		durations = append(durations, stopOnce())
-	}
-	slices.Sort(durations)
-	p50, p95, worst := durations[runs/2], durations[runs*95/100], durations[runs-1]
-	t.Logf("Stop with 500 decisions over %d runs: p50 %v, p95 %v, max %v", runs, p50, p95, worst)
+	var p50, worst time.Duration
+	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+		durations := make([]time.Duration, 0, runs)
+		for range runs {
+			durations = append(durations, stopOnce())
+		}
+		slices.Sort(durations)
+		p50, worst = durations[runs/2], durations[runs-1]
+		t.Logf("Stop with 500 decisions over %d runs: p50 %v, p95 %v, max %v (load average %s)", runs, p50, durations[runs*95/100], worst, loadAverage())
+		return durations[runs*95/100]
+	})
 	if p95 >= 20*time.Millisecond {
-		t.Errorf("p95 = %v, want < 20ms (p50 %v, max %v, load average %s)", p95, p50, worst, loadAverage())
+		t.Errorf("median p95 = %v, want < 20ms (last batch p50 %v, max %v, load average %s)", p95, p50, worst, loadAverage())
 	}
 }
 
@@ -2415,25 +2422,31 @@ func TestStopLatencyWithMessages(t *testing.T) {
 			return res
 		}
 	}
+	gate := func(name string, prep func(), op func() hook.Result) {
+		p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+			d := latency(t, latencyGateRuns, prep, op)
+			runs, p50, p95, worst := len(d), d[len(d)/2], d[len(d)*95/100], d[len(d)-1]
+			t.Logf("%s, over %d runs: p50 %v, p95 %v, max %v (load average %s)", name, runs, p50, p95, worst, loadAverage())
+			return p95
+		})
+		if p95 >= 20*time.Millisecond {
+			t.Errorf("%s: median p95 = %v, want < 20ms (load average %s)", name, p95, loadAverage())
+		}
+	}
+	gate("Stop, none queued", topUp(0), hookOnce(model.Stop, stopBody, 0))
+	gate("Stop, 1 queued", topUp(1), claim(hookOnce(model.Stop, stopBody, 1)))
 	rows := []struct {
 		name string
-		gate bool
 		d    []time.Duration
 	}{
-		{"Stop, none queued", true, latency(t, latencyGateRuns, topUp(0), hookOnce(model.Stop, stopBody, 0))},
-		{"Stop, 1 queued", true, latency(t, latencyGateRuns, topUp(1), claim(hookOnce(model.Stop, stopBody, 1)))},
-		{"Stop, 20 queued", false, latency(t, latencyRuns, topUp(20), claim(hookOnce(model.Stop, stopBody, message.MaxPerStop)))},
-		{"PostToolUse, 12 queued", false, latency(t, latencyRuns, transcriptLine, hookOnce(model.PostToolUse, payload("A", tr, `,"tool_name":"Edit"`), 0))},
-		{"UserPromptSubmit", false, latency(t, latencyRuns, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "go on"), 0))},
-		{"UserPromptSubmit naming a message", false, latency(t, latencyRuns, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "Message M-1 from the user: x."), 0))},
+		{"Stop, 20 queued", latency(t, latencyRuns, topUp(20), claim(hookOnce(model.Stop, stopBody, message.MaxPerStop)))},
+		{"PostToolUse, 12 queued", latency(t, latencyRuns, transcriptLine, hookOnce(model.PostToolUse, payload("A", tr, `,"tool_name":"Edit"`), 0))},
+		{"UserPromptSubmit", latency(t, latencyRuns, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "go on"), 0))},
+		{"UserPromptSubmit naming a message", latency(t, latencyRuns, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "Message M-1 from the user: x."), 0))},
 	}
 	for _, r := range rows {
 		runs := len(r.d)
-		p50, p95, worst := r.d[runs/2], r.d[runs*95/100], r.d[runs-1]
-		t.Logf("%s, over %d runs: p50 %v, p95 %v, max %v", r.name, runs, p50, p95, worst)
-		if r.gate && p95 >= 20*time.Millisecond {
-			t.Errorf("%s: p95 = %v, want < 20ms (p50 %v, max %v, load average %s)", r.name, p95, p50, worst, loadAverage())
-		}
+		t.Logf("%s, over %d runs: p50 %v, p95 %v, max %v", r.name, runs, r.d[runs/2], r.d[runs*95/100], r.d[runs-1])
 	}
 }
 
@@ -2944,6 +2957,98 @@ func TestCodexHookAddsNoCall(t *testing.T) {
 		if len(f.gitCalls) != 1 || len(f.paneCalls) != 1 {
 			t.Errorf("agent %q: after five more events %d Git and %d PaneInfo calls, want still one each",
 				agent, len(f.gitCalls), len(f.paneCalls))
+		}
+	}
+}
+
+// repoAt is a fake Env whose Git knows only the directories in repos (cwd to
+// repository) and counts its calls per directory.
+func repoAt(repos map[string]string) (hook.Env, *[]string) {
+	var calls []string
+	env := (&fakeEnv{}).env("%3")
+	env.Git = func(cwd string) (string, string, string) {
+		calls = append(calls, cwd)
+		if r, ok := repos[cwd]; ok {
+			return r, "main", ""
+		}
+		return "", "", ""
+	}
+	return env, &calls
+}
+
+func cwdPayload(cwd string) []byte {
+	b, _ := json.Marshal(map[string]string{"session_id": "A", "cwd": cwd})
+	return b
+}
+
+func TestSessionOutsideRepoGetsRepoOnceFromFirstRepoCwd(t *testing.T) {
+	parent, repoA, repoB := t.TempDir(), t.TempDir(), t.TempDir()
+	env, calls := repoAt(map[string]string{repoA: "/r/a", repoB: "/r/b"})
+	st := openStore(t)
+	run(t, st, env, model.SessionStart, cwdPayload(parent))
+	if s := get(t, st, "A"); s.Repo != "" {
+		t.Fatalf("repo outside a repository = %q", s.Repo)
+	}
+	run(t, st, env, model.PreToolUse, cwdPayload(parent))
+	if len(*calls) != 1 {
+		t.Fatalf("same cwd as the start checked again: %v", *calls)
+	}
+	run(t, st, env, model.PreToolUse, cwdPayload(repoA))
+	if s := get(t, st, "A"); s.Repo != "/r/a" || s.Branch != "main" {
+		t.Fatalf("after moving into a repository: repo %q branch %q", s.Repo, s.Branch)
+	}
+	run(t, st, env, model.PreToolUse, cwdPayload(repoB))
+	run(t, st, env, model.PreToolUse, cwdPayload(repoA))
+	if s := get(t, st, "A"); s.Repo != "/r/a" {
+		t.Errorf("repo followed cd: %q", s.Repo)
+	}
+	if len(*calls) != 2 {
+		t.Errorf("git calls = %v, want the start and one more", *calls)
+	}
+}
+
+func TestSessionOutsideRepoChecksEachNewCwdOnce(t *testing.T) {
+	d1, d2, repo := t.TempDir(), t.TempDir(), t.TempDir()
+	env, calls := repoAt(map[string]string{repo: "/r/a"})
+	st := openStore(t)
+	run(t, st, env, model.SessionStart, cwdPayload(d1))
+	for _, d := range []string{d2, d2, d2, d1, d1} {
+		run(t, st, env, model.PreToolUse, cwdPayload(d))
+	}
+	if want := []string{d1, d2, d1}; !slices.Equal(*calls, want) {
+		t.Errorf("git calls = %v, want %v", *calls, want)
+	}
+	run(t, st, env, model.PreToolUse, cwdPayload(repo))
+	if s := get(t, st, "A"); s.Repo != "/r/a" {
+		t.Errorf("repo = %q", s.Repo)
+	}
+}
+
+func TestSessionStartedInRepoIsNeverRederived(t *testing.T) {
+	repoA, repoB := t.TempDir(), t.TempDir()
+	env, calls := repoAt(map[string]string{repoA: "/r/a", repoB: "/r/b"})
+	st := openStore(t)
+	run(t, st, env, model.SessionStart, cwdPayload(repoA))
+	run(t, st, env, model.PreToolUse, cwdPayload(repoB))
+	if s := get(t, st, "A"); s.Repo != "/r/a" || len(*calls) != 1 {
+		t.Errorf("repo %q, git calls %v", s.Repo, *calls)
+	}
+}
+
+func TestHostileOrMissingCwdChangesNothing(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range []string{"", "relative/dir", "/no/such/dir", file, "-C/etc"} {
+		repos := map[string]string{cwd: "/r/evil"}
+		env, calls := repoAt(repos)
+		st := openStore(t)
+		run(t, st, env, model.SessionStart, cwdPayload(t.TempDir()))
+		n := len(*calls)
+		run(t, st, env, model.PreToolUse, cwdPayload(cwd))
+		if s := get(t, st, "A"); s.Repo != "" || len(*calls) != n {
+			t.Errorf("cwd %q: repo %q, git calls %v", cwd, s.Repo, *calls)
 		}
 	}
 }

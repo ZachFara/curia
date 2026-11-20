@@ -499,3 +499,52 @@ func sendAncestryRotating(t *testing.T) {
 		}
 	}
 }
+
+const (
+	sendSockA = "/tmp/tmux-1/a"
+	sendSockB = "/tmp/tmux-1/b"
+)
+
+// sendOnServer is readSession on the tmux server at socket.
+func sendOnServer(id, pane, socket string) model.Session {
+	s := readSession(id, model.StateIdle, pane)
+	s.Socket = socket
+	return s
+}
+
+// A pane id is matched only with its tmux server (Ruling 133).
+func TestSendPaneMatchesCallersServer(t *testing.T) {
+	both := []model.Session{sendOnServer("sa", "%7", sendSockA), sendOnServer("sb", "%7", sendSockB)}
+	for _, c := range []struct {
+		name, tmuxEnv string
+		sessions      []model.Session
+		want          string // target session, or "" for a refusal
+	}{
+		{"caller on A", sendSockA + ",1,0", both, "sa"},
+		{"caller on B", sendSockB + ",1,0", both, "sb"},
+		{"third server", "/tmp/tmux-1/c,1,0", both, ""},
+		{"no TMUX", "", both, ""},
+		{"only on other server", sendSockA + ",1,0", both[1:], ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db, fake := readHome(t, []string{"%7"}, c.sessions...)
+			t.Setenv("TMUX", c.tmuxEnv)
+			_, err := readRun(t, "", "send", "%7", "hello")
+			if c.want == "" {
+				if err == nil {
+					t.Fatal("send: no error, want a refusal")
+				}
+				if ms := sendMessages(t, db); len(ms) != 0 || len(sendTyped(fake)) != 0 {
+					t.Errorf("refused send stored %+v, typed %q", ms, sendTyped(fake))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m := sendOne(t, db); m.TargetSession != c.want {
+				t.Errorf("target = %q, want %q", m.TargetSession, c.want)
+			}
+		})
+	}
+}
