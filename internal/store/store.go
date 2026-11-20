@@ -59,10 +59,11 @@ func Open(path string) (*Store, error) {
 	if err = os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
 		return nil, fmt.Errorf("store: create directory for %s: %w", abs, err)
 	}
-	db, err := sql.Open("sqlite", dsn(abs))
+	conn, err := sqlite.NewConnector(dsn(abs))
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", abs, err)
 	}
+	db := sql.OpenDB(newWriterConnector(conn, abs)) // writes take the writer lock, see writelock.go
 	s := &Store{db: db}
 	ctx := context.Background()
 	if err = s.enableWAL(ctx); err != nil {

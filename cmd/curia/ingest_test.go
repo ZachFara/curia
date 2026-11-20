@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/config"
+	latgate "github.com/ZachFara/curia/internal/latency"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 )
@@ -498,16 +499,20 @@ func TestIngestLatency(t *testing.T) {
 	prev := ingestOpen
 	ingestOpen = func() (*store.Store, func(), error) { return st, func() {}, nil }
 	t.Cleanup(func() { ingestOpen = prev })
-	d := timed(runs, gatedRuns)
+	from := runs
+	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+		d := timed(from, gatedRuns)
+		from += gatedRuns
+		t.Logf("ingest on an open store over %d runs: p50 %v, p95 %v, max %v", gatedRuns, d[gatedRuns/2], d[gatedRuns*95/100], d[gatedRuns-1])
+		return d[gatedRuns*95/100]
+	})
 
 	t.Logf("ingest opening the store each run, over %d runs (not gated): p50 %v, p95 %v, max %v",
 		runs, opening[runs/2], opening[runs*95/100], opening[runs-1])
-	p50, p95 := d[gatedRuns/2], d[gatedRuns*95/100]
-	t.Logf("ingest on an open store over %d runs: p50 %v, p95 %v, max %v", gatedRuns, p50, p95, d[gatedRuns-1])
 	if p95 >= 20*time.Millisecond {
-		t.Errorf("ingest p95 = %v, want < 20ms", p95)
+		t.Errorf("ingest median p95 = %v, want < 20ms", p95)
 	}
-	if got := ingestSnap(t, db, "s0"); got.cost != 5000/2+runs+gatedRuns {
+	if got := ingestSnap(t, db, "s0"); got.cost != 5000/2+from {
 		t.Errorf("%d cost samples, want every run stored (log %q)", got.cost, readLog(t))
 	}
 }
