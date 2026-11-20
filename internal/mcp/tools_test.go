@@ -240,7 +240,7 @@ func TestToolSurfaceIsExactlySix(t *testing.T) {
 			t.Errorf("%s has no Call", tool.Name)
 		}
 	}
-	want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision", "check_messages", "complete_task"}
+	want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision", "check_messages", "complete_task", "file_task"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("names = %v, want %v", names, want)
 	}
@@ -251,6 +251,7 @@ func TestToolSurfaceIsExactlySix(t *testing.T) {
 		"withdraw_decision": "Withdraw your own open ticket, giving the reason or the past decision that settles it.",
 		"check_messages":    "Read the messages the user sent to this session. Call it when a message says its wording was simplified, or to see whether anything is waiting. New messages come under messages; the last 5 messages already typed into your prompt come again under typed_earlier, newest first, with their full wording.",
 		"complete_task":     "Tell the user the task is finished and ready for review. Call it once everything is committed, with a short summary and the state of the tests.",
+		"file_task":         fileDescription,
 	}
 	for _, tool := range f.tools {
 		if tool.Description != descs[tool.Name] {
@@ -290,6 +291,7 @@ func TestSchemasAreExact(t *testing.T) {
   "precedent_id":{"type":"string","description":"The past decision that settles this, if one does."}}}`,
 		"check_messages": `{"type":"object","properties":{}}`,
 		"complete_task":  `{"type":"object","required":["summary","tests_status"],"properties":{"summary":{"type":"string","maxLength":2000},"tests_status":{"type":"string","enum":["passed","failed","not_run"]},"tests_detail":{"type":"string","maxLength":200}}}`,
+		"file_task":      fileSchema,
 	}
 	if len(want) != len(f.tools)-1 {
 		t.Fatalf("schemas checked for %d tools, want all but request_decision", len(want))

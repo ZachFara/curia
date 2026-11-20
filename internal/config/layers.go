@@ -220,6 +220,8 @@ func loosens(p Policy, l leaf, old, next Config) bool {
 		return reflect.ValueOf(next).FieldByIndex(l.index).Bool()
 	case PolicyTrue:
 		return !reflect.ValueOf(next).FieldByIndex(l.index).Bool()
+	case PolicyLevel:
+		return levelRank[reflect.ValueOf(next).FieldByIndex(l.index).String()] > levelRank[reflect.ValueOf(old).FieldByIndex(l.index).String()]
 	}
 	return true
 }

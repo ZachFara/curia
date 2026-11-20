@@ -60,6 +60,7 @@ type Config struct {
 
 	// Plan 6 additions.
 	Activity  Activity  `toml:"activity"`
+	Tasks     Tasks     `toml:"tasks"`
 	Resources Resources `toml:"resources"`
 	Monitor   Monitor   `toml:"monitor"`
 	Cost      Cost      `toml:"cost"`
@@ -136,6 +137,7 @@ func Default() Config {
 		Activity:  defaultActivity(),
 		Resources: defaultResources(),
 		Monitor:   Monitor{Autostart: true},
+		Tasks:     defaultTasks(),
 	}
 }
 
@@ -162,6 +164,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.validatePlan4(); err != nil {
+		return err
+	}
+	if err := c.Tasks.validate(); err != nil {
 		return err
 	}
 	if err := c.Resources.validate(); err != nil {

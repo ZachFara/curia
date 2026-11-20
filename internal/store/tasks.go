@@ -39,7 +39,7 @@ func failTask(op, id string, err error) error {
 const selectTasks = `
 SELECT n, id, title, body, repo, base_branch, status, source, source_ref, tags, branch, worktree,
   team, agent_model, pane, resume_session, created_at, updated_at, launched_at, paused_at, cleaned_at,
-  priority, agent, budget_usd
+  priority, agent, COALESCE(filed_by, ''), COALESCE(filed_reason, ''), COALESCE(filer_lineage, ''), budget_usd
 FROM tasks`
 
 // scanTask reads one row of selectTasks.
@@ -50,7 +50,8 @@ func scanTask(sc scanner) (model.Task, error) {
 	var budget sql.NullFloat64
 	err := sc.Scan(&t.N, &t.ID, &t.Title, &t.Body, &t.Repo, &t.BaseBranch, &t.Status, &t.Source, &t.SourceRef,
 		&tags, &t.Branch, &t.Worktree, &t.Team, &t.AgentModel, &t.Pane, &t.ResumeSession,
-		&created, &updated, &launched, &paused, &cleaned, &t.Priority, &t.Agent, &budget)
+		&created, &updated, &launched, &paused, &cleaned, &t.Priority, &t.Agent,
+		&t.FiledBy, &t.FiledReason, &t.FiledLineage, &budget)
 	if err != nil {
 		return model.Task{}, err
 	}

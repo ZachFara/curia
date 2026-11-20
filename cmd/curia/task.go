@@ -409,6 +409,9 @@ type taskRow struct {
 	LaunchedAt    *time.Time       `json:"launched_at"`
 	PausedAt      *time.Time       `json:"paused_at"`
 	CleanedAt     *time.Time       `json:"cleaned_at"`
+	FiledBy       string           `json:"filed_by,omitempty"`
+	FiledReason   string           `json:"filed_reason,omitempty"`
+	FilerLineage  string           `json:"filer_lineage,omitempty"`
 	// The budget (F16): the task's own or the default, what its sessions spent
 	// (null while no session's cost is known), the share and the level
 	// none, unknown, ok, warn (from 80%) or over (from 100%).
@@ -434,6 +437,7 @@ func taskToRow(c task.Card) taskRow {
 		ResumeSession: t.ResumeSession, Sessions: sessions,
 		CreatedAt: jsonTime(t.CreatedAt), UpdatedAt: jsonTime(t.UpdatedAt), LaunchedAt: jsonTime(t.LaunchedAt),
 		PausedAt: jsonTime(t.PausedAt), CleanedAt: jsonTime(t.CleanedAt),
+		FiledBy: t.FiledBy, FiledReason: t.FiledReason, FilerLineage: t.FiledLineage,
 		BudgetUSD: budgetLimit(b), SpentUSD: budgetSpent(b), BudgetPct: budgetPct(b), BudgetLevel: b.Level().String(),
 	}
 }
@@ -502,7 +506,7 @@ func taskPrintTable(w io.Writer, cards []task.Card) error {
 	_, _ = fmt.Fprintln(tw, "ID\tPRI\tSTATUS\tREPO\tTITLE\tAGENT\tBUDGET")
 	for _, c := range cards {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", taskCell(c.Task.ID), task.PriorityLabel(c.Task.Priority), taskCell(taskStatusText(c)),
-			taskCell(ui.RepoName(c.Task.Repo)), taskCell(c.Task.Title), taskCell(taskAgentText(c)), usage.BudgetCell(c.Budget))
+			taskCell(ui.RepoName(c.Task.Repo)), taskCell(c.Task.Title+taskFiledNote(c.Task)), taskCell(taskAgentText(c)), usage.BudgetCell(c.Budget))
 	}
 	return tw.Flush()
 }
@@ -735,6 +739,9 @@ func runTaskReady(cmd *cobra.Command, args []string) error {
 	}
 	cfg, err := loadConfig()
 	if err != nil {
+		return err
+	}
+	if err = taskConfirmFiled(cmd.Context(), cfg, id, cmd.InOrStdin(), cmd.OutOrStdout()); err != nil {
 		return err
 	}
 	if err = taskUpdate(cmd.Context(), cfg, id, nil, func(t *model.Task) { t.Status = model.TaskReady }); err != nil {
