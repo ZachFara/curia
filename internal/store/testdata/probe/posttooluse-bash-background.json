@@ -1,0 +1,28 @@
+{
+ "session_id": "<uuid>",
+ "transcript_path": "<scratch>/scratchpad/probe-claude-config/projects/-private-tmp-p6r2-11F3-repo/<uuid>.jsonl",
+ "cwd": "/private<tmp>/repo",
+ "scratchpad_dir": "<scratch>/scratchpad",
+ "prompt_id": "<uuid>",
+ "permission_mode": "auto",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "sleep 3",
+  "description": "Sleep 3 seconds in background",
+  "run_in_background": true
+ },
+ "tool_response": {
+  "stdout": "",
+  "stderr": "",
+  "interrupted": false,
+  "isImage": false,
+  "noOutputExpected": false,
+  "backgroundTaskId": "bn1xn9x92"
+ },
+ "tool_use_id": "toolu_01QTckjtv6jGSNMb8b4gwMMM",
+ "duration_ms": 7
+}

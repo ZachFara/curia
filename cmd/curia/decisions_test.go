@@ -1077,6 +1077,7 @@ var userOnlyCommands = map[string][]string{
 	"curia serve devices":   {},
 	"curia export obsidian": {},
 	"curia export commons":  {"D-1"},
+	"curia monitor stop":    {}, // ends a process the user runs
 }
 
 // userNotOnlyCommands are the leaf commands anyone, an agent included, may
@@ -1110,6 +1111,9 @@ var userNotOnlyCommands = map[string]string{
 	"curia task ls":               "reads the tasks only",
 	"curia timeline":              "reads existing rows and prints cleaned, bounded text, as ls and read do; changes nothing",
 	"curia ui":                    "a view; its user actions go through the guard (uiUserActions)",
+	"curia monitor start":         "run by tmux's run-shell with no terminal; starts the one instance the lock allows, and nothing depends on the monitor",
+	"curia resources":             "reads the monitor's samples and prints numbers by session id; changes nothing",
+	"curia monitor status":        "reads whether the lock is held; changes nothing",
 	"curia time":                  "reads the stored hook events and prints numbers; writes nothing and calls no model",
 	"curia usage":                 "reads the samples and tasks and prints numbers; it pauses nothing, and the pause it suggests is typed by the user",
 	"curia version":               "prints the version",

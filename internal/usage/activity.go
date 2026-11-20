@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 )
 
@@ -152,6 +153,20 @@ type ActivityEvent struct {
 	Kind          model.EventKind
 	At            time.Time
 	Tool, Command string
+	// Background commands (probe, Claude Code 2.1.329). On a PreToolUse:
+	// Background is tool_input.run_in_background and ToolUseID the call's
+	// id. On the PostToolUse (fired at once): ToolUseID and TaskID, the
+	// response's backgroundTaskId. On a Stop: Listed are the ids of
+	// background_tasks still running, and HasList says the field was there.
+	// On a UserPromptSubmit: Prompt, its first bytes only (a task
+	// notification names the finished id there). All untrusted and
+	// bounded by the store read.
+	Background bool
+	ToolUseID  string
+	TaskID     string
+	Listed     []string
+	HasList    bool
+	Prompt     string
 }
 
 // ActivityOpts bounds one session's classification. Since and Now clip the
@@ -170,6 +185,11 @@ type Span struct{ Start, End time.Time }
 type ActivityTime struct {
 	ByClass map[string]time.Duration
 	Spans   []Span
+	// Background is the lifetime of background commands per class, whether
+	// or not the agent was working meanwhile (overlapping commands each
+	// count in full); Unfinished is how many had no completion seen.
+	Background map[string]time.Duration
+	Unfinished int
 }
 
 // ClassifyActivity turns one session's events (in order) into time per
@@ -180,12 +200,30 @@ type ActivityTime struct {
 // prompt, are waiting on me, the latter only up to IdleCap in all (a
 // following idle Notification does not restart the cap).
 //
+// Background commands (see backgroundCommands) overlap like this: while the
+// agent works (a tool, thinking) its time is that work's class and the
+// command adds nothing (agent time counts once); after a turn end, time
+// while a command runs is that command's class (the first started, when
+// several run) and not waiting on me, and it does not use up the idle cap:
+// the user is not blamed for the agent waiting on its own command.
+// A task notification or agent message is a system turn, not the user: it
+// wakes the agent (thinking) but does not restart the idle cap.
+//
 // shortcut: the first event after the window start has no known earlier
-// state, so the interval before it is dropped; a background command's
-// runtime after its Post counts as what the events say (thinking or
-// waiting on me) until the monitor tracks it (F19).
+// state, so the interval before it is dropped, and a command that started
+// before the window is not seen; revisit if retention gets long.
 func ClassifyActivity(evs []ActivityEvent, rules *ActivityRules, o ActivityOpts) ActivityTime {
-	r := &activityRun{o: o, out: ActivityTime{ByClass: map[string]time.Duration{}}}
+	r := &activityRun{o: o, out: ActivityTime{ByClass: map[string]time.Duration{}, Background: map[string]time.Duration{}}}
+	r.bg = backgroundCommands(evs, rules, o)
+	for _, c := range r.bg {
+		a, b := laterOf(c.start, o.Since), earlierOf(c.end, o.Now)
+		if b.After(a) {
+			r.out.Background[c.class] += b.Sub(a)
+		}
+		if !c.done && c.end.After(o.Since) {
+			r.out.Unfinished++
+		}
+	}
 	for _, e := range evs {
 		r.flush(e.At)
 		r.step(e, rules)
@@ -196,39 +234,208 @@ func ClassifyActivity(evs []ActivityEvent, rules *ActivityRules, o ActivityOpts)
 	return r.out
 }
 
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+func earlierOf(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
+}
+
+// maxTaskID bounds a background task id (probe ids are 9 characters).
+const maxTaskID = 64
+
+// bgCommand is one background command: its lifetime and class. done says a
+// completion was seen (a task notification, or a Stop that no longer lists
+// it); otherwise it is unfinished.
+type bgCommand struct {
+	use, id, class string
+	start, end     time.Time
+	done           bool
+}
+
+// backgroundCommands finds a session's background commands: a PreToolUse
+// with run_in_background starts one (class by the usual rules); its
+// PostToolUse (same tool_use_id) names its task id; it ends at the task
+// notification naming that id, else at the first Stop whose background_tasks
+// no longer lists it. One with neither is unfinished and ends at the
+// session's end, else now (live), else the last Stop that listed it (or the
+// last event). A notification or Stop naming no known command is ignored.
+func backgroundCommands(evs []ActivityEvent, rules *ActivityRules, o ActivityOpts) []*bgCommand {
+	t := &bgTracker{seen: map[*bgCommand]time.Time{}}
+	for _, e := range evs {
+		t.last = e.At
+		switch {
+		case e.Kind == model.PreToolUse && e.Background:
+			t.cmds = append(t.cmds, &bgCommand{use: e.ToolUseID, class: rules.Class(e.Tool, e.Command), start: e.At})
+		case e.Kind == model.PostToolUse:
+			t.named(e)
+		case e.Kind == model.UserPromptSubmit && message.AgentBuilt(e.Prompt):
+			t.notice(e)
+		case e.Kind == model.Stop && e.HasList:
+			t.stop(e)
+		case e.Kind == model.SessionEnd:
+			t.sessEnd = e.At
+		}
+	}
+	for _, c := range t.cmds {
+		if !c.done {
+			c.end = laterOf(t.fallbackEnd(c, o), c.start)
+		}
+	}
+	return t.cmds
+}
+
+// bgTracker is backgroundCommands' state: the commands, the last Stop that
+// listed each, the session's end and its last event.
+type bgTracker struct {
+	cmds          []*bgCommand
+	seen          map[*bgCommand]time.Time
+	sessEnd, last time.Time
+}
+
+func (t *bgTracker) find(pred func(*bgCommand) bool) *bgCommand {
+	for i := len(t.cmds) - 1; i >= 0; i-- {
+		if pred(t.cmds[i]) {
+			return t.cmds[i]
+		}
+	}
+	return nil
+}
+
+// named gives the command whose PostToolUse this is its task id.
+func (t *bgTracker) named(e ActivityEvent) {
+	if e.TaskID == "" || len(e.TaskID) > maxTaskID {
+		return
+	}
+	if c := t.find(func(c *bgCommand) bool { return c.id == "" && c.use == e.ToolUseID }); c != nil {
+		c.id = e.TaskID
+	}
+}
+
+// notice ends the command a task notification names; an unknown id is ignored.
+func (t *bgTracker) notice(e ActivityEvent) {
+	id := noticeTaskID(e.Prompt)
+	if id == "" {
+		return
+	}
+	if c := t.find(func(c *bgCommand) bool { return c.id == id && !c.done }); c != nil {
+		c.end, c.done = e.At, true
+	}
+}
+
+// stop notes which running commands a Stop lists; one it no longer lists ended.
+func (t *bgTracker) stop(e ActivityEvent) {
+	for _, c := range t.cmds {
+		switch {
+		case c.id == "" || c.done:
+		case slices.Contains(e.Listed, c.id):
+			t.seen[c] = e.At
+		default:
+			c.end, c.done = e.At, true
+		}
+	}
+}
+
+// fallbackEnd is where an unfinished command ends.
+func (t *bgTracker) fallbackEnd(c *bgCommand, o ActivityOpts) time.Time {
+	switch {
+	case !t.sessEnd.IsZero():
+		return t.sessEnd
+	case o.Live:
+		return o.Now
+	case !t.seen[c].IsZero():
+		return t.seen[c]
+	}
+	return t.last
+}
+
+// noticeTaskID is the id in a task notification's <task-id> element, within
+// the bytes the store kept; "" when there is none or it is too long.
+func noticeTaskID(prompt string) string {
+	_, rest, ok := strings.Cut(prompt, "<task-id>")
+	if !ok {
+		return ""
+	}
+	id, _, ok := strings.Cut(rest, "</task-id>")
+	if !ok || len(id) > maxTaskID {
+		return ""
+	}
+	return id
+}
+
 // activityRun is ClassifyActivity's state: the open interval's class and
-// start, the open tool calls, and the idle cap left.
+// start, the open tool calls, the idle cap left, and the background commands.
 type activityRun struct {
 	o              ActivityOpts
 	out            ActivityTime
+	bg             []*bgCommand
 	cur, toolClass string
 	t              time.Time
 	depth          int
 	capped         bool
+	wake           bool // a system turn woke the capped wait: the cap is not restarted
 	capLeft        time.Duration
 }
 
-// flush closes the open interval at to.
+// add counts [a, b) as class, clipped to the window.
+func (r *activityRun) add(class string, a, b time.Time) {
+	a, b = laterOf(a, r.o.Since), earlierOf(b, r.o.Now)
+	if b.After(a) {
+		r.out.ByClass[class] += b.Sub(a)
+		r.out.Spans = append(r.out.Spans, Span{a, b})
+	}
+}
+
+// flush closes the open interval at to. A capped wait (after a turn end) is
+// cut at the background commands' edges: where one runs it is that
+// command's class and free of the cap; the rest is waiting on me, up to the cap.
 func (r *activityRun) flush(to time.Time) {
 	defer func() { r.t = to }()
 	if r.cur == "" || !to.After(r.t) {
 		return
 	}
-	end := to
-	if r.capped && r.cur == ClassWaitingMe {
-		end = r.t.Add(min(to.Sub(r.t), r.capLeft))
-		r.capLeft -= end.Sub(r.t)
+	if r.cur != ClassWaitingMe || !r.capped {
+		r.add(r.cur, r.t, to)
+		return
 	}
-	a, b := r.t, end
-	if a.Before(r.o.Since) {
-		a = r.o.Since
+	cuts := []time.Time{r.t, to}
+	for _, c := range r.bg {
+		for _, p := range []time.Time{c.start, c.end} {
+			if p.After(r.t) && p.Before(to) {
+				cuts = append(cuts, p)
+			}
+		}
 	}
-	if b.After(r.o.Now) {
-		b = r.o.Now
+	slices.SortFunc(cuts, time.Time.Compare)
+	for i := 1; i < len(cuts); i++ {
+		a, b := cuts[i-1], cuts[i]
+		if c := slices.IndexFunc(r.bg, func(c *bgCommand) bool { return !c.start.After(a) && !c.end.Before(b) }); c >= 0 {
+			r.add(r.bg[c].class, a, b)
+			continue
+		}
+		end := a.Add(min(b.Sub(a), r.capLeft))
+		r.capLeft -= end.Sub(a)
+		r.add(ClassWaitingMe, a, end)
 	}
-	if b.After(a) {
-		r.out.ByClass[r.cur] += b.Sub(a)
-		r.out.Spans = append(r.out.Spans, Span{a, b})
+}
+
+// prompt is a UserPromptSubmit: the user typing, or a system turn (a task
+// notification, an agent message) that wakes the agent and nobody typed.
+func (r *activityRun) prompt(e ActivityEvent) {
+	if !message.AgentBuilt(e.Prompt) {
+		r.cur, r.capped, r.depth, r.wake = ClassThinking, false, 0, false
+		return
+	}
+	if r.cur == ClassWaitingMe || r.cur == "" {
+		r.wake = r.wake || r.capped
+		r.cur, r.capped = ClassThinking, false
 	}
 }
 
@@ -236,7 +443,7 @@ func (r *activityRun) flush(to time.Time) {
 func (r *activityRun) step(e ActivityEvent, rules *ActivityRules) {
 	switch e.Kind {
 	case model.UserPromptSubmit:
-		r.cur, r.capped, r.depth = ClassThinking, false, 0
+		r.prompt(e)
 	case model.PreToolUse:
 		if r.depth == 0 {
 			r.toolClass = rules.Class(e.Tool, e.Command)
@@ -259,7 +466,10 @@ func (r *activityRun) step(e ActivityEvent, rules *ActivityRules) {
 			r.cur, r.capped = ClassWaitingMe, false
 		}
 	case model.Stop, model.SessionStart:
-		r.cur, r.capped, r.capLeft, r.depth = ClassWaitingMe, true, r.o.IdleCap, 0
+		if !r.wake || e.Kind == model.SessionStart {
+			r.capLeft, r.wake = r.o.IdleCap, false
+		}
+		r.cur, r.capped, r.depth = ClassWaitingMe, true, 0
 	case model.SessionEnd:
 		r.cur, r.depth = "", 0
 	}
@@ -310,6 +520,28 @@ func ActivityHeadline(byClass map[string]time.Duration, wall time.Duration) stri
 	}
 	pct := float64(byClass[ClassWaitingMe]) * 100 / float64(total)
 	return fmt.Sprintf("waiting on me: %.0f%% of %s agent time (wall %s)", pct, ActivityDuration(total), ActivityDuration(wall))
+}
+
+// ActivityBackgroundLine is one line on background commands, "" without any:
+// their lifetime per class (shown beside the table because the agent may
+// have worked meanwhile) and how many are unfinished.
+func ActivityBackgroundLine(by map[string]time.Duration, unfinished int) string {
+	var parts []string
+	var total time.Duration
+	for _, c := range ActivityClasses {
+		if d := by[c]; d > 0 {
+			parts = append(parts, c+" "+ActivityDuration(d))
+			total += d
+		}
+	}
+	if len(parts) == 0 && unfinished == 0 {
+		return ""
+	}
+	line := fmt.Sprintf("background commands: %s (%s)", ActivityDuration(total), strings.Join(parts, ", "))
+	if unfinished > 0 {
+		line += fmt.Sprintf(", %d unfinished (no completion seen)", unfinished)
+	}
+	return line
 }
 
 // ActivityDuration is "6h 05m", or "7m" under an hour.

@@ -548,3 +548,16 @@ func TestSendPaneMatchesCallersServer(t *testing.T) {
 		})
 	}
 }
+
+// Ruling 133: a sender session in the same pane id on another tmux server is
+// not the caller's own pane.
+func TestSendCheckSelfIgnoresSamePaneIDOnOtherServer(t *testing.T) {
+	t.Setenv("TMUX_PANE", "")
+	target := model.Session{ID: "t", Pane: "%3", Socket: "/mine.sock"}
+	if err := sendCheckSelf(target, model.Session{ID: "o", Pane: "%3", Socket: "/other.sock"}, "o"); err != nil {
+		t.Errorf("other server's %%3 refused: %v", err)
+	}
+	if err := sendCheckSelf(target, model.Session{ID: "o", Pane: "%3", Socket: "/mine.sock"}, "o"); err == nil {
+		t.Error("same server's %3 allowed")
+	}
+}

@@ -91,18 +91,18 @@ func withCurrent(entries []any, bin, ev string) ([]any, bool) {
 	return entries, true
 }
 
-// toolRules are the permission rules that let the six curia MCP tools run
+// toolRules are the permission rules that let the seven curia MCP tools run
 // without a prompt.
 var toolRules = []string{
 	"mcp__curia__search_decisions", "mcp__curia__request_decision",
 	"mcp__curia__check_decision", "mcp__curia__withdraw_decision",
-	"mcp__curia__check_messages", "mcp__curia__complete_task",
+	"mcp__curia__check_messages", "mcp__curia__complete_task", "mcp__curia__file_task",
 }
 
-// AllowTools adds each of the six curia MCP tool rules that is not already
+// AllowTools adds each of the seven curia MCP tool rules that is not already
 // in permissions.allow of the settings file at settingsPath, creating the
 // file, permissions and allow as needed, in one write with the usual backup.
-// When all six are there it writes nothing. A permissions or allow value of
+// When all seven are there it writes nothing. A permissions or allow value of
 // an unexpected type is an error and nothing is written.
 func AllowTools(settingsPath string, now time.Time) error {
 	settingsPath = filepath.Clean(settingsPath)
@@ -129,7 +129,7 @@ func AllowTools(settingsPath string, now time.Time) error {
 	return saveSettings(settingsPath, raw, settings, now)
 }
 
-// ToolsAllowed reports whether all six curia MCP tool rules are already in
+// ToolsAllowed reports whether all seven curia MCP tool rules are already in
 // permissions.allow of the settings file at settingsPath. A file that is
 // missing, unreadable or of an unexpected shape reports false.
 func ToolsAllowed(settingsPath string) bool {
@@ -171,7 +171,7 @@ func allowList(settings map[string]any) (map[string]any, []any, error) {
 	return perms, allow, nil
 }
 
-// Unhooks removes the hook commands Curia added, and the six curia MCP tool
+// Unhooks removes the hook commands Curia added, and the seven curia MCP tool
 // rules whoever added them, from the settings file at settingsPath, in one
 // write. Hook entries that became empty are dropped; the allow list is kept
 // even when empty, and everything else is kept as it is. A missing file, or
@@ -230,7 +230,7 @@ func removeOurHooks(settings map[string]any, bin string) (bool, error) {
 	return changed, nil
 }
 
-// removeToolRules drops the six tool rules from permissions.allow and
+// removeToolRules drops the seven tool rules from permissions.allow and
 // reports whether it removed any.
 func removeToolRules(settings map[string]any) (bool, error) {
 	perms, allow, err := allowList(settings)
@@ -516,10 +516,13 @@ func writeBackup(path string, original []byte, now time.Time) error {
 	}
 }
 
+// WriteAtomic is writeAtomic for other packages (the user's config file).
+func WriteAtomic(path string, data []byte) error { return writeAtomic(path, data) }
+
 // writeAtomic writes data to path via a temporary file and a rename, creating
 // the parent directory if needed. If path is a symlink the write lands on the
 // file it points to, so the link survives. A file that exists keeps its
-// permission bits; a new one is 0600.
+// permission bits; a new one is 0600. The data is synced before the rename.
 func writeAtomic(path string, data []byte) error {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
@@ -542,6 +545,10 @@ func writeAtomic(path string, data []byte) error {
 		return err
 	}
 	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return err
 	}

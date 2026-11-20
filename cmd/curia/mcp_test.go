@@ -265,7 +265,7 @@ func mcpHandshake(t *testing.T, p *mcpProc) {
 	for _, tool := range mcpAs[[]any](t, mcpAs[map[string]any](t, list["result"])["tools"]) {
 		names = append(names, mcpAs[string](t, mcpAs[map[string]any](t, tool)["name"]))
 	}
-	if want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision", "check_messages", "complete_task"}; !slices.Equal(names, want) {
+	if want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision", "check_messages", "complete_task", "file_task"}; !slices.Equal(names, want) {
 		t.Errorf("tools = %v, want %v", names, want)
 	}
 }

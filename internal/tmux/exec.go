@@ -34,7 +34,8 @@ type execClient struct {
 }
 
 // NewExec returns a Client that runs the tmux binary. An empty socket uses
-// the default server; otherwise every command gets -L socket.
+// the default server; an absolute path gets -S path (a server's socket_path,
+// as a session records it); any other name gets -L name.
 func NewExec(socket string) Client {
 	c := &execClient{socket: socket}
 	c.runner = c.execTmux
@@ -50,7 +51,10 @@ func (c *execClient) run(ctx context.Context, args ...string) (string, error) {
 // execTmux executes tmux with args as separate argv entries (never a shell).
 func (c *execClient) execTmux(ctx context.Context, args ...string) (string, error) {
 	full := args
-	if c.socket != "" {
+	switch {
+	case strings.HasPrefix(c.socket, "/"):
+		full = append([]string{"-S", c.socket}, args...)
+	case c.socket != "":
 		full = append([]string{"-L", c.socket}, args...)
 	}
 	cmd := exec.CommandContext(ctx, "tmux", full...)

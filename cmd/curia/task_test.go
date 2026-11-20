@@ -58,7 +58,7 @@ func taskHome(t *testing.T) string {
 }
 
 // taskFlagNames are the flags of `curia task`'s subcommands.
-var taskFlagNames = []string{"repo", "body", "base", "tag", "status", "json", "title", "backlog-md", "priority"}
+var taskFlagNames = []string{"repo", "body", "base", "tag", "status", "json", "title", "backlog-md", "priority", "budget"}
 
 // taskResetFlags restores every flag of `curia task`'s subcommands to its
 // default and clears its Changed mark, which cobra keeps between runs. A

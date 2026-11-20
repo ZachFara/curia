@@ -25,6 +25,8 @@ const (
 	// minLabelCells is the narrowest the label is cut to before the kind
 	// moves to a line of its own.
 	minLabelCells = 8
+	// sayTargetsShown bounds the targets of a broadcast listed under it.
+	sayTargetsShown = 5
 )
 
 // View renders, top to bottom: the input line or the message, the
@@ -137,7 +139,21 @@ func (m SayModel) proposalLines(w int) []string {
 	if m.p.Routed == model.RoutedConfirmed && !m.choice().Changed {
 		suffix += fmt.Sprintf(" (%.2f)", m.p.Confidence)
 	}
-	return arrowLines(candLabel(c), suffix, w)
+	return append(arrowLines(candLabel(c), suffix, w), m.targetLines(w)...)
+}
+
+// targetLines lists the first sayTargetsShown sessions of a broadcast and
+// how many more there are; the count is in the proposal's label.
+func (m SayModel) targetLines(w int) []string {
+	var out []string
+	for i, t := range m.p.Targets {
+		if i == sayTargetsShown {
+			out = append(out, helpStyle.Render(truncate(fmt.Sprintf("  … and %d more", len(m.p.Targets)-i), w)))
+			break
+		}
+		out = append(out, helpStyle.Render(truncate("  · "+candLabel(t), w)))
+	}
+	return out
 }
 
 // holdLines is "→ <label> (<what>)".

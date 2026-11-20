@@ -33,10 +33,14 @@ type DetailData struct {
 	// TaskCostUSD is the task branch's cost, when TaskCostKnown.
 	TaskCostUSD   float64
 	TaskCostKnown bool
+	// Budget is the task's budget and spend (F16); zero when it has none.
+	Budget model.Budget
 	// Activity is F27's time by class and last events; the section is drawn
 	// only when ActivityOK (a source with no F27 data leaves it false).
 	Activity   []string
 	ActivityOK bool
+	// Resources is the CPU and memory line (F19), "" when the source has none.
+	Resources string
 }
 
 // DetailDiff is the diff panel: drawn only when Has (a session with no worktree has none).

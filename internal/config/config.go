@@ -59,7 +59,11 @@ type Config struct {
 	CostLens CostLens `toml:"costlens"`
 
 	// Plan 6 additions.
-	Activity Activity `toml:"activity"`
+	Activity  Activity  `toml:"activity"`
+	Tasks     Tasks     `toml:"tasks"`
+	Resources Resources `toml:"resources"`
+	Monitor   Monitor   `toml:"monitor"`
+	Cost      Cost      `toml:"cost"`
 }
 
 // maxEditor bounds the editor option, in bytes.
@@ -131,7 +135,10 @@ func Default() Config {
 		Linear: Linear{URL: DefaultLinearURL},
 
 		// Plan 6 additions.
-		Activity: defaultActivity(),
+		Activity:  defaultActivity(),
+		Resources: defaultResources(),
+		Monitor:   Monitor{Autostart: true},
+		Tasks:     defaultTasks(),
 	}
 }
 
@@ -158,6 +165,15 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.validatePlan4(); err != nil {
+		return err
+	}
+	if err := c.Tasks.validate(); err != nil {
+		return err
+	}
+	if err := c.Resources.validate(); err != nil {
+		return err
+	}
+	if err := c.Cost.validate(); err != nil {
 		return err
 	}
 	return c.validatePlan5()

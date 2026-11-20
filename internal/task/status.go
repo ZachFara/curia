@@ -53,6 +53,7 @@ type Card struct {
 	Sessions []model.Session // live linked sessions; the lead or solo session first, then by id
 	Pane     string          // the first session's pane, "" when none
 	Review   model.Review    // the newest review; zero when none
+	Budget   model.Budget    // F16: filled by the caller (cmd's taskBudgets); zero when none
 }
 
 // columns is the order of the board's columns.

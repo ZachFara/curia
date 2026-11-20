@@ -22,6 +22,9 @@ const (
 	TargetTask    TargetType = "task"
 	TargetRepo    TargetType = "repo"
 	TargetGlobal  TargetType = "global"
+	// TargetBroadcast is the one candidate of a broadcast proposal: every
+	// session in Proposal.Targets. It is never offered to the router.
+	TargetBroadcast TargetType = "broadcast"
 )
 
 const labelLimit = 120 // runes of a candidate's label

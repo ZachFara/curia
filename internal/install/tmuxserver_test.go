@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -90,6 +92,7 @@ func unloadFixture(ctx context.Context, t *testing.T, bin string) (tm func(...st
 	}
 	mustTmux(t, tm, "set", "-g", "status-right", "#[fg=blue]before")
 	mustTmux(t, tm, "set-hook", "-g", "pane-focus-in[0]", "display-message first")
+	mustTmux(t, tm, "set-hook", "-g", "client-attached[0]", "display-message mine")
 	sourceSnippet(t, tm, dir, bin, 1)
 	mustTmux(t, tm, "set", "-ag", "status-right", " #[fg=red]after")
 	mustTmux(t, tm, "set-hook", "-g", "pane-focus-in[5]", `run-shell -b "/old/curia seen #{pane_id}"`)
@@ -122,6 +125,8 @@ func TestUnloadTmuxUndoesOnlyTheSnippet(t *testing.T) {
 		`  pane-focus-in[5]: removed Curia's hook: run-shell -b "/old/curia seen #{pane_id}"`,
 		`  pane-focus-in[77]: removed Curia's hook: run-shell -b "'/opt/my \$tools/it'\\''s/curia' seen #{pane_id}"`,
 		"  pane-focus-in[100]: not Curia's, kept: display-message last",
+		"  client-attached[0]: not Curia's, kept: display-message mine",
+		`  client-attached[78]: removed Curia's hook: run-shell -b "'/opt/my \$tools/it'\\''s/curia' monitor start --quiet"`,
 		"  status-right: removed Curia's badge #[default] #{@curia_badge}#(" + b + " status); the rest is as it was",
 		"  window-status-format: removed Curia's marker #{E:@curia_marker_format}; the rest is as it was",
 		"  window-status-current-format: removed Curia's marker #{E:@curia_marker_format}; the rest is as it was",
@@ -139,7 +144,7 @@ func TestUnloadTmuxUndoesOnlyTheSnippet(t *testing.T) {
 	checkUnloaded(t, tm, formats)
 
 	again := UnloadTmux(ctx, serverRunner(tm), conf, bin, defaultKeys, defaultKeys)
-	for _, w := range []string{"  pane-focus-in: no Curia hook to remove", "  status-right: holds no Curia badge", "  @curia_marker_format: not set"} {
+	for _, w := range []string{"  pane-focus-in: no Curia hook to remove", "  client-attached: no Curia hook to remove", "  status-right: holds no Curia badge", "  @curia_marker_format: not set"} {
 		if !slices.Contains(again, w) {
 			t.Errorf("second pass lacks %q:\n%s", w, strings.Join(again, "\n"))
 		}
@@ -163,6 +168,9 @@ func checkUnloaded(t *testing.T, tm func(...string) (string, error), formats [2]
 	}
 	if out, err := tm("show", "-gv", "@curia_marker_format"); err == nil {
 		t.Errorf("@curia_marker_format still set: %q", out)
+	}
+	if got := mustTmux(t, tm, "show-hooks", "-g", "client-attached"); got != "client-attached[0] display-message mine" {
+		t.Errorf("client-attached hooks = %q, want only the user's entry", got)
 	}
 	for key, want := range map[string]string{"a": "display-message mine", "m": "select-pane -m", "A": "", "N": ""} {
 		out, _ := tm("list-keys", "-T", "prefix", key)
@@ -241,6 +249,8 @@ func TestUnloadTmuxWithNoServer(t *testing.T) {
 		"tmux: a tmux server that is still running keeps Curia's hook, keys, badge and marker until it restarts " +
 			"(tmux kill-server, which closes its sessions); to clear them by hand instead, run these in a shell inside it:",
 		`  tmux show-hooks -g pane-focus-in | grep -F -- 'run-shell -b "` + testBin + ` seen #{pane_id}"' | cut -d' ' -f1 | ` +
+			`while read -r h; do tmux set-hook -gu "$h"; done`,
+		`  tmux show-hooks -g client-attached | grep -F -- 'run-shell -b "` + testBin + ` monitor start --quiet"' | cut -d' ' -f1 | ` +
 			`while read -r h; do tmux set-hook -gu "$h"; done`,
 		"  (prefix a is left out: " + conf + " binds it outside the curia block)",
 		`  tmux list-keys -T prefix A 2>/dev/null | grep -qF -- '"` + testBin + ` decide"' && tmux unbind-key -T prefix A`,
@@ -361,5 +371,98 @@ func TestTmuxWords(t *testing.T) {
 		if !slices.Equal(got, tc.want) || plain != tc.plain {
 			t.Errorf("tmuxWords(%q) = %q, %v; want %q, %v", tc.line, got, plain, tc.want, tc.plain)
 		}
+	}
+}
+
+// monitorHooks is show-hooks' list of client-attached entries.
+func monitorHooks(t *testing.T, tm func(args ...string) (string, error)) string {
+	t.Helper()
+	return mustTmux(t, tm, "show-hooks", "-g", "client-attached")
+}
+
+// TestSnippetStartsTheMonitorOnAttach: sourcing the snippet (twice, then for
+// a moved binary) sets one client-attached entry that runs `monitor start
+// --quiet`, keeps the user's own entries, and leaves a user's entry at
+// Curia's index. A client that really attaches runs the command once, and
+// installing over an existing setup (another source) starts nothing: the
+// line only runs on an attach.
+func TestSnippetStartsTheMonitorOnAttach(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	tm := realTmux(ctx, t, dir)
+	mustTmux(t, tm, "set-hook", "-g", "client-attached[0]", "display-message first")
+
+	// A script that records each run, in a directory whose name needs quoting.
+	bin := filepath.Join(dir, "my bin", "curia")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, bin, "#!/bin/sh\necho \"$@\" >> '"+filepath.Join(dir, "ran")+"'\n")
+	if out, err := exec.Command("chmod", "700", bin).CombinedOutput(); err != nil {
+		t.Fatalf("chmod: %v %s", err, out)
+	}
+	sourceSnippet(t, tm, dir, bin, 2)
+	want := "client-attached[0] display-message first\n" +
+		fmt.Sprintf(`client-attached[78] run-shell -b "%s monitor start --quiet"`, shellQuote(bin))
+	if got := monitorHooks(t, tm); got != want {
+		t.Errorf("hooks after sourcing twice =\n%s\nwant\n%s", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ran")); err == nil {
+		t.Error("sourcing the snippet ran the monitor command: only an attach may")
+	}
+
+	// A real attach (a control-mode client needs no terminal).
+	cmd := exec.CommandContext(ctx, "tmux", "-L", realSocket, "-C", "attach")
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = in.Close(); _ = cmd.Wait() }()
+	deadline := time.Now().Add(10 * time.Second)
+	var ran string
+	for time.Now().Before(deadline) && !strings.Contains(ran, "start") {
+		time.Sleep(50 * time.Millisecond)
+		ran = readFileIfAny(filepath.Join(dir, "ran"))
+	}
+	if strings.Count(ran, "monitor start --quiet\n") != 1 {
+		t.Errorf("the attach ran %q, want exactly one `monitor start --quiet`", ran)
+	}
+
+	moved := "/usr/local/bin/curia"
+	sourceSnippet(t, tm, dir, moved, 1)
+	if got, w := monitorHooks(t, tm), "client-attached[0] display-message first\n"+fmt.Sprintf(`client-attached[78] run-shell -b "%s monitor start --quiet"`, moved); got != w {
+		t.Errorf("hooks for a moved binary =\n%s\nwant\n%s", got, w)
+	}
+	mustTmux(t, tm, "set-hook", "-g", "client-attached[78]", "display-message mine")
+	sourceSnippet(t, tm, dir, testBin, 1)
+	if got, w := monitorHooks(t, tm), "client-attached[0] display-message first\nclient-attached[78] display-message mine"; got != w {
+		t.Errorf("hooks with the user's own entry at Curia's index =\n%s\nwant\n%s", got, w)
+	}
+}
+
+func readFileIfAny(path string) string {
+	b, _ := os.ReadFile(filepath.Clean(path))
+	return string(b)
+}
+
+// TestRefreshTmuxMovesTheMonitorHook: a server holding an earlier binary's
+// monitor hook (another index too) ends with none of those and the new
+// source gives one for the new binary.
+func TestRefreshTmuxMovesTheMonitorHook(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	tm := realTmux(ctx, t, dir)
+	mustTmux(t, tm, "set-hook", "-g", "client-attached[0]", "display-message first")
+	mustTmux(t, tm, "set-hook", "-g", "client-attached[5]", `run-shell -b "/old/curia monitor start --quiet"`)
+	sourceSnippet(t, tm, dir, "/old/curia", 1)
+	sourceSnippet(t, tm, dir, testBin, 1)
+	lines := RefreshTmux(ctx, serverRunner(tm), filepath.Join(dir, ".tmux.conf"), testBin, defaultKeys)
+	if got, w := monitorHooks(t, tm), "client-attached[0] display-message first\nclient-attached[78] run-shell -b \""+testBin+" monitor start --quiet\""; got != w {
+		t.Errorf("hooks =\n%s\nwant\n%s\n(lines %q)", got, w, lines)
 	}
 }

@@ -101,6 +101,10 @@ func (m DetailModel) body() []bodyLine {
 	}
 	section("Cost")
 	one(linePlain, m.costText())
+	if d.Resources != "" {
+		section("Resources")
+		one(linePlain, d.Resources)
+	}
 	if d.ActivityOK {
 		section("Activity")
 		for _, l := range d.Activity {
@@ -144,6 +148,12 @@ func (m DetailModel) costText() string {
 	parts := []string{"session " + cmpCost(usage.CostCell(d.Session.CostUSD, d.Session.CostKnown))}
 	if d.TaskCostKnown {
 		parts = append(parts, "task branch "+usage.CostCell(d.TaskCostUSD, true))
+	}
+	if c := usage.BudgetCell(d.Budget); c != "" {
+		if d.Budget.Level() != model.BudgetUnknown {
+			c = "budget " + c
+		}
+		parts = append(parts, c)
 	}
 	if c := usage.CacheCell(d.Session, m.now()); c != "" {
 		parts = append(parts, "cache "+c)
