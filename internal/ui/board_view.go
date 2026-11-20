@@ -149,7 +149,7 @@ func (m BoardModel) columnCells(c, cw, room int) []string {
 	out := make([]string, 0, last-first)
 	for i, card := range cards[first:last] {
 		sel := c == m.col && first+i == m.row
-		out = append(out, markCard(fit(cardMark(sel)+cardID(card)+" "+cardTitle(card), cw, false), sel))
+		out = append(out, markCard(fit(cardMark(sel)+cardID(card)+" "+cardBudget(card)+cardTitle(card), cw, false), sel))
 	}
 	return out
 }
@@ -175,7 +175,7 @@ func (m BoardModel) listView(w int) []string {
 			if selected {
 				sel = len(lines)
 			}
-			text := cardMark(selected) + fit(cardID(c), idW, false) + "  " + fit(cardRepo(c), repoW, false) + "  " + cardTitle(c)
+			text := cardMark(selected) + fit(cardID(c), idW, false) + "  " + fit(cardRepo(c), repoW, false) + "  " + cardBudget(c) + cardTitle(c)
 			lines = append(lines, markCard(truncate(text, w), selected))
 		}
 	}
@@ -205,6 +205,14 @@ func markCard(s string, selected bool) string {
 // cardTitle is c's title as drawn.
 func cardTitle(c task.Card) string {
 	return sanitize.Line(c.Task.Title, task.MaxTitle)
+}
+
+// cardBudget is c's budget mark and a space, or "" with no budget (F16).
+func cardBudget(c task.Card) string {
+	if s := c.Budget.Short(); s != "" {
+		return s + " "
+	}
+	return ""
 }
 
 // cardRepo is the basename of c's repository as drawn, or "-".

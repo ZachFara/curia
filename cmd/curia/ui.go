@@ -325,7 +325,11 @@ func (b boardSource) Cards(ctx context.Context) ([]task.Card, error) {
 	if err := reconcile(ctx, b.st, b.tm, b.cfg.LogPath, now); err != nil {
 		return nil, err
 	}
-	return taskCards(ctx, b.st, now)
+	cards, err := taskCards(ctx, b.st, now)
+	if err == nil {
+		err = taskBudgets(ctx, b.st, b.cfg, cards)
+	}
+	return cards, err
 }
 
 // SetStatus moves task id between backlog and ready, in one write
