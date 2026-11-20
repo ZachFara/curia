@@ -57,6 +57,7 @@ type Doc struct {
 	// CacheTTL are the payload's own words about the cache, kept as read.
 	ModelName          string // cleaned, at most 24 runes
 	ContextPct         int
+	ContextSize        int // the window, set only with ContextPct; 0 when either is absent or refused
 	HasContext         bool
 	CacheRecacheTokens int64
 	HasCacheRecache    bool
@@ -153,9 +154,17 @@ func (r *reader) statusCost(d *Doc, top map[string]json.RawMessage) {
 	}
 }
 
+// statusContext reads the context window. A null or missing used_percentage
+// (right after a start or a compaction) is no reading: the session keeps its
+// last known value until the next payload, and no number is invented.
 func (r *reader) statusContext(d *Doc, top map[string]json.RawMessage) {
-	if v, ok := r.num(r.sub(top, "context_window"), "used_percentage", "context_window.used_percentage", 100); ok {
+	cw := r.sub(top, "context_window")
+	if v, ok := r.num(cw, "used_percentage", "context_window.used_percentage", 100); ok {
 		d.ContextPct, d.HasContext = int(math.Round(v)), true
+		// 1000 keeps the store's rounding exact; 1e7 is far above any real window.
+		if n, ok := r.num(cw, "context_window_size", "context_window.context_window_size", 1e7); ok && n == math.Trunc(n) && n >= 1000 {
+			d.ContextSize = int(n)
+		}
 	}
 }
 

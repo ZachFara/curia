@@ -387,9 +387,23 @@ linters:
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
             - github.com/ZachFara/curia/internal/hook$
+            - github.com/ZachFara/curia/internal/latency$
           deny:
             - pkg: github.com/ZachFara/curia
-              desc: "internal/hook may import only internal packages above it: model to transcript (docs/decisions/0003)"
+              desc: "internal/hook may import only internal packages above it: model to transcript, and latency in tests (docs/decisions/0003)"
+
+        # Test support: the median-of-three latency gate helper (docs/decisions/0012).
+        latency:
+          list-mode: strict
+          files:
+            - "**/internal/latency/**"
+          allow:
+            - $gostd
+            - modernc.org/sqlite
+            - github.com/ZachFara/curia/internal/latency$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/latency imports the standard library and the SQLite driver (the reference workload), no internal package (docs/decisions/0012)"
 
         tmux:
           list-mode: strict
@@ -671,6 +685,7 @@ linters:
             - github.com/ZachFara/curia/internal/mcp$
             - github.com/ZachFara/curia/internal/ui$
             - github.com/ZachFara/curia/internal/install$
+            - github.com/ZachFara/curia/internal/latency$
           deny:
             - pkg: github.com/ZachFara/curia
               desc: "cmd/curia may import only the internal packages in the plan's File structure table (docs/decisions/0003)"
@@ -681,6 +696,7 @@ linters:
             - "**/e2e/**"
           allow:
             - $gostd
+            - modernc.org/sqlite
           deny:
             - pkg: github.com/ZachFara/curia
               desc: "e2e drives the built binary only and imports no internal package (docs/decisions/0003)"
@@ -694,6 +710,7 @@ linters:
             - "!**/internal/model/**"
             - "!**/internal/config/**"
             - "!**/internal/sanitize/**"
+            - "!**/internal/latency/**"
             - "!**/internal/decision/**"
             - "!**/internal/precedent/**"
             - "!**/internal/task/**"

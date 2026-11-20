@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	latgate "github.com/ZachFara/curia/internal/latency"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 )
@@ -460,10 +461,10 @@ VALUES (?, 's1', ?, '[{"key":"A","label":"a","tradeoffs":""}]', 'A', 'r', 'costl
 		t.Fatal(err)
 	}
 	defer func() { _ = rd.Close() }()
-	f50, f95 := timed(func() { _ = statusForecast(context.Background(), rd, fleetNow) })
+	latgate.Gate(t, "the forecast read", 20*time.Millisecond, func() time.Duration {
+		p50, p95 := timed(func() { _ = statusForecast(context.Background(), rd, fleetNow) })
+		t.Logf("the forecast read alone (statusForecast), %d runs: p50 %v, p95 %v", runs, p50, p95)
+		return p95
+	})
 	t.Logf("statusBadge with 3000 tickets and 20000 samples, %d runs (not gated: the ticket counts it already did cost most of it under -race): p50 %v, p95 %v", runs, b50, b95)
-	t.Logf("the forecast read alone (statusForecast), %d runs: p50 %v, p95 %v", runs, f50, f95)
-	if f95 >= 20*time.Millisecond {
-		t.Errorf("the forecast read p95 = %v, want < 20ms", f95)
-	}
 }

@@ -306,7 +306,9 @@ func (r *costRun) statusLine(t *testing.T) {
 }
 
 // Step 6: under the forecast a spawn starts the agent on the cheaper model
-// and says so first; --model wins without a note.
+// and says so first; --model wins without a note. The cheaper model is this
+// spawn's only (Ruling P5-R7): the argv carries it, the task does not store it
+// (tasks.golden.json: T-3 agent_model ""), while --model opus is stored (T-4).
 func (r *costRun) cheaperModel(t *testing.T) {
 	t.Helper()
 	r.user(t, "task", "add", "Add the audit log", "--repo", r.repo)
@@ -826,16 +828,18 @@ func TestIngestProcessLatency(t *testing.T) {
 		return took
 	}
 	timed(0) // warm-up, untimed
-	var runs []time.Duration
-	for len(runs) < costLatencyRuns {
-		runs = append(runs, timed(len(runs)+1))
-	}
-	t.Logf("%-12s %s (load average %s)", "ingest", stats(runs), loadAverage())
-	if p := percentile(runs, 95); p >= p95Budget {
-		t.Errorf("p95 wall time of curia ingest = %v, want under %v (load average %s)", p, p95Budget, loadAverage())
-	}
-	if out := h.mustRun(t, "usage", "--json"); !strings.Contains(out, `"window":"five_hour","used_pct":30`) {
-		t.Errorf("curia usage --json after the pass = %s, want the last reading (30%%) stored", out)
+	sent := 0
+	latencyGate(t, "curia ingest", func() time.Duration {
+		var runs []time.Duration
+		for len(runs) < costLatencyRuns {
+			sent++
+			runs = append(runs, timed(sent))
+		}
+		t.Logf("%-12s %s (load average %s)", "ingest", stats(runs), loadAverage())
+		return percentile(runs, 95)
+	})
+	if out := h.mustRun(t, "usage", "--json"); !strings.Contains(out, fmt.Sprintf(`"window":"five_hour","used_pct":%g`, 10+float64(sent)/20)) {
+		t.Errorf("curia usage --json after the pass = %s, want the last reading stored", out)
 	}
 	checkNoErrors(t, h.logPath)
 }

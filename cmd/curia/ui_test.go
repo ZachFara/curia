@@ -345,6 +345,22 @@ func TestBoardSourceSpawnDoesNotWait(t *testing.T) {
 	}
 }
 
+// The board's line carries the spawn's note (the cheaper model under a
+// limit forecast), on the same one line.
+func TestBoardSourceSpawnShowsNote(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Now", "")
+	f.spawnWarning()
+	line, err := uiBoardSource(f).Spawn(context.Background(), "T-1")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if !strings.HasPrefix(line, "T-1 launched in ") || !strings.HasSuffix(line, "; "+spawnWarningNote("T-1")) ||
+		strings.Contains(line, "\n") {
+		t.Errorf("line = %q, want the launch and then the note %q on one line", line, spawnWarningNote("T-1"))
+	}
+}
+
 // A setup script that is not approved is skipped by spawn, and the board's
 // line says so.
 func TestBoardSourceSpawnShowsSkippedSetup(t *testing.T) {
@@ -938,7 +954,7 @@ func TestStoreSourcePauseRefusals(t *testing.T) {
 }
 
 // uiPauseHome is a fleetHome under curia usage's warning series with
-// T-1 (P2, /src/web) and T-2 (P3, /src/api) running: their working sessions
+// T-1 (P2, /src/web) and T-2 (P3, /src/api) running: their idle sessions
 // sa and sb are in the live panes %1 and %2, so the dashboard's reconcile
 // keeps them.
 func uiPauseHome(t *testing.T) {
@@ -961,7 +977,7 @@ func uiPauseHome(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err = st.UpsertSession(context.Background(), model.Session{
-			ID: c.sid, Agent: "claude", State: model.StateWorking, Pane: "%" + strconv.Itoa(i+1), TmuxSession: "work",
+			ID: c.sid, Agent: "claude", State: model.StateIdle, Pane: "%" + strconv.Itoa(i+1), TmuxSession: "work",
 			TmuxWindow: "@1", TaskID: tk.ID, Repo: c.repo, StartedAt: fleetNow.Add(-time.Hour), UpdatedAt: fleetNow.Add(-time.Minute),
 		}); err != nil {
 			t.Fatal(err)

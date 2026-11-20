@@ -244,6 +244,18 @@ func TestFromStatusLineBuilt(t *testing.T) {
 	assert.False(t, d.HasCacheRebuild, "no price table: tokens never become money")
 }
 
+// Right after a start or a compaction Claude Code sends used_percentage
+// null: no context reading then. The session keeps its last known value
+// (no number is invented); the next payload with a percentage replaces it.
+func TestFromStatusLineNullContextPercentageIsNoReading(t *testing.T) {
+	d, err := FromStatusLine([]byte(`{"session_id":"s1","context_window":{"used_percentage":null,"context_window_size":200000}}`), testNow)
+	require.NoError(t, err)
+	assert.False(t, d.HasContext)
+	assert.Equal(t, 0, d.ContextPct)
+	assert.Equal(t, 0, d.ContextSize, "a size without a percentage must not reach the store")
+	assert.Empty(t, d.Dropped)
+}
+
 func TestFromStatusLineCaptured(t *testing.T) {
 	d, err := FromStatusLine(fixture(t, "statusline-captured.json"), testNow)
 	require.NoError(t, err)
@@ -478,4 +490,23 @@ func FuzzParsers(f *testing.F) {
 			require.False(t, math.IsNaN(usd) || math.IsInf(usd, 0) || usd < 0)
 		}
 	})
+}
+
+func TestFromStatusLineContextWindow(t *testing.T) {
+	d, err := FromStatusLine(fixture(t, "statusline-captured.json"), testNow)
+	require.NoError(t, err)
+	assert.Equal(t, 1000000, d.ContextSize)
+	assert.Equal(t, 4, d.ContextPct)
+	d, err = FromStatusLine(fixture(t, "statusline-captured-startup.json"), testNow)
+	require.NoError(t, err)
+	assert.Equal(t, 0, d.ContextSize, "null percentage: no context reading")
+	for _, cw := range []string{
+		`{"context_window_size":-1,"used_percentage":5}`, `{"context_window_size":0,"used_percentage":5}`,
+		`{"context_window_size":1e12,"used_percentage":5}`, `{"context_window_size":"1000000","used_percentage":5}`,
+		`{"context_window_size":1000000,"used_percentage":250}`, `{"context_window_size":1000000,"used_percentage":"5"}`,
+	} {
+		d, err = FromStatusLine([]byte(`{"session_id":"s1","context_window":`+cw+`}`), testNow)
+		require.NoError(t, err, cw)
+		assert.Equal(t, 0, d.ContextSize, cw)
+	}
 }

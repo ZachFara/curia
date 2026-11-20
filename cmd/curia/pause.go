@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -180,7 +179,7 @@ func pauseMakePlan(ctx context.Context, st *store.Store, tm tmux.Client, cfg con
 	plan := pausePlan{resume: pauseResumeSession(linked)}
 	var unknown []string
 	for _, tg := range pauseTargets(t, live) {
-		switch lifecyclePaneStateOf(panes, perr, tg.pane, tg.socket, tg.since) {
+		switch lifecycleTargetState(panes, perr, tg) {
 		case lifecyclePaneOurs:
 			plan.kill = append(plan.kill, tg)
 		case lifecyclePaneUnknown:
@@ -234,13 +233,11 @@ func pauseTargets(t model.Task, live []model.Session) []lifecycleTarget {
 			out = append(out, tg)
 		}
 	}
-	socket := "" // the task's window is on the server its sessions were recorded on
 	for _, s := range live {
 		add(lifecycleTarget{pane: s.Pane, socket: s.Socket, since: s.StartedAt, what: "session " + spawnShortID(s.ID)})
-		socket = cmp.Or(socket, s.Socket)
 	}
 	if t.Pane != "" {
-		add(lifecycleTarget{pane: t.Pane, socket: socket, since: t.LaunchedAt, what: t.ID + "'s window"})
+		add(lifecycleTarget{pane: t.Pane, socket: t.PaneSocket, window: true, since: t.LaunchedAt, what: t.ID + "'s window"})
 	}
 	return out
 }
@@ -252,6 +249,8 @@ func pauseUnknown(tg lifecycleTarget, panes []tmux.Pane, perr error) string {
 		return tg.what + ", which runs outside tmux"
 	case perr != nil:
 		return tg.what + " in pane " + sanitize.Line(tg.pane, 20) + " (tmux cannot list its panes: " + sanitize.Line(perr.Error(), 200) + ")"
+	case tg.window && tg.socket == "":
+		return tg.what + " in pane " + sanitize.Line(tg.pane, 20) + " (its tmux server was not recorded, so it may still be open on another server): close it yourself"
 	case lifecycleOtherServer(panes, tg.socket):
 		return tg.what + " in pane " + sanitize.Line(tg.pane, 20) + " of another tmux server (" +
 			sanitize.Line(filepath.Base(tg.socket), 60) + "): run curia pause from that server"
@@ -443,7 +442,7 @@ func pauseRemove(ctx context.Context, t model.Task, path, left string, out io.Wr
 func pauseRecord(ctx context.Context, st *store.Store, t model.Task, resume string, kept bool, out io.Writer) error {
 	now := clock()
 	_, err := st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
-		cur.PausedAt, cur.Pane, cur.ResumeSession, cur.LaunchedAt, cur.UpdatedAt = now, "", resume, time.Time{}, now
+		cur.PausedAt, cur.Pane, cur.PaneSocket, cur.ResumeSession, cur.LaunchedAt, cur.UpdatedAt = now, "", "", resume, time.Time{}, now
 		return cur, nil
 	})
 	if err != nil {
@@ -479,8 +478,25 @@ const lifecycleIgnoredShown = 5
 // have been there since, and whose it is.
 type lifecycleTarget struct {
 	pane, socket string
+	window       bool // the task's own window pane, whose server is unknown when socket is empty
 	since        time.Time
 	what         string
+}
+
+// lifecycleTargetState is lifecyclePaneStateOf for tg, except that a task's
+// window pane with no recorded server (a task from before the column) is
+// never ours: unknown is not "the same server".
+func lifecycleTargetState(panes []tmux.Pane, perr error, tg lifecycleTarget) lifecyclePaneState {
+	st := lifecyclePaneStateOf(panes, perr, tg.pane, tg.socket, tg.since)
+	if st == lifecyclePaneOurs && tg.window && tg.socket == "" {
+		return lifecyclePaneUnknown
+	}
+	return st
+}
+
+// lifecycleTaskPaneState places t's window pane (lifecycleTargetState).
+func lifecycleTaskPaneState(panes []tmux.Pane, perr error, t model.Task) lifecyclePaneState {
+	return lifecycleTargetState(panes, perr, lifecycleTarget{pane: t.Pane, socket: t.PaneSocket, window: true, since: t.LaunchedAt})
 }
 
 // lifecyclePaneState is what tmux shows of a pane an agent was in.
@@ -608,7 +624,7 @@ func lifecycleLaunching(t model.Task, linked []model.Session, panes []tmux.Pane,
 	if slices.ContainsFunc(linked, func(s model.Session) bool { return !s.StartedAt.Before(t.LaunchedAt) }) {
 		return nil
 	}
-	if lifecyclePaneStateOf(panes, perr, t.Pane, "", t.LaunchedAt) == lifecyclePaneOurs {
+	if lifecyclePaneStateOf(panes, perr, t.Pane, t.PaneSocket, t.LaunchedAt) == lifecyclePaneOurs {
 		return nil
 	}
 	return fmt.Errorf("a spawn of %s started at %s may still be under way (no agent has reported and no window of it is open). "+

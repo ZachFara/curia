@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -26,11 +27,14 @@ import (
 
 // spawnOptions are the choices of one spawn.
 type spawnOptions struct {
-	Agent  string        // --agent: claude, codex, or empty: the task's own, claude for a task never spawned
-	Model  string        // --model; "" uses the task's stored model, if any, or spawnModel's default
-	Team   bool          // --team
-	Resume string        // a session id: curia resume
-	Wait   time.Duration // how long to wait for the agent's first hook; 0: do not wait
+	Agent string // --agent: claude, codex, or empty: the task's own, claude for a task never spawned
+	Model string // --model; "" uses the task's stored model, if any, or spawnModel's default
+	// ModelOnce marks Model as spawnModel's limit-forecast default: this
+	// spawn's only, never stored on the task (Ruling P5-R7).
+	ModelOnce bool
+	Team      bool          // --team
+	Resume    string        // a session id: curia resume
+	Wait      time.Duration // how long to wait for the agent's first hook; 0: do not wait
 	// ReadyOnly refuses a task whose stored status is not ready: the caller
 	// is an agent (Ruling 113).
 	ReadyOnly bool
@@ -47,7 +51,7 @@ type spawnResult struct {
 	Task    model.Task
 	Pane    tmux.Pane
 	Session model.Session // zero when the agent had not reported within Wait
-	// Note is the cheaper-model note (spawnModel), "" when none; spawnTask
+	// Note is spawnModel's note, "" when none, one line per sentence; spawnTask
 	// also prints it to Out before anything else.
 	Note string
 }
@@ -150,6 +154,21 @@ func spawnTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.
 	return r, nil
 }
 
+// spawnChosenOption names the first option that chooses how the agent runs.
+func spawnChosenOption(o spawnOptions) string {
+	switch {
+	case o.Agent != "":
+		return "--agent"
+	case o.Model != "":
+		return "--model"
+	case o.Team:
+		return "--team"
+	case o.Resume != "":
+		return "--resume"
+	}
+	return ""
+}
+
 // spawnCheckOptions refuses an id, agent, model or session id that is not
 // of the form Curia accepts, before anything else happens. The agent is
 // one of two fixed names; a model or session id that starts with a dash
@@ -180,10 +199,15 @@ func spawnAgentOf(t model.Task, o spawnOptions) string {
 	if o.Resume == "" && o.Agent != "" {
 		return o.Agent
 	}
-	if t.Agent == "" {
-		return model.AgentClaude
-	}
-	return t.Agent
+	return spawnStoredAgent(t)
+}
+
+// spawnStoredAgent is t's stored agent, claude when none is stored. The
+// stored model (agent_model) is always this agent's: spawn writes the two
+// together, and clears the model whenever it changes the agent
+// (spawnStoreAgent, spawnLink).
+func spawnStoredAgent(t model.Task) string {
+	return cmp.Or(t.Agent, model.AgentClaude)
 }
 
 // spawnCheckAgent sets o.Agent to the agent this spawn starts and refuses
@@ -193,22 +217,43 @@ func spawnCheckAgent(t model.Task, o *spawnOptions) error {
 	if o.Agent == model.AgentCodex && o.Team {
 		return fmt.Errorf("agent teams are Claude Code's; spawn %s without --team or without --agent codex", t.ID)
 	}
+	if _, err := launchLookPath(o.Agent); o.Agent == model.AgentCodex && err != nil {
+		return fmt.Errorf("codex is not installed (not on PATH): install the Codex CLI, or spawn %s with --agent claude", t.ID)
+	}
 	return nil
 }
 
 // spawnModel is section 4.4's cheaper-model rule: o.Model when set, else
-// the task's stored model, else, for Claude Code on a new start (no
-// resume) while a limit forecast warns, the configured cheaper model and
-// the note saying so; otherwise no model. A failed usage read, or a
-// cheaper model that is not a model name, gives no model and no note
-// (logged): nothing automatic stops a spawn.
-func spawnModel(ctx context.Context, st *store.Store, cfg config.Config, t model.Task, o spawnOptions, now time.Time) (modelName, note string) {
+// the task's stored model when it was stored for the agent this spawn
+// starts, else spawnCheaperModel. A stored model of the other agent is not
+// used, and the note says so (Ruling P5-R7). once reports that the model is
+// the limit-forecast default, which is this spawn's only and not stored.
+func spawnModel(ctx context.Context, st *store.Store, cfg config.Config, t model.Task, o spawnOptions, now time.Time) (modelName, note string, once bool) {
+	agent := spawnAgentOf(t, o)
+	var other string
 	switch {
 	case o.Model != "":
-		return o.Model, ""
+		return o.Model, "", false
+	case t.AgentModel != "" && spawnStoredAgent(t) == agent:
+		return t.AgentModel, "", false
 	case t.AgentModel != "":
-		return t.AgentModel, ""
-	case o.Resume != "" || spawnAgentOf(t, o) != model.AgentClaude || cfg.Usage.CheaperModel == "":
+		other = fmt.Sprintf("%s's stored model %s was chosen for %s; %s starts without it (pass --model to choose)",
+			t.ID, sanitize.Line(t.AgentModel, 70), spawnStoredAgent(t), agent)
+	}
+	modelName, note = spawnCheaperModel(ctx, st, cfg, t, o, agent, now)
+	if other != "" {
+		note = strings.TrimSuffix(other+"\n"+note, "\n")
+	}
+	return modelName, note, modelName != ""
+}
+
+// spawnCheaperModel is, for Claude Code on a new start (no resume) while a
+// limit forecast warns, the configured cheaper model and the note saying
+// so; otherwise no model. A failed usage read, or a cheaper model that is
+// not a model name, gives no model and no note (logged): nothing automatic
+// stops a spawn.
+func spawnCheaperModel(ctx context.Context, st *store.Store, cfg config.Config, t model.Task, o spawnOptions, agent string, now time.Time) (modelName, note string) {
+	if o.Resume != "" || agent != model.AgentClaude || cfg.Usage.CheaperModel == "" {
 		return "", ""
 	}
 	cheaper := cfg.Usage.CheaperModel
@@ -240,7 +285,7 @@ func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 		return model.Task{}, "", err
 	}
 	var note string
-	o.Model, note = spawnModel(ctx, st, cfg, t, *o, clock())
+	o.Model, note, o.ModelOnce = spawnModel(ctx, st, cfg, t, *o, clock())
 	if err = spawnCheckOptions(id, *o); err != nil {
 		return model.Task{}, "", err
 	}
@@ -249,6 +294,9 @@ func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 
 // spawnCheckTask is spawnCheck's checks of the options and the task.
 func spawnCheckTask(ctx context.Context, st *store.Store, id string, o *spawnOptions) (model.Task, error) {
+	if opt := spawnChosenOption(*o); o.ReadyOnly && opt != "" {
+		return model.Task{}, fmt.Errorf("%s is the user's choice: %s's stored values apply to a spawn that is not the user's", opt, id)
+	}
 	if err := spawnCheckOptions(id, *o); err != nil {
 		return model.Task{}, err
 	}
@@ -322,7 +370,7 @@ func spawnCheckIdle(ctx context.Context, st *store.Store, tm tmux.Client, cfg co
 // lists it and it is not a recycled id (lifecyclePaneStateOf), or it is
 // listed and cannot be told apart.
 func spawnPaneOpen(panes []tmux.Pane, perr error, t model.Task) bool {
-	switch lifecyclePaneStateOf(panes, perr, t.Pane, "", t.LaunchedAt) {
+	switch lifecycleTaskPaneState(panes, perr, t) {
 	case lifecyclePaneOurs:
 		return true
 	case lifecyclePaneUnknown:
@@ -491,12 +539,17 @@ func spawnAddWorktree(ctx context.Context, t model.Task, path, branch string) er
 
 // spawnStoreAgent stores the agent on the task before the window opens:
 // curia launch, which the window runs at once, reads it from the store to
-// choose the binary, so the window's command carries no agent name.
+// choose the binary, so the window's command carries no agent name. A
+// changed agent clears the stored model, which was the other agent's, so
+// the stored model stays the stored agent's even if the window then fails.
 func spawnStoreAgent(ctx context.Context, st *store.Store, t model.Task, agent string) (model.Task, error) {
-	if agent == "" || agent == t.Agent {
+	if agent == "" || agent == spawnStoredAgent(t) {
 		return t, nil
 	}
 	return st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
+		if spawnStoredAgent(cur) != agent {
+			cur.AgentModel = ""
+		}
 		cur.Agent, cur.UpdatedAt = agent, clock()
 		return cur, nil
 	})
@@ -551,11 +604,17 @@ func spawnWindow(ctx context.Context, tm tmux.Client, t model.Task, o spawnOptio
 }
 
 // spawnLink is step 6's write: the pane, agent, team and model are stored and a
-// backlog task becomes ready. If that fails, the window just opened is
-// closed again, so nothing runs that the task does not record.
+// backlog task becomes ready. The model is stored together with the agent it
+// is for; a limit-forecast default (o.ModelOnce) is not stored (Ruling
+// P5-R7). If that fails, the window just opened is closed again, so nothing
+// runs that the task does not record.
 func spawnLink(ctx context.Context, st *store.Store, tm tmux.Client, t model.Task, pane tmux.Pane, o spawnOptions) (model.Task, error) {
+	keep := o.Model
+	if o.ModelOnce {
+		keep = ""
+	}
 	stored, err := st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
-		cur.Pane, cur.Team, cur.AgentModel, cur.UpdatedAt = pane.ID, o.Team, o.Model, clock()
+		cur.Pane, cur.PaneSocket, cur.Team, cur.AgentModel, cur.UpdatedAt = pane.ID, pane.Socket, o.Team, keep, clock()
 		if o.Agent != "" {
 			cur.Agent = o.Agent
 		}

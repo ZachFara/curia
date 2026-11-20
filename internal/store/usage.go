@@ -21,6 +21,15 @@ const (
 	// CostKeep as its CostSince baseline: the longest window a reader looks
 	// back over (seven days) and a day, as for usage samples.
 	BaselineKeep = UsageKeep
+	// UsageMaxRows and CostMaxRows bound the tables whatever the readings
+	// say: the age rule alone lets a stream of valid, changing readings for
+	// a known session grow them without bound inside the keep time (the
+	// values and the times are the sender's). Real use is far below: a
+	// usage sample is added only when a window's value or reset time
+	// changes, a cost sample once per changed cost. Past the bound the
+	// oldest rows (by insertion order) go, except a series' newest.
+	UsageMaxRows = 50_000
+	CostMaxRows  = 200_000
 )
 
 // The ranges Ingest accepts, checked again at the store although the
@@ -57,7 +66,10 @@ type Reading struct {
 	// CacheRecacheTokens is how many tokens a rebuild of the cold cache would
 	// write (Ruling P5-R2: the status line's prompt_cache.recache_tokens_if_cold).
 	CacheRecacheTokens *int64
-	Limits             []model.UsageSample // Window, UsedPct and ResetsAt set; At and SessionID are filled from the Reading
+	// ContextSize and ContextPct are Claude Code's own window and percentage
+	// (status line); ContextSize 0 means not carried.
+	ContextSize, ContextPct int
+	Limits                  []model.UsageSample // Window, UsedPct and ResetsAt set; At and SessionID are filled from the Reading
 }
 
 // IngestResult says what an ingest changed.
@@ -77,6 +89,7 @@ const (
 UPDATE sessions SET cost_usd = COALESCE(?, cost_usd), cache_expires_at = COALESCE(?, cache_expires_at),
   cache_rebuild_usd = COALESCE(?, cache_rebuild_usd), recache_tokens = COALESCE(?, recache_tokens)
 WHERE id = ?`
+	ingestContext       = `UPDATE sessions SET context_used = ?, context_max = ?, context_live = 1 WHERE id = ?`
 	ingestSessionExists = `SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ?)`
 	// newestCost is a session's newest cost sample; newestUsage a window's.
 	newestCost  = `SELECT cost_usd, at FROM cost_samples WHERE session_id = ? ORDER BY at DESC, n DESC LIMIT 1`
@@ -93,6 +106,22 @@ DELETE FROM usage_samples WHERE n IN (
   WHERE u.window IN ('five_hour', 'seven_day') AND u.at < ?
     AND u.n != (SELECT v.n FROM usage_samples v WHERE v.window = u.window ORDER BY v.at DESC, v.n DESC LIMIT 1)
   ORDER BY u.at, u.n LIMIT ?)`
+	// pruneUsageCap and pruneCostCap delete the oldest rows (lowest n)
+	// beyond the last UsageMaxRows/CostMaxRows numbers, at most the limit,
+	// never a series' newest. n is the rowid, so the range is a seek.
+	// Parameters: the keep count, the limit.
+	pruneUsageCap = `
+DELETE FROM usage_samples WHERE n IN (
+  SELECT u.n FROM usage_samples u
+  WHERE u.n <= (SELECT MAX(n) FROM usage_samples) - ?
+    AND u.n != (SELECT v.n FROM usage_samples v WHERE v.window = u.window ORDER BY v.at DESC, v.n DESC LIMIT 1)
+  ORDER BY u.n LIMIT ?)`
+	pruneCostCap = `
+DELETE FROM cost_samples WHERE n IN (
+  SELECT c.n FROM cost_samples c
+  WHERE c.n <= (SELECT MAX(n) FROM cost_samples) - ?
+    AND c.n != (SELECT b.n FROM cost_samples b WHERE b.session_id = c.session_id ORDER BY b.at DESC, b.n DESC LIMIT 1)
+  ORDER BY c.n LIMIT ?)`
 	// costSessions walks the distinct session ids of cost_samples down
 	// the (session_id, at) index, one seek each, so no statement scans the
 	// table for them.
@@ -140,8 +169,8 @@ const pruneCursorKey = "cost_prune_after"
 // Ingest stores r in one write transaction (plan section 4.2): the
 // session's cost and cache values (an absent value keeps the stored one;
 // no row is created for an unknown session), a cost sample when the
-// session exists and r has a cost, one usage sample per window (for an
-// unknown session too: the windows are the account's), each unless the
+// session exists and r has a cost, one usage sample per window (only when
+// the session exists: an unknown session stores nothing), each unless the
 // series' newest sample has the same values and is less than SampleRepeat
 // older, and then at most PruneBatch old samples deleted, usage samples
 // first. It is not activity: the session's state and times are not
@@ -182,7 +211,13 @@ func ingest(ctx context.Context, tx *sql.Tx, r Reading, now time.Time) (IngestRe
 			return res, err
 		}
 	}
+	// Usage samples, too, are stored only for a session a hook created: the
+	// windows are the account's, but anything able to run the status line
+	// could otherwise add rows under made-up ids.
 	for _, l := range r.Limits {
+		if !res.SessionFound {
+			break
+		}
 		added, addErr := addUsage(ctx, tx, r, l)
 		if addErr != nil {
 			return res, addErr
@@ -196,6 +231,13 @@ func ingest(ctx context.Context, tx *sql.Tx, r Reading, now time.Time) (IngestRe
 // ingestSessionRow writes r's session values and reports whether the
 // session exists. A reading that carries none only looks.
 func ingestSessionRow(ctx context.Context, tx *sql.Tx, r Reading) (bool, error) {
+	if r.ContextSize >= 1000 && r.ContextSize <= 10_000_000 && r.ContextPct >= 0 && r.ContextPct <= 100 {
+		// context_used is the least count whose floor percentage is Claude Code's, so the
+		// existing used*100/max code shows its number; context_live stops the hook overwriting both.
+		if _, err := tx.ExecContext(ctx, ingestContext, (r.ContextPct*r.ContextSize+99)/100, r.ContextSize, r.SessionID); err != nil {
+			return false, err
+		}
+	}
 	if r.CostUSD == nil && r.CacheExpiresAt.IsZero() && r.CacheRebuildUSD == nil && r.CacheRecacheTokens == nil {
 		var found bool
 		err := tx.QueryRowContext(ctx, ingestSessionExists, r.SessionID).Scan(&found)
@@ -286,8 +328,65 @@ func prune(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
 	if err != nil || usage >= PruneBatch {
 		return int(usage), err
 	}
+	capped, err := pruneCapped(ctx, tx, PruneBatch-usage)
+	if err != nil {
+		return 0, err
+	}
+	usage += capped
+	if usage >= PruneBatch {
+		return int(usage), nil
+	}
 	cost, err := pruneCostSamples(ctx, tx, now, PruneBatch-usage)
 	return int(usage + cost), err
+}
+
+// capProbe tells with two cheap seeks (MAX and MIN each alone, or SQLite scans) whether a table can hold rows beyond
+// its bound: the oldest rowid is that far behind the newest only then
+// (NULL for an empty table). It keeps the two DELETEs, whose planning cost
+// milliseconds on every ingest, for the rare run that needs them.
+const capProbe = `SELECT
+  (SELECT MAX(n) FROM usage_samples) - (SELECT MIN(n) FROM usage_samples) >= ?,
+  (SELECT MAX(n) FROM cost_samples) - (SELECT MIN(n) FROM cost_samples) >= ?`
+
+// pruneCapped deletes at most limit rows beyond UsageMaxRows, then beyond
+// CostMaxRows.
+func pruneCapped(ctx context.Context, tx *sql.Tx, limit int64) (int64, error) {
+	var over [2]sql.NullBool
+	if err := tx.QueryRowContext(ctx, capProbe, UsageMaxRows, CostMaxRows).Scan(&over[0], &over[1]); err != nil {
+		return 0, err
+	}
+	var total int64
+	for i, q := range []struct {
+		sql, table string
+		keep       int
+	}{{pruneUsageCap, "usage_samples", UsageMaxRows}, {pruneCostCap, "cost_samples", CostMaxRows}} {
+		if !over[i].Bool {
+			continue
+		}
+		// The probe is a rowid span, which gaps (old deletions) inflate: only
+		// a real count over the bound, found by a scan that stops at keep+1
+		// rows, may delete. It runs only when the probe fires.
+		var really bool
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) > ? FROM (SELECT 1 FROM `+q.table+` LIMIT ?)`, q.keep, q.keep+1).Scan(&really); err != nil {
+			return 0, err
+		}
+		if !really {
+			continue
+		}
+		out, err := tx.ExecContext(ctx, q.sql, q.keep, limit-total)
+		if err != nil {
+			return 0, err
+		}
+		n, err := out.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		total += n
+		if total >= limit {
+			break
+		}
+	}
+	return total, nil
 }
 
 // pruneCostSamples deletes at most limit old cost samples of the sessions

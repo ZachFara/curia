@@ -21,5 +21,5 @@ Spec F13 and the non-goals: Linear is an import source, adapters only map fields
 
 Amended 2026-11-19 (Plan 5 records; Rulings in `PROGRESS.md`):
 
-- Ruling 168: a failed page imports nothing (all or nothing); a retry imports everything. A `started` issue is skipped, and the 200-issue cap (4 pages of 50) is inferred from the count.
+- Ruling 168: a failed page imports nothing (all or nothing); a retry imports everything. A `started` issue is skipped, and the 200-issue cap (4 pages of 50) is inferred from the count. Review B-8 (PR #172): a re-import still replaces a task's title, body and tags, and now says when it replaced local text that differed from Linear's; no copy of the last import is kept.
 - Probe L1 (the owner's, needs the Linear key) has not run; the query, the filter and the `Authorization` form are unverified against the real API.

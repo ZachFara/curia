@@ -21,6 +21,7 @@ import (
 	"unicode"
 
 	"github.com/ZachFara/curia/internal/install"
+	latgate "github.com/ZachFara/curia/internal/latency"
 )
 
 // statuslineNow sits inside every status-line fixture's windows.
@@ -517,33 +518,82 @@ func TestStatuslineProcessLatency(t *testing.T) {
 		t.Fatal(err)
 	}
 	const runs = 200
-	d := make([]time.Duration, 0, runs)
-	for i := range runs {
-		payload := statuslineLivePayload(t, files[i%len(files)], ids[i%len(ids)], time.Now(), 20+float64(i)/100)
-		f, ferr := os.Open(statuslineWriteFile(t, in, fmt.Sprintf("p%d.json", i), payload))
-		if ferr != nil {
-			t.Fatal(ferr)
+	latgate.Gate(t, "statusline process", 50*time.Millisecond, func() time.Duration {
+		d := make([]time.Duration, 0, runs)
+		for i := range runs {
+			payload := statuslineLivePayload(t, files[i%len(files)], ids[i%len(ids)], time.Now(), 20+float64(i)/100)
+			f, ferr := os.Open(statuslineWriteFile(t, in, fmt.Sprintf("p%d.json", i), payload))
+			if ferr != nil {
+				t.Fatal(ferr)
+			}
+			cmd := exec.CommandContext(t.Context(), bin, "statusline")
+			cmd.Env = statuslineEnv(home)
+			cmd.Stdin, cmd.Stdout = f, out
+			start := time.Now()
+			if err = cmd.Run(); err != nil {
+				t.Fatal(err)
+			}
+			d = append(d, time.Since(start))
+			_ = f.Close()
 		}
-		cmd := exec.CommandContext(t.Context(), bin, "statusline")
-		cmd.Env = statuslineEnv(home)
-		cmd.Stdin, cmd.Stdout = f, out
-		start := time.Now()
-		if err = cmd.Run(); err != nil {
-			t.Fatal(err)
-		}
-		d = append(d, time.Since(start))
-		_ = f.Close()
-	}
-	slices.Sort(d)
-	p50, p95 := d[runs/2], d[runs*95/100]
-	t.Logf("curia statusline as a process over %d runs: p50 %v, p95 %v, max %v", runs, p50, p95, d[runs-1])
-	if p95 >= 50*time.Millisecond {
-		t.Errorf("statusline process p95 = %v, want < 50ms", p95)
-	}
+		slices.Sort(d)
+		t.Logf("curia statusline as a process over %d runs: p50 %v, p95 %v, max %v", runs, d[runs/2], d[runs*95/100], d[runs-1])
+		return d[runs*95/100]
+	})
 	if got := ingestSnap(t, db, ids[(runs-1)%len(ids)]); !got.sess.CostKnown {
 		t.Errorf("nothing stored: %+v", got)
 	}
 	if b, err := os.ReadFile(filepath.Clean(filepath.Join(home, ".local", "state", "curia", "curia.log"))); err == nil {
 		t.Errorf("log = %q, want none", b)
+	}
+}
+
+// TestStatuslineUnknownSessionPrintsStoresNothing: the status line may run
+// before the session's first hook, and anything can run it with any id. It
+// prints its line and exits 0, stores nothing and creates no session row;
+// the problem is logged once however many runs repeat it. The first
+// seconds of samples of a new session are lost: that is accepted.
+func TestStatuslineUnknownSessionPrintsStoresNothing(t *testing.T) {
+	db := hookHome(t)
+	ingestSeed(t, db, "other")
+	ingestFixClock(t, statuslineNow)
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	ingestLogAt(t, &now)
+	prev := statuslineLimit
+	statuslineLimit = 5 * time.Second // a loaded machine must not turn this into a timeout
+	t.Cleanup(func() { statuslineLimit = prev })
+	for range 5 {
+		stdout, stderr := ingestExec(t, bytes.NewReader(ingestFixture(t, "statusline-built.json")), "statusline")
+		if stdout != statuslineBuiltText+"\n" || stderr != "" {
+			t.Fatalf("stdout %q stderr %q, want the text and nothing else", stdout, stderr)
+		}
+		now = now.Add(300 * time.Millisecond)
+	}
+	if got := ingestSnap(t, db, "built-session-1"); got.found || got.usage != 0 || got.cost != 0 {
+		t.Errorf("unknown session stored %+v, want nothing", got)
+	}
+	if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "unknown session") {
+		t.Errorf("log = %q, want one line about an unknown session", log)
+	}
+}
+
+// TestStatuslineLogBoundedWhenStoreBroken: a store that cannot be opened is
+// one log line per interval, not one per run.
+func TestStatuslineLogBoundedWhenStoreBroken(t *testing.T) {
+	db := hookHome(t)
+	ingestFixClock(t, statuslineNow)
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	ingestLogAt(t, &now)
+	ingestBadConfig(t, db)
+	t.Setenv("CURIA_DB", filepath.Join(t.TempDir(), "none", "curia.db"))
+	for range 20 {
+		stdout, _ := ingestExec(t, bytes.NewReader(ingestFixture(t, "statusline-built.json")), "statusline")
+		if stdout != statuslineBuiltText+"\n" {
+			t.Fatalf("stdout %q", stdout)
+		}
+		now = now.Add(300 * time.Millisecond)
+	}
+	if log := readLog(t); len(log) != 1 {
+		t.Errorf("log = %q, want one line", log)
 	}
 }

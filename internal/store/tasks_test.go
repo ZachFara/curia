@@ -125,8 +125,8 @@ func TestMigrationAddsTasksAndMessages(t *testing.T) {
 			t.Errorf("sessions.%s = %s notnull=%d, want nullable TEXT", col, typ, notNull)
 		}
 	}
-	if n := countMigrations(t, path); n != 8 {
-		t.Errorf("schema_migrations has %d rows, want 8", n)
+	if n := countMigrations(t, path); n != len(allMigrations) {
+		t.Errorf("schema_migrations has %d rows, want %d", n, len(allMigrations))
 	}
 }
 
@@ -271,8 +271,8 @@ func TestMigrationOnPlan2Database(t *testing.T) {
 
 	s := open(t, path)
 	if names := migrationNames(t, db); !reflect.DeepEqual(names,
-		[]string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql"}) {
-		t.Errorf("migrations = %v, want 0001 to 0007 (both 0005 files)", names)
+		allMigrations) {
+		t.Errorf("migrations = %v, want every migration file (both 0005 files)", names)
 	}
 	sess := get(t, s, "old")
 	want := model.Session{
@@ -986,4 +986,21 @@ func TestStoreRejectsBadPriorityAndAgent(t *testing.T) {
 		}
 	}
 	assertTask(t, getTask(t, s, good.ID), good)
+}
+
+func TestTaskPaneSocketIsStored(t *testing.T) {
+	s := open(t, dbPath(t))
+	created := createTask(t, s, newTask("Socket"))
+	if created.PaneSocket != "" {
+		t.Fatalf("new task pane_socket = %q, want unknown", created.PaneSocket)
+	}
+	if _, err := s.UpdateTask(context.Background(), created.ID, func(tk model.Task) (model.Task, error) {
+		tk.Pane, tk.PaneSocket = "%100", "/tmp/tmux-501/first"
+		return tk, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := getTask(t, s, created.ID); got.PaneSocket != "/tmp/tmux-501/first" {
+		t.Errorf("pane_socket = %q, want the stored socket", got.PaneSocket)
+	}
 }

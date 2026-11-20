@@ -3434,6 +3434,14 @@ func TestPauseInFlightRefusesKeys(t *testing.T) {
 
 // The notice line and the prompt fit every width, with wide and hostile
 // text, and the table above them keeps its alignment and the height.
+// wantPauseTail: from 40 cells the prompt shows what a pause does and y/N.
+func wantPauseTail(t *testing.T, width int, s string) {
+	t.Helper()
+	if !strings.HasSuffix(s, "y/N") || !strings.Contains(s, "closes its pane") {
+		t.Errorf("width %d: the prompt %q does not end in y/N or lacks what it does", width, s)
+	}
+}
+
 func TestPauseNoticeFitsEveryWidth(t *testing.T) {
 	sessions, fake, tasks := costWide()
 	b := pauseBudget()
@@ -3459,9 +3467,39 @@ func TestPauseNoticeFitsEveryWidth(t *testing.T) {
 				t.Errorf("width %d prompt %v: %d lines, want the height 12", width, prompt, len(lines))
 			}
 			costTable(t, m)
-			if s := lines[len(lines)-1]; width >= 80 && prompt && !strings.HasSuffix(s, "y/N") {
-				t.Errorf("width %d: the prompt %q does not end in y/N", width, s)
+			if width >= 40 && prompt {
+				wantPauseTail(t, width, lines[len(lines)-1])
 			}
 		}
+	}
+}
+
+func TestOverfullContextShowsQuestionMark(t *testing.T) {
+	s := threeSessions()[0]
+	s.ContextUsed, s.ContextMax = 436000, 200000 // 218%
+	m, _, _ := newTest(t, ModePopup, s)
+	if v := m.View(); strings.Contains(v, "218") || !strings.Contains(v, "?") {
+		t.Errorf("want ? and no 218:\n%s", v)
+	}
+	if l := ContextLevel(s.ContextUsed, s.ContextMax, 60, 85); l != LevelUnknown {
+		t.Errorf("level = %v, want Unknown", l)
+	}
+}
+
+func TestPauseNoticeBusyOffersNoP(t *testing.T) {
+	clk := &sayClock{t: testNow}
+	b := pauseBudget()
+	b.PauseBusy = true
+	p, src := newPauseTest(t, clk, ModePopup, b, nil)
+	want := "limit ~48m before reset: T-7 (P3) api-server can be paused when its agent is idle"
+	lines := strings.Split(p.m.View(), "\n")
+	if got := lines[len(lines)-2]; got != want {
+		t.Errorf("notice = %q, want %q", got, want)
+	}
+	p.key(key("P"))
+	clk.advance(300 * time.Millisecond)
+	p.key(key("y"))
+	if len(src.paused) != 0 || statusLine(p.m) == pausePromptText {
+		t.Errorf("P opened a prompt or paused %q for a busy task", src.paused)
 	}
 }

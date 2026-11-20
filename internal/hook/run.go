@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -104,6 +106,7 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 		return Result{}, err
 	}
 	ev.TaskID, ev.Agent = env.TaskID, env.Agent
+	var start *startInfo
 	if err = st.AppendEvent(ctx, ev, payload); err != nil {
 		return Result{}, err
 	}
@@ -118,8 +121,11 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 		}
 		// First seen mid-run, or an ended session a compaction revives.
 		starting = !found || (kind == model.SessionStart && !state.Continues(prev, ev))
+		// Ticket D-2: a session with no repository looks again once per new cwd.
+		if !starting {
+			start = recheck(prev, ev, env)
+		}
 	}
-	var start *startInfo
 	if starting {
 		if start, err = sessionStart(ctx, ev, env, st); err != nil {
 			return Result{}, err
@@ -141,6 +147,30 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 		return Result{}, err
 	}
 	return Result{Session: out}, readErr
+}
+
+// recheck asks git about ev's cwd for a stored session with no repository,
+// when cwd is not the directory last asked about and is usable; else nil.
+// An event the state machine ignores never reaches enrich, which would store
+// the answer, so it asks nothing.
+func recheck(prev model.Session, ev model.Event, env Env) *startInfo {
+	cwd := ev.Cwd
+	if prev.Repo != "" || prev.CheckedCwd == cwd || !usableDir(cwd) || state.Ignores(prev, ev) {
+		return nil
+	}
+	start := &startInfo{}
+	start.repo, start.branch, start.worktree = env.Git(cwd)
+	return start
+}
+
+// usableDir reports whether a payload's cwd, which is untrusted, may be
+// handed to git: an absolute path of an existing directory.
+func usableDir(cwd string) bool {
+	if !filepath.IsAbs(cwd) {
+		return false
+	}
+	fi, err := os.Stat(cwd)
+	return err == nil && fi.IsDir()
 }
 
 // The words a typed line starts with, and so what a prompt that may confirm
@@ -369,6 +399,11 @@ func recordEndReason(s *model.Session, ev model.Event) {
 // teammate's process) never clears a task.
 func enrich(s *model.Session, ev model.Event, start *startInfo) {
 	fillEmpty(&s.TaskID, ev.TaskID)
+	defer func() { // only a session with no repository looks again
+		if start != nil && s.Repo == "" {
+			s.CheckedCwd = ev.Cwd
+		}
+	}()
 	switch {
 	case start == nil: // git and tmux were not asked
 	case ev.Kind == model.SessionStart && !state.Continues(*s, ev):
