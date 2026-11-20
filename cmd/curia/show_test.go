@@ -125,3 +125,37 @@ func TestShowPaneIsMatchedWithItsServer(t *testing.T) {
 		t.Errorf("no TMUX = %v", err)
 	}
 }
+
+func TestShowBudget(t *testing.T) {
+	showHome(t)
+	db := os.Getenv("CURIA_DB")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	tk, err := st.CreateTask(ctx, model.Task{Title: "t", Repo: "/src/web", BaseBranch: "main", Status: model.TaskReady, BudgetUSD: 5, CreatedAt: fleetNow})
+	if err != nil || tk.ID != "T-1" {
+		t.Fatalf("task = %+v, %v; want T-1", tk, err)
+	}
+	usd := 4.0
+	if _, err = st.Ingest(ctx, store.Reading{SessionID: "sa", CostUSD: &usd}, fleetNow); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runRoot(t, "show", "sa")
+	if err != nil || !strings.Contains(out, "budget $4.00/$5 80% !") {
+		t.Errorf("show lacks the budget (%v):\n%s", err, out)
+	}
+	out, err = runRoot(t, "show", "sa", "--json")
+	var got struct {
+		Budget struct {
+			USD   float64 `json:"budget_usd"`
+			Spent float64 `json:"spent_usd"`
+			Level string  `json:"level"`
+		}
+	}
+	if err != nil || json.Unmarshal([]byte(out), &got) != nil || got.Budget.USD != 5 || got.Budget.Spent != 4 || got.Budget.Level != "warn" {
+		t.Errorf("show --json budget = %+v, %v:\n%s", got.Budget, err, out)
+	}
+}

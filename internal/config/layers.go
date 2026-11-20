@@ -206,6 +206,11 @@ func number(c Config, l leaf) float64 {
 
 // loosens reports whether going from old to next breaks the policy.
 func loosens(p Policy, l leaf, old, next Config) bool {
+	if l.key == "cost.task_budget_default" {
+		// 0 means no budget, so it is not "lower": a repository may only lower a nonzero default.
+		o, n := number(old, l), number(next, l)
+		return (o == 0) != (n == 0) || n > o
+	}
 	switch p {
 	case PolicyLower:
 		return number(next, l) > number(old, l)

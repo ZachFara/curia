@@ -62,10 +62,13 @@ func Normalize(text string) (string, error) {
 
 // Address is what the start of a message says about where it goes.
 type Address struct {
-	TaskID  string            // from "T-42:"
-	Name    string            // from "@name"
-	Kind    model.MessageKind // from "rule:" or "task:"
-	HasKind bool
+	TaskID string // from "T-42:"
+	Name   string // from "@name", or the repository of "@name/*"
+	// Broadcast is "@all" (Name "") or "@name/*" (Name the repository): every live
+	// agent session, or every one of that repository (Ruling 152).
+	Broadcast bool
+	Kind      model.MessageKind // from "rule:" or "task:"
+	HasKind   bool
 }
 
 // ParseAddress reads the address parts off the start of text and returns the
@@ -97,13 +100,8 @@ func (a *Address) take(word string) bool {
 		a.TaskID = id
 		return true
 	}
-	if name, ok := strings.CutPrefix(word, "@"); ok && a.Name == "" {
-		name = strings.TrimSuffix(name, ":")
-		if !validName(name) {
-			return false
-		}
-		a.Name = name
-		return true
+	if name, ok := strings.CutPrefix(word, "@"); ok && a.Name == "" && !a.Broadcast {
+		return a.takeName(strings.TrimSuffix(name, ":"))
 	}
 	if a.HasKind {
 		return false
@@ -113,6 +111,22 @@ func (a *Address) take(word string) bool {
 		a.Kind, a.HasKind = model.KindRule, true
 	case "task:":
 		a.Kind, a.HasKind = model.KindTask, true
+	default:
+		return false
+	}
+	return true
+}
+
+// takeName records an "@name" part: "all" and "<repo>/*" are broadcasts.
+func (a *Address) takeName(name string) bool {
+	repo, glob := strings.CutSuffix(name, "/*")
+	switch {
+	case strings.EqualFold(name, "all"):
+		a.Broadcast = true
+	case glob && validName(repo):
+		a.Broadcast, a.Name = true, repo
+	case !glob && validName(name):
+		a.Name = name
 	default:
 		return false
 	}

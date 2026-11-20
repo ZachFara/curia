@@ -48,7 +48,7 @@ const msgTyped = `status = 'delivered' AND delivered_via = 'send_keys' AND confi
 const messageColumns = `
   n, id, text, kind, sender, sender_session, target_session, target_task, target_repo,
   suggested_target, suggested_kind, runner_up, confidence, routed_by, auto_eligible, status,
-  delivered_via, result_ref, created_at, hold_until, delivered_at, confirmed_at`
+  delivered_via, result_ref, created_at, hold_until, delivered_at, confirmed_at, COALESCE(broadcast_id, '')`
 
 // selectMessages is the column list every reader of messages uses.
 const selectMessages = `
@@ -62,7 +62,7 @@ func scanMessage(sc scanner) (model.Message, error) {
 	var created, hold, delivered, confirmed sql.NullString
 	err := sc.Scan(&m.N, &m.ID, &m.Text, &m.Kind, &m.Sender, &m.SenderSession, &m.TargetSession, &m.TargetTask,
 		&m.TargetRepo, &m.SuggestedTarget, &m.SuggestedKind, &m.RunnerUp, &conf, &m.RoutedBy, &m.AutoEligible,
-		&m.Status, &m.DeliveredVia, &m.ResultRef, &created, &hold, &delivered, &confirmed)
+		&m.Status, &m.DeliveredVia, &m.ResultRef, &created, &hold, &delivered, &confirmed, &m.BroadcastID)
 	if err != nil {
 		return model.Message{}, err
 	}
@@ -238,20 +238,7 @@ func (s *Store) CreateMessage(ctx context.Context, m model.Message) (model.Messa
 	if err = checkSendLimits(ctx, tx, &m); err != nil {
 		return model.Message{}, failMessage("create message", "", err)
 	}
-	// The write lock makes the subselect agree with the rowid n the row
-	// receives; rows are never deleted, so an id is never reused.
-	stored, err := scanMessage(tx.QueryRowContext(ctx, `
-INSERT INTO messages (
-  id, text, kind, sender, sender_session, target_session, target_task, target_repo,
-  suggested_target, suggested_kind, runner_up, confidence, routed_by, auto_eligible, status,
-  created_at, hold_until
-) VALUES (
-  'M-' || (SELECT COALESCE(MAX(n), 0) + 1 FROM messages), ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?, ?, ?, ?, ?
-) RETURNING`+messageColumns,
-		m.Text, m.Kind, m.Sender, m.SenderSession, m.TargetSession, m.TargetTask, m.TargetRepo,
-		m.SuggestedTarget, m.SuggestedKind, m.RunnerUp, confidence(m), m.RoutedBy, m.AutoEligible, m.Status,
-		formatTime(m.CreatedAt), formatTime(m.HoldUntil)))
+	stored, err := insertMessage(ctx, tx, m, "")
 	if err == nil {
 		err = tx.Commit()
 	}
@@ -259,6 +246,71 @@ INSERT INTO messages (
 		return model.Message{}, failMessage("create message", "", err)
 	}
 	return stored, nil
+}
+
+// insertMessage inserts m through tx with the next id; broadcast is its
+// broadcast_id, "" for none.
+func insertMessage(ctx context.Context, tx *sql.Tx, m model.Message, broadcast string) (model.Message, error) {
+	// The write lock makes the subselect agree with the rowid n the row
+	// receives; rows are never deleted, so an id is never reused.
+	return scanMessage(tx.QueryRowContext(ctx, `
+INSERT INTO messages (
+  id, text, kind, sender, sender_session, target_session, target_task, target_repo,
+  suggested_target, suggested_kind, runner_up, confidence, routed_by, auto_eligible, status,
+  created_at, hold_until, broadcast_id
+) VALUES (
+  'M-' || (SELECT COALESCE(MAX(n), 0) + 1 FROM messages), ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, '')
+) RETURNING`+messageColumns,
+		m.Text, m.Kind, m.Sender, m.SenderSession, m.TargetSession, m.TargetTask, m.TargetRepo,
+		m.SuggestedTarget, m.SuggestedKind, m.RunnerUp, confidence(m), m.RoutedBy, m.AutoEligible, m.Status,
+		formatTime(m.CreatedAt), formatTime(m.HoldUntil), broadcast))
+}
+
+// ErrAgentBroadcast is CreateBroadcast's refusal of a row from an agent:
+// only the user broadcasts (Ruling 152).
+var ErrAgentBroadcast = errors.New("an agent cannot broadcast")
+
+// CreateBroadcast stores rows, one per target session, in one write
+// transaction under one new broadcast id (B-<n>, n the first row's number),
+// and returns them as stored. Every row must be queued and from the user;
+// an agent's row, or no row, stores nothing. The send limits of
+// checkSendLimits are applied to each row, so a limit that binds an
+// agent's send binds each target of it.
+func (s *Store) CreateBroadcast(ctx context.Context, rows []model.Message) ([]model.Message, error) {
+	if len(rows) == 0 {
+		return nil, failMessage("create broadcast", "", errors.New("a broadcast needs at least one target"))
+	}
+	for _, m := range rows {
+		if m.Sender != model.SenderUser || m.Status != model.MsgQueued {
+			return nil, failMessage("create broadcast", "", fmt.Errorf("%w (rows must be queued and from the user)", ErrAgentBroadcast))
+		}
+	}
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return nil, failMessage("create broadcast", "", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var next int64
+	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(n), 0) + 1 FROM messages`).Scan(&next); err != nil {
+		return nil, failMessage("create broadcast", "", err)
+	}
+	id := fmt.Sprintf("B-%d", next)
+	out := make([]model.Message, 0, len(rows))
+	for _, m := range rows {
+		if err = checkSendLimits(ctx, tx, &m); err != nil {
+			return nil, failMessage("create broadcast", "", err)
+		}
+		stored, ierr := insertMessage(ctx, tx, m, id)
+		if ierr != nil {
+			return nil, failMessage("create broadcast", "", ierr)
+		}
+		out = append(out, stored)
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, failMessage("create broadcast", "", err)
+	}
+	return out, nil
 }
 
 // GetMessage returns the message with the given id, and false if there is
@@ -578,7 +630,7 @@ func (s *Store) RouteLabels(ctx context.Context, minConfidence float64, limit in
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT confidence, routed_by = 'confirmed' FROM messages
-WHERE routed_by IN ('confirmed', 'overridden') AND confidence >= ?
+WHERE routed_by IN ('confirmed', 'overridden') AND broadcast_id IS NULL AND confidence >= ?
 ORDER BY n DESC LIMIT ?`, minConfidence, limit)
 	if err != nil {
 		return nil, failMessage("read route labels", "", err)

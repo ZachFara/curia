@@ -516,10 +516,13 @@ func writeBackup(path string, original []byte, now time.Time) error {
 	}
 }
 
+// WriteAtomic is writeAtomic for other packages (the user's config file).
+func WriteAtomic(path string, data []byte) error { return writeAtomic(path, data) }
+
 // writeAtomic writes data to path via a temporary file and a rename, creating
 // the parent directory if needed. If path is a symlink the write lands on the
 // file it points to, so the link survives. A file that exists keeps its
-// permission bits; a new one is 0600.
+// permission bits; a new one is 0600. The data is synced before the rename.
 func writeAtomic(path string, data []byte) error {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
@@ -542,6 +545,10 @@ func writeAtomic(path string, data []byte) error {
 		return err
 	}
 	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return err
 	}

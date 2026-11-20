@@ -163,11 +163,17 @@ func showJSONOf(d ui.DetailData, diff ui.DetailDiff) map[string]any {
 		"tail":    d.Tail, "tail_note": c(d.TailNote), "tickets": tickets, "messages": messages,
 		"cost": map[string]any{"session_usd": s.CostUSD, "session_known": s.CostKnown, "task_usd": d.TaskCostUSD, "task_known": d.TaskCostKnown},
 	}
+	if d.Budget.Level() != model.BudgetNone {
+		out["budget"] = map[string]any{"budget_usd": d.Budget.Limit, "spent_usd": budgetSpent(d.Budget), "level": d.Budget.Level().String()}
+	}
 	if diff.Has {
 		out["diff"] = map[string]string{"stat": sanitize.Block(diff.Stat, 8<<10), "note": c(diff.Note)}
 	}
 	if d.ActivityOK {
 		out["activity"] = d.Activity
+	}
+	if d.Resources != "" {
+		out["resources"] = c(d.Resources)
 	}
 	return out
 }

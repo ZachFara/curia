@@ -215,3 +215,62 @@ func TestRepoActivityRulesDoNotChangeGlobalConfig(t *testing.T) {
 		t.Errorf("rules = %+v %v", rules, problems)
 	}
 }
+
+func TestRepoFileBudgetKeys(t *testing.T) {
+	d := Default()
+	if d.Cost.TaskBudgetDefault != 0 || d.Cost.BudgetHardStop {
+		t.Errorf("defaults = %+v, want 0 and false", d.Cost)
+	}
+	for _, c := range []struct {
+		name, user, repo string
+		budget           float64
+		stop, refuse     bool
+		refusedKey       string
+	}{
+		{"repo lowers a default", "[cost]\ntask_budget_default = 8\n", "[cost]\ntask_budget_default = 5\n", 5, false, false, ""},
+		{"repo cannot raise it", "[cost]\ntask_budget_default = 5\n", "[cost]\ntask_budget_default = 8\n", 5, false, true, "cost.task_budget_default"},
+		{"repo cannot remove it with 0", "[cost]\ntask_budget_default = 5\n", "[cost]\ntask_budget_default = 0\n", 5, false, true, "cost.task_budget_default"},
+		{"repo cannot set one over none", "", "[cost]\ntask_budget_default = 5\n", 0, false, true, "cost.task_budget_default"},
+		{"repo turns the stop on", "", "[cost]\nbudget_hard_stop = true\n", 0, true, false, ""},
+		{"repo cannot turn it off", "[cost]\nbudget_hard_stop = true\n", "[cost]\nbudget_hard_stop = false\n", 0, true, true, "cost.budget_hard_stop"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, r, err := Resolve(layerRepo(t, c.user, c.repo))
+			if err != nil || got.Cost.BudgetHardStop != c.stop {
+				t.Fatalf("stop = %v, %v; want %v", got.Cost.BudgetHardStop, err, c.stop)
+			}
+			if c.refusedKey != "" && !refused(r, c.refusedKey) {
+				t.Errorf("refusals = %+v, want %s", r.Refused, c.refusedKey)
+			}
+			if got.Cost.TaskBudgetDefault != c.budget {
+				t.Errorf("default = %v, want %v", got.Cost.TaskBudgetDefault, c.budget)
+			}
+		})
+	}
+	if _, _, err := Resolve(layerRepo(t, "[cost]\ntask_budget_default = -1\n", "")); err == nil {
+		t.Error("a negative default was accepted")
+	}
+}
+
+func TestMonitorKeysDefaultsPolicyAndBounds(t *testing.T) {
+	d := Default()
+	if !d.Resources.Enabled || d.Resources.Interval != 10*time.Second || !d.Monitor.Autostart {
+		t.Errorf("defaults = %+v %+v, want enabled, 10s, autostart", d.Resources, d.Monitor)
+	}
+	o := layerRepo(t, "", "[resources]\nenabled = false\ninterval = \"1s\"\n[monitor]\nautostart = false\n")
+	c, r, err := Resolve(o)
+	if err != nil || c.Resources != d.Resources || c.Monitor != d.Monitor {
+		t.Errorf("a repository file changed the monitor settings: %v %+v %+v", err, c.Resources, c.Monitor)
+	}
+	for _, k := range []string{"resources.enabled", "resources.interval", "monitor.autostart"} {
+		if !refused(r, k) {
+			t.Errorf("repository's %s was not refused: %+v", k, r.Refused)
+		}
+	}
+	for _, bad := range []string{"500ms", "2h", "0s"} {
+		o = layerRepo(t, "[resources]\ninterval = \""+bad+"\"\n", "")
+		if _, _, err = Resolve(o); err == nil || !strings.Contains(err.Error(), "resources.interval") {
+			t.Errorf("interval %s: err = %v, want one naming resources.interval", bad, err)
+		}
+	}
+}

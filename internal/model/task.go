@@ -46,4 +46,9 @@ type Task struct {
 	// task the user wrote; FiledReason is its reason and FiledLineage the
 	// JSON of what Curia saw of its team (display and audit only).
 	FiledBy, FiledReason, FiledLineage string
+	// BudgetUSD is the task's own budget in dollars; 0 means none (the config default applies).
+	BudgetUSD float64
 }
+
+// MaxBudgetUSD bounds a task budget and cost.task_budget_default, in dollars.
+const MaxBudgetUSD = 1_000_000

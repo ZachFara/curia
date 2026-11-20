@@ -217,6 +217,17 @@ func (s storeSource) Reviews(ctx context.Context) (map[string]string, error) {
 // While a warning is in force the pause suggestion is curia usage's
 // (usageBuild), computed nowhere else.
 func (s storeSource) Budget(ctx context.Context) (ui.Budget, error) {
+	b, err := s.usageBudget(ctx)
+	if err != nil {
+		return b, err
+	}
+	// A failed read leaves the cells empty: the column is a view, not a reason to fail.
+	b.Res, _ = resourceCells(ctx, s.st, s.cfg, clock())
+	return b, nil
+}
+
+// usageBudget is Budget's usage part.
+func (s storeSource) usageBudget(ctx context.Context) (ui.Budget, error) {
 	now := clock()
 	since := now.Add(-usage.BurnWindow)
 	samples, err := s.st.UsageSince(ctx, since)
@@ -325,7 +336,11 @@ func (b boardSource) Cards(ctx context.Context) ([]task.Card, error) {
 	if err := reconcile(ctx, b.st, b.tm, b.cfg.LogPath, now); err != nil {
 		return nil, err
 	}
-	return taskCards(ctx, b.st, now)
+	cards, err := taskCards(ctx, b.st, now)
+	if err == nil {
+		err = taskBudgets(ctx, b.st, b.cfg, cards)
+	}
+	return cards, err
 }
 
 // SetStatus moves task id between backlog and ready, in one write

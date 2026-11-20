@@ -4,6 +4,7 @@ package task
 
 import (
 	"fmt"
+	"math"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -112,7 +113,7 @@ func normTags(raw []string) []string {
 func Validate(t model.Task) []Problem {
 	var ps []Problem
 	for _, check := range []func(model.Task) []Problem{
-		checkTitle, checkBody, checkRepo, checkBase, checkTags, checkModel, checkPriority, checkAgent,
+		checkTitle, checkBody, checkRepo, checkBase, checkTags, checkModel, checkPriority, checkAgent, checkBudget,
 	} {
 		ps = append(ps, check(t)...)
 	}
@@ -178,6 +179,13 @@ func checkModel(t model.Task) []Problem {
 func checkPriority(t model.Task) []Problem {
 	if t.Priority < model.PriorityHigh || t.Priority > model.PriorityLow {
 		return one("priority", "must be P1, P2 or P3")
+	}
+	return nil
+}
+
+func checkBudget(t model.Task) []Problem {
+	if v := t.BudgetUSD; math.IsNaN(v) || v < 0 || v > model.MaxBudgetUSD {
+		return one("budget", fmt.Sprintf("must be between 0 and %d dollars (0: none)", model.MaxBudgetUSD))
 	}
 	return nil
 }

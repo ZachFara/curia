@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/route"
@@ -186,6 +187,9 @@ func sayPlanFor(ctx context.Context, st *store.Store, cfg config.Config, text st
 	if addr.HasKind {
 		kind = addr.Kind
 	}
+	if addr.Broadcast {
+		return sayBroadcastAddress(addr, rest, kind, cands, cfg.Routing.Aliases)
+	}
 	if addr.TaskID != "" || addr.Name != "" {
 		return sayAddressed(addr, rest, kind, cands, sessions, cfg.Routing.Aliases)
 	}
@@ -284,6 +288,9 @@ func sayAsk(ctx context.Context, st *store.Store, cfg config.Config, rest string
 	sugg, note := sayAskModel(ctx, cfg.LogPath, rest, cands)
 	if note != "" {
 		return sayPlan{p: ui.Proposal{Text: rest, Kind: kind, Candidates: cands, Routed: model.RoutedManual, Note: note}, all: cands}, nil
+	}
+	if sugg.Scope != route.ScopeOne {
+		return sayBroadcastSuggested(rest, sugg, cands), nil
 	}
 	plan := sayPlan{all: cands, sugg: sugg, asked: true}
 	shown := sugg
@@ -468,4 +475,83 @@ func saySettleError(err error) error {
 		return errors.New(sanitize.Line(strings.TrimPrefix(err.Error(), route.ErrNoTarget.Error()+": "), 300))
 	}
 	return err
+}
+
+// sayBroadcastLimit bounds a broadcast's deliveries, which run one session
+// after the other past the view's own call timeout.
+const sayBroadcastLimit = 2 * time.Minute
+
+// sayBroadcastTargets are the session candidates (live, never a teammate:
+// a team's message goes to its lead) of the caller's tmux server that keep
+// accepts. A pane id means something only with its server (Ruling 133), so
+// with no known server there are no targets.
+func sayBroadcastTargets(cands []route.Candidate, keep func(route.Candidate) bool) ([]route.Candidate, error) {
+	socket := seenSocket(os.Getenv("TMUX"))
+	if socket == "" {
+		return nil, errors.New("a broadcast reaches the agent sessions of your tmux server, and TMUX is not set here: run it inside tmux")
+	}
+	var out []route.Candidate
+	for _, c := range cands {
+		if c.Type == route.TargetSession && !fleet.OtherSocket(socket, c.Session) && keep(c) {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// sayBroadcastPlan proposes one broadcast of rest to targets, never auto,
+// never a label: what says who ("everyone", "repo api-server").
+func sayBroadcastPlan(rest, what string, targets, cands []route.Candidate, routed model.RoutedBy) (sayPlan, error) {
+	if len(targets) == 0 {
+		return sayPlan{}, fmt.Errorf("no live agent session to broadcast to (%s)", sanitize.Line(what, 80))
+	}
+	label := sanitize.Line(fmt.Sprintf("%s (%d)", what, len(targets)), 120) // the count stays when the window is narrow
+	return sayPlan{all: cands, p: ui.Proposal{
+		Text: rest, Kind: model.KindInstruction, Routed: routed, Targets: targets,
+		Candidates: []route.Candidate{{Key: "broadcast", Type: route.TargetBroadcast, Ref: "broadcast", Label: label}},
+		Note:       "a broadcast is always confirmed",
+	}}, nil
+}
+
+// sayBroadcastAddress proposes "@all" or "@<repo>/*". A broadcast is an
+// instruction, and does not also name a task.
+func sayBroadcastAddress(addr message.Address, rest string, kind model.MessageKind, cands []route.Candidate, aliases map[string]string) (sayPlan, error) {
+	if kind != model.KindInstruction || addr.TaskID != "" {
+		return sayPlan{}, errors.New("a broadcast is an instruction to every session: it takes no rule:, task: or task id")
+	}
+	keep, what := func(route.Candidate) bool { return true }, "everyone"
+	if addr.Name != "" {
+		name := sayUnalias(addr.Name, aliases)
+		keep = func(c route.Candidate) bool { return c.Repo != "" && strings.EqualFold(filepath.Base(c.Repo), name) }
+		what = "repo " + addr.Name
+	}
+	targets, err := sayBroadcastTargets(cands, keep)
+	if err != nil {
+		return sayPlan{}, err
+	}
+	return sayBroadcastPlan(rest, what, targets, cands, model.RoutedAddress)
+}
+
+// sayBroadcastSuggested proposes the broadcast the router asked for (scope
+// all or repo, already validated by route.ParseSuggestion); it is stored
+// routed manual, so it is no label, and the user always confirms. When no
+// session matches, the user is asked to pick a target.
+func sayBroadcastSuggested(rest string, sugg route.Suggestion, cands []route.Candidate) sayPlan {
+	keep, what := func(route.Candidate) bool { return true }, "everyone"
+	if sugg.Scope == route.ScopeRepo {
+		keep = func(c route.Candidate) bool { return c.Repo == sugg.Target.Repo }
+		what = "repo " + filepath.Base(sugg.Target.Repo)
+	}
+	targets, err := sayBroadcastTargets(cands, keep)
+	if err == nil {
+		var plan sayPlan
+		if plan, err = sayBroadcastPlan(rest, what, targets, cands, model.RoutedManual); err == nil {
+			plan.sugg, plan.asked = sugg, true
+			return plan
+		}
+	}
+	return sayPlan{all: cands, p: ui.Proposal{
+		Text: rest, Kind: model.KindInstruction, Candidates: cands, Routed: model.RoutedManual,
+		Note: "the router suggested a broadcast, but " + sanitize.Line(err.Error(), 200) + "; pick a target",
+	}}
 }

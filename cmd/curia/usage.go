@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -66,6 +67,7 @@ type usageBurnRow struct {
 	SessionID, Window, TaskID string
 	USDPerHour, CostUSD       float64
 	CostKnown                 bool
+	Budget                    model.Budget // the task's (F16), filled by runUsage
 }
 
 // usageBuild reads the samples, the sessions and the task cards and applies
@@ -195,6 +197,9 @@ func runUsage(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if err = usageBudgets(cmd.Context(), st, cfg, rep.Burn); err != nil {
+		return err
+	}
 	if usageJSON {
 		return usagePrintJSON(cmd.OutOrStdout(), rep)
 	}
@@ -221,14 +226,14 @@ func usagePrint(w io.Writer, rep usageReport, now time.Time) error {
 	if len(rep.Burn) > 0 {
 		_, _ = fmt.Fprintln(w, "Burn by session")
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "SESSION:WINDOW\tTASK\t$/h\tCOST")
+		_, _ = fmt.Fprintln(tw, "SESSION:WINDOW\tTASK\t$/h\tCOST\tBUDGET")
 		for _, r := range rep.Burn {
 			session := r.SessionID
 			if r.Window != "" {
 				session += ":" + r.Window
 			}
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", ui.Cell(session), ui.Cell(r.TaskID),
-				ui.Cell(usage.CostCell(r.USDPerHour, true)), ui.Cell(usage.CostCell(r.CostUSD, r.CostKnown)))
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", ui.Cell(session), ui.Cell(r.TaskID),
+				ui.Cell(usage.CostCell(r.USDPerHour, true)), ui.Cell(usage.CostCell(r.CostUSD, r.CostKnown)), usage.BudgetCell(r.Budget))
 		}
 		if err := tw.Flush(); err != nil {
 			return err
@@ -254,6 +259,9 @@ type usageJSONBurn struct {
 	TaskID     string   `json:"task_id"`
 	USDPerHour float64  `json:"usd_per_hour"`
 	CostUSD    *float64 `json:"cost_usd"`
+	BudgetUSD  *float64 `json:"budget_usd"` // the task's budget (F16); null with none
+	SpentUSD   *float64 `json:"spent_usd"`  // null while no cost of the task is known
+	BudgetPct  *int     `json:"budget_pct"`
 }
 
 type usageJSONReport struct {
@@ -282,7 +290,10 @@ func usagePrintJSON(w io.Writer, rep usageReport) error {
 		out.API = &rep.APIUSD
 	}
 	for _, r := range rep.Burn {
-		b := usageJSONBurn{SessionID: r.SessionID, TaskID: r.TaskID, USDPerHour: r.USDPerHour}
+		b := usageJSONBurn{
+			SessionID: r.SessionID, TaskID: r.TaskID, USDPerHour: r.USDPerHour,
+			BudgetUSD: budgetLimit(r.Budget), SpentUSD: budgetSpent(r.Budget), BudgetPct: budgetPct(r.Budget),
+		}
 		if r.CostKnown {
 			b.CostUSD = &r.CostUSD
 		}
@@ -291,5 +302,10 @@ func usagePrintJSON(w io.Writer, rep usageReport) error {
 	if rep.PauseTask != "" {
 		out.Suggest = &rep.PauseTask
 	}
-	return json.NewEncoder(w).Encode(out)
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(out); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
+	return err
 }
