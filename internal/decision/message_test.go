@@ -66,9 +66,9 @@ func TestTypedMessageWording(t *testing.T) {
 			"Decision D-118 overridden: option C, the new queue, not your assumption. " +
 				"Revert work based on the old assumption, then continue.",
 		},
-		{ // confirmed uses the answered wording
-			decided(119, model.StatusConfirmed, "A", "Redis", "", ""),
-			"Decision D-119 answered: option A, Redis. Continue.",
+		{ // confirmed says the assumption stands and gives the note
+			decided(119, model.StatusConfirmed, "A", "Redis", "", "new session only"),
+			"Decision D-119 confirmed: option A, Redis, your assumption stands. Note from the user: new session only. Continue.",
 		},
 		{ // a label cut to 60 runes is lossy
 			decided(120, model.StatusAnswered, "B", strings.Repeat("l", 61), "", ""),
