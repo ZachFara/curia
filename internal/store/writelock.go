@@ -241,11 +241,11 @@ func (c *writerConn) ExecContext(ctx context.Context, query string, args []drive
 }
 
 // QueryContext runs query. Outside a transaction a statement that is not
-// a SELECT (an UPDATE ... RETURNING, a PRAGMA that changes the file) holds
+// a read (see isRead) (an UPDATE ... RETURNING, a PRAGMA that changes the file) holds
 // the writer lock until its rows are closed, when SQLite ends it.
 func (c *writerConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	q := c.conn.QueryContext
-	if c.held != nil || isSelect(query) {
+	if c.held != nil || isRead(query) {
 		return q(ctx, query, args)
 	}
 	release, err := c.lock.lock(ctx)
@@ -258,12 +258,6 @@ func (c *writerConn) QueryContext(ctx context.Context, query string, args []driv
 		return nil, err
 	}
 	return &writerRows{Rows: rows, release: release}, nil
-}
-
-// isSelect reports whether query is a plain SELECT, which never writes.
-func isSelect(query string) bool {
-	f := strings.Fields(query)
-	return len(f) > 0 && strings.EqualFold(f[0], "SELECT")
 }
 
 // Ping checks the connection.
@@ -306,4 +300,161 @@ type writerRows struct {
 func (r *writerRows) Close() error {
 	defer r.once.Do(r.release)
 	return r.Rows.Close()
+}
+
+// readPragmas are the PRAGMAs that only read when given no value.
+var readPragmas = map[string]bool{
+	"JOURNAL_MODE": true, "USER_VERSION": true, "PAGE_COUNT": true, "FREELIST_COUNT": true,
+	"DATABASE_LIST": true, "COMPILE_OPTIONS": true, "TABLE_INFO": true, "TABLE_XINFO": true,
+	"INDEX_LIST": true, "INDEX_INFO": true, "FOREIGN_KEY_LIST": true,
+}
+
+// argPragmas read even with an argument in parentheses.
+var argPragmas = map[string]bool{
+	"TABLE_INFO": true, "TABLE_XINFO": true, "INDEX_LIST": true, "INDEX_INFO": true, "FOREIGN_KEY_LIST": true,
+}
+
+// isRead reports whether query is one statement that cannot write: a
+// SELECT or VALUES, an EXPLAIN, a WITH whose main statement is a SELECT,
+// or a read-only PRAGMA. Leading space and comments are skipped. When in
+// doubt it says false (a write taken for a read would bypass the writer
+// lock): a second statement, an unterminated string or comment, an empty
+// query.
+func isRead(query string) bool {
+	words, ok := topLevelWords(query)
+	if !ok || len(words) == 0 {
+		return false
+	}
+	switch words[0].text {
+	case "SELECT", "VALUES", "EXPLAIN":
+		return true
+	case "WITH":
+		for _, w := range words[1:] {
+			switch w.text {
+			case "SELECT", "VALUES":
+				return true
+			case "INSERT", "UPDATE", "DELETE", "REPLACE":
+				return false
+			}
+		}
+	case "PRAGMA":
+		if len(words) < 2 || !readPragmas[words[1].text] || words[1].set {
+			return false
+		}
+		return argPragmas[words[1].text] || !words[1].paren
+	}
+	return false
+}
+
+// word is a bare word of a statement outside parentheses.
+type word struct {
+	text       string // upper case
+	set, paren bool   // an = or a ( follows it
+}
+
+// skipLexical skips the comment or quoted text that starts at q[i] and
+// returns the index after it. handled is false when none starts there, and
+// ok when the comment or quote is terminated.
+func skipLexical(q string, i int) (next int, handled, ok bool) {
+	switch c := q[i]; {
+	case strings.HasPrefix(q[i:], "--"):
+		if j := strings.IndexByte(q[i:], '\n'); j >= 0 {
+			return i + j, true, true
+		}
+		return len(q), true, true
+	case strings.HasPrefix(q[i:], "/*"):
+		j := strings.Index(q[i+2:], "*/")
+		return i + j + 4, true, j >= 0
+	case c == '\'' || c == '"' || c == '`' || c == '[':
+		end := map[byte]byte{'\'': '\'', '"': '"', '`': '`', '[': ']'}[c]
+		for i++; i < len(q); i++ {
+			if q[i] != end {
+				continue
+			}
+			if end != ']' && i+1 < len(q) && q[i+1] == end { // doubled quote
+				i++
+				continue
+			}
+			return i + 1, true, true
+		}
+		return len(q), true, false
+	}
+	return i, false, true
+}
+
+func isQuote(c byte) bool { return strings.IndexByte("'\"`[", c) >= 0 }
+
+func isIdent(c byte) bool {
+	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}
+
+// scan collects the bare words of a statement and tracks its parentheses.
+type scan struct {
+	words []word
+	depth int
+}
+
+// mark flags the last bare word, which a "(" or "=" at depth 0 follows.
+func (sc *scan) mark(c byte) {
+	if sc.depth != 0 || len(sc.words) == 0 {
+		return
+	}
+	if last := &sc.words[len(sc.words)-1]; c == '(' {
+		last.paren = true
+	} else if c == '=' {
+		last.set = true
+	}
+}
+
+// symbol handles the punctuation c; it is false for an unbalanced ")".
+func (sc *scan) symbol(c byte) bool {
+	switch c {
+	case '(', '=':
+		sc.mark(c)
+		if c == '(' {
+			sc.depth++
+		}
+	case ')':
+		sc.depth--
+	}
+	return sc.depth >= 0
+}
+
+// topLevelWords splits query into its bare words outside parentheses,
+// quotes and comments. ok is false when the query has anything after a
+// semicolon (a second statement), an unterminated quote or comment, or
+// unbalanced parentheses.
+func topLevelWords(q string) (words []word, ok bool) {
+	var sc scan
+	i, ended := 0, false
+	for i < len(q) {
+		if next, handled, closed := skipLexical(q, i); handled {
+			if !closed || ended && isQuote(q[i]) { // a quote after ';' is a second statement
+				return nil, false
+			}
+			i = next
+			continue
+		}
+		c := q[i]
+		if strings.IndexByte(" \t\n\r\f", c) >= 0 {
+			i++
+			continue
+		}
+		if ended {
+			return nil, false
+		}
+		j := i + 1
+		for isIdent(c) && j < len(q) && isIdent(q[j]) {
+			j++
+		}
+		if isIdent(c) && sc.depth == 0 {
+			sc.words = append(sc.words, word{text: strings.ToUpper(q[i:j])})
+		}
+		ended = c == ';'
+		if !sc.symbol(c) {
+			return nil, false
+		}
+		i = j
+	}
+	return sc.words, sc.depth == 0
 }

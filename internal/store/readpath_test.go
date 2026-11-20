@@ -55,3 +55,19 @@ func TestOpenDoesNotWaitForWriters(t *testing.T) {
 		return err
 	})
 }
+
+func TestReadsDoNotWaitForWriters(t *testing.T) {
+	path := dbPath(t)
+	w := open(t, path)
+	upsert(t, w, model.Session{ID: "s1", Agent: "claude", State: model.StateWorking})
+	r := open(t, path)
+	release := holdWriter(t, w)
+	defer release()
+
+	ctx := context.Background()
+	since := time.Now().Add(-time.Hour)
+	within(t, "ListSessions", func() error { _, err := r.ListSessions(ctx, store.ListFilter{IncludeEnded: true}); return err })
+	within(t, "CostSince", func() error { _, err := r.CostSince(ctx, since); return err })
+	within(t, "UsageSince", func() error { _, err := r.UsageSince(ctx, since); return err })
+	within(t, "UsageReadings", func() error { _, err := r.UsageReadings(ctx, since); return err })
+}
