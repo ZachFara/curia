@@ -89,6 +89,9 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 		bsrc := boardSource{st: st, tm: client, cfg: cfg, refused: refused}
 		m = m.WithBoard(func() tea.Model { return ui.NewBoard(bsrc, client, clock, true) })
 		m = m.WithTimeline(func() tea.Model { return ui.NewTimeline(timelineSource(st), clock) })
+		m = m.WithSettings(func() tea.Model {
+			return ui.NewSettings(settingsSource{st: st, refused: refused}, clock, settingsReason(refused))
+		})
 		if refused == nil {
 			m = m.WithPause()
 		}
