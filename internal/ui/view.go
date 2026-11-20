@@ -418,7 +418,10 @@ func (m Model) cellText(s model.Session, c column) string {
 		if s.ContextMax <= 0 {
 			return ""
 		}
-		return fmt.Sprintf("%d%%", contextPct(s.ContextUsed, s.ContextMax))
+		if p := contextPct(s.ContextUsed, s.ContextMax); p <= 100 {
+			return fmt.Sprintf("%d%%", p)
+		}
+		return "?" // a count above its window: never show a number over 100
 	case colSubagents:
 		return strconv.Itoa(s.SubagentsActive)
 	case colUpdate:
