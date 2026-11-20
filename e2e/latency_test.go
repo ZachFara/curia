@@ -5,8 +5,10 @@ package e2e
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -38,8 +40,15 @@ const latencyMaxScale = 2
 // returns its p95), and fails t unless the median p95 is under p95Budget times
 // the machine's scale. The reference is timed before and after the batches and
 // the smaller is used, so a slowdown that starts mid-test does not excuse it.
+//
+// With CURIA_LATENCY_SPACED set it runs one batch and prints it
+// for internal/latency's Judge (same line format as latency.Result).
 func latencyGate(t testing.TB, what string, batch func() time.Duration) {
 	t.Helper()
+	if os.Getenv("CURIA_LATENCY_SPACED") != "" {
+		latencySpaced(t, what, batch)
+		return
+	}
 	before50, before95 := latencyReference(t)
 	p95s := make([]time.Duration, latencyBatches)
 	for i := range p95s {
@@ -169,4 +178,33 @@ func TestLatencyVerdictInflatedReferenceTailStillCatchesAProductSleep(t *testing
 	if _, _, fail := latencyVerdict(25*ms+30*ms, threshold, ref); fail == "" {
 		t.Error("a 30 ms sleep in the product passed on an inflated reference tail")
 	}
+}
+
+// latencyResult is internal/latency.Result.
+type latencyResult struct {
+	Gate      string        `json:"gate"`
+	At        time.Time     `json:"at"`
+	Threshold time.Duration `json:"threshold"`
+	P95       time.Duration `json:"p95"`
+	Ref50     time.Duration `json:"ref_p50"`
+	Ref95     time.Duration `json:"ref_p95"`
+	Failed    bool          `json:"failed"`
+}
+
+func latencySpaced(t testing.TB, what string, batch func() time.Duration) {
+	t.Helper()
+	before50, before95 := latencyReference(t)
+	p95 := batch()
+	after50, after95 := latencyReference(t)
+	r := latencyResult{Gate: t.Name() + ": " + what, At: time.Now(), Threshold: p95Budget, P95: p95, Ref50: min(before50, after50), Ref95: min(before95, after95)}
+	t.Logf("%s: spaced batch p95 %v, reference commit p50 %v p95 %v", r.Gate, p95, r.Ref50, r.Ref95)
+	t.Cleanup(func() {
+		r.Failed = t.Failed()
+		line, err := json.Marshal(r)
+		if err != nil {
+			t.Errorf("record latency result: %v", err)
+			return
+		}
+		fmt.Printf("LATENCY-RESULT %s\n", line)
+	})
 }
