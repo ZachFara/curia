@@ -106,6 +106,7 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 		var closeLog func() error
 		m, closeLog = dashboardPopupViews(m, st, client, cfg, refused)
 		defer func() { _ = closeLog() }()
+		m = m.WithDetail(func(id string) tea.Model { return ui.NewDetail(newDetailSource(st, cfg), id, clock) })
 	}
 	// A hang-up or SIGTERM ends the dashboard, but an approval (or another
 	// review action) in flight finishes and is recorded first (C1).
