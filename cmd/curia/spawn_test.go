@@ -1449,3 +1449,28 @@ func TestSpawnHostileStoredModelOfOtherAgent(t *testing.T) {
 		})
 	}
 }
+
+// An agent may spawn a ready task but not choose how it runs (Ruling 113).
+func TestSpawnByAgentRefusesHowItRuns(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Fix", "Body")
+	f.update("T-1", func(tk *model.Task) { tk.Status = model.TaskReady })
+	before := f.get("T-1")
+	for opt, o := range map[string]spawnOptions{
+		"--agent":  {Agent: model.AgentCodex},
+		"--model":  {Model: "gpt-expensive"},
+		"--team":   {Team: true},
+		"--resume": {Resume: "0b9a2c1e-0000-4000-8000-000000000000"},
+	} {
+		o.ReadyOnly = true
+		f.fake.Calls = nil
+		_, _, err := f.spawn("T-1", o)
+		if err == nil || !strings.Contains(err.Error(), opt+" is the user's choice") || !strings.Contains(err.Error(), "stored values apply") {
+			t.Errorf("%s: err = %v, want a refusal naming it and the stored values", opt, err)
+		}
+		f.wantNothingStarted("T-1")
+	}
+	if tk := f.get("T-1"); tk.Agent != before.Agent || tk.AgentModel != before.AgentModel {
+		t.Errorf("stored agent %q model %q, want unchanged", tk.Agent, tk.AgentModel)
+	}
+}

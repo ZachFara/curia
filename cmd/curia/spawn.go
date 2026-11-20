@@ -154,6 +154,21 @@ func spawnTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.
 	return r, nil
 }
 
+// spawnChosenOption names the first option that chooses how the agent runs.
+func spawnChosenOption(o spawnOptions) string {
+	switch {
+	case o.Agent != "":
+		return "--agent"
+	case o.Model != "":
+		return "--model"
+	case o.Team:
+		return "--team"
+	case o.Resume != "":
+		return "--resume"
+	}
+	return ""
+}
+
 // spawnCheckOptions refuses an id, agent, model or session id that is not
 // of the form Curia accepts, before anything else happens. The agent is
 // one of two fixed names; a model or session id that starts with a dash
@@ -276,6 +291,9 @@ func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 
 // spawnCheckTask is spawnCheck's checks of the options and the task.
 func spawnCheckTask(ctx context.Context, st *store.Store, id string, o *spawnOptions) (model.Task, error) {
+	if opt := spawnChosenOption(*o); o.ReadyOnly && opt != "" {
+		return model.Task{}, fmt.Errorf("%s is the user's choice: %s's stored values apply to a spawn that is not the user's", opt, id)
+	}
 	if err := spawnCheckOptions(id, *o); err != nil {
 		return model.Task{}, err
 	}
