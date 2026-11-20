@@ -20,7 +20,7 @@ What was checked: the statements below were read against the code of the `plan-5
 | SessionStart sets a session `idle`, not `working`. Spec amended. | Ruling 37 |
 | The badge is `D<n> Q<n> W<n> R<n>`: open blocking tickets, answers a live session has not received, waiting sessions, reviews. Spec amended. | Ruling 91 |
 | A permission prompt shows up to 6 seconds late: Claude Code sends no hook until then. A denied prompt or an interrupt fires no hook; the next refresh settles the session from the transcript. | Rulings 48, 77 |
-| Context and its percentage come from Claude Code's status line when it has reported; a table or a default is only a fallback; a figure over 100% shows `?`. | Ruling 179 |
+| Context and its percentage come from Claude Code's status line when it has reported; a table or a default is only a fallback; a figure over 100% shows `?`. Spec amended. | Rulings 142, 179 |
 | Sessions whose pane is gone are marked stale and hidden after `stale_hide_after` (default 10 minutes). | `curia ls --help` |
 | The tmux snippet adds to your window formats and binds a key only if it is free. | Rulings 94 to 96, 103 |
 | The marker has a blue dot for a review you have not seen as well as the red one. | Plan 4 decision 20 |
