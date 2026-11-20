@@ -136,7 +136,7 @@ func TestTimelineQueryUsesIndexes(t *testing.T) {
 	tlExec(t, db, gen+`INSERT INTO events (session_id, kind, payload, at) SELECT 'x' || (i % 500), 'Stop', '{}', at FROM ts`)
 	tlExec(t, db, gen+`INSERT INTO decisions (id, question, options, recommendation, rationale, reversibility, mode, scope, status, args_hash, created_at, answered_at, answer)
 SELECT 'D-x' || i, 'q', '[]', 'a', 'r', 'cheap', 'blocking', 'repo', 'answered', i, at, at, 'x' FROM ts WHERE i % 10 = 0`)
-	for _, line := range strings.Split(queryPlan(t, db, store.TimelineUnion(), tlAt(0), "9999", "", "", 50), "\n") {
+	for _, line := range strings.Split(queryPlan(t, db, store.TimelineUnion(), tlAt(0), "9999", "", "", 50, "", "", false), "\n") {
 		if tlScan.MatchString(strings.TrimSpace(line)) {
 			t.Errorf("a source scans its whole table: %q", line)
 		}
@@ -144,5 +144,50 @@ SELECT 'D-x' || i, 'q', '[]', 'a', 'r', 'cheap', 'blocking', 'repo', 'answered',
 	evs, err := s.Timeline(context.Background(), store.TimelineQuery{Limit: 50})
 	if err != nil || len(evs) != 50 {
 		t.Fatalf("Timeline = %d events, %v", len(evs), err)
+	}
+}
+
+// Events that share one timestamp across a page edge are neither skipped
+// nor repeated when paging with the last event as the cursor.
+func TestTimelinePagesThroughIdenticalTimestamps(t *testing.T) {
+	s, db := tlSeed(t)
+	for range 7 {
+		tlExec(t, db, `INSERT INTO events (session_id, kind, payload, at) VALUES ('s2','Stop','{}',?)`, tlAt(20))
+	}
+	ctx := context.Background()
+	all, err := s.Timeline(ctx, store.TimelineQuery{Limit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range []int{1, 2, 3, 4} {
+		var got []model.TimelineEvent
+		var cur model.TimelineEvent
+		for len(got) <= len(all) {
+			p, err := s.Timeline(ctx, store.TimelineQuery{Limit: size, Cursor: cur})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(p) == 0 {
+				break
+			}
+			got, cur = append(got, p...), p[len(p)-1]
+		}
+		if !reflect.DeepEqual(got, all) {
+			t.Errorf("page size %d: %d events, want %d (or a different order)", size, len(got), len(all))
+		}
+	}
+}
+
+func TestTimelineTextIsTheWholeLine(t *testing.T) {
+	s, db := tlSeed(t)
+	long := strings.Repeat("word ", 200)
+	tlExec(t, db, `INSERT INTO events (session_id, kind, payload, at) VALUES ('s1','Stop',json_object('last_assistant_message', ?),?)`, long, tlAt(30))
+	evs, _ := s.Timeline(context.Background(), store.TimelineQuery{Limit: 1})
+	if len(evs[0].Line) != 300 {
+		t.Fatalf("line = %d bytes, want the 300 bound", len(evs[0].Line))
+	}
+	full, err := s.TimelineText(context.Background(), evs[0])
+	if err != nil || full != long {
+		t.Errorf("TimelineText = %d bytes, %v; want %d", len(full), err, len(long))
 	}
 }

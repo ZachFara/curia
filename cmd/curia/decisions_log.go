@@ -1,9 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -88,31 +88,22 @@ func decisionlogPrint(w io.Writer, rows []model.DecisionLogRow, sum model.Decisi
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ID\tSTATUS\tSCOPE\tDATE\tREUSE\tASKED\tQUESTION\tANSWER")
 	for _, r := range rows {
-		status := string(r.Status)
-		if r.Superseded {
-			status += " (superseded)"
-		}
-		reuse := fmt.Sprint(r.Reuse)
-		if r.Reuse > 0 {
-			reuse += " (last " + ui.Age(r.LastReuse, now) + " ago)"
-		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-			decisionlogCell(r.ID, 20), decisionlogCell(status, 30), decisionlogCell(r.Scope, 10),
-			r.CreatedAt.Local().Format("2006-01-02"), reuse, r.AskedAgain,
+			decisionlogCell(r.ID, 20), decisionlogCell(ui.DecisionLogStatus(r), 30), decisionlogCell(r.Scope, 10),
+			r.CreatedAt.Local().Format("2006-01-02"), ui.DecisionLogReuse(r, now), r.AskedAgain,
 			decisionlogCell(r.Question, decisionlogQuestionLimit), decisionlogCell(r.Answer, decisionlogAnswerLimit))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintln(w, decisionlogSummaryLine(sum))
+	_, err := fmt.Fprintln(w, ui.DecisionLogSummaryLine(sum))
 	return err
 }
 
-// decisionlogSummaryLine is the share of answered decisions reused at least once.
-func decisionlogSummaryLine(s model.DecisionLogSummary) string {
-	if s.Answered == 0 {
-		return "no answered decisions"
+// decisionlogSource reads the dashboard's decision log view from the store,
+// through the same query the command runs.
+func decisionlogSource(st *store.Store) ui.DecisionLogSource {
+	return func(ctx context.Context, f ui.DecisionLogFilter) ([]model.DecisionLogRow, model.DecisionLogSummary, error) {
+		return st.DecisionLog(ctx, store.DecisionLogQuery{Text: f.Text, Scope: f.Scope, Since: f.Since})
 	}
-	return strings.TrimSpace(fmt.Sprintf("%d of %d answered decisions (%d%%) were reused at least once",
-		s.Reused, s.Answered, s.Reused*100/s.Answered))
 }

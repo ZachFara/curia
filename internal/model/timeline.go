@@ -7,6 +7,7 @@ import "time"
 // cleaned: a view cleans it before it shows it.
 type TimelineEvent struct {
 	At        time.Time
+	Ref       string // the source row's id as text; with At and Kind it is a stable position
 	SessionID string // "" when the event has no session
 	TaskID    string // "" when the event has no task
 	Kind      string // session_start, turn_end, answered, review_opened, ...
