@@ -659,6 +659,33 @@ func TestIngestCapsCostSamples(t *testing.T) {
 	}
 }
 
+// TestIngestCapIsByRowCount: rowids with gaps (rows deleted long ago) make
+// the span between the oldest and newest rowid exceed the bound while the
+// table holds far fewer rows. No row may be deleted then.
+func TestIngestCapIsByRowCount(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		table, insert string
+		bound         int
+	}{
+		{"usage_samples", `INSERT INTO usage_samples (n, at, window, used_pct, resets_at, session_id)
+			SELECT x, ?, 'five_hour', x % 100, NULL, 's1' FROM c WHERE x <= 1000 OR x = ?`, store.UsageMaxRows},
+		{"cost_samples", `INSERT INTO cost_samples (n, at, session_id, cost_usd)
+			SELECT x, ?, 's1', x FROM c WHERE x <= 1000 OR x = ?`, store.CostMaxRows},
+	} {
+		path, s := capSetup(t)
+		at := usageNow.Add(-time.Hour).UTC().Format("2006-01-02T15:04:05.000000000Z")
+		top := c.bound + 500
+		if _, err := rawDB(t, path).Exec(`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < ?) `+c.insert, top, at, top); err != nil {
+			t.Fatal(err)
+		}
+		capIngest(t, s)
+		if n := capCount(t, path, c.table); n < 1001 {
+			t.Errorf("%s has %d rows after ingests, want at least the 1001 stored (far under the bound %d)", c.table, n, c.bound)
+		}
+	}
+}
+
 func capSetup(t *testing.T) (string, *store.Store) {
 	t.Helper()
 	path := dbPath(t)
@@ -1602,6 +1629,19 @@ func BenchmarkIngest(b *testing.B) {
 	slices.Sort(durations)
 	b.ReportMetric(float64(durations[len(durations)/2].Microseconds()), "p50-µs")
 	b.ReportMetric(float64(durations[len(durations)*95/100].Microseconds()), "p95-µs")
+}
+
+// A reading with no context (the status line's null used_percentage, which
+// the cmd layer turns into size 0) leaves the last known context in place.
+func TestIngestWithoutContextKeepsLastKnown(t *testing.T) {
+	s := open(t, dbPath(t))
+	usageSession(t, s, "s1")
+	usageIngest(t, s, store.Reading{SessionID: "s1", At: usageNow, ContextSize: 200_000, ContextPct: 40}, usageNow)
+	before := get(t, s, "s1")
+	usageIngest(t, s, store.Reading{SessionID: "s1", At: usageNow.Add(time.Minute), CostUSD: usageF(1)}, usageNow.Add(time.Minute))
+	if after := get(t, s, "s1"); after.ContextUsed != before.ContextUsed || after.ContextMax != before.ContextMax || before.ContextUsed == 0 {
+		t.Errorf("context %d/%d after a reading without one, want the last known %d/%d", after.ContextUsed, after.ContextMax, before.ContextUsed, before.ContextMax)
+	}
 }
 
 func TestIngestContextWindowOwnsContextFields(t *testing.T) {
