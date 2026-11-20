@@ -1275,3 +1275,36 @@ func TestRuleShownAsRuleInPrecedent(t *testing.T) {
 		}
 	}
 }
+
+// F25: a ticket raised although request_decision returned a near match
+// records it; one with no near match records none.
+func TestRequestRecordsNearMatch(t *testing.T) {
+	f := newFixture(t)
+	f.decided(otherInRepoA, webhookQ)
+	f.mustCall("request_decision", ticket("Use Postgres or Redis to store the webhook events?"))
+	f.mustCall("request_decision", ticket("Which logging library should the exporter use for its output?"))
+	raw, err := sql.Open("sqlite", f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	got := map[string]string{}
+	rows, err := raw.Query(`SELECT id, COALESCE(near_match, '') FROM decisions`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, near string
+		if err = rows.Scan(&id, &near); err != nil {
+			t.Fatal(err)
+		}
+		got[id] = near
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"D-1": "", "D-2": "D-1", "D-3": ""}; !reflect.DeepEqual(got, want) {
+		t.Errorf("near_match = %v, want %v", got, want)
+	}
+}

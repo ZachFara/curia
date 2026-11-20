@@ -188,8 +188,8 @@ func TestMigrationAddsCostTables(t *testing.T) {
 	if err := ftsIntegrity(db); err != nil {
 		t.Errorf("decisions_fts integrity-check: %v", err)
 	}
-	if n := countMigrations(t, path); n != 8 {
-		t.Errorf("schema_migrations has %d rows, want 8", n)
+	if n := countMigrations(t, path); n != 9 {
+		t.Errorf("schema_migrations has %d rows, want 9", n)
 	}
 }
 
@@ -282,7 +282,7 @@ func TestMigrationOnPlan4Database(t *testing.T) {
 	s := open(t, path)
 	if names := migrationNames(t, db); !reflect.DeepEqual(names, []string{
 		"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql",
-		"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql",
+		"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0009_decision_near_match.sql",
 	}) {
 		t.Errorf("migrations = %v, want 0001 to 0007 (both 0005 files)", names)
 	}

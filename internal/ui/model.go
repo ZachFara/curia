@@ -165,6 +165,7 @@ type Model struct {
 	noKill   string                           // why x cannot kill; "": it can
 	board    func() tea.Model                 // builds the task board; nil: t and n say why
 	review   func(taskID string) tea.Model    // builds the review view; nil: r says why
+	timeline func() tea.Model                 // builds the timeline view; nil: T says why
 	noReview string                           // why r cannot open a review; "": inside an agent session
 	child    tea.Model                        // the decide view, the board or the review view while it is shown
 	childGen int                              // which child is (or was last) shown
@@ -588,7 +589,7 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 		msg = cm.msg
 	}
 	switch msg := msg.(type) {
-	case DecideClosedMsg, BoardClosedMsg, ReviewClosedMsg:
+	case DecideClosedMsg, BoardClosedMsg, ReviewClosedMsg, TimelineClosedMsg:
 		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
 		m.chain++
 		return m, m.refresh()
@@ -911,8 +912,26 @@ func (m Model) commandKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.toggleBurn(), nil
 	case "P":
 		return m.askPause(), nil
+	case "T":
+		return m.openTimeline()
 	}
 	return m, nil
+}
+
+// WithTimeline returns m with the T key enabled in the popup: T shows the
+// model open builds until it sends TimelineClosedMsg.
+func (m Model) WithTimeline(open func() tea.Model) Model {
+	m.timeline = open
+	return m
+}
+
+// openTimeline shows the timeline view, or says it opens in the popup.
+func (m Model) openTimeline() (Model, tea.Cmd) {
+	if m.timeline == nil {
+		m.notice = "the timeline opens in the popup (curia ui)"
+		return m, nil
+	}
+	return m.showChild(m.timeline())
 }
 
 // toggleBurn turns the burn sort on or off in the popup; the selection
