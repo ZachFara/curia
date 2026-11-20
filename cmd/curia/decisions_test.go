@@ -1098,6 +1098,7 @@ var userNotOnlyCommands = map[string]string{
 	"curia task ls":               "reads the tasks only",
 	"curia timeline":              "reads existing rows and prints cleaned, bounded text, as ls and read do; changes nothing",
 	"curia ui":                    "a view; its user actions go through the guard (uiUserActions)",
+	"curia time":                  "reads the stored hook events and prints numbers; writes nothing and calls no model",
 	"curia usage":                 "reads the samples and tasks and prints numbers; it pauses nothing, and the pause it suggests is typed by the user",
 	"curia version":               "prints the version",
 	"curia help":                  "cobra's help",

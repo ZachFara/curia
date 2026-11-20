@@ -76,7 +76,7 @@ Commands:
 | Command | What it does |
 | --- | --- |
 | `make check` | The full gate, run by CI and by hand. Runs, in order: pinned tool install, gofumpt (fail on diff), golangci-lint, complexity limits, depguard boundaries, the suppression ban, `go vet`, staticcheck, `deadcode -test`, the layout check, the latency-name check, then `go test` in two phases (every test except the latency gates, packages in parallel; then the latency gates alone, `-p 1`, so they do not measure other packages' load; Ruling 134). All gates run under a lock shared by every worktree of the repository, so a check may wait for another worktree's. CI runs exactly this; the pre-commit hook runs `make check-fast`. |
-| `make check-fast` | The pre-commit hook. No lock. All static gates (including `deadcode`), `go build ./...`, then `go test -race` (without the latency tests) of only the packages the staged `.go` and `testdata/` files belong to (`scripts/staged-tests.sh`; the whole module if `go.mod` or `go.sum` is staged or more than 20 packages are touched; no tests if none staged). Seconds, plus the touched packages' tests. |
+| `make check-fast` | The pre-commit hook. No lock. All static gates (including `deadcode`) and `go build ./...`. Static checks and build only, no tests: run `make test-staged` (the touched packages' tests, `scripts/staged-tests.sh`) or a narrow `go test -run` yourself; CI runs every test and is required to merge. Seconds. |
 | `make fmt` | Rewrite Go files with gofumpt (convenience; the gate only checks). |
 | `make build` | Build `./curia` (gitignored). |
 | `go test -race ./internal/<pkg>/ -v` | Run one package's tests while iterating. |
