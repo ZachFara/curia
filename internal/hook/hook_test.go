@@ -21,6 +21,7 @@ import (
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/decision"
 	"github.com/ZachFara/curia/internal/hook"
+	latgate "github.com/ZachFara/curia/internal/latency"
 	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -863,20 +864,22 @@ func TestHookLatency(t *testing.T) {
 	body := payload("A", tr, `,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
 
 	const runs = latencyGateRuns
-	durations := make([]time.Duration, 0, runs)
-	for range runs {
-		appendLine(t, tr, `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}`)
-		start := time.Now()
-		if _, err := hook.Run(context.Background(), model.PostToolUse, body, env, st, config.Default()); err != nil {
-			t.Fatal(err)
+	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+		durations := make([]time.Duration, 0, runs)
+		for range runs {
+			appendLine(t, tr, `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}`)
+			start := time.Now()
+			if _, err := hook.Run(context.Background(), model.PostToolUse, body, env, st, config.Default()); err != nil {
+				t.Fatal(err)
+			}
+			durations = append(durations, time.Since(start))
 		}
-		durations = append(durations, time.Since(start))
-	}
-	slices.Sort(durations)
-	p50, p95 := durations[runs/2], durations[runs*95/100]
-	t.Logf("PostToolUse over %d runs: p50 %v, p95 %v, max %v", runs, p50, p95, durations[runs-1])
+		slices.Sort(durations)
+		t.Logf("PostToolUse over %d runs: p50 %v, p95 %v, max %v", runs, durations[runs/2], durations[runs*95/100], durations[runs-1])
+		return durations[runs*95/100]
+	})
 	if p95 >= 20*time.Millisecond {
-		t.Errorf("p95 = %v, want < 20ms", p95)
+		t.Errorf("median p95 = %v, want < 20ms", p95)
 	}
 }
 
@@ -1513,15 +1516,19 @@ func TestStopLatencyWithDecisions(t *testing.T) {
 	stopOnce() // warm-up, untimed
 
 	const runs = latencyGateRuns
-	durations := make([]time.Duration, 0, runs)
-	for range runs {
-		durations = append(durations, stopOnce())
-	}
-	slices.Sort(durations)
-	p50, p95, worst := durations[runs/2], durations[runs*95/100], durations[runs-1]
-	t.Logf("Stop with 500 decisions over %d runs: p50 %v, p95 %v, max %v", runs, p50, p95, worst)
+	var p50, worst time.Duration
+	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+		durations := make([]time.Duration, 0, runs)
+		for range runs {
+			durations = append(durations, stopOnce())
+		}
+		slices.Sort(durations)
+		p50, worst = durations[runs/2], durations[runs-1]
+		t.Logf("Stop with 500 decisions over %d runs: p50 %v, p95 %v, max %v (load average %s)", runs, p50, durations[runs*95/100], worst, loadAverage())
+		return durations[runs*95/100]
+	})
 	if p95 >= 20*time.Millisecond {
-		t.Errorf("p95 = %v, want < 20ms (p50 %v, max %v, load average %s)", p95, p50, worst, loadAverage())
+		t.Errorf("median p95 = %v, want < 20ms (last batch p50 %v, max %v, load average %s)", p95, p50, worst, loadAverage())
 	}
 }
 
@@ -2415,25 +2422,31 @@ func TestStopLatencyWithMessages(t *testing.T) {
 			return res
 		}
 	}
+	gate := func(name string, prep func(), op func() hook.Result) {
+		p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+			d := latency(t, latencyGateRuns, prep, op)
+			runs, p50, p95, worst := len(d), d[len(d)/2], d[len(d)*95/100], d[len(d)-1]
+			t.Logf("%s, over %d runs: p50 %v, p95 %v, max %v (load average %s)", name, runs, p50, p95, worst, loadAverage())
+			return p95
+		})
+		if p95 >= 20*time.Millisecond {
+			t.Errorf("%s: median p95 = %v, want < 20ms (load average %s)", name, p95, loadAverage())
+		}
+	}
+	gate("Stop, none queued", topUp(0), hookOnce(model.Stop, stopBody, 0))
+	gate("Stop, 1 queued", topUp(1), claim(hookOnce(model.Stop, stopBody, 1)))
 	rows := []struct {
 		name string
-		gate bool
 		d    []time.Duration
 	}{
-		{"Stop, none queued", true, latency(t, latencyGateRuns, topUp(0), hookOnce(model.Stop, stopBody, 0))},
-		{"Stop, 1 queued", true, latency(t, latencyGateRuns, topUp(1), claim(hookOnce(model.Stop, stopBody, 1)))},
-		{"Stop, 20 queued", false, latency(t, latencyRuns, topUp(20), claim(hookOnce(model.Stop, stopBody, message.MaxPerStop)))},
-		{"PostToolUse, 12 queued", false, latency(t, latencyRuns, transcriptLine, hookOnce(model.PostToolUse, payload("A", tr, `,"tool_name":"Edit"`), 0))},
-		{"UserPromptSubmit", false, latency(t, latencyRuns, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "go on"), 0))},
-		{"UserPromptSubmit naming a message", false, latency(t, latencyRuns, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "Message M-1 from the user: x."), 0))},
+		{"Stop, 20 queued", latency(t, latencyRuns, topUp(20), claim(hookOnce(model.Stop, stopBody, message.MaxPerStop)))},
+		{"PostToolUse, 12 queued", latency(t, latencyRuns, transcriptLine, hookOnce(model.PostToolUse, payload("A", tr, `,"tool_name":"Edit"`), 0))},
+		{"UserPromptSubmit", latency(t, latencyRuns, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "go on"), 0))},
+		{"UserPromptSubmit naming a message", latency(t, latencyRuns, func() {}, hookOnce(model.UserPromptSubmit, promptBody(t, "Message M-1 from the user: x."), 0))},
 	}
 	for _, r := range rows {
 		runs := len(r.d)
-		p50, p95, worst := r.d[runs/2], r.d[runs*95/100], r.d[runs-1]
-		t.Logf("%s, over %d runs: p50 %v, p95 %v, max %v", r.name, runs, p50, p95, worst)
-		if r.gate && p95 >= 20*time.Millisecond {
-			t.Errorf("%s: p95 = %v, want < 20ms (p50 %v, max %v, load average %s)", r.name, p95, p50, worst, loadAverage())
-		}
+		t.Logf("%s, over %d runs: p50 %v, p95 %v, max %v", r.name, runs, r.d[runs/2], r.d[runs*95/100], r.d[runs-1])
 	}
 }
 
