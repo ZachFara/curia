@@ -112,6 +112,8 @@ func ContextLevel(used, limit, warnPct, critPct int) Level {
 		return LevelUnknown
 	}
 	switch pct := contextPct(used, limit); {
+	case pct > 100: // the window is wrong or unknown; no color
+		return LevelUnknown
 	case pct < warnPct:
 		return LevelOK
 	case pct <= critPct:
