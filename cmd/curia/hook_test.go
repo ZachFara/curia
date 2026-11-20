@@ -1145,7 +1145,7 @@ func TestHookLatencyUnchanged(t *testing.T) {
 	})
 	n := len(started)
 	t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", model.SessionStart, n, started[n/2], started[n*95/100], started[n-1])
-	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+	latgate.Gate(t, "PostToolUse after SessionStart", 20*time.Millisecond, func() time.Duration {
 		tools := hookLatency(t, st, env, model.PostToolUse, runs, func(int) []byte {
 			f, ferr := os.OpenFile(filepath.Clean(tr), os.O_APPEND|os.O_WRONLY, 0)
 			if ferr != nil {
@@ -1160,9 +1160,6 @@ func TestHookLatencyUnchanged(t *testing.T) {
 		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", model.PostToolUse, runs, tools[runs/2], tools[runs*95/100], tools[runs-1])
 		return tools[runs*95/100]
 	})
-	if p95 >= 20*time.Millisecond {
-		t.Errorf("PostToolUse median p95 = %v, want < 20ms", p95)
-	}
 	if s := getSession(t, db, "S0"); s.TaskID != "T-7" || s.Worktree != wt {
 		t.Errorf("S0: task %q worktree %q, want T-7 and %q", s.TaskID, s.Worktree, wt)
 	}
@@ -1262,7 +1259,7 @@ func TestHookLatencySocketPane(t *testing.T) {
 	starts := timed(model.SessionStart, runs, func(i int) []byte {
 		return body(fmt.Sprintf("S%d", i), `,"source":"startup"`)
 	})
-	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+	latgate.Gate(t, "PostToolUse with a socket pane", 20*time.Millisecond, func() time.Duration {
 		tools := timed(model.PostToolUse, gatedRuns, func(int) []byte {
 			appendLine()
 			return body(last, `,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
@@ -1270,9 +1267,6 @@ func TestHookLatencySocketPane(t *testing.T) {
 		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", model.PostToolUse, gatedRuns, tools[gatedRuns/2], tools[gatedRuns*95/100], tools[gatedRuns-1])
 		return tools[gatedRuns*95/100]
 	})
-	if p95 >= 20*time.Millisecond {
-		t.Errorf("PostToolUse median p95 = %v, want < 20ms", p95)
-	}
 	stops := timed(model.Stop, runs, func(int) []byte {
 		appendLine()
 		return body(last, `,"last_assistant_message":"Done."`)
@@ -1530,16 +1524,13 @@ func TestHookLatencyUnchangedWithAgentFlag(t *testing.T) {
 	hookQueueMessages(t, db, "S", "use pnpm, not npm")
 
 	const runs, gatedRuns = 200, 1000 // reported; gated (Ruling 114)
-	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+	latgate.Gate(t, "PostToolUse --agent codex", 20*time.Millisecond, func() time.Duration {
 		tools := hookLatency(t, st, env, model.PostToolUse, gatedRuns, func(int) []byte {
 			return body(`,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
 		})
 		t.Logf("%s --agent codex over %d runs: p50 %v, p95 %v, max %v", model.PostToolUse, gatedRuns, tools[gatedRuns/2], tools[gatedRuns*95/100], tools[gatedRuns-1])
 		return tools[gatedRuns*95/100]
 	})
-	if p95 >= 20*time.Millisecond {
-		t.Errorf("PostToolUse median p95 = %v, want < 20ms", p95)
-	}
 	stops := hookLatency(t, st, env, model.Stop, runs, func(int) []byte {
 		return body(`,"last_assistant_message":"Done."`)
 	})
@@ -1550,4 +1541,17 @@ func TestHookLatencyUnchangedWithAgentFlag(t *testing.T) {
 	if lines := logLines(buf); lines != nil {
 		t.Errorf("log = %q, want none", lines)
 	}
+}
+
+// Ruling 133: a red session in the same pane id on ANOTHER tmux server is not
+// ended by a start here, so its window is not touched.
+func TestHookPeerInSamePaneIDOnOtherServerIsIgnored(t *testing.T) {
+	m := newMarkerHook(t)
+	m.fake.Panes = []tmux.Pane{{ID: "%1", Session: "s", WindowID: "@9", Socket: "/other.sock"}}
+	t.Setenv("TMUX", "/other.sock,1,0")
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	m.fake.Panes = []tmux.Pane{{ID: "%1", Session: "s", WindowID: "@7", Socket: "/mine.sock"}}
+	t.Setenv("TMUX", "/mine.sock,1,0")
+	wantCalls(t, m.event("SessionStart", "B"))
 }

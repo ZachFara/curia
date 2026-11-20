@@ -1600,3 +1600,20 @@ func TestStripEscapes(t *testing.T) {
 		}
 	}
 }
+
+// A client made with a server's absolute socket path (as a session records
+// it) reaches that server with -S, not the default one.
+func TestNewExecAbsoluteSocketUsesS(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tm := realTmux(ctx, t)
+	path, err := tm("display-message", "-p", "#{socket_path}")
+	path = strings.TrimSpace(path)
+	if err != nil || !filepath.IsAbs(path) {
+		t.Fatalf("socket_path = %q, %v", path, err)
+	}
+	panes, err := NewExec(path).ListPanes(ctx)
+	if err != nil || len(panes) != 1 || panes[0].Socket != path {
+		t.Errorf("ListPanes via -S %s = %+v, %v", path, panes, err)
+	}
+}

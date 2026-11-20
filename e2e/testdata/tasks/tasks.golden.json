@@ -23,7 +23,11 @@
     "updated_at": "<time>",
     "launched_at": null,
     "paused_at": null,
-    "cleaned_at": null
+    "cleaned_at": null,
+    "budget_usd": null,
+    "spent_usd": null,
+    "budget_pct": null,
+    "budget_level": "none"
   },
   {
     "id": "T-2",
@@ -49,7 +53,11 @@
     "updated_at": "<time>",
     "launched_at": "<time>",
     "paused_at": null,
-    "cleaned_at": null
+    "cleaned_at": null,
+    "budget_usd": null,
+    "spent_usd": null,
+    "budget_pct": null,
+    "budget_level": "none"
   },
   {
     "id": "T-1",
@@ -75,6 +83,10 @@
     "updated_at": "<time>",
     "launched_at": null,
     "paused_at": null,
-    "cleaned_at": "<time>"
+    "cleaned_at": "<time>",
+    "budget_usd": null,
+    "spent_usd": null,
+    "budget_pct": null,
+    "budget_level": "none"
   }
 ]

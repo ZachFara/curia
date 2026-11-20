@@ -42,4 +42,9 @@ type Task struct {
 	// for claude.
 	Priority int
 	Agent    string
+	// BudgetUSD is the task's own budget in dollars; 0 means none (the config default applies).
+	BudgetUSD float64
 }
+
+// MaxBudgetUSD bounds a task budget and cost.task_budget_default, in dollars.
+const MaxBudgetUSD = 1_000_000

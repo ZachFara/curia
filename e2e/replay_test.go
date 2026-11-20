@@ -94,7 +94,7 @@ func TestReplayFiveSessions(t *testing.T) {
 	}
 	checkLog(t, h.logPath, append(slices.Clone(hookLog), lsLog))
 
-	if p := medianP95(t.Logf, func() time.Duration {
+	latencyGate(t, "curia hook", func() time.Duration {
 		timed := newHome(t, bin)
 		runs := timed.timeSequential(t, lines)
 		p := checkLatency(t, runs)
@@ -102,9 +102,7 @@ func TestReplayFiveSessions(t *testing.T) {
 		// what shows that every timed run did its work.
 		checkLog(t, timed.logPath, repeat(hookLog, len(runs)/len(lines)))
 		return p
-	}); p >= p95Budget {
-		t.Errorf("median p95 wall time of curia hook = %v, want under %v (load average %s)", p, p95Budget, loadAverage())
-	}
+	})
 }
 
 // build builds curia into a temp dir, execs it once untimed, and returns its
@@ -471,31 +469,5 @@ func checkLog(t *testing.T, path string, want []string) {
 	if !slices.Equal(got, want) {
 		t.Errorf("log %s: got %d entries, want %d:\n%s\nwant:\n%s\nlog:\n%s", path, len(got), len(want),
 			strings.Join(got, "\n"), strings.Join(want, "\n"), data)
-	}
-}
-
-// medianP95 is internal/latency.MedianP95 (e2e may import no internal
-// package): it runs batch three times, always, and returns the median of the
-// p95 values it returns. Owner's next step if flakes continue (ticket D-1):
-// gate on the ratio to a reference workload measured in the same job.
-func medianP95(logf func(string, ...any), batch func() time.Duration) time.Duration {
-	var p95s [3]time.Duration
-	for i := range p95s {
-		logf("latency batch %d of 3", i+1)
-		p95s[i] = batch()
-	}
-	logf("batch p95 values %v", p95s)
-	slices.Sort(p95s[:])
-	return p95s[1]
-}
-
-// TestMedianOfThreeLatencyBatches: one wild batch among three does not move
-// the median, two do.
-func TestMedianOfThreeLatencyBatches(t *testing.T) {
-	for _, c := range []struct{ a, b, c, want time.Duration }{{5, 400, 6, 6}, {400, 5, 6, 6}, {5, 400, 300, 300}} {
-		p, n := []time.Duration{c.a, c.b, c.c}, 0
-		if got := medianP95(t.Logf, func() time.Duration { n++; return p[n-1] }); got != c.want || n != 3 {
-			t.Errorf("batches %v: median %v after %d, want %v after 3", p, got, n, c.want)
-		}
 	}
 }
