@@ -347,6 +347,11 @@ func (t *tools) request(ctx context.Context, args json.RawMessage, now time.Time
 		t.Notify(ctx, stored, c.Pane)
 	}
 	strong := t.strongPrecedent(ctx, stored, c)
+	if len(strong) > 0 { // F25: "asked again" counts tickets raised despite a near match
+		if err := t.Store.SetNearMatch(ctx, stored.ID, strong[0].ID); err != nil {
+			t.Log.Error("mcp: record near match", "tool", "request_decision", "decision", stored.ID, "err", err.Error())
+		}
+	}
 	res := requestResult{ID: stored.ID, Status: stored.Status, Mode: stored.Mode, Precedent: toPrecedents(strong), Instruction: instrBlocking}
 	switch {
 	case len(strong) > 0:

@@ -165,6 +165,7 @@ type Model struct {
 	noKill   string                           // why x cannot kill; "": it can
 	board    func() tea.Model                 // builds the task board; nil: t and n say why
 	review   func(taskID string) tea.Model    // builds the review view; nil: r says why
+	timeline func() tea.Model                 // builds the timeline view; nil: T says why
 	noReview string                           // why r cannot open a review; "": inside an agent session
 	child    tea.Model                        // the decide view, the board or the review view while it is shown
 	childGen int                              // which child is (or was last) shown
@@ -656,7 +657,7 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.child, m.chain = nil, m.chain+1
 		next, cmd := m.jump()
 		return next, tea.Batch(cmd, next.refresh())
-	case BoardClosedMsg, DetailClosedMsg:
+	case BoardClosedMsg, DetailClosedMsg, TimelineClosedMsg:
 		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
 		m.chain++
 		return m, m.refresh()
@@ -982,10 +983,35 @@ func (m Model) commandKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.toggleBurn(), nil
 	case "P":
 		return m.askPause(), nil
-	case "i":
-		return m.openDetail()
+	case "T", "i":
+		return m.openReadView(msg.String())
 	}
 	return m, nil
+}
+
+// openReadView opens the views that only read: T the timeline, i the agent
+// detail. One case in commandKey keeps it within the complexity limit.
+func (m Model) openReadView(key string) (Model, tea.Cmd) {
+	if key == "T" {
+		return m.openTimeline()
+	}
+	return m.openDetail()
+}
+
+// WithTimeline returns m with the T key enabled in the popup: T shows the
+// model open builds until it sends TimelineClosedMsg.
+func (m Model) WithTimeline(open func() tea.Model) Model {
+	m.timeline = open
+	return m
+}
+
+// openTimeline shows the timeline view, or says it opens in the popup.
+func (m Model) openTimeline() (Model, tea.Cmd) {
+	if m.timeline == nil {
+		m.notice = "the timeline opens in the popup (curia ui)"
+		return m, nil
+	}
+	return m.showChild(m.timeline())
 }
 
 // toggleBurn turns the burn sort on or off in the popup; the selection

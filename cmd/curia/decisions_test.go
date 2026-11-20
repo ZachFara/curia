@@ -1081,6 +1081,7 @@ var userOnlyCommands = map[string][]string{
 // neither, so a new command cannot be added without that decision.
 var userNotOnlyCommands = map[string]string{
 	"curia decisions ls":          "reads the tickets only",
+	"curia decisions log":         "reads the tickets and prints cleaned, bounded text; changes nothing",
 	"curia config list":           "reads the effective settings only",
 	"curia config get":            "reads one effective setting only",
 	"curia config history":        "reads the revisions only",
@@ -1102,6 +1103,7 @@ var userNotOnlyCommands = map[string]string{
 	"curia spawn":                 "agents may spawn ready tasks only (Ruling 113)",
 	"curia status":                "prints the badge",
 	"curia task ls":               "reads the tasks only",
+	"curia timeline":              "reads existing rows and prints cleaned, bounded text, as ls and read do; changes nothing",
 	"curia ui":                    "a view; its user actions go through the guard (uiUserActions)",
 	"curia time":                  "reads the stored hook events and prints numbers; writes nothing and calls no model",
 	"curia usage":                 "reads the samples and tasks and prints numbers; it pauses nothing, and the pause it suggests is typed by the user",
