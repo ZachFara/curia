@@ -5,7 +5,9 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -131,16 +133,14 @@ func protectedFile(ev model.Event, payload []byte, cfg config.Config) (reason st
 		if json.Unmarshal(in.ToolInput[key], &p) != nil || p == "" {
 			continue // missing or not a string: the tool itself refuses it
 		}
-		cands, ok := candidates(p, ev.Cwd, home)
+		target, ok := resolveTarget(p, ev.Cwd, home)
 		if !ok { // fail closed: a path that cannot be checked is not let through
-			return "Curia could not check where this path " + sanitize.Line(p, 60) +
-				" leads (too long, or \"..\" after a missing directory), so this tool may not change it. Use a plain absolute path.", false
+			return "Curia could not verify where this path " + sanitize.Line(p, 60) +
+				" leads (too long, unreadable, a symlink loop, or \"..\" after a missing directory), so this tool may not change it. Use a plain absolute path.", false
 		}
-		for _, cand := range cands {
-			if inside(cand, roots) {
-				return "Curia protects its own configuration and data: this tool may not change " + sanitize.Line(cand, 80) +
-					". Only the user edits these files (curia config set). Do not retry; tell the user what change you need.", false
-			}
+		if inside(target, roots) {
+			return "Curia protects its own configuration and data: this tool may not change " + sanitize.Line(target, 80) +
+				". Only the user edits these files (curia config set). Do not retry; tell the user what change you need.", false
 		}
 	}
 	return "", herr != nil
@@ -161,65 +161,86 @@ func protectedRoots(home string, cfg config.Config) []string {
 	}
 	var roots []string
 	for _, r := range raw {
-		resolved, _ := realPath(r)
-		roots = append(roots, strings.ToLower(r), strings.ToLower(resolved))
+		roots = append(roots, strings.ToLower(r))
+		if resolved, ok := walk(r); ok {
+			roots = append(roots, strings.ToLower(resolved))
+		}
 	}
 	return roots
 }
 
-// candidates are the forms of path p (relative to cwd) to check: cleaned
-// and absolute (lexical), and resolved on disk from the UNCLEANED path, so a
-// symlink followed by ".." lands where the disk says, not where the text
-// says. Both are checked: a path that only looks inside is denied too. ok is
-// false when the path cannot be checked: longer than maxCheckedPath, or
-// with ".." after a component that does not exist (on disk that path
-// resolves to nothing, and a parent created in between could change it).
-func candidates(p, cwd, home string) (cands []string, ok bool) {
+// resolveTarget is where path p (relative to cwd) really lands, by one
+// fail-closed walk over the UNCLEANED joined path (see walk). ok is false when
+// that cannot be said: longer than maxCheckedPath or any error on the way.
+func resolveTarget(p, cwd, home string) (string, bool) {
 	if rest, found := strings.CutPrefix(p, "~/"); found && home != "" {
 		p = filepath.Join(home, rest)
 	}
-	raw := p
-	if !filepath.IsAbs(p) && filepath.IsAbs(cwd) {
-		raw = cwd + string(filepath.Separator) + p // not Join: Join would clean ".." away
+	if !filepath.IsAbs(p) {
+		if !filepath.IsAbs(cwd) { // a hostile cwd leaves the hook's own working directory
+			var err error
+			if cwd, err = os.Getwd(); err != nil {
+				return "", false
+			}
+		}
+		p = cwd + string(filepath.Separator) + p // not Join: Join would clean ".." away
 	}
-	if len(raw) > maxCheckedPath {
-		return nil, false
+	if len(p) > maxCheckedPath {
+		return "", false
 	}
-	abs, err := filepath.Abs(raw) // a hostile cwd leaves the hook's own working directory
-	if err != nil {
-		abs = filepath.Clean(raw)
-	}
-	if !filepath.IsAbs(raw) {
-		raw = abs
-	}
-	resolved, ok := realPath(raw)
-	return []string{abs, resolved}, ok
+	return walk(p)
 }
 
 // maxCheckedPath is the longest path checked; no real edit has a longer one.
 const maxCheckedPath = 4096
 
-// realPath is p with symlinks resolved, ".." applied after them as the disk
-// does: p is cut at its last separator, by text and never cleaned, until a
-// prefix exists. ok is false when the part that does not exist holds "..".
-func realPath(p string) (string, bool) {
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r, true
+// maxHops is the most symlinks a walk follows.
+const maxHops = 40
+
+// walk resolves the absolute path p component by component from the root:
+// "." is skipped; ".." goes to the parent of the resolved path so far; a
+// symlink is replaced by its target (relative to the directory so far); the
+// first component that does not exist ends the walk, the rest being plain
+// names (a ".." among them, or any error, or too many hops, is a failure).
+// Limit: a symlink made after the check is not seen (the deny rules in the
+// settings file are the backstop).
+func walk(p string) (string, bool) {
+	cur, hops := string(filepath.Separator), 0
+	rest := strings.Split(p, string(filepath.Separator))
+	for len(rest) > 0 {
+		c := rest[0]
+		rest = rest[1:]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, c)
+		fi, err := os.Lstat(next)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			if slices.Contains(rest, "..") {
+				return "", false
+			}
+			return filepath.Join(append([]string{next}, rest...)...), true
+		case err != nil:
+			return "", false
+		case fi.Mode()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(next)
+			if hops++; err != nil || hops > maxHops {
+				return "", false
+			}
+			if filepath.IsAbs(target) {
+				cur = string(filepath.Separator)
+			}
+			rest = append(strings.Split(target, string(filepath.Separator)), rest...)
+		default:
+			cur = next
+		}
 	}
-	for d := p; ; {
-		i := strings.LastIndexByte(d, filepath.Separator)
-		if i < 0 {
-			return filepath.Clean(p), false
-		}
-		d = d[:max(i, 1)] // keep the root itself
-		if r, err := filepath.EvalSymlinks(d); err == nil {
-			tail := p[i+1:]
-			return filepath.Join(r, tail), !slices.Contains(strings.Split(tail, string(filepath.Separator)), "..")
-		}
-		if i == 0 {
-			return filepath.Clean(p), false
-		}
-	}
+	return cur, true
 }
 
 // inside reports whether p is one of roots or below one.

@@ -333,8 +333,8 @@ func TestProtectedFilesSymlinkThenDotDot(t *testing.T) {
 	for _, p := range []string{proj + "/link/../config.toml", "link/../config.toml", "link/../new/dir/x", proj + "/link/../sub/../config.toml"} {
 		wantDeny(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(p)+`}`, proj, "")), "bypass via "+p)
 	}
-	// Lexically inside, really outside: denying is fine; pinned so a change is noticed.
-	wantDeny(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(cfgDir+"/back/../x")+`}`, proj, "")), "lexically inside")
+	// Lexically inside, really outside: the disk decides.
+	wantQuiet(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(cfgDir+"/back/../x")+`}`, proj, "")), "lexically inside, really outside")
 	wantQuiet(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/../proj/b.go")+`}`, proj, "")), "dotdot over existing components")
 }
 
@@ -366,4 +366,38 @@ func TestProtectedFilesFailClosed(t *testing.T) {
 	wantDeny(t, pre(t, st, env, cfg, preBody("Edit", `{"file_path":`+quote(proj+"/"+long+"a.go")+`}`, proj, "")), "long harmless path")
 	// ".." in the part that exists is resolved on disk, and is fine.
 	wantQuiet(t, pre(t, st, env, cfg, preBody("Edit", `{"file_path":`+quote(proj+"/link/../../proj/new.go")+`}`, proj, "")), "dotdot over existing components")
+}
+
+// Symlinks that do not resolve cleanly: dangling, chained, looping, climbing, unreadable.
+func TestProtectedFilesOneFailClosedWalk(t *testing.T) {
+	home, proj, cfg := denyHome(t)
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	cfgDir := filepath.Join(home, ".config", "curia")
+	link := func(target, name string) {
+		t.Helper()
+		if err := os.Symlink(target, filepath.Join(proj, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link(filepath.Join(cfgDir, "new.toml"), "dangling") // the target does not exist yet
+	link("dangling", "chain1")
+	link("chain1", "chain2")
+	link("loopb", "loopa")
+	link("loopa", "loopb")
+	link("../.config/curia", "climb") // relative target climbing out of proj into Curia's directory
+	link("../../../../../../../../../../../../.."+cfgDir, "deepclimb")
+	if err := os.MkdirAll(filepath.Join(proj, "locked", "in"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(proj, "locked"), 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(proj, "locked"), os.FileMode(7<<6)) })
+	for _, p := range []string{"dangling", "chain2", "climb/config.toml", "climb/new/x", "deepclimb/config.toml", "loopa", "loopb/x", "locked/in/x"} {
+		wantDeny(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(p)+`}`, proj, "")), p)
+	}
+	for _, p := range []string{"new/sub/x.go", "a.go", "/tmp/curia-hook-test-x", proj + "/new/dir/x"} {
+		wantQuiet(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(p)+`}`, proj, "")), p)
+	}
 }
