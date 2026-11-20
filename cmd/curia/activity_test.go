@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -135,5 +138,99 @@ func TestActivityRepoRulesOverrideOnlyThatRepo(t *testing.T) {
 	}
 	if rep.ByClass["building"] != 40 || rep.ByClass["git"] != 0 || rep.ByClass["testing"] != 60 {
 		t.Errorf("by class = %v", rep.ByClass)
+	}
+}
+
+// activityRepoDir makes a repository directory with the given
+// .curia/config.toml.
+func activityRepoDir(t *testing.T, repoToml string) string {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(d, ".git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(d, ".curia"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if repoToml != "" {
+		if err := os.WriteFile(filepath.Join(d, ".curia", "config.toml"), []byte(repoToml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return d
+}
+
+func TestActivityRepositoryRulesApplyOnlyToThatRepository(t *testing.T) {
+	a := activityRepoDir(t, "[[activity.rules]]\nclass = \"git\"\nmatch = \"^zzship\"\n")
+	b := activityRepoDir(t, "")
+	user := []config.ActivityRule{{Class: usage.ClassBuilding, Match: `^user-rule`}}
+	rulesFor := activityRulesFor(user)
+	if got := rulesFor(a).Class("Bash", "zzship it"); got != "git" {
+		t.Errorf("repository rule not applied in its own repository: %q", got)
+	}
+	if got := rulesFor(b).Class("Bash", "zzship it"); got == "git" {
+		t.Errorf("a repository's rule applied to another repository: %q", got)
+	}
+	if got := rulesFor(b).Class("Bash", "user-rule x"); got != "building" {
+		t.Errorf("the user's rule is lost: %q", got)
+	}
+}
+
+func TestActivityHostileRepositoryRulesCannotBreakTime(t *testing.T) {
+	var many strings.Builder
+	for i := 0; i < 80; i++ {
+		many.WriteString("[[activity.rules]]\nclass = \"git\"\nmatch = \"^x" + strconv.Itoa(i) + "\"\n")
+	}
+	cases := map[string]string{
+		"bad regexp":    "[[activity.rules]]\nclass = \"git\"\nmatch = \"(\"\n[[activity.rules]]\nclass = \"building\"\nmatch = \"^ok\"\n",
+		"bad class":     "[[activity.rules]]\nclass = \"nope\"\nmatch = \"a\"\n",
+		"long pattern":  "[[activity.rules]]\nclass = \"git\"\nmatch = \"" + strings.Repeat("a", 500) + "\"\n",
+		"invalid TOML":  "[[activity.rules\n",
+		"wrong type":    "[activity]\nrules = 5\n",
+		"too many":      many.String(),
+		"oversized":     "# " + strings.Repeat("x", 70<<10),
+		"empty rule":    "[[activity.rules]]\nclass = \"git\"\n",
+		"not a table":   "activity = 1\n",
+		"unknown field": "[[activity.rules]]\nclass = \"git\"\nmatch = \"^a\"\nexec = \"/bin/sh\"\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			d := activityRepoDir(t, body)
+			r := activityRulesFor(nil)(d) // must not panic or fail
+			if r == nil || r.Class("Bash", "go test ./...") != "testing" {
+				t.Errorf("the default rules are lost")
+			}
+			if _, problems := activityRepoRules(nil, d); name == "bad regexp" && len(problems) != 1 {
+				t.Errorf("problems = %v, want the one bad rule named", problems)
+			}
+		})
+	}
+	// A symlinked file pointing outside the repository is not read.
+	d := activityRepoDir(t, "")
+	out := filepath.Join(t.TempDir(), "evil.toml")
+	if err := os.WriteFile(out, []byte("[[activity.rules]]\nclass = \"building\"\nmatch = \"^evil\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(out, filepath.Join(d, ".curia", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if got := activityRulesFor(nil)(d).Class("Bash", "evil"); got == "building" {
+		t.Error("a symlinked repository file was read")
+	}
+	// And `curia time` itself still runs.
+	activityHome(t)
+	t.Chdir(activityRepoDir(t, "[[activity.rules]]\nclass = \"git\"\nmatch = \"(\"\n"))
+	if _, err := runRoot(t, "time"); err != nil {
+		t.Errorf("curia time failed on a hostile repository file: %v", err)
+	}
+}
+
+func TestConfigListShowsActivityKeys(t *testing.T) {
+	configTestEnv(t)
+	out := configRun(t, "list")
+	for _, k := range []string{"activity.idle_cap = 30m0s  (default)", "activity.rules = (0 entries)  (default)", "activity.task_types = (7 entries)  (default)"} {
+		if !strings.Contains(out, k) {
+			t.Errorf("list lacks %q:\n%s", k, out)
+		}
 	}
 }

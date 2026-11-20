@@ -4,7 +4,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/netip"
 	"net/url"
 	"os"
@@ -15,8 +14,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-
-	"github.com/BurntSushi/toml"
 )
 
 // Config is Curia's runtime configuration.
@@ -137,42 +134,32 @@ func Default() Config {
 	}
 }
 
-// Load reads the TOML file at path over Default(). A missing file yields the
-// defaults. A leading "~" in the paths is expanded, and the CURIA_DB
-// environment variable, when set, overrides DBPath last.
+// Load resolves the configuration (see Resolve) from the user file at path
+// and the repository file of the current directory's repository. A missing
+// file yields the defaults. A leading "~" in the paths is expanded, and the
+// CURIA_DB environment variable, when set, overrides DBPath last.
 func Load(path string) (Config, error) {
-	c := Default()
-	data, err := os.ReadFile(filepath.Clean(path))
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-	case err != nil:
-		return Config{}, fmt.Errorf("read config: %w", err)
-	default:
-		if err := toml.Unmarshal(data, &c); err != nil {
-			return Config{}, fmt.Errorf("parse config %s: %w", path, err)
-		}
-	}
+	wd, _ := os.Getwd()
+	c, _, err := Resolve(Options{UserPath: path, RepoRoot: FindRepoRoot(wd)})
+	return c, err
+}
+
+// validate checks every section, each error naming its key, and normalizes
+// the paths and URLs.
+func (c *Config) validate() error {
 	if c.AssumeExpiry <= 0 {
-		return Config{}, fmt.Errorf("config %s: assume_expiry must be positive, got %v", path, c.AssumeExpiry)
+		return fmt.Errorf("assume_expiry must be positive, got %v", c.AssumeExpiry)
 	}
 	if err := c.Routing.validate(); err != nil {
-		return Config{}, fmt.Errorf("config %s: %w", path, err)
+		return err
 	}
 	if err := validateEditor(c.Editor); err != nil {
-		return Config{}, fmt.Errorf("config %s: %w", path, err)
+		return err
 	}
 	if err := c.validatePlan4(); err != nil {
-		return Config{}, fmt.Errorf("config %s: %w", path, err)
+		return err
 	}
-	if err := c.validatePlan5(); err != nil {
-		return Config{}, fmt.Errorf("config %s: %w", path, err)
-	}
-	c.DBPath = expandHome(c.DBPath)
-	c.LogPath = expandHome(c.LogPath)
-	if env := os.Getenv("CURIA_DB"); env != "" {
-		c.DBPath = env
-	}
-	return c, nil
+	return c.validatePlan5()
 }
 
 func expandHome(p string) string {
