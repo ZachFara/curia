@@ -165,6 +165,15 @@ func installAddCall(bin string) string {
 	return "mcp add --scope user curia -- " + bin + " mcp"
 }
 
+// installWantDeny checks that settings hold the deny rules for Curia's files
+// (present reports whether they should).
+func installWantDeny(t *testing.T, settings []byte, present bool) {
+	t.Helper()
+	if strings.Contains(string(settings), "Edit(~/.config/curia/**)") != present {
+		t.Errorf("settings: deny rules for Curia's files present = %v, want %v: %s", !present, present, settings)
+	}
+}
+
 func TestInstallAndUninstallRoundTrip(t *testing.T) {
 	installRecord(t)
 	home := t.TempDir()
@@ -199,9 +208,10 @@ func TestInstallAndUninstallRoundTrip(t *testing.T) {
 	if _, err := os.Stat(snippet); err != nil {
 		t.Errorf("snippet not written: %v", err)
 	}
-	if baks, _ := filepath.Glob(settings + ".bak.*"); len(baks) != 3 {
-		t.Errorf("backups = %v, want one each from the hooks, the tool rules and the status line", baks)
+	if baks, _ := filepath.Glob(settings + ".bak.*"); len(baks) != 4 {
+		t.Errorf("backups = %v, want one each from the hooks, the tool rules, the deny rules and the status line", baks)
 	}
+	installWantDeny(t, got, true)
 
 	if out, err := installRun(t, "uninstall"); err != nil {
 		t.Fatalf("uninstall: %v\n%s", err, out)
@@ -211,6 +221,7 @@ func TestInstallAndUninstallRoundTrip(t *testing.T) {
 		t.Errorf("conf = %q, want original", gotConf)
 	}
 	gotSettings, _ := os.ReadFile(filepath.Clean(settings))
+	installWantDeny(t, gotSettings, false)
 	if strings.Contains(string(gotSettings), "hook ") || !strings.Contains(string(gotSettings), "opus") {
 		t.Errorf("settings after uninstall: %s", gotSettings)
 	}

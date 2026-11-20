@@ -55,7 +55,8 @@ type startInfo struct {
 // write to stdout. Stdout is nil except on a Stop that claimed queued
 // answers or messages: then it is one line, {"decision":"block","reason":...}
 // and a newline, which blocks the stop and hands Claude the answers, then
-// the messages, as the reason.
+// the messages, as the reason; and on a PreToolUse that Curia denies (see
+// preToolUse): one line of hookSpecificOutput JSON.
 type Result struct {
 	Session model.Session
 	Stdout  []byte
@@ -65,6 +66,8 @@ type Result struct {
 	// ClaimedMessages holds the ids of the messages a Stop claimed, which
 	// Stdout delivers after the answers; the caller logs them too.
 	ClaimedMessages []string
+	// Undecided names the kinds of check a PreToolUse could not make (see decide.go); the caller logs them.
+	Undecided []string
 }
 
 // Run records one hook event and returns a Result: the session as stored,
@@ -100,11 +103,12 @@ type Result struct {
 // its transcript is not read, and its Stop claims no answer and no message,
 // so it prints nothing and the session becomes idle, or needs_decision with
 // an open blocking ticket. What is queued stays queued.
-func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st *store.Store, cfg config.Config) (Result, error) {
+func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st *store.Store, cfg config.Config) (res Result, err error) {
 	ev, err := Parse(kind, payload, env.Pane, env.Now())
 	if err != nil {
 		return Result{}, err
 	}
+	defer decideAfter(ctx, &res, ev, payload, env.TaskID, st, cfg) // a PreToolUse's decision, after the update whatever it returned
 	ev.TaskID, ev.Agent = env.TaskID, env.Agent
 	var start *startInfo
 	if err = st.AppendEvent(ctx, ev, payload); err != nil {

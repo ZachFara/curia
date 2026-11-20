@@ -12,9 +12,8 @@ type Cost struct {
 	// TaskBudgetDefault is the budget in dollars of a task with none of its
 	// own; 0 means none. A repository file may only lower a nonzero value.
 	TaskBudgetDefault float64 `toml:"task_budget_default"`
-	// BudgetHardStop will make the PreToolUse hook deny a task's tool calls
-	// once its budget is spent. It is stored and shown but has NO effect yet:
-	// the hook part of F16's amendment is not built.
+	// BudgetHardStop makes the PreToolUse hook deny a task's tool calls, but
+	// Curia's own MCP tools, once its budget is spent (hook.preToolUse).
 	BudgetHardStop bool `toml:"budget_hard_stop"`
 }
 

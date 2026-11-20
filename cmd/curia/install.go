@@ -198,6 +198,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	if err = installTools(out, p.settings); err != nil {
 		return err
 	}
+	if err = installDeny(out, p.settings); err != nil {
+		return err
+	}
 	if err = installStatusLine(out, p.settings, bin); err != nil {
 		return err
 	}
@@ -289,6 +292,18 @@ func installTools(out io.Writer, settings string) error {
 	}
 	installSay(out, "MCP tools: the six curia tools are allowed without a prompt in %s; "+
 		"to skip this step, run curia install --no-allow-mcp-tools", settings)
+	return nil
+}
+
+// installDeny adds the permission deny rules for Curia's own files (spec F28):
+// Claude Code enforces them even when the hook fails. Edit rules do not stop
+// a Bash command that writes the files.
+func installDeny(out io.Writer, settings string) error {
+	if err := install.DenyOwnFiles(settings, time.Now()); err != nil {
+		return err
+	}
+	installSay(out, "protection: Claude Code may not edit Curia's config, data or state files (deny rules in %s; "+
+		"a Bash command is not covered)", settings)
 	return nil
 }
 
