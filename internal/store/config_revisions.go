@@ -96,3 +96,26 @@ ON CONFLICT (key) DO UPDATE SET value = excluded.value`, configAckKey, strconv.F
 	}
 	return nil
 }
+
+// ConfigHead is the newest revision's file and the marks `curia status`
+// needs, read in one indexed query.
+type ConfigHead struct {
+	File          string
+	External, Ack int64 // the newest external revision's number, and the acknowledged one; 0 when none
+}
+
+// ConfigHead returns the newest revision's head; ok is false with no revision.
+func (s *Store) ConfigHead(ctx context.Context) (h ConfigHead, ok bool, err error) {
+	err = s.db.QueryRowContext(ctx, `
+SELECT file,
+  COALESCE((SELECT MAX(n) FROM config_revisions WHERE actor = 'external'), 0),
+  COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?), 0)
+FROM config_revisions ORDER BY n DESC LIMIT 1`, configAckKey).Scan(&h.File, &h.External, &h.Ack)
+	if errors.Is(err, sql.ErrNoRows) {
+		return h, false, nil
+	}
+	if err != nil {
+		return h, false, fmt.Errorf("store: read config head: %w", err)
+	}
+	return h, true, nil
+}

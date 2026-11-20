@@ -166,6 +166,7 @@ type Model struct {
 	board    func() tea.Model                 // builds the task board; nil: t and n say why
 	review   func(taskID string) tea.Model    // builds the review view; nil: r says why
 	timeline func() tea.Model                 // builds the timeline view; nil: T says why
+	settings func() tea.Model                 // builds the settings view; nil: S says why
 	noReview string                           // why r cannot open a review; "": inside an agent session
 	child    tea.Model                        // the decide view, the board or the review view while it is shown
 	childGen int                              // which child is (or was last) shown
@@ -189,7 +190,9 @@ type Model struct {
 	pausing    string          // the task a pause in flight is for; "" when none
 
 	inbox    func() tea.Model // builds the inbox, the popup's default view; nil: none
-	viaInbox bool             // the shown child was opened from the inbox, which a closing decide or review view returns to
+	inboxKey string           // the item the inbox opened a view for, and where it stood
+	inboxAt  int
+	viaInbox bool // the shown child was opened from the inbox, which a closing decide or review view returns to
 }
 
 // rowKind is what a row of the table stands for.
@@ -377,6 +380,15 @@ func (m Model) openInbox() (Model, tea.Cmd) {
 	}
 	m.viaInbox = true
 	return m.showChild(m.inbox())
+}
+
+// rebuiltInbox is a fresh inbox with the cursor where the item last opened stood.
+func (m Model) rebuiltInbox() tea.Model {
+	c := m.inbox()
+	if in, ok := c.(InboxModel); ok {
+		return in.keep(m.inboxKey, m.inboxAt)
+	}
+	return c
 }
 
 // openFromInbox opens the decide or review view for an item the inbox has
@@ -641,6 +653,7 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch msg := msg.(type) {
 	case InboxOpenMsg:
+		m.inboxKey, m.inboxAt = msg.Item.Key, msg.Index
 		return m.openFromInbox(msg.Item)
 	case TimelineOpenMsg:
 		return m.openFromTimeline(msg.Event)
@@ -652,7 +665,7 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.refresh()
 	case DecideClosedMsg, ReviewClosedMsg:
 		if m.viaInbox && m.inbox != nil { // back to the list the item came from
-			return m.showChild(m.inbox())
+			return m.showChild(m.rebuiltInbox())
 		}
 		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
 		m.chain++
@@ -661,7 +674,7 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.child, m.chain = nil, m.chain+1
 		next, cmd := m.jump()
 		return next, tea.Batch(cmd, next.refresh())
-	case BoardClosedMsg, DetailClosedMsg, TimelineClosedMsg, DecisionLogClosedMsg:
+	case BoardClosedMsg, DetailClosedMsg, TimelineClosedMsg, SettingsClosedMsg, DecisionLogClosedMsg:
 		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
 		m.chain++
 		return m, m.refresh()
@@ -987,7 +1000,7 @@ func (m Model) commandKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.toggleBurn(), nil
 	case "P":
 		return m.askPause(), nil
-	case "T", "i", "L":
+	case "T", "i", "S", "L":
 		return m.openReadView(msg.String())
 	}
 	return m, nil
@@ -1001,6 +1014,9 @@ func (m Model) openReadView(key string) (Model, tea.Cmd) {
 		return m.openTimeline()
 	case "L":
 		return m.openDecisionLog()
+	}
+	if key == "S" {
+		return m.openSettings()
 	}
 	return m.openDetail()
 }
@@ -1280,4 +1296,20 @@ func (m Model) openDetail() (Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.showChild(m.detail(r.target().ID))
+}
+
+// WithSettings returns m with the S key enabled in the popup: S shows the
+// model open builds until it sends SettingsClosedMsg.
+func (m Model) WithSettings(open func() tea.Model) Model {
+	m.settings = open
+	return m
+}
+
+// openSettings shows the settings view, or says it opens in the popup.
+func (m Model) openSettings() (Model, tea.Cmd) {
+	if m.settings == nil {
+		m.notice = "the settings open in the popup (curia ui)"
+		return m, nil
+	}
+	return m.showChild(m.settings())
 }
