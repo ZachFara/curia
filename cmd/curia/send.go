@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
+	"github.com/ZachFara/curia/internal/ui"
 )
 
 // sendStdinMax is how many bytes of text `curia send -` reads from stdin.
@@ -46,14 +48,16 @@ func sendShared(err error) bool {
 
 func init() {
 	rootCmd.AddCommand(&cobra.Command{
-		Use:   "send <pane> <text...>|-",
+		Use:   "send <pane>|@all|@<repo>/* <text...>|-",
 		Short: "Send a message to the agent session in a pane",
 		Long: "Stores a message for the one live agent session in <pane> (a pane id such as %12)\n" +
 			"and delivers it: typed into the pane when that is safe, otherwise at the session's\n" +
 			"next stop or by its check_messages. The text is the remaining arguments, or stdin\n" +
 			"with -, at most 800 characters. Run from inside an agent session, the message is\n" +
 			"delivered as coming from another agent session, never from the user, and a session\n" +
-			"cannot send to itself or into its own pane.",
+			"cannot send to itself or into its own pane. @all and @<repo>/* send to every live\n" +
+			"session (of this tmux server) or of one repository: only the user at a terminal may,\n" +
+			"after the count and the list and a typed y.",
 		Args: cobra.MinimumNArgs(2),
 		RunE: runSend,
 	})
@@ -161,8 +165,12 @@ func sendCheckSelf(target, sender model.Session, senderID string) error {
 }
 
 func runSend(cmd *cobra.Command, args []string) error {
-	if err := sendCheckPane(args[0]); err != nil {
-		return err
+	addr, rest := message.ParseAddress(args[0])
+	broadcast := addr.Broadcast && rest == "" // "@all" or "@<repo>/*", nothing else
+	if !broadcast {
+		if err := sendCheckPane(args[0]); err != nil {
+			return err
+		}
 	}
 	text, err := sendText(cmd.InOrStdin(), args[1:])
 	if err != nil {
@@ -186,7 +194,54 @@ func runSend(cmd *cobra.Command, args []string) error {
 	if err = reconcile(ctx, st, tm, cfg.LogPath, clock()); err != nil {
 		return err
 	}
+	if broadcast {
+		return sendBroadcast(ctx, cmd, sayNewSource(st, tm, logger, cfg, model.AnsweredCLI), args[0], text)
+	}
 	return sendDeliver(ctx, cmd.OutOrStdout(), st, tm, logger, args[0], text)
+}
+
+// sendBroadcastShown bounds the targets listed before the question.
+const sendBroadcastShown = 10
+
+// sendBroadcast is `curia send @all <text>` and `curia send @<repo>/* <text>`:
+// only the user at a terminal broadcasts (the sender is read from process
+// ancestry as for any send, Ruling 113; an agent, or a sender Curia cannot
+// identify, is refused), and always after seeing the count and a bounded
+// list and typing y (Ruling 152).
+func sendBroadcast(ctx context.Context, cmd *cobra.Command, src *saySource, addr, text string) error {
+	claimed, claimedID := mcpSession(ctx, src.st, src.log)
+	if sender, _, _ := sendSender(ctx, src.st, claimed, claimedID); sender != model.SenderUser {
+		return errors.New("refused: an agent cannot broadcast; only the user at a terminal sends to several sessions")
+	}
+	plan, err := src.propose(ctx, addr+" "+text)
+	if err != nil {
+		return err
+	}
+	p, w := plan.p, cmd.OutOrStdout()
+	if len(p.Targets) == 0 {
+		return errors.New("not a broadcast")
+	}
+	if !sayIsTerminal() {
+		return errors.New("a broadcast always needs your confirmation, and there is no terminal to ask on")
+	}
+	_, _ = fmt.Fprintln(w, p.Candidates[0].Label)
+	shown := p.Targets[:min(len(p.Targets), sendBroadcastShown)]
+	_, _ = fmt.Fprintln(w, sayList(shown))
+	if more := len(p.Targets) - len(shown); more > 0 {
+		_, _ = fmt.Fprintf(w, "  … and %d more\n", more)
+	}
+	_, _ = fmt.Fprintf(w, "send to %d sessions? [y/N] ", len(p.Targets))
+	line, _ := bufio.NewReader(io.LimitReader(cmd.InOrStdin(), 64)).ReadString('\n')
+	if strings.TrimSpace(line) != "y" {
+		_, err = fmt.Fprintln(w, "nothing sent")
+		return err
+	}
+	out, _, err := src.send(ctx, ui.Choice{Proposal: p, Target: p.Candidates[0], Kind: p.Kind})
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w, sanitize.Line(out.Message.ID, 20)+" "+out.Note)
+	return err
 }
 
 // sendDeliver stores text as a queued instruction for the live session in

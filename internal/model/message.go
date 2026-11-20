@@ -68,6 +68,7 @@ type Message struct {
 	DeliveredVia                                   DeliveryVia
 	ResultRef                                      string
 	CreatedAt, HoldUntil, DeliveredAt, ConfirmedAt time.Time
+	BroadcastID                                    string // B-<n>, shared by the rows of one broadcast; "" for any other message
 }
 
 // MessageOutcome is what happened to a message's delivery; Note is "" when

@@ -1050,3 +1050,51 @@ func sendLimitPlans(t *testing.T, path string) {
 		}
 	}
 }
+
+func TestCreateBroadcastSharesOneIDAndIsNoLabel(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	createMessage(t, s, instruction("before", "s0"))
+	rows := make([]model.Message, 0, 200)
+	for i := range 200 {
+		m := instruction("everyone", fmt.Sprintf("s%d", i))
+		m.RoutedBy, m.Confidence, m.HasConfidence = model.RoutedConfirmed, 0.99, true // would be a label but for the broadcast
+		rows = append(rows, m)
+	}
+	got, err := s.CreateBroadcast(ctx, rows)
+	if err != nil || len(got) != 200 {
+		t.Fatalf("CreateBroadcast = %d rows, %v; want 200", len(got), err)
+	}
+	for _, m := range got {
+		if m.BroadcastID != "B-2" {
+			t.Fatalf("row %s broadcast id %q, want B-2 (one id for all)", m.ID, m.BroadcastID)
+		}
+	}
+	back, found, err := s.GetMessage(ctx, got[199].ID)
+	if err != nil || !found || back.BroadcastID != "B-2" {
+		t.Errorf("GetMessage = %+v, %v, %v; want the broadcast id kept", back, found, err)
+	}
+	if labels, err := s.RouteLabels(ctx, 0, 300); err != nil || len(labels) != 0 {
+		t.Errorf("RouteLabels = %d labels, %v; want none: broadcast rows are no labels", len(labels), err)
+	}
+	if plain := createMessage(t, s, instruction("after", "s1")); plain.BroadcastID != "" {
+		t.Errorf("plain message broadcast id = %q, want empty", plain.BroadcastID)
+	}
+}
+
+func TestCreateBroadcastRefusesAnAgentAndNothingStored(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	agent := instruction("x", "s1")
+	agent.Sender, agent.RoutedBy = model.SenderAgent, model.RoutedSend
+	_, err := s.CreateBroadcast(ctx, []model.Message{instruction("x", "s0"), agent})
+	if !errors.Is(err, store.ErrAgentBroadcast) {
+		t.Fatalf("err = %v, want ErrAgentBroadcast", err)
+	}
+	if _, err = s.CreateBroadcast(ctx, nil); err == nil {
+		t.Error("an empty broadcast was stored")
+	}
+	if ms, _ := s.ListMessages(ctx, store.MessageFilter{}); len(ms) != 0 {
+		t.Errorf("%d messages stored, want none", len(ms))
+	}
+}

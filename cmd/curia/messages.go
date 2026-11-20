@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -139,6 +140,7 @@ type messagesRow struct {
 	HoldUntil       *time.Time          `json:"hold_until"`
 	DeliveredAt     *time.Time          `json:"delivered_at"`
 	ConfirmedAt     *time.Time          `json:"confirmed_at"`
+	BroadcastID     string              `json:"broadcast_id"` // "" unless the message is one row of a broadcast
 }
 
 func messagesToRow(m model.Message) messagesRow {
@@ -153,6 +155,7 @@ func messagesToRow(m model.Message) messagesRow {
 		Confidence: conf, RoutedBy: m.RoutedBy, AutoEligible: m.AutoEligible, Status: m.Status,
 		DeliveredVia: m.DeliveredVia, ResultRef: m.ResultRef, CreatedAt: jsonTime(m.CreatedAt),
 		HoldUntil: jsonTime(m.HoldUntil), DeliveredAt: jsonTime(m.DeliveredAt), ConfirmedAt: jsonTime(m.ConfirmedAt),
+		BroadcastID: m.BroadcastID,
 	}
 }
 
@@ -216,16 +219,64 @@ func messagesStatusText(m model.Message, states map[string]model.State) string {
 	return text
 }
 
+// messagesTargetsShown bounds the per-target lines under a broadcast.
+const messagesTargetsShown = 5
+
 func messagesPrintTable(w io.Writer, ms []model.Message, states map[string]model.State, now time.Time) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ID\tAGE\tKIND\tTO\tSTATUS\tTEXT")
-	for _, m := range ms {
+	row := func(id string, m model.Message, to, status string) {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			messagesCell(m.ID, messagesToLimit), messagesCell(ui.Age(m.CreatedAt, now), messagesToLimit),
-			messagesCell(string(m.Kind), messagesToLimit), messagesCell(messagesTo(m), messagesToLimit),
-			messagesCell(messagesStatusText(m, states), messagesTextLimit), messagesCell(m.Text, messagesTextLimit))
+			messagesCell(id, messagesToLimit), messagesCell(ui.Age(m.CreatedAt, now), messagesToLimit),
+			messagesCell(string(m.Kind), messagesToLimit), messagesCell(to, messagesToLimit),
+			messagesCell(status, messagesTextLimit), messagesCell(m.Text, messagesTextLimit))
+	}
+	done := map[string]bool{}
+	for _, m := range ms {
+		if m.BroadcastID == "" {
+			row(m.ID, m, messagesTo(m), messagesStatusText(m, states))
+			continue
+		}
+		if done[m.BroadcastID] {
+			continue
+		}
+		done[m.BroadcastID] = true
+		var group []model.Message // a broadcast is one entry, its targets under it
+		for _, x := range ms {
+			if x.BroadcastID == m.BroadcastID {
+				group = append(group, x)
+			}
+		}
+		row(m.BroadcastID, m, fmt.Sprintf("%d sessions", len(group)), messagesTally(group, states))
+		for i, x := range group {
+			if i == messagesTargetsShown {
+				_, _ = fmt.Fprintf(tw, "\t\t\t\t%s\t\n", messagesCell(fmt.Sprintf("… and %d more", len(group)-i), messagesToLimit))
+				break
+			}
+			_, _ = fmt.Fprintf(tw, "  %s\t\t\t%s\t%s\t\n", messagesCell(x.ID, messagesToLimit),
+				messagesCell(messagesTo(x), messagesToLimit), messagesCell(messagesStatusText(x, states), messagesTextLimit))
+		}
 	}
 	return tw.Flush()
+}
+
+// messagesTally counts a broadcast's rows by their status text, in the
+// order each first appears: "2 delivered (send_keys), 1 queued".
+func messagesTally(group []model.Message, states map[string]model.State) string {
+	var order []string
+	n := map[string]int{}
+	for _, m := range group {
+		t := messagesStatusText(m, states)
+		if n[t] == 0 {
+			order = append(order, t)
+		}
+		n[t]++
+	}
+	parts := make([]string, 0, len(order))
+	for _, t := range order {
+		parts = append(parts, fmt.Sprintf("%d %s", n[t], t))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func runMessagesCancel(cmd *cobra.Command, args []string) error {
