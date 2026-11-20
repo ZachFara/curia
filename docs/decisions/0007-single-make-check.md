@@ -25,3 +25,5 @@ Amended 2026-11-19 (owner, ticket D-3, answer "D"): the pre-commit hook no longe
 Amended 2026-11-19 (owner, ticket D-3 answer "D", and D-1): CI runs the same gate as parallel jobs, each a Makefile target that `make check` also runs (`check-static`, `test-unit` split into `cmd/curia` and every other package computed with `go list`, `test-latency` alone on its own runner), plus a final job named `check` that needs all of them and fails unless every one succeeded. The required status `check` is that aggregate job. `make check` is unchanged and still the full gate by hand.
 
 2026-11-19: the pre-commit hook no longer runs tests (owner decision D-11): static checks and build only; `make test-staged` runs the touched packages' tests by hand; CI remains the full gate.
+
+2026-11-19: CI shards the `cmd/curia` unit tests (4 shards by test name) and the latency step (3 shards by package, each still `-p 1`), computed by `scripts/shard.sh`; `make check-shards` (in `check-gates` and CI `static`) fails unless the shards partition the set. `make check` still runs everything unsharded.
