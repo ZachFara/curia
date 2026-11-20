@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -123,6 +124,19 @@ func messageState(msg model.Message) string {
 		return "delivered, unconfirmed"
 	}
 	return string(msg.Status)
+}
+
+// MessageState is messageState for the command-line form.
+func MessageState(msg model.Message) string { return messageState(msg) }
+
+// RenderDetail is the view's head and body as plain lines (`curia show`): one renderer for both forms.
+func RenderDetail(d DetailData, diff DetailDiff, now func() time.Time) string {
+	m := DetailModel{id: d.Session.ID, now: now, data: d, loaded: true, diff: diff}
+	lines := []string{m.head()}
+	for _, l := range m.body() {
+		lines = append(lines, l.text)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m DetailModel) costText() string {
