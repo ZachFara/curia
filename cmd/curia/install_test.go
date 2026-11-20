@@ -350,7 +350,7 @@ func TestUninstallReversesPlan2Items(t *testing.T) {
 	if out, err := installRun(t, "install"); err != nil {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
-	if got := installAllow(t, h.settings); len(got) != 7 {
+	if got := installAllow(t, h.settings); len(got) != 8 {
 		t.Fatalf("allow after install = %q", got)
 	}
 	// What claude mcp add writes, which the recorder does not.
@@ -461,7 +461,7 @@ func TestInstallKeepsUsersOwnRules(t *testing.T) {
 		return m.Permissions.Allow
 	}
 	got := read()
-	if len(got) != 10 || got[0] != "mcp__curia" || got[1] != float64(42) || got[4] != "Bash(ls:*)" {
+	if len(got) != 11 || got[0] != "mcp__curia" || got[1] != float64(42) || got[4] != "Bash(ls:*)" {
 		t.Errorf("allow after install = %v", got)
 	}
 	if out, err := installRun(t, "uninstall"); err != nil {
