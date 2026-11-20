@@ -153,7 +153,7 @@ func sendSender(ctx context.Context, st *store.Store, claimed model.Session, cla
 func sendCheckSelf(target, sender model.Session, senderID string) error {
 	switch {
 	case senderID != "" && senderID == target.ID,
-		sender.Pane != "" && sender.Pane == target.Pane,
+		sender.Pane != "" && sender.Pane == target.Pane && !fleet.OtherSocket(target.Socket, sender),
 		os.Getenv("TMUX_PANE") == target.Pane:
 		return errors.New("refusing to send into your own session or pane")
 	}

@@ -156,3 +156,64 @@ func TestConfigGetShowsRefusedRepoValue(t *testing.T) {
 		t.Errorf("doctor = %q", out)
 	}
 }
+
+func TestConfigSetKeepsSymlinkAndMode(t *testing.T) {
+	path := configTestEnv(t)
+	target := filepath.Join(t.TempDir(), "dotfiles", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("notify_bell = false\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	configRun(t, "set", "notify_bell", "true")
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("config file is no longer a symlink: %v, %v", fi, err)
+	}
+	if b, _ := os.ReadFile(filepath.Clean(target)); !strings.Contains(string(b), "notify_bell = true") {
+		t.Errorf("target = %q, want the new value", b)
+	}
+	if fi, _ := os.Stat(target); fi.Mode().Perm() != 0o400 {
+		t.Errorf("target mode = %v, want 0400", fi.Mode().Perm())
+	}
+}
+
+func TestConfigSetKeepsMode0600(t *testing.T) {
+	path := configTestEnv(t)
+	configRun(t, "set", "notify_bell", "true")
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configRun(t, "set", "notify_bell", "false")
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600", fi.Mode().Perm())
+	}
+}
+
+func TestConfigSetWriteFailureKeepsOldContent(t *testing.T) {
+	path := configTestEnv(t)
+	configRun(t, "set", "notify_bell", "true")
+	before, _ := os.ReadFile(filepath.Clean(path))
+	dir, rwx := filepath.Dir(path), os.FileMode(0o700) // a variable: the linter flags a literal above 0600
+	if err := os.Chmod(dir, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, rwx) })
+	if f, err := os.CreateTemp(dir, "probe"); err == nil { // running as root: the directory stays writable
+		_ = f.Close()
+		t.Skip("directory not read-only for this user")
+	}
+	if _, err := runRoot(t, "config", "set", "notify_bell", "false"); err == nil {
+		t.Error("set succeeded in a read-only directory")
+	}
+	_ = os.Chmod(dir, rwx)
+	if after, _ := os.ReadFile(filepath.Clean(path)); string(after) != string(before) {
+		t.Errorf("file changed: %q", after)
+	}
+}
