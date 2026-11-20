@@ -19,7 +19,7 @@ Plan 2 adds decisions. `curia mcp` is a stdio MCP server, one process per Claude
 Sources of truth:
 
 - `docs/DESIGN.md`: the spec, WHAT to build.
-- `docs/superpowers/plans/`: the implementation plans, for task order, interfaces and tests. The current plan is Plan 5 (`2026-11-13-curia-plan-5-cost-and-integrations.md`), the last of V1. Plan 4 (`2026-11-13-curia-plan-4-reviews-remote-restore.md`), Plan 3 (`2026-11-13-curia-plan-3-tasks-and-routing.md`), Plan 2 (`2026-11-11-curia-plan-2-decisions.md`) and Plan 1 (`2026-11-11-curia-plan-1-foundation.md`) are complete.
+- `docs/superpowers/plans/`: the implementation plans, for task order, interfaces and tests. All five plans of V1 are complete (Plan 5, `2026-11-13-curia-plan-5-cost-and-integrations.md`, up to Task 10 and its live check, which wait on the owner). `docs/v1-as-built.md` lists where V1 differs from the spec; `docs/DESIGN.md` is the owner's and is not edited. Plan 4 (`2026-11-13-curia-plan-4-reviews-remote-restore.md`), Plan 3 (`2026-11-13-curia-plan-3-tasks-and-routing.md`), Plan 2 (`2026-11-11-curia-plan-2-decisions.md`) and Plan 1 (`2026-11-11-curia-plan-1-foundation.md`) are complete too.
 - `docs/decisions/`: numbered decision records, for HOW.
 - `PROGRESS.md`: status, waves, done criteria, open questions and rulings.
 
@@ -36,7 +36,7 @@ The layout check (`scripts/check-layout.sh`, decision 0006) rejects anything not
 | `docs/` | Spec, plans, decision records. |
 | `scripts/` | Check scripts used by `make check` and the git hooks. |
 | `.github/` | CI workflow and PR template. |
-| Root files | `.gitignore`, `.golangci.yml`, `AGENTS.md`, `CLAUDE.md`, `Makefile`, `PROGRESS.md`, `go.mod`, `go.sum`, `lefthook.yml`; `CHANGELOG.md` (written by Plan 5's last task). |
+| Root files | `.gitignore`, `.golangci.yml`, `AGENTS.md`, `CLAUDE.md`, `Makefile`, `PROGRESS.md`, `go.mod`, `go.sum`, `lefthook.yml`; `CHANGELOG.md`. |
 
 Plan 3's packages (each a row of the plan's table, in import order): `task` (task rules, `Derive`, briefs, the Backlog.md parser), `message` (message wording, addresses, the Stop block, `AgentBuilt`), `route` (router candidates, the prompt, the strict parser of the router's answer, the auto-send gate), `team` (Agent Teams config parser and assignment). Plan 3's commands, one file each in `cmd/curia/`: `task.go`, `task_import.go`, `spawn.go`, `launch.go` (hidden), `setup.go` (`setup approve`), `worktree.go` and `git.go` (git plumbing), `pause.go`, `resume.go`, `clean.go`, `say.go` and `say_route.go`, `send.go`, `read.go`, `messages.go`, `routing.go`, `teams.go` (team refresh). `store` gains `tasks.go`, `messages.go`, `teams.go`, `setup.go` (approvals in `meta`) and migrations `0004_tasks.sql` and `0005_send_limits.sql`; `ui` gains the board and the say view; `deliver` gains the message path beside the answer path (both through `typeLine`); `config` gains `routing`, `editor` and `key_message`.
 
@@ -104,7 +104,7 @@ Commands:
 
 Rules for the toolchain:
 
-- Never run `go mod tidy` during Plans 1 to 5. Every dependency is already in `go.mod` and `go.sum` (decision 0009) and Plans 2 to 5 add no module (decision 0011; Plan 3 parses Backlog.md by hand and runs the router as a subprocess; Plan 4 sends ntfy pushes and serves its endpoint with the standard library's `net/http`). No task edits `go.mod` or `go.sum`.
+- Do not run `go mod tidy` or add a dependency without a decision record in `docs/decisions/` (after V1, a new dependency needs one). Every dependency V1 uses is already in `go.mod` and `go.sum` (decision 0009) and Plans 2 to 5 added no module (decision 0011; Plan 3 parses Backlog.md by hand and runs the router as a subprocess; Plan 4 sends ntfy pushes and serves its endpoint with the standard library's `net/http`). No task edits `go.mod` or `go.sum`.
 - No test-helper modules (testify, teatest and so on): tests use the standard library plus the package's own dependencies. Use real dependencies in temp dirs: SQLite files under `t.TempDir()`, a real tmux server on its own socket (`tmux -L <name>`) where tmux is installed.
 - gosec is on (except G204): `filepath.Clean` paths before opening them, and write files with mode `0o600`.
 - Worktrees live under `.worktrees/` (gitignored). Each one has its own `.bin/`, so its first `make check` builds the tools (about a minute). depguard matches files by absolute path and its `e2e` rule matches any path segment named `e2e`, so no directory on the path to a worktree may be named `e2e`; use the branch slug, e.g. `.worktrees/plan1-t2-store`.
