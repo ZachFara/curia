@@ -65,6 +65,7 @@ func (d detailSource) Detail(ctx context.Context, id string) (ui.DetailData, err
 		return out, err
 	}
 	out.Activity, out.ActivityOK = d.activity(ctx, s)
+	out.Resources = d.resources(ctx, s)
 	return out, nil
 }
 
@@ -155,4 +156,15 @@ func (d detailSource) activity(ctx context.Context, s model.Session) ([]string, 
 		lines = append(lines, sanitize.Line(e.At.Local().Format("15:04:05")+" "+string(e.Kind)+" "+e.Tool, 80))
 	}
 	return lines, true
+}
+
+// resources is the CPU and memory line of the monitor's latest sample of the
+// session: the numbers only while current, else a ? that says why.
+func (d detailSource) resources(ctx context.Context, s model.Session) string {
+	latest, err := d.st.LatestResources(ctx)
+	r := latest[s.ID]
+	if err != nil || !usage.ResourceFresh(r.At, clock(), d.cfg.Resources.Interval) {
+		return "? (the monitor is not running, or has no current sample of this session)"
+	}
+	return "CPU " + usage.ResourceCell(r.CPU, r.RSSMB*1024, r.At, clock(), d.cfg.Resources.Interval)
 }

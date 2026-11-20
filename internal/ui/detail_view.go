@@ -101,6 +101,10 @@ func (m DetailModel) body() []bodyLine {
 	}
 	section("Cost")
 	one(linePlain, m.costText())
+	if d.Resources != "" {
+		section("Resources")
+		one(linePlain, d.Resources)
+	}
 	if d.ActivityOK {
 		section("Activity")
 		for _, l := range d.Activity {

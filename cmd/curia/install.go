@@ -397,6 +397,7 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	for _, line := range install.UnloadTmux(cmd.Context(), installRunTmux, p.tmuxConf, bin, uninstallKeys(), uninstallDefaultKeys()) {
 		installSay(cmd.OutOrStdout(), "%s", line)
 	}
+	uninstallMonitor(cmd.OutOrStdout())
 	if err = uninstallSkill(cmd.OutOrStdout(), p.skills); err != nil {
 		return err
 	}
@@ -405,6 +406,23 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	}
 	_, err = fmt.Fprintln(cmd.OutOrStdout(), "Curia is uninstalled.\nRestart running Claude Code sessions.")
 	return err
+}
+
+// uninstallMonitor stops a running monitor so that no Curia process outlives
+// the uninstall, and says what happened in one line. It never fails the
+// uninstall: when the monitor cannot be stopped the line says why and how to
+// stop it by hand.
+func uninstallMonitor(out io.Writer) {
+	cfg, err := loadConfig()
+	if err != nil {
+		installSay(out, "monitor: not stopped (the config cannot be read: %v); if one runs, stop it with: curia monitor stop", err)
+		return
+	}
+	line, err := stopMonitor(cfg)
+	if err != nil {
+		line = err.Error()
+	}
+	installSay(out, "%s", line)
 }
 
 // uninstallDefaultKeys are the keys of Curia's default configuration, which

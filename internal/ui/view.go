@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,7 @@ const (
 	colDecisions
 	colCost
 	colCache
+	colRes
 	colUpdate
 	colAge
 )
@@ -52,6 +54,7 @@ var specs = map[column]colSpec{
 	colDecisions: {title: "DEC", right: true},
 	colCost:      {title: "COST", right: true},
 	colCache:     {title: "CACHE"},
+	colRes:       {title: "CPU/RAM"},
 	colUpdate:    {title: "LAST UPDATE", flex: true},
 	colAge:       {title: "AGE", right: true},
 }
@@ -264,7 +267,7 @@ func (m Model) columns() ([]column, int) {
 	}
 	switch w := m.width; {
 	case w <= 0 || w >= fullWidth:
-		return popupColumns, 2
+		return m.withRes(popupColumns), 2
 	case w >= costWidth:
 		return costColumns, 2
 	case w >= midWidth:
@@ -274,6 +277,16 @@ func (m Model) columns() ([]column, int) {
 	default:
 		return tinyColumns, 2
 	}
+}
+
+// withRes is cols with the CPU/RAM column before LAST UPDATE when the source
+// reports resources (Budget.Res is not nil), else cols as they are.
+func (m Model) withRes(cols []column) []column {
+	if m.budget.Res == nil {
+		return cols
+	}
+	i := slices.Index(cols, colUpdate)
+	return slices.Insert(slices.Clone(cols), i, colRes)
 }
 
 // titles are the header cells of cols.
@@ -308,11 +321,26 @@ func (m Model) cells(r row, cols []column, now time.Time) []string {
 			out[i] = costText(r)
 		case colCache:
 			out[i], _ = cacheText(r, now)
+		case colRes:
+			out[i] = m.resText(r)
 		default:
 			out[i] = Cell(m.cellText(r.s, c))
 		}
 	}
 	return out
+}
+
+// resText is the CPU/RAM cell of r: the source's text, "?" when it reports
+// resources and has none current for this session, blank for a group row or
+// a source with no resource data.
+func (m Model) resText(r row) string {
+	if m.budget.Res == nil || r.kind == rowGroup {
+		return ""
+	}
+	if t, ok := m.budget.Res[r.s.ID]; ok {
+		return t
+	}
+	return "?"
 }
 
 // windowCell is the window cell of r: a group row's is "▸ <lead's window>

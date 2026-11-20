@@ -39,6 +39,8 @@ type DetailData struct {
 	// only when ActivityOK (a source with no F27 data leaves it false).
 	Activity   []string
 	ActivityOK bool
+	// Resources is the CPU and memory line (F19), "" when the source has none.
+	Resources string
 }
 
 // DetailDiff is the diff panel: drawn only when Has (a session with no worktree has none).
