@@ -20,7 +20,8 @@
     "created_at": "<time>",
     "hold_until": null,
     "delivered_at": "<time>",
-    "confirmed_at": "<time>"
+    "confirmed_at": "<time>",
+    "broadcast_id": ""
   },
   {
     "id": "M-2",
@@ -43,7 +44,8 @@
     "created_at": "<time>",
     "hold_until": null,
     "delivered_at": "<time>",
-    "confirmed_at": "<time>"
+    "confirmed_at": "<time>",
+    "broadcast_id": ""
   },
   {
     "id": "M-3",
@@ -66,7 +68,8 @@
     "created_at": "<time>",
     "hold_until": null,
     "delivered_at": "<time>",
-    "confirmed_at": "<time>"
+    "confirmed_at": "<time>",
+    "broadcast_id": ""
   },
   {
     "id": "M-4",
@@ -89,7 +92,8 @@
     "created_at": "<time>",
     "hold_until": null,
     "delivered_at": "<time>",
-    "confirmed_at": null
+    "confirmed_at": null,
+    "broadcast_id": ""
   },
   {
     "id": "M-5",
@@ -112,7 +116,8 @@
     "created_at": "<time>",
     "hold_until": null,
     "delivered_at": "<time>",
-    "confirmed_at": null
+    "confirmed_at": null,
+    "broadcast_id": ""
   },
   {
     "id": "M-6",
@@ -135,7 +140,8 @@
     "created_at": "<time>",
     "hold_until": null,
     "delivered_at": "<time>",
-    "confirmed_at": "<time>"
+    "confirmed_at": "<time>",
+    "broadcast_id": ""
   },
   {
     "id": "M-7",
@@ -158,6 +164,7 @@
     "created_at": "<time>",
     "hold_until": null,
     "delivered_at": null,
-    "confirmed_at": null
+    "confirmed_at": null,
+    "broadcast_id": ""
   }
 ]
