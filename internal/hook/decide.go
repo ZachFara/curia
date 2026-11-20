@@ -162,40 +162,45 @@ func protectedRoots(home string, cfg config.Config) []string {
 }
 
 // candidates are the forms of path p (relative to cwd) to check: cleaned
-// and absolute, and with symlinks resolved.
+// and absolute (lexical), and resolved on disk from the UNCLEANED path, so a
+// symlink followed by ".." lands where the disk says, not where the text
+// says. Both are checked: a path that only looks inside is denied too.
 func candidates(p, cwd, home string) []string {
 	if rest, ok := strings.CutPrefix(p, "~/"); ok && home != "" {
 		p = filepath.Join(home, rest)
 	}
+	raw := p
 	if !filepath.IsAbs(p) && filepath.IsAbs(cwd) {
-		p = filepath.Join(cwd, p)
+		raw = cwd + string(filepath.Separator) + p // not Join: Join would clean ".." away
 	}
-	abs, err := filepath.Abs(p) // a hostile cwd leaves the hook's own working directory
+	abs, err := filepath.Abs(raw) // a hostile cwd leaves the hook's own working directory
 	if err != nil {
-		abs = filepath.Clean(p)
+		abs = filepath.Clean(raw)
 	}
-	if len(abs) > 4096 { // shortcut: no symlink walk for a path no system accepts; upgrade if a real limit above PATH_MAX appears
+	if len(raw) > 4096 { // shortcut: no symlink walk for a path no system accepts; upgrade if a real limit above PATH_MAX appears
 		return []string{abs}
 	}
-	return []string{abs, realPath(abs)}
+	if !filepath.IsAbs(raw) {
+		raw = abs
+	}
+	return []string{abs, realPath(raw)}
 }
 
-// realPath is p with the symlinks of its longest existing ancestor resolved.
+// realPath is p with symlinks resolved, ".." applied after them as the disk
+// does: p is cut at its last separator, by text and never cleaned, until a
+// prefix exists; the part that does not exist is then cleaned lexically.
 func realPath(p string) string {
 	if r, err := filepath.EvalSymlinks(p); err == nil {
 		return r
 	}
-	var tail []string
 	for d := p; ; {
-		parent := filepath.Dir(d)
-		if parent == d {
-			return p
+		i := strings.LastIndexByte(d, filepath.Separator)
+		if i <= 0 {
+			return filepath.Clean(p)
 		}
-		tail = append(tail, filepath.Base(d))
-		d = parent
+		d = d[:i]
 		if r, err := filepath.EvalSymlinks(d); err == nil {
-			slices.Reverse(tail)
-			return filepath.Join(append([]string{r}, tail...)...)
+			return filepath.Join(r, p[i+1:])
 		}
 	}
 }

@@ -312,3 +312,28 @@ func TestPreToolUseWithBudgetCheckLatency(t *testing.T) {
 		return d[len(d)*95/100]
 	})
 }
+
+// A symlink followed by ".." lands where the disk says, not where the text says.
+func TestProtectedFilesSymlinkThenDotDot(t *testing.T) {
+	home, proj, cfg := denyHome(t)
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	cfgDir := filepath.Join(home, ".config", "curia")
+	if err := os.MkdirAll(filepath.Join(cfgDir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// proj/link -> ~/.config/curia/sub, so proj/link/.. is ~/.config/curia.
+	if err := os.Symlink(filepath.Join(cfgDir, "sub"), filepath.Join(proj, "link")); err != nil {
+		t.Fatal(err)
+	}
+	// ~/.config/curia/back -> proj, so ~/.config/curia/back/.. is home: outside.
+	if err := os.Symlink(proj, filepath.Join(cfgDir, "back")); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{proj + "/link/../config.toml", "link/../config.toml", "link/../new/dir/x", proj + "/link/../sub/../config.toml"} {
+		wantDeny(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(p)+`}`, proj, "")), "bypass via "+p)
+	}
+	// Lexically inside, really outside: denying is fine; pinned so a change is noticed.
+	wantDeny(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(cfgDir+"/back/../x")+`}`, proj, "")), "lexically inside")
+	wantQuiet(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/a/../b.go")+`}`, proj, "")), "plain dotdot in the project")
+}
