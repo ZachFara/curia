@@ -169,8 +169,8 @@ const pruneCursorKey = "cost_prune_after"
 // Ingest stores r in one write transaction (plan section 4.2): the
 // session's cost and cache values (an absent value keeps the stored one;
 // no row is created for an unknown session), a cost sample when the
-// session exists and r has a cost, one usage sample per window (for an
-// unknown session too: the windows are the account's), each unless the
+// session exists and r has a cost, one usage sample per window (only when
+// the session exists: an unknown session stores nothing), each unless the
 // series' newest sample has the same values and is less than SampleRepeat
 // older, and then at most PruneBatch old samples deleted, usage samples
 // first. It is not activity: the session's state and times are not

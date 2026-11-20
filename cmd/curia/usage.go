@@ -58,6 +58,7 @@ type usageReport struct {
 	PauseTask  string         // "" when there is no suggestion
 	PauseLabel string         // "T-7 (P3) api-server"
 	PauseTitle string
+	PauseBusy  bool // the agent is mid-turn: pause would refuse it now
 	Any        bool // something was ingested in the last 24 hours
 }
 
@@ -150,7 +151,7 @@ func usageBurnRows(burns map[string]float64, sessions []model.Session) []usageBu
 // burn is the sum over its live linked sessions.
 func usagePause(rep *usageReport, cards []task.Card, burns map[string]float64) {
 	var running []usage.Running
-	byID := map[string]task.Card{}
+	byID, busyIDs := map[string]task.Card{}, map[string]bool{}
 	for _, c := range cards {
 		if c.Status != model.TaskRunning {
 			continue
@@ -159,7 +160,12 @@ func usagePause(rep *usageReport, cards []task.Card, burns map[string]float64) {
 		for _, s := range c.Sessions {
 			sum += burns[s.ID]
 		}
-		running = append(running, usage.Running{TaskID: c.Task.ID, N: c.Task.N, Priority: c.Task.Priority, BurnUSD: sum})
+		// The test curia pause applies without --force.
+		busy := pauseCheckStates(c.Task, c.Sessions) != nil
+		running = append(running, usage.Running{TaskID: c.Task.ID, N: c.Task.N, Priority: c.Task.Priority, BurnUSD: sum, Busy: busy})
+		if busy {
+			busyIDs[c.Task.ID] = true
+		}
 		byID[c.Task.ID] = c
 	}
 	id, ok := usage.SuggestPause(running)
@@ -175,7 +181,7 @@ func usagePause(rep *usageReport, cards []task.Card, burns map[string]float64) {
 	if repo := filepath.Base(t.Repo); t.Repo != "" && repo != "." && repo != "/" {
 		label += " " + repo
 	}
-	rep.PauseTask = id
+	rep.PauseTask, rep.PauseBusy = id, busyIDs[id]
 	rep.PauseLabel = sanitize.Line(label, usageLabelLimit)
 	rep.PauseTitle = sanitize.Line(t.Title, usageLabelLimit)
 }
@@ -234,7 +240,10 @@ func usagePrint(w io.Writer, rep usageReport, now time.Time) error {
 			return err
 		}
 	}
-	if rep.PauseTask != "" {
+	switch {
+	case rep.PauseBusy:
+		_, _ = fmt.Fprintf(w, "suggestion: pause %s when its agent is idle\n", ui.Cell(rep.PauseLabel))
+	case rep.PauseTask != "":
 		_, _ = fmt.Fprintf(w, "suggestion: pause %s: curia pause %s\n", ui.Cell(rep.PauseLabel), rep.PauseTask)
 	}
 	return nil
@@ -288,7 +297,7 @@ func usagePrintJSON(w io.Writer, rep usageReport) error {
 		}
 		out.Burn = append(out.Burn, b)
 	}
-	if rep.PauseTask != "" {
+	if rep.PauseTask != "" && !rep.PauseBusy {
 		out.Suggest = &rep.PauseTask
 	}
 	return json.NewEncoder(w).Encode(out)

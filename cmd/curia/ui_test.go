@@ -954,7 +954,7 @@ func TestStoreSourcePauseRefusals(t *testing.T) {
 }
 
 // uiPauseHome is a fleetHome under curia usage's warning series with
-// T-1 (P2, /src/web) and T-2 (P3, /src/api) running: their working sessions
+// T-1 (P2, /src/web) and T-2 (P3, /src/api) running: their idle sessions
 // sa and sb are in the live panes %1 and %2, so the dashboard's reconcile
 // keeps them.
 func uiPauseHome(t *testing.T) {
@@ -977,7 +977,7 @@ func uiPauseHome(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err = st.UpsertSession(context.Background(), model.Session{
-			ID: c.sid, Agent: "claude", State: model.StateWorking, Pane: "%" + strconv.Itoa(i+1), TmuxSession: "work",
+			ID: c.sid, Agent: "claude", State: model.StateIdle, Pane: "%" + strconv.Itoa(i+1), TmuxSession: "work",
 			TmuxWindow: "@1", TaskID: tk.ID, Repo: c.repo, StartedAt: fleetNow.Add(-time.Hour), UpdatedAt: fleetNow.Add(-time.Minute),
 		}); err != nil {
 			t.Fatal(err)

@@ -1193,7 +1193,7 @@ func TestApproveSurvivesTerminate(t *testing.T) {
 	reviewChildWait(t, cmd, out)
 	f.wantMerged(head)
 	// M-2: it said it waits, and logged the outcome.
-	if !strings.Contains(out.String(), reviewWaitingLine) {
+	if !strings.Contains(out.String(), "a review action is still running; waiting") {
 		t.Errorf("the child did not say it waits:\n%s", out)
 	}
 	if log := strings.Join(readLog(t), "\n"); !strings.Contains(log, "review action done") || !strings.Contains(log, "R-1 approved: merged") {
@@ -1464,4 +1464,39 @@ func TestApproveFlagRefusesPrefix(t *testing.T) {
 		t.Errorf("stdout = %q", stdout)
 	}
 	f.wantMerged(head)
+}
+
+// A held signal while a dashboard pause (or a review action, or both) runs
+// names what runs, and the command that shows its outcome.
+func TestFlightWordsNameWhatRuns(t *testing.T) {
+	for _, c := range []struct {
+		pause, review bool
+		what, follow  string
+	}{
+		{false, true, "a review action", "curia reviews ls"},
+		{true, false, "a pause", "curia task ls"},
+		{true, true, "a pause and a review action", "curia task ls and curia reviews ls"},
+	} {
+		f := &reviewInFlight{}
+		if c.pause {
+			defer f.beginPause()()
+		}
+		if c.review {
+			defer f.begin()()
+		}
+		if what, follow := f.words(); what != c.what || follow != c.follow {
+			t.Errorf("pause %v review %v: words = %q, %q; want %q, %q", c.pause, c.review, what, follow, c.what, c.follow)
+		}
+	}
+	saved := reviewFlight
+	defer func() { reviewFlight = saved }()
+	reviewFlight = &reviewInFlight{}
+	end := reviewFlight.beginPause()
+	sig, cancel := context.WithCancel(context.Background())
+	cancel()
+	time.AfterFunc(50*time.Millisecond, end)
+	var buf strings.Builder
+	if err := reviewAfterProgram(sig, &buf); err != nil || !strings.Contains(buf.String(), "a pause is still running") || strings.Contains(buf.String(), "review") {
+		t.Errorf("waiting line for a pause = %q, %v", buf.String(), err)
+	}
 }
