@@ -4,7 +4,7 @@ Nov 11, 2026 · @Zachariah Farahany
 
 ## TLDR
 
-V1 is a single binary, `curia`, that turns tmux into a control plane for parallel coding agents. Claude Code hooks write every session event into one local SQLite store. Everything else is a view or an action over that store: a session dashboard, attention signals, a task board, worktree-isolated agent spawning, a review queue, and the core differentiator, a decision queue with a searchable precedent log that agents consult before asking again. Session tracking, worktrees and approval queues already exist in open source, so V1 borrows their patterns (and code, where the license allows) and spends original effort on decisions, precedent and the task-to-merge lifecycle. Coordination inside a single job is left to Claude Code's Agent Teams; Curia treats each team as one unit to watch, route and cost. After V1, ten further features (F19 to F28) add resource limits, permission modes and an away routine, Remote Control, scheduled messages, an inbox, an agent detail view, a timeline and decision log, a local web view, activity-time measurement and one layered settings file; they are specified here and built later (section 8), around one new background process, `curia monitor` (section 4).
+V1 is a single binary, `curia`, that turns tmux into a control plane for parallel coding agents. Claude Code hooks write every session event into one local SQLite store. Everything else is a view or an action over that store: a session dashboard, attention signals, a task board, worktree-isolated agent spawning, a review queue, and the core differentiator, a decision queue with a searchable precedent log that agents consult before asking again. Session tracking, worktrees and approval queues already exist in open source, so V1 borrows their patterns (and code, where the license allows) and spends original effort on decisions, precedent and the task-to-merge lifecycle. Coordination inside a single job is left to Claude Code's Agent Teams; Curia treats each team as one unit to watch, route and cost. After V1, eleven further features (F19 to F29) add resource limits, permission modes and an away routine, Remote Control, scheduled messages, an inbox, an agent detail view, a timeline and decision log, a local web view, activity-time measurement, one layered settings file and an opt-in auto-spawn of ready tasks; they are specified here and built later (section 8), around one new background process, `curia monitor` (section 4).
 
 ## Contents
 
@@ -13,9 +13,9 @@ V1 is a single binary, `curia`, that turns tmux into a control plane for paralle
 3. Build vs borrow
 4. Architecture
 5. Data model
-6. Feature specs (F1 to F28)
+6. Feature specs (F1 to F29)
 7. Safety and trust boundaries
-8. Build order (V1, then F19 to F28)
+8. Build order (V1, then F19 to F29)
 9. Open questions
 
 ## 1. Problem
@@ -100,7 +100,7 @@ These overlap with parts of V1 and are worth reading before building the matchin
 
 &#91;embedded content: Curia architecture · 9 components around one store\]
 
-The diagram above shows the V1 core. `curia monitor` (below) is a tenth component around the same store, added by F19 to F28.
+The diagram above shows the V1 core. `curia monitor` (below) is a tenth component around the same store, added by F19 to F29.
 
 Agents never talk to me directly. Hooks and MCP calls write into the store; the tmux UI and remote channels read from it; my answers go back into the store, and the delivery step carries them to the right pane.
 
@@ -114,12 +114,12 @@ Agents never talk to me directly. Hooks and MCP calls write into the store; the 
 | `curia serve` | Phone answers via ntfy actions (F11) | Optional, long-running |
 | `curia restore`, `curia export` | Restore and integrations (F12, F13) | On demand |
 | `curia install`, `curia uninstall` | Hook, MCP and skill registration | Once |
-| `curia monitor` (amended, Ruling 145) | Sampler and scheduler: resources (F19), schedules (F22), background commands (F27), pending `/rc` (F21), mode and away expiry notices (F20) | Long-running, one instance |
-| `curia mode`, `curia away`, `curia back`, `curia rc`, `curia schedule`, `curia inbox`, `curia show`, `curia timeline`, `curia time`, `curia resources`, `curia config` | Features F19 to F28 | On demand |
+| `curia monitor` (amended, Ruling 145) | Sampler and scheduler: resources (F19), schedules (F22), background commands (F27), pending `/rc` (F21), mode and away expiry notices (F20), auto-spawn of ready tasks (F29) | Long-running, one instance |
+| `curia mode`, `curia away`, `curia back`, `curia rc`, `curia schedule`, `curia inbox`, `curia show`, `curia timeline`, `curia time`, `curia resources`, `curia config`, `curia auto-spawn` | Features F19 to F29 | On demand |
 
 **`curia monitor`.** One instance, held by a lock file at `~/.local/state/curia/monitor.lock`. It is started by `curia monitor start`, and by the tmux snippet that `curia install` already adds (additively, Ruling 95), which runs `curia monitor start --quiet` when a client attaches; `monitor.autostart = false` removes that line's effect. `curia monitor status` and `stop` report and end it. It writes a heartbeat row so other commands can say `monitor not running`.
 
-When it is not running, nothing in V1 changes, and no safety rule depends on it: permission modes and their expiry are decided by the hook at call time (F20), the docker wrapper counts containers itself (F19), and every delivery rule is unchanged. What stops is the work that needs a clock: resource samples (the dashboard says so), schedules do not fire (missed triggers follow F22's 30-minute rule on the next start), background commands are not tracked to completion (F27), and `/rc` for a busy session stays pending (F21).
+When it is not running, nothing in V1 changes, and no safety rule depends on it: permission modes and their expiry are decided by the hook at call time (F20), the docker wrapper counts containers itself (F19), and every delivery rule is unchanged. What stops is the work that needs a clock: resource samples (the dashboard says so), schedules do not fire (missed triggers follow F22's 30-minute rule on the next start), background commands are not tracked to completion (F27), `/rc` for a busy session stays pending (F21), and nothing is auto-spawned (F29): ready tasks wait.
 
 ## 5. Data model
 
@@ -189,13 +189,15 @@ CREATE TABLE reviews (
 );
 ```
 
-**Additions for F5, F16 and F19 to F28.** Columns and tables added to the above, only as far as the spec needs.
+**Additions for F5, F16 and F19 to F29.** Columns and tables added to the above, only as far as the spec needs.
 
 ```sql
 ALTER TABLE tasks ADD COLUMN filed_by TEXT;        -- F5: filing session id; NULL for tasks I wrote
 ALTER TABLE tasks ADD COLUMN filed_reason TEXT;    -- F5: the agent's reason, required
 ALTER TABLE tasks ADD COLUMN filer_lineage JSON;   -- F5: filer, its team id, lead and teammates at filing time
 ALTER TABLE tasks ADD COLUMN budget_usd REAL;      -- F16: NULL = no budget
+ALTER TABLE tasks ADD COLUMN ready_hash TEXT;      -- F29: hash of title and body when I marked it ready at a terminal; NULL otherwise, cleared on leaving ready
+ALTER TABLE tasks ADD COLUMN auto_spawned_at TEXT; -- F29: set when the monitor started it; NULL for a spawn I ran
 ALTER TABLE sessions ADD COLUMN rc TEXT;           -- F21: off | pending | on | unknown
 ALTER TABLE sessions ADD COLUMN rc_checked_at TEXT;
 ALTER TABLE decisions ADD COLUMN coerced_from TEXT; -- F20: 'blocking' when raised while away
@@ -235,7 +237,7 @@ CREATE TABLE schedules (          -- F22
 );
 CREATE TABLE schedule_runs (
   id INTEGER PRIMARY KEY, schedule_id TEXT, due_at TEXT, ran_at TEXT,
-  outcome TEXT,                 -- fired | skipped_late | skipped_no_target | monitor_down
+  outcome TEXT,                 -- fired | skipped_late | skipped_no_target | monitor_down; F29: schedule_id 'auto', fired | refused
   results JSON                  -- per session: delivered | skipped_busy | skipped_not_limited
 );
 CREATE TABLE activity (           -- F27
@@ -255,13 +257,13 @@ CREATE TABLE config_revisions (   -- F28
 );
 ```
 
-An agent-filed task is a `tasks` row with `filed_by` set; the per-agent daily cap counts such rows by `filed_by` and `created_at`.
+An agent-filed task is a `tasks` row with `filed_by` set; the per-agent daily cap counts such rows by `filed_by` and `created_at`. F29's daily cap counts `auto_spawned_at` over the last 24 hours, and its log is `schedule_runs` rows with `schedule_id = 'auto'`, which is not a `schedules` row.
 
 The `sessions.state` value `needs_decision` is distinct from `waiting` on purpose: `waiting` means Claude Code's own permission or input prompt, `needs_decision` means an open ticket in the queue. The dashboard ranks them differently (section 6, F4).
 
 ## 6. Feature specs
 
-Twenty-eight features. F1 to F18 are V1, grouped by the four jobs from section 1 plus a cost layer: see who needs me (F1 to F4), start work (F5, F6), resolve judgments (F7 to F9), finish and sustain work (F10 to F14), and spend wisely (F15 to F17). F18 routes my own messages down to the right agent. F19 to F28 are additions made on 2026-11-19 (Rulings 140 to 161), built after V1 (section 8): resources and limits (F19), permission modes and away (F20), Remote Control (F21), scheduled messages (F22), an inbox (F23), agent detail (F24), a timeline and decision log (F25), a web view (F26), activity time (F27) and settings (F28).
+Twenty-nine features. F1 to F18 are V1, grouped by the four jobs from section 1 plus a cost layer: see who needs me (F1 to F4), start work (F5, F6), resolve judgments (F7 to F9), finish and sustain work (F10 to F14), and spend wisely (F15 to F17). F18 routes my own messages down to the right agent. F19 to F29 are additions made on 2026-11-19 (Rulings 140 to 161), built after V1 (section 8): resources and limits (F19), permission modes and away (F20), Remote Control (F21), scheduled messages (F22), an inbox (F23), agent detail (F24), a timeline and decision log (F25), a web view (F26), activity time (F27), settings (F28) and auto-spawn (F29).
 
 ### F1. Session tracking
 
@@ -326,7 +328,7 @@ Twenty-eight features. F1 to F18 are V1, grouped by the four jobs from section 1
 
 **Commands:** `curia task add "title" --repo . [--body file.md]`, `curia task ls`, `curia task edit T-42`, `curia task ready T-42`. The task body is the starting brief given to the agent, so writing a good task is writing a good prompt. (amended, Ruling 107: `curia task edit` opens an editor only from the `editor` config option, an argument vector run without a shell; `$VISUAL` and `$EDITOR` are not read, and flags cover every field. amended, Ruling 113: `task add`, `edit`, `ready` and `import` are user-only; an agent cannot run them.)
 
-**Agent-filed tasks (amended, Ruling 141; amends Ruling 113):** an agent may file a task through a seventh MCP tool, `file_task(title, body, reason)`; `reason` is required. The setting `tasks.agent_filed.level` is `off`, `backlog` (default) or `ready`. At `off` the tool returns an error. At `backlog` the task is created `backlog`; only I mark it ready (`curia task ready`, the board, or the web page with its token). At `ready` it is created `ready`, which is my standing choice and cannot come from a repository file (F28). Every such task records the filer (`filed_by`), the reason and the filer's lineage (`filer_lineage`): as far as it can be observed: the session itself and, from Curia's own spawn records, its team, its lead and its teammates (a subagent acts as the session that launched it). Hook payloads carry an agent id and type but no link to a parent, and a teammate cannot be linked to its lead from the payload (hooks page, read 2026-11-19), so lineage is partly observable. It is kept for display and audit only; no permission rests on it. Each agent may file `tasks.agent_filed.max_per_day` tasks (default 5) per rolling 24 hours; a further call returns an error. An agent's `spawn`, and any future auto-spawn, is refused on any agent-filed task whatever its status, so an agent cannot file work and run it, whoever it is. Only I spawn an agent-filed task (owner decision D-7 pending). `task add`, `edit`, `ready` and `import` stay user-only. This answers Plan 3 Open Question 14.
+**Agent-filed tasks (amended, Ruling 141; amends Ruling 113):** an agent may file a task through a seventh MCP tool, `file_task(title, body, reason)`; `reason` is required. The setting `tasks.agent_filed.level` is `off`, `backlog` (default) or `ready`. At `off` the tool returns an error. At `backlog` the task is created `backlog`; only I mark it ready (`curia task ready`, the board, or the web page with its token). At `ready` it is created `ready`, which is my standing choice and cannot come from a repository file (F28). Every such task records the filer (`filed_by`), the reason and the filer's lineage (`filer_lineage`): as far as it can be observed: the session itself and, from Curia's own spawn records, its team, its lead and its teammates (a subagent acts as the session that launched it). Hook payloads carry an agent id and type but no link to a parent, and a teammate cannot be linked to its lead from the payload (hooks page, read 2026-11-19), so lineage is partly observable. It is kept for display and audit only; no permission rests on it. Each agent may file `tasks.agent_filed.max_per_day` tasks (default 5) per rolling 24 hours; a further call returns an error. An agent's `spawn` is refused on any agent-filed task whatever its status, so an agent cannot file work and run it, whoever it is. Only I spawn an agent-filed task, and auto-spawn (F29) takes one only after I marked it ready at a terminal myself (`ready_hash`; a task created ready by `level = ready` is not eligible) (owner decision D-7 pending). `task ready` records `ready_hash`, the hash of the title and body at that moment, and for a task from Linear, Backlog.md or an agent it first prints the body and waits for Enter; a ready move from the web page does not record it (F29). `task add`, `edit`, `ready` and `import` stay user-only. This answers Plan 3 Open Question 14.
 
 **Views:** a kanban view inside the F3 popup (`t`), and `curia task ls` for scripting.
 
@@ -709,7 +711,7 @@ Within a group, oldest first. Each row shows age, session or task, and a one-lin
 
 ### F28. Settings
 
-**What:** one `config.toml` for every feature, layered so a repository can make Curia stricter and never looser, with history and rollback. (Rulings 156 to 159; "auto-spawn" is owner decision D-8, pending.)
+**What:** one `config.toml` for every feature, layered so a repository can make Curia stricter and never looser, with history and rollback. (Rulings 156 to 159; auto-spawn is F29, owner decision D-8.)
 
 **Layers:** defaults < `~/.config/curia/config.toml` (the user file) < `.curia/config.toml` in the repository < flags. The repo file is untrusted data: it is read with a 64 KiB cap, strict TOML, unknown keys ignored, and each key passes a compiled-in policy that says whether it may be set and in which direction. A value that would loosen is ignored, and `curia config doctor` says so. A flag is mine, so it may loosen what a repo file tightened.
 
@@ -721,6 +723,9 @@ Within a group, oldest first. Each row shows age, session or task, and a one-lin
 | `routing.aliases`, `editor`, `review.*`, `key_*`, `ntfy.*`, `serve.*` (including `serve.web`), `monitor.*`, `rc.*` | as today, false, true | nothing |
 | `tasks.agent_filed.level` | backlog | choose a lower level (ready > backlog > off) |
 | `tasks.agent_filed.max_per_day` | 5 | lower |
+| `tasks.auto_spawn.enabled` | false | set false |
+| `tasks.auto_spawn.max_agents`, `tasks.auto_spawn.max_per_day` | 3, 5 | lower |
+| `tasks.auto_spawn.interval` | 5m | lengthen |
 | `cost.budget_hard_stop` | false | set true |
 | `cost.task_budget_default` | 0 (none) | lower, if nonzero |
 | `resources.max_containers_per_session`, `resources.max_containers_total` | 3, 8 | lower |
@@ -734,7 +739,7 @@ Within a group, oldest first. Each row shows age, session or task, and a one-lin
 | `activity.idle_cap`, `activity.task_types` | 30m, list | nothing |
 | `context_max`, `default_context_max` | table, 200000 | nothing |
 
-A repo file can never: enable bypass (it is not a key; bypass is only ever typed), enable `routing.auto_send`, lower `routing.auto_threshold`, set `tasks.agent_filed.level = ready`, enable or widen any auto-spawn setting (none is defined in this spec, Ruling 159), raise any cap or limit above, add a `mode.away_allow` entry, turn `cost.budget_hard_stop` off, enable Remote Control, `serve.web` or any `serve` or `ntfy` key, or set `editor` or `review.*` (an exec path, Ruling 107). Any key added to F19 to F28 later is "nothing" until a ruling says otherwise.
+A repo file can never: enable bypass (it is not a key; bypass is only ever typed), enable `routing.auto_send`, lower `routing.auto_threshold`, set `tasks.agent_filed.level = ready`, enable auto-spawn (`tasks.auto_spawn.enabled`), raise `tasks.auto_spawn.max_agents` or `tasks.auto_spawn.max_per_day`, or shorten `tasks.auto_spawn.interval` (F29, Ruling 159), raise any cap or limit above, add a `mode.away_allow` entry, turn `cost.budget_hard_stop` off, enable Remote Control, `serve.web` or any `serve` or `ntfy` key, or set `editor` or `review.*` (an exec path, Ruling 107). Any key added to F19 to F28 later is "nothing" until a ruling says otherwise.
 
 **Agents never change settings.** `curia config set`, `edit`, `rollback` and `doctor` that fixes anything are user-only; the MCP surface has no config tool. In every mode, including bypass, the PreToolUse hook denies Edit, Write, MultiEdit and NotebookEdit on the user file, on `~/.local/share/curia/` and on `~/.config/curia/` (Ruling 157). A Bash command that writes the file is not caught (README's same-user limit), and the denial is best-effort against a crashed or hung hook (section 7).
 
@@ -742,9 +747,30 @@ A repo file can never: enable bypass (it is not a key; bypass is only ever typed
 
 **History.** Every write by `set`, `edit` or `rollback` appends to `config_revisions`: number, time, actor (`cli`, `dashboard`, `rollback`, `external`), key (or `*`), old and new values and the full file. At each load Curia compares the file's hash with the last revision; a mismatch is recorded as an `external` revision (an edit made outside Curia), takes effect, and shows `C!` in the badge until `curia config doctor` is run at a terminal. `rollback <n>` writes the file as it was after revision `n` as a new revision (no history is deleted) and asks for confirmation.
 
-**Acceptance:** each default above is returned by `config get` with no files; a repo file setting `tasks.agent_filed.level = "ready"` or `routing.auto_send = true` or `resources.max_containers_total = 99` leaves the effective value unchanged and `doctor` names the key; a repo file setting `cost.budget_hard_stop = true` or lowering `max_per_day` takes effect; a flag overrides a repo value; `set` writes a revision, `rollback 3` restores revision 3's content as revision N+1; a file edited by hand yields an `external` revision; an agent session cannot run `set`; the hook denies an Edit of the user file in every mode.
+**Acceptance:** each default above is returned by `config get` with no files; a repo file setting `tasks.agent_filed.level = "ready"` or `tasks.auto_spawn.enabled = true` or `routing.auto_send = true` or `resources.max_containers_total = 99` leaves the effective value unchanged and `doctor` names the key; a repo file setting `cost.budget_hard_stop = true` or lowering `max_per_day` takes effect; a flag overrides a repo value; `set` writes a revision, `rollback 3` restores revision 3's content as revision N+1; a file edited by hand yields an `external` revision; an agent session cannot run `set`; the hook denies an Edit of the user file in every mode.
 
 **Risks:** the policy table is the security rule, so a key forgotten from it must default to "nothing" (it does, above). The user file is plain, so an out-of-band edit by an agent through Bash is detected afterward, not prevented. A tightened repo value can quietly make Curia refuse things in that repo, so `list` shows the layer for each value.
+
+### F29. Auto-spawn
+
+**What:** when I allow it, Curia starts the next ready task by itself, within caps, while the usage forecast and the machine have room. It is off by default and only I can turn it on. (Ruling 159, owner decision D-8: a feature of its own, because work that starts while I am away needs caps and risks of its own.)
+
+**How:**
+
+- **Setting.** `tasks.auto_spawn.enabled` (default false), `tasks.auto_spawn.max_agents` (default 3), `tasks.auto_spawn.max_per_day` (default 5) and `tasks.auto_spawn.interval` (default 5m). They are read from the user file and flags only: a repository's `.curia/config.toml` can set `enabled = false` for its own repository, lower the two caps and lengthen the interval, and can never enable it or raise a cap (F28). `curia auto-spawn on | off | status` is user-only (the F6 guard, Ruling 119) and is `curia config set tasks.auto_spawn.enabled` with a printout of the caps and a revision in `config_revisions`. Agents have no tool for it, and the hook denies their edits to the user file in every mode (F28).
+- **Who runs it.** `curia monitor` (F19; section 4), on its own tick of 30 seconds. With no monitor running nothing is auto-spawned, and that is safe: a task simply stays ready. Missed ticks are not made up.
+- **Which task.** The next task by the board's order (priority, then age, F5 and F16) that is `ready`, has `ready_hash` equal to the hash of its title and body now, and is in a repository that does not have `tasks.auto_spawn.enabled = false`. `ready_hash` is set only when I mark the task ready at a terminal (`curia task ready`, or the board key) and is cleared when the task leaves `ready`. So these are never eligible: a task an agent filed at `tasks.agent_filed.level = ready` (created ready, no hash), a task whose body was edited or re-imported after I marked it ready (the hash no longer matches), and a task moved to ready from the web page (F26; the page's move leaves `ready_hash` empty, so a stolen device token cannot start work). An agent-filed task I mark ready myself is eligible; an agent-filed task I have not is not, whichever way owner decision D-7 goes (owner decision D-7 pending). For a task with `source` other than `local` or with `filed_by` set, `curia task ready` first prints the body and waits for Enter, so marking it ready is the moment I read it.
+- **Checks, in this order,** each tick, stopping at the first that refuses. 1. enabled, and no mode row of any scope (F20) is `bypass`: while bypass is active nothing is auto-spawned, a new agent with no permission prompts and nobody present being the worst combination. 2. live agents (sessions in `working`, `waiting`, `needs_decision` or `idle`, whoever started them) are fewer than `max_agents`. 3. fewer than `max_per_day` auto-spawns in the last 24 hours (`tasks.auto_spawned_at`). 4. the last auto-spawn was at least `interval` ago, because F16's burn rate is a 20-minute window and a new agent has not yet shown in it. 5. F16's forecast has no warning (the limit is not projected before `resets_at`) and no window is at or above `schedule.limited_pct`; the latest sample of a window whose `resets_at` has passed counts as 0. 6. if `resource_samples` are fresh (F19), Docker memory is not above `resources.docker_memory_refuse_pct`; stale or no samples skip this check with a log line, as in F19. Then the candidates in order: a task whose cost is at or above its budget (F16, `budget_usd` or the default) is skipped, and so is one in a repository whose `.curia/setup.sh` is not approved (Rulings 108 and 109), because a script I have not approved never runs unattended; the first task left is spawned.
+- **The spawn.** Exactly the `curia spawn T-42` path of F6: same worktree, branch, approved setup, tmux window, preamble, default model (F16) and `docker` wrapper, one task per tick. On success `tasks.auto_spawned_at` is set. A failed spawn changes nothing and is retried after `interval`.
+- **Log.** Reused from F22: `schedule_runs` rows with `schedule_id = 'auto'` (not a `schedules` row, so `curia schedule ls` does not list them): outcome `fired` with `results` naming the task and session, or `refused` with `results` naming the check (`bypass`, `max_agents`, `max_per_day`, `interval`, `forecast`, `memory`, `budget`, `setup_unapproved`, `spawn_failed`) and the task. A `refused` row is written only when it differs from the previous `auto` row, so a standing refusal is one line, not one per tick. No eligible task writes nothing.
+- **Visibility.** The dashboard header (F3) shows `auto: on 2/3 agents, 1/5 today` or `auto: off`, and, when the last `auto` row is a refusal, `auto: waiting (forecast)`. The task row on the board and the session row show `auto` for a task started this way. `curia auto-spawn status` prints the same plus the last ten `auto` rows. The timeline (F25) already unions `schedule_runs` and tasks, so every start and every refusal is on it.
+- **Modes (F20).** `normal` and `edits`: it runs. `away`: it runs, which is the point (work continues while I am gone). The new agent is covered by the `away` row like any session, so its tool calls the hook does not allow are denied, and its questions become `assume` tickets with nobody watching. Its launch preamble gets the F20 away sentence with the time I return. `curia back` lists, under their own heading, every task auto-spawned during the away window with its time and session, and the refusals counted by check. `bypass`: auto-spawn does not run (check 1), including when a repository's own mode is `normal`; a task already running is not stopped.
+
+**Data model:** `tasks.ready_hash` and `tasks.auto_spawned_at` (section 5), and the `schedule_runs` rows above. No new table.
+
+**Acceptance:** with defaults and a ready task, nothing is spawned, and `curia config get tasks.auto_spawn.enabled` is false; a repository file setting `enabled = true`, `max_agents = 9` or a shorter `interval` leaves the effective value unchanged and `doctor` names the key, while `enabled = false` or `max_agents = 1` takes effect; with it enabled and a monitor running, the highest-priority, oldest ready task starts through the same code path as `curia spawn` and carries `auto_spawned_at`; with no monitor nothing starts; a task created ready by `file_task` at `level = ready`, a task edited after `task ready`, and a task moved to ready from the web page are skipped and the next one starts; an agent-filed task marked ready at a terminal starts; at `max_agents` live agents, at `max_per_day` starts in 24 hours, within `interval` of the last start, with a forecast warning, with a window at 100%, over the Docker memory threshold with fresh samples, or with any `bypass` row, no task starts and one `refused` row names the check, and a second tick with the same cause writes no second row; with stale samples the memory check is skipped; a task at its budget is skipped and the next one starts; a task in a repository with an unapproved `setup.sh` is skipped and the script never runs; in `away` a task starts and appears in `curia back` under its own heading; an agent session cannot run `curia auto-spawn on`, and the hook denies its Edit of the user file; the dashboard header shows `auto: off` after `curia auto-spawn off`, and a tick right after it starts nothing.
+
+**Risks:** work starts without me and spends usage while I am away. Bounds: it is off until I turn it on, three agents and five starts a day by default, one start per 5 minutes, my own `bypass` stops it, and `curia auto-spawn off` is one command. A forecast can be wrong: it is a 20-minute burn rate, a new agent's cost shows only after its first turns, and under API billing F16 has a projection but no warning, so check 5 passes there and only the caps and the task budget bound spend (check 2 to 4 and the budget skip). The status line is the only source of `rate_limits`, so a stale sample before an idle night may understate the day's burn. A task body that came from Linear or an agent could carry hostile instructions: it starts only after I marked that exact text ready, and a changed body loses eligibility, but I may mark it ready without reading it; for imported or agent-filed tasks the body is printed first. An auto-spawned agent runs under whatever the mode is: in `away` it can do only what the F20 allow-list lets it and its questions become `assume` tickets I confirm later, and none of that is a sandbox. The hook failing open (a crashed or hung hook; section 7) removes away's denials and the budget stop for that agent, so the unattended agent then has the permission prompts of its normal settings, not Curia's denials; the bound is the hook's own deadline and the `undecided` log line, and the prompts of Claude Code itself still stop an agent with nobody to answer, which is slow rather than unsafe. The spawn checks read the store, not the hook, and do not fail open. `ready_hash` is written only by user-only commands; a same-user process that writes the store directly can forge it (README's same-user limit).
 
 ## 7. Safety and trust boundaries
 
@@ -758,13 +784,14 @@ The rule behind all of these: agents can propose and report, but only I can deci
 - **Hook installs are reversible.** `curia install` backs up `settings.json` first; `curia uninstall` removes only the entries it added.
 - **Modes and bypass (F20; amended, Rulings 147 to 149, which touch "only I decide").** A hook may answer a permission check only because I set a mode with a user-only command. Agents never change settings or modes: there is no MCP tool, no config an agent or a repository can write that sets one, and the hook denies agent edits to Curia's config and data. `bypass` needs the word typed on a terminal that passes the user guard, shows red, always expires, and a saved bypass is never restored by `curia back` or by expiry of `away`. It allows only what the user's own deny, ask and managed rules do not forbid, which stay in force.
 - **Hook enforcement is best-effort.** Claude Code lets a call through when a PreToolUse hook crashes, fails or times out (default 600 seconds). Away's denials, the budget hard stop and the protection of Curia's config (F16, F20, F28) therefore hold only while the hook runs. The bound is the hook's own short deadline, after which it prints no opinion and logs `undecided`; a gap is visible afterward, not prevented.
-- **Agent-filed tasks (F5; amends Ruling 113).** An agent may add to the backlog, with a reason and a cap. It cannot mark a task ready (unless I chose `level = ready`) or spawn any task it or any agent filed. Lineage is recorded for display and audit and no permission rests on it.
+- **Agent-filed tasks (F5; amends Ruling 113).** An agent may add to the backlog, with a reason and a cap. It cannot mark a task ready (unless I chose `level = ready`) or spawn any task it or any agent filed, and a task it filed ready is not eligible for auto-spawn. Lineage is recorded for display and audit and no permission rests on it.
 - **The web view and messages (F26, F18; widens Rulings 127 and 129).** A message that arrives over HTTP is mine only with a device token and a matching Origin, is held until I confirm it, is never auto-sent, and then follows every typing rule. The page is off by default and exposes no transcripts.
-- **Settings layering (F28).** The user file is mine; a repository's `.curia/config.toml` is untrusted data that may only tighten, by a compiled-in per-key table. Anything that gives an agent more power (bypass, auto-send, `agent_filed = ready`, auto-spawn, higher caps, a longer away allow-list, Remote Control, the network surface, an exec path) cannot come from a repository. Everything is stated in Ruling 156.
+- **Auto-spawn (F29; Ruling 159).** Off by default; on only from my user file or `curia auto-spawn on`, never from a repository or an agent. It starts only a task I marked ready at a terminal with its text unchanged (`ready_hash`), through the same spawn path as `curia spawn` (setup approval included), within caps on live agents, starts per day and spacing, never while `bypass` is active, the forecast warns, a limit is reached, memory is over the threshold or the task's budget is spent. Every start and refusal is logged and shown, and `curia auto-spawn off` stops it at once. The checks read the store and do not fail open; the unattended agent is still bound by the hook, which does (see the item above).
+- **Settings layering (F28).** The user file is mine; a repository's `.curia/config.toml` is untrusted data that may only tighten, by a compiled-in per-key table. Anything that gives an agent more power (bypass, auto-send, `agent_filed = ready`, auto-spawn and its caps, higher caps, a longer away allow-list, Remote Control, the network surface, an exec path) cannot come from a repository. Everything is stated in Ruling 156.
 - **Typed lines stay bounded.** `/rc` lines and scheduled or broadcast messages are typed only into a pane whose empty prompt was seen, one unconfirmed line per session, and only into registered agent panes.
 - **Ticket content is data.** Ticket text shown in the popup, notifications or Obsidian export is never executed or interpreted as commands.
 
-## 8. Build order (V1, then F19 to F28)
+## 8. Build order (V1, then F19 to F29)
 
 Everything ships in V1, but it's built in an order where each step is usable by itself and the next step depends on it. The store comes first because every feature reads it.
 
@@ -777,10 +804,10 @@ Everything ships in V1, but it's built in an order where each step is usable by 
 7. **Remote and restore** (F11, F12). ntfy, `curia serve`, `curia restore`.
 8. **Integrations** (F13). Obsidian export, Linear import, cost-lens, Agent Commons, Codex, then Agent Teams grouping and the escalation chain (F14), then the cost layer: cost-lens ingest, forecasting and cache-aware triage (F15 to F17).
 
-**After V1 (amended, Ruling 161): Plan 6, after Plan 5 merges.** F19 to F28 are specified and not built. V1's order above does not change. Within Plan 6 each step is usable alone and depends on the ones before it:
+**After V1 (amended, Ruling 161): Plan 6, after Plan 5 merges.** F19 to F29 are specified and not built. V1's order above does not change. Within Plan 6 each step is usable alone and depends on the ones before it:
 
 9. **Settings and the monitor** (F28, then `curia monitor`). The config layering with its policy table, history and the hook's denial of agent writes come first, because every later feature adds keys to it.
-10. **Modes and away** (F20), then **resources** (F19) and **activity time** (F27), which both read the monitor's process samples, then the budget stop (F16's amendment) and agent-filed tasks (F5's amendment).
+10. **Modes and away** (F20), then **resources** (F19) and **activity time** (F27), which both read the monitor's process samples, then the budget stop (F16's amendment) and agent-filed tasks with `ready_hash` (F5's amendment), then **auto-spawn** (F29), which needs the monitor, modes, resources, the forecast and budget, and the F5 amendment all in place.
 11. **Routing extensions and schedules** (F18's broadcasts, F22), then **Remote Control** (F21).
 12. **Views** (F23, F24, F25), then the **web view** (F26) last, since it widens the network surface and needs every page's data to exist.
 
@@ -795,18 +822,17 @@ Everything ships in V1, but it's built in an order where each step is usable by 
 - Does the Stop-hook delivery path work reliably when an agent has subagents running?
 - Does a separate sidebar pane earn its screen space, or is the popup plus status badge enough?
 - Which agent time counts toward `waiting on me` when one person-hour of attention serves several agents at once? F27 counts each session's wait in full, so the share can exceed what one person could have saved.
-- Should the web settings view (F26, F28) become editable later? It is read-only now (conflict 2 below).
+- Should the web settings view (F26, F28) become editable later? It is read-only now (conflict 1 below).
 - Spawned branches are named `curia/T-<n>-<slug>`, so F27's task type from the branch prefix is `untyped` for every spawned task. Is a type tag on the task wanted?
-- Are 5 filed tasks per agent per day (F5) and 3 per session and 8 in total containers (F19) the right defaults? Both are first guesses (Rulings 141 and 146).
+- Are 5 filed tasks per agent per day (F5) and 3 per session and 8 in total containers (F19) the right defaults? Both are first guesses (Rulings 141 and 146). The same holds for F29's 3 live agents, 5 starts a day and 5 minutes between starts (Ruling 159).
 
-**Conflicts in the 2026-11-19 request.** Written for the safer reading; the owner should confirm. Those now covered by decision tickets D-6 to D-10 are marked.
+**Conflicts in the 2026-11-19 request.** Written for the safer reading; the owner should confirm. Those now covered by decision tickets D-6 to D-10 are marked; D-8 (auto-spawn) is answered and is F29.
 
-1. **`auto-spawn` has no feature.** F28 forbids a repository from enabling "auto-spawn", but no item defines it, and the request adds none. This spec defines no auto-spawn key, and F28's rule and F5's spawn refusal are written to cover one if it is added (Ruling 159). Covered by D-8.
-2. **F26 is "read-only" yet accepts drag, messages and a settings view.** Read as: read-only except task moves between backlog, ready and dropped and confirmed messages, both behind a device token. Covered by D-9. The settings view on the web page is read-only (F28 says "a settings view" without saying editable); editing from a phone would let a stolen token change caps and `auto_send`.
-3. **F5 "only the owner marks backlog tasks ready" against `level = ready`.** At `ready` the agent's task is created ready by my standing setting. To keep Ruling 113's intent, an agent can still not spawn any agent-filed task (Ruling 141). Covered by D-7.
-4. **F20 away "wait for ready" has no signal.** There is no MCP tool for it in the request. Ready means the agent's turn ended after the message was confirmed (Ruling 148). An agent that never ends its turn is waited on for 10 minutes and then skipped.
-5. **F21 asks for `/rc` typed into panes, and typing needs a confirmable line.** A slash command carries no message id, so the confirmation rule differs for it (Ruling 150). Covered by D-10; D-6 covers the bypass wording in F20.
-6. **F22 schedules and F20 bypass or away together.** A scheduled message types into panes unattended under whatever mode is set. Nothing in the request forbids it, so the spec allows it and says so in both Risks sections.
+1. **F26 is "read-only" yet accepts drag, messages and a settings view.** Read as: read-only except task moves between backlog, ready and dropped and confirmed messages, both behind a device token. Covered by D-9. The settings view on the web page is read-only (F28 says "a settings view" without saying editable); editing from a phone would let a stolen token change caps and `auto_send`.
+2. **F5 "only the owner marks backlog tasks ready" against `level = ready`.** At `ready` the agent's task is created ready by my standing setting. To keep Ruling 113's intent, an agent can still not spawn any agent-filed task (Ruling 141), and auto-spawn (F29) takes one only after I mark it ready at a terminal. Covered by D-7.
+3. **F20 away "wait for ready" has no signal.** There is no MCP tool for it in the request. Ready means the agent's turn ended after the message was confirmed (Ruling 148). An agent that never ends its turn is waited on for 10 minutes and then skipped.
+4. **F21 asks for `/rc` typed into panes, and typing needs a confirmable line.** A slash command carries no message id, so the confirmation rule differs for it (Ruling 150). Covered by D-10; D-6 covers the bypass wording in F20.
+5. **F22 schedules and F20 bypass or away together.** A scheduled message types into panes unattended under whatever mode is set. Nothing in the request forbids it, so the spec allows it and says so in both Risks sections.
 
 **Third-party facts, checked against the documentation on 2026-11-19** (code.claude.com/docs, docs.docker.com, github.com/paperclipai/paperclip).
 
