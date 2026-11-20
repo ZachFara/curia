@@ -367,7 +367,7 @@ func spawnCheckIdle(ctx context.Context, st *store.Store, tm tmux.Client, cfg co
 // lists it and it is not a recycled id (lifecyclePaneStateOf), or it is
 // listed and cannot be told apart.
 func spawnPaneOpen(panes []tmux.Pane, perr error, t model.Task) bool {
-	switch lifecyclePaneStateOf(panes, perr, t.Pane, "", t.LaunchedAt) {
+	switch lifecycleTaskPaneState(panes, perr, t) {
 	case lifecyclePaneOurs:
 		return true
 	case lifecyclePaneUnknown:
@@ -611,7 +611,7 @@ func spawnLink(ctx context.Context, st *store.Store, tm tmux.Client, t model.Tas
 		keep = ""
 	}
 	stored, err := st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
-		cur.Pane, cur.Team, cur.AgentModel, cur.UpdatedAt = pane.ID, o.Team, keep, clock()
+		cur.Pane, cur.PaneSocket, cur.Team, cur.AgentModel, cur.UpdatedAt = pane.ID, pane.Socket, o.Team, keep, clock()
 		if o.Agent != "" {
 			cur.Agent = o.Agent
 		}

@@ -45,6 +45,7 @@ func spawnNewFixture(t *testing.T) *spawnFixture {
 	t.Helper()
 	userTerminalAs(t, true) // the user, at a terminal
 	f := &spawnFixture{t: t, db: hookHome(t), fake: useFakeTmux(t)}
+	f.fake.Socket = "/tmp/tmux-501/first" // the server the task's windows open on
 	f.start = time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	f.now = f.start
 	f.repo = worktreeRepo(t, "api-server")
