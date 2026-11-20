@@ -40,7 +40,8 @@ func init() {
 			"click jumps to the session's pane (a team's: the member most in need of you)\n" +
 			"and closes the popup, d opens the session's decisions to answer them (not\n" +
 			"inside an agent session) and r the review waiting for its task (read-only\n" +
-			"inside an agent session), t opens\n" +
+			"inside an agent session), i a read-only detail of the session (curia show),\n" +
+			"t opens\n" +
 			"the task board (n there spawns a task), / filters on repo, branch, last\n" +
 			"update and member name, x then y kills the pane, q or Esc quits. From 100\n" +
 			"columns COST and CACHE show each session's cost and prompt cache; b sorts\n" +

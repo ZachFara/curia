@@ -1057,6 +1057,7 @@ var userOnlyCommands = map[string][]string{
 	"curia routing reset":   {},
 	"curia setup approve":   {"T-1"},
 	"curia pause":           {"T-1"},
+	"curia show":            {"s1"}, // the transcript can hold anything the agent saw: no agent reads another session's
 	"curia resume":          {"T-1"},
 	"curia config set":      {"notify_bell", "true"},
 	"curia config edit":     {},
