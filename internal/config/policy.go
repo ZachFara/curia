@@ -55,4 +55,7 @@ var keyPolicy = map[string]Policy{
 	"activity.idle_cap":      PolicyNone,
 	"activity.task_types":    PolicyNone,
 	"activity.rules":         PolicyRepoRules, // measurement only (F27, F28)
+	"resources.enabled":      PolicyNone,      // the spec's F28 table: nothing
+	"resources.interval":     PolicyNone,      // monitor.* and resources.*: a repository cannot change when Curia samples
+	"monitor.autostart":      PolicyNone,
 }

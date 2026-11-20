@@ -291,7 +291,7 @@ func TestMigrationOnPlan3Database(t *testing.T) {
 	if names := migrationNames(t, db); !reflect.DeepEqual(names, []string{
 		"0001_init.sql", "0002_decisions.sql",
 		"0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql",
-		"0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql",
+		"0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql", "0014_resource_samples.sql",
 	}) {
 		t.Errorf("migrations = %v, want 0001 to 0009 (both 0005 files)", names)
 	}
