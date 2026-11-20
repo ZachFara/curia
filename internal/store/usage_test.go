@@ -188,8 +188,8 @@ func TestMigrationAddsCostTables(t *testing.T) {
 	if err := ftsIntegrity(db); err != nil {
 		t.Errorf("decisions_fts integrity-check: %v", err)
 	}
-	if n := countMigrations(t, path); n != 9 {
-		t.Errorf("schema_migrations has %d rows, want 9", n)
+	if n := countMigrations(t, path); n != len(allMigrations) {
+		t.Errorf("schema_migrations has %d rows, want %d", n, len(allMigrations))
 	}
 }
 
@@ -282,7 +282,7 @@ func TestMigrationOnPlan4Database(t *testing.T) {
 	s := open(t, path)
 	if names := migrationNames(t, db); !reflect.DeepEqual(names, []string{
 		"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql",
-		"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0009_session_checked_cwd.sql",
+		"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_context_live.sql", "0009_session_checked_cwd.sql",
 	}) {
 		t.Errorf("migrations = %v, want 0001 to 0009 (both 0005 files)", names)
 	}
@@ -1605,4 +1605,30 @@ func BenchmarkIngest(b *testing.B) {
 	slices.Sort(durations)
 	b.ReportMetric(float64(durations[len(durations)/2].Microseconds()), "p50-µs")
 	b.ReportMetric(float64(durations[len(durations)*95/100].Microseconds()), "p95-µs")
+}
+
+func TestIngestContextWindowOwnsContextFields(t *testing.T) {
+	s := open(t, dbPath(t))
+	usageSession(t, s, "s1")
+	usageIngest(t, s, store.Reading{SessionID: "s1", At: usageNow, ContextSize: 1_000_000, ContextPct: 4}, usageNow)
+	// A hook event after the refresh carries the table's window and the transcript's count.
+	upsert(t, s, model.Session{ID: "s1", Agent: "claude", State: model.StateWorking, ContextUsed: 500_000, ContextMax: 200_000})
+	got := get(t, s, "s1")
+	if got.ContextMax != 1_000_000 || got.ContextUsed*100/got.ContextMax != 4 {
+		t.Errorf("used %d max %d, want 4%% of 1000000", got.ContextUsed, got.ContextMax)
+	}
+	// Hostile readings change nothing.
+	for _, r := range []store.Reading{{ContextSize: -1, ContextPct: 5}, {ContextSize: 1e12, ContextPct: 5}, {ContextSize: 1_000_000, ContextPct: 250}} {
+		r.SessionID, r.At = "s1", usageNow
+		_, _ = s.Ingest(context.Background(), r, usageNow)
+	}
+	if again := get(t, s, "s1"); again.ContextMax != 1_000_000 || again.ContextUsed != got.ContextUsed {
+		t.Errorf("hostile reading changed %d/%d", again.ContextUsed, again.ContextMax)
+	}
+	// A session with no status-line data still takes the hook's values.
+	usageSession(t, s, "s2")
+	upsert(t, s, model.Session{ID: "s2", Agent: "claude", State: model.StateWorking, ContextUsed: 5, ContextMax: 200_000})
+	if g := get(t, s, "s2"); g.ContextUsed != 5 || g.ContextMax != 200_000 {
+		t.Errorf("fallback: %d/%d", g.ContextUsed, g.ContextMax)
+	}
 }

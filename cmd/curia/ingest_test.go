@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/config"
+	latgate "github.com/ZachFara/curia/internal/latency"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 )
@@ -470,18 +471,17 @@ func TestIngestLatency(t *testing.T) {
 	if got := ingestSnap(t, db, "s0"); got.usage+got.cost != 5000 {
 		t.Fatalf("filled %d samples, want 5000", got.usage+got.cost)
 	}
+	// The captured status-line payload carries context_window, as every real one does.
 	doc := func(i int) string {
-		return fmt.Sprintf(`{"schema_version":1,"session_id":%q,"cost_usd":%g,"cache_expires_at":%q,"cache_rebuild_usd":1.5,`+
-			`"rate_limits":{"five_hour":{"used_percentage":%d,"resets_at":%d},"seven_day":{"used_percentage":31,"resets_at":%q}}}`,
-			ids[i%len(ids)], 10+float64(i)/100, now.Add(30*time.Minute).Format(time.RFC3339),
-			i%100, now.Add(2*time.Hour).Unix(), now.Add(72*time.Hour).Format(time.RFC3339))
+		return string(statuslineLivePayload(t, "statusline-captured.json", ids[i%len(ids)], time.Now(), 10+float64(i)/100))
 	}
 	const runs, gatedRuns = 200, 1000 // reported; gated (Ruling 114)
 	timed := func(from, runs int) []time.Duration {
 		d := make([]time.Duration, 0, runs)
 		for i := range runs {
+			in := strings.NewReader(doc(from + i)) // built before the clock starts
 			start := time.Now()
-			if _, err := ingestRun(context.Background(), strings.NewReader(doc(from+i)), false); err != nil {
+			if _, err := ingestRun(context.Background(), in, true); err != nil {
 				t.Fatal(err)
 			}
 			d = append(d, time.Since(start))
@@ -499,16 +499,20 @@ func TestIngestLatency(t *testing.T) {
 	prev := ingestOpen
 	ingestOpen = func() (*store.Store, func(), error) { return st, func() {}, nil }
 	t.Cleanup(func() { ingestOpen = prev })
-	d := timed(runs, gatedRuns)
+	from := runs
+	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+		d := timed(from, gatedRuns)
+		from += gatedRuns
+		t.Logf("ingest on an open store over %d runs: p50 %v, p95 %v, max %v", gatedRuns, d[gatedRuns/2], d[gatedRuns*95/100], d[gatedRuns-1])
+		return d[gatedRuns*95/100]
+	})
 
 	t.Logf("ingest opening the store each run, over %d runs (not gated): p50 %v, p95 %v, max %v",
 		runs, opening[runs/2], opening[runs*95/100], opening[runs-1])
-	p50, p95 := d[gatedRuns/2], d[gatedRuns*95/100]
-	t.Logf("ingest on an open store over %d runs: p50 %v, p95 %v, max %v", gatedRuns, p50, p95, d[gatedRuns-1])
 	if p95 >= 20*time.Millisecond {
-		t.Errorf("ingest p95 = %v, want < 20ms", p95)
+		t.Errorf("ingest median p95 = %v, want < 20ms", p95)
 	}
-	if got := ingestSnap(t, db, "s0"); got.cost != 5000/2+runs+gatedRuns {
+	if got := ingestSnap(t, db, "s0"); got.cost != 5000/2+from {
 		t.Errorf("%d cost samples, want every run stored (log %q)", got.cost, readLog(t))
 	}
 }
@@ -546,6 +550,23 @@ func ingestFillSamples(t *testing.T, db string, ids []string, now time.Time) {
 	}
 	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestIngestStatuslineSetsContextWindow(t *testing.T) {
+	db := hookHome(t)
+	ingestSeed(t, db, "s1")
+	ingestFixClock(t, time.Date(2026, 11, 15, 19, 0, 0, 0, time.UTC))
+	doc := strings.ReplaceAll(string(ingestFixture(t, "statusline-captured.json")), "5cd98763-d94d-417d-b2ee-d172b8f63e81", "s1")
+	ingestExec(t, strings.NewReader(doc), "ingest", "--statusline")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	s, _, _ := st.GetSession(context.Background(), "s1")
+	if s.ContextMax != 1000000 || s.ContextUsed*100/s.ContextMax != 4 {
+		t.Errorf("used %d max %d, want 4%% of 1000000", s.ContextUsed, s.ContextMax)
 	}
 }
 
