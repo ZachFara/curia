@@ -184,6 +184,9 @@ type Model struct {
 	confirmAt  time.Time       // when a y was taken, waiting out burstGap before it pauses; zero when none
 	confirmSeq int             // the pauseConfirmMsg the taken y waits for
 	pausing    string          // the task a pause in flight is for; "" when none
+
+	inbox    func() tea.Model // builds the inbox, the popup's default view; nil: none
+	viaInbox bool             // the shown child was opened from the inbox, which a closing decide or review view returns to
 }
 
 // rowKind is what a row of the table stands for.
@@ -354,6 +357,46 @@ func (m Model) WithoutReview(why string) Model {
 	return m
 }
 
+// WithInbox returns m opening on the inbox: open builds it, Tab on the
+// session list returns to it, and the decide and review views it opens come
+// back to it when they close.
+func (m Model) WithInbox(open func() tea.Model) Model {
+	m.inbox = open
+	return m
+}
+
+// openInboxMsg shows the inbox as the first view.
+type openInboxMsg struct{}
+
+func (m Model) openInbox() (Model, tea.Cmd) {
+	if m.inbox == nil || m.mode != ModePopup {
+		return m, nil
+	}
+	m.viaInbox = true
+	return m.showChild(m.inbox())
+}
+
+// openFromInbox opens the decide or review view for an item the inbox has
+// just found still waiting, by the same factories d and r use, or tells the
+// inbox why not (read-only, inside an agent session).
+func (m Model) openFromInbox(it InboxItem) (Model, tea.Cmd) {
+	switch {
+	case it.Kind == InboxReview && m.review != nil:
+		return m.showChild(m.review(it.TaskID))
+	case it.Kind == InboxReview:
+		return m.tellInbox(cmp.Or(m.noReview, noticeNoReview))
+	case m.open != nil:
+		return m.showChild(m.open(it.SessionID))
+	}
+	return m.tellInbox(cmp.Or(m.noAnswer, noticeNoAnswer))
+}
+
+func (m Model) tellInbox(text string) (Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.child, cmd = m.child.Update(InboxNoticeMsg{Text: text})
+	return m, wrapChild(m.childGen, cmd)
+}
+
 // WithPause returns m with the P key enabled in the popup: while the
 // Budget suggests a task to pause, a notice line offers it, P asks to
 // confirm and a y pauses it through Source.Pause. Without it, P says why
@@ -371,6 +414,9 @@ func (m Model) WithoutPause(why string) Model {
 
 // Init starts the first refresh.
 func (m Model) Init() tea.Cmd {
+	if m.inbox != nil {
+		return func() tea.Msg { return openInboxMsg{} }
+	}
 	return m.refresh()
 }
 
@@ -422,6 +468,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateChild(msg)
 	}
 	switch msg := msg.(type) {
+	case openInboxMsg:
+		return m.openInbox()
 	case refreshMsg:
 		if msg.chain != m.chain {
 			return m, nil
@@ -589,11 +637,26 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 		msg = cm.msg
 	}
 	switch msg := msg.(type) {
+	case InboxOpenMsg:
+		return m.openFromInbox(msg.Item)
+	case InboxClosedMsg:
+		m.child, m.viaInbox, m.chain = nil, false, m.chain+1
+		if msg.Board {
+			return m.openBoard("")
+		}
+		return m, m.refresh()
+	case DecideClosedMsg, ReviewClosedMsg:
+		if m.viaInbox && m.inbox != nil { // back to the list the item came from
+			return m.showChild(m.inbox())
+		}
+		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
+		m.chain++
+		return m, m.refresh()
 	case DetailJumpMsg:
 		m.child, m.chain = nil, m.chain+1
 		next, cmd := m.jump()
 		return next, tea.Batch(cmd, next.refresh())
-	case DecideClosedMsg, BoardClosedMsg, ReviewClosedMsg, DetailClosedMsg:
+	case BoardClosedMsg, DetailClosedMsg:
 		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
 		m.chain++
 		return m, m.refresh()
@@ -883,6 +946,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.filterKey(msg), nil
 	case msg.Paste: // pasted text is never a command
 		return m, nil
+	}
+	if msg.Type == tea.KeyTab {
+		return m.openInbox()
 	}
 	return m.commandKey(msg)
 }
