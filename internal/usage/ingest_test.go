@@ -479,3 +479,22 @@ func FuzzParsers(f *testing.F) {
 		}
 	})
 }
+
+func TestFromStatusLineContextWindow(t *testing.T) {
+	d, err := FromStatusLine(fixture(t, "statusline-captured.json"), testNow)
+	require.NoError(t, err)
+	assert.Equal(t, 1000000, d.ContextSize)
+	assert.Equal(t, 4, d.ContextPct)
+	d, err = FromStatusLine(fixture(t, "statusline-captured-startup.json"), testNow)
+	require.NoError(t, err)
+	assert.Equal(t, 0, d.ContextSize, "null percentage: no context reading")
+	for _, cw := range []string{
+		`{"context_window_size":-1,"used_percentage":5}`, `{"context_window_size":0,"used_percentage":5}`,
+		`{"context_window_size":1e12,"used_percentage":5}`, `{"context_window_size":"1000000","used_percentage":5}`,
+		`{"context_window_size":1000000,"used_percentage":250}`, `{"context_window_size":1000000,"used_percentage":"5"}`,
+	} {
+		d, err = FromStatusLine([]byte(`{"session_id":"s1","context_window":`+cw+`}`), testNow)
+		require.NoError(t, err, cw)
+		assert.Equal(t, 0, d.ContextSize, cw)
+	}
+}

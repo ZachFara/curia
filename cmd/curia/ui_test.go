@@ -358,6 +358,22 @@ func TestBoardSourceSpawnDoesNotWait(t *testing.T) {
 	}
 }
 
+// The board's line carries the spawn's note (the cheaper model under a
+// limit forecast), on the same one line.
+func TestBoardSourceSpawnShowsNote(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Now", "")
+	f.spawnWarning()
+	line, err := uiBoardSource(f).Spawn(context.Background(), "T-1")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if !strings.HasPrefix(line, "T-1 launched in ") || !strings.HasSuffix(line, "; "+spawnWarningNote("T-1")) ||
+		strings.Contains(line, "\n") {
+		t.Errorf("line = %q, want the launch and then the note %q on one line", line, spawnWarningNote("T-1"))
+	}
+}
+
 // A setup script that is not approved is skipped by spawn, and the board's
 // line says so.
 func TestBoardSourceSpawnShowsSkippedSetup(t *testing.T) {

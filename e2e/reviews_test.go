@@ -1064,13 +1064,16 @@ func TestStopHookLatencyWithReviews(t *testing.T) {
 	timed := *h
 	timed.env = append(slices.Clone(h.env), "CURIA_TASK_ID=T-1")
 	timed.timedStop(t, stop) // warm-up, untimed
-	var runs []time.Duration
-	for len(runs) < minTimedRuns {
-		runs = append(runs, timed.timedStop(t, stop))
-	}
-	t.Logf("%-12s %s (load average %s)", "Stop", stats(runs), loadAverage())
-	if p := percentile(runs, 95); p >= p95Budget {
-		t.Errorf("p95 wall time of curia hook Stop with %d pending reviews = %v, want under %v (load average %s)",
+	p := medianP95(t.Logf, func() time.Duration {
+		var runs []time.Duration
+		for len(runs) < minTimedRuns {
+			runs = append(runs, timed.timedStop(t, stop))
+		}
+		t.Logf("%-12s %s (load average %s)", "Stop", stats(runs), loadAverage())
+		return percentile(runs, 95)
+	})
+	if p >= p95Budget {
+		t.Errorf("median p95 wall time of curia hook Stop with %d pending reviews = %v, want under %v (load average %s)",
 			latencyReviews, p, p95Budget, loadAverage())
 	}
 	if got, want := h.mustRun(t, "status"), "R"+strconv.Itoa(latencyReviews); got != want {

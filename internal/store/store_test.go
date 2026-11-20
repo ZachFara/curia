@@ -164,11 +164,11 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	open(t, path)
-	if n := countMigrations(t, path); n != 10 {
-		t.Errorf("schema_migrations has %d rows, want 10", n)
+	if n := countMigrations(t, path); n != len(allMigrations) {
+		t.Errorf("schema_migrations has %d rows, want %d", n, len(allMigrations))
 	}
 	names := migrationNames(t, rawDB(t, path))
-	if want := []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0009_decision_near_match.sql"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("migration names = %v, want %v", names, want)
 	}
 }
@@ -178,13 +178,19 @@ func TestOpenIsIdempotent(t *testing.T) {
 // Plan 3's send limits, merged with their names kept) apply in a fixed order.
 var allMigrations = []string{
 	"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql",
-	"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0009_decision_near_match.sql",
+	"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql",
 }
 
 // plan3Applied is what a Plan 3 binary (with the fix wave) applies.
 var plan3Applied = []string{
 	"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_send_limits.sql",
 }
+
+// plan5Applied and plan6Applied are what each branch's binary applied before the merge.
+var (
+	plan5Applied = []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_context_live.sql", "0009_session_checked_cwd.sql"}
+	plan6Applied = []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0009_decision_near_match.sql"}
+)
 
 // migratedDatabase builds, at path, a database with exactly the migrations
 // named applied and recorded, as a binary built with only those files
@@ -265,8 +271,14 @@ func TestBothMigrationsNumberedFive(t *testing.T) {
 	}{
 		{"fresh", nil, allMigrations},
 		{"plan 4 database", allMigrations[:5], allMigrations},
-		{"plan 3 database", plan3Applied, append(slices.Clone(plan3Applied), "0005_reviews.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0009_decision_near_match.sql")},
+		{"plan 3 database", plan3Applied, append(slices.Clone(plan3Applied), "0005_reviews.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql")},
 		{"plan 4 database with both 0005 files", allMigrations[:6], allMigrations},
+		// 0008 and 0009 each exist twice (plan-5: context_live, checked_cwd;
+		// plan-6: config_revisions, decision_near_match). They touch different
+		// tables or columns, so their order does not matter; a store that ran
+		// either branch's set gets the other branch's two files.
+		{"plan-5 database", plan5Applied, append(slices.Clone(plan5Applied), "0008_config_revisions.sql", "0009_decision_near_match.sql")},
+		{"plan-6 database", plan6Applied, append(slices.Clone(plan6Applied), "0008_context_live.sql", "0009_session_checked_cwd.sql")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			path := dbPath(t)
@@ -613,8 +625,8 @@ func TestConcurrentOpenOfFreshFile(t *testing.T) {
 	for round := range 10 {
 		path := filepath.Join(t.TempDir(), fmt.Sprintf("round%d.db", round))
 		openAndUpsertConcurrently(t, path, openers)
-		if n := countMigrations(t, path); n != 10 {
-			t.Errorf("round %d: schema_migrations has %d rows, want 10", round, n)
+		if n := countMigrations(t, path); n != len(allMigrations) {
+			t.Errorf("round %d: schema_migrations has %d rows, want %d", round, n, len(allMigrations))
 		}
 		got, err := open(t, path).ListSessions(context.Background(), store.ListFilter{})
 		if err != nil {
