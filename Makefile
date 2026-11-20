@@ -43,13 +43,15 @@ GO_FILES = $$(git ls-files --cached --others --exclude-standard -- '*.go')
 check:
 	@scripts/with-test-lock.sh $(MAKE) --no-print-directory check-gates
 
-## check-fast: the pre-commit gate, no lock: static gates, build, tests of the staged packages only
-## (no latency tests, no full suite; CI's `make check` runs those)
+## check-fast: the pre-commit gate, no lock: static checks and build only. No tests: run `make test-staged` or a narrow `go test -run` yourself; CI runs every test and is required to merge.
 check-fast: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script
 	@echo "==> go build ./..."
 	@go build ./...
-	@scripts/staged-tests.sh
 	@echo "==> make check-fast: all gates passed"
+
+## test-staged: race-test the packages the staged files touch (what check-fast used to run; run by hand before committing)
+test-staged:
+	@scripts/staged-tests.sh
 
 ## check-gates: the gates themselves; `check` runs them under the worktree lock
 check-gates: tools fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test

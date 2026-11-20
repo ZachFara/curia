@@ -612,11 +612,11 @@ func TestIngestIsNotActivity(t *testing.T) {
 	}
 }
 
-func TestIngestUnknownSessionKeepsUsageOnly(t *testing.T) {
+func TestIngestUnknownSessionStoresNothing(t *testing.T) {
 	path := dbPath(t)
 	s := open(t, path)
 	res := usageIngest(t, s, usageFull("ghost", usageNow), usageNow)
-	if want := (store.IngestResult{SessionFound: false, UsageAdded: 2}); res != want {
+	if want := (store.IngestResult{SessionFound: false}); res != want {
 		t.Errorf("result = %+v, want %+v", res, want)
 	}
 	if _, found, err := s.GetSession(context.Background(), "ghost"); err != nil || found {
@@ -625,10 +625,80 @@ func TestIngestUnknownSessionKeepsUsageOnly(t *testing.T) {
 	if costs := costRows(t, path); len(costs) != 0 {
 		t.Errorf("cost samples = %+v, want none", costs)
 	}
-	usage := usageRows(t, path)
-	if len(usage) != 2 || usage[0].SessionID != "ghost" || usage[1].SessionID != "ghost" {
-		t.Errorf("usage samples = %+v, want both windows from ghost", usage)
+	if usage := usageRows(t, path); len(usage) != 0 {
+		t.Errorf("usage samples = %+v, want none: only a known session's readings are kept", usage)
 	}
+	usageSession(t, s, "ghost") // the first hook arrives: the same reading is stored
+	if res = usageIngest(t, s, usageFull("ghost", usageNow), usageNow); res.UsageAdded != 2 || res.CostAdded != 1 {
+		t.Errorf("after the session exists: %+v, want 2 usage and 1 cost sample", res)
+	}
+}
+
+// TestIngestCapsUsageSamples and TestIngestCapsCostSamples: a stream of
+// valid, changing readings for a known session cannot grow the tables past
+// their bounds, whatever the times (inside the contract's day) say. Each
+// starts over the bound and shows ingests bring it back, keeping the newest.
+func TestIngestCapsUsageSamples(t *testing.T) {
+	t.Parallel()
+	path, s := capSetup(t)
+	capFill(t, path, `INSERT INTO usage_samples (at, window, used_pct, resets_at, session_id)
+		SELECT ?, 'five_hour', (x % 100), NULL, 's1' FROM c`, store.UsageMaxRows)
+	capIngest(t, s)
+	if n := capCount(t, path, "usage_samples"); n > store.UsageMaxRows+8 {
+		t.Errorf("usage_samples %d rows, want at most %d", n, store.UsageMaxRows+8)
+	}
+	if rows := usageRows(t, path); rows[len(rows)-1].UsedPct != 7 {
+		t.Errorf("newest usage sample = %+v, want the last reading kept", rows[len(rows)-1])
+	}
+}
+
+func TestIngestCapsCostSamples(t *testing.T) {
+	t.Parallel()
+	path, s := capSetup(t)
+	capFill(t, path, `INSERT INTO cost_samples (at, session_id, cost_usd) SELECT ?, 's1', x FROM c`, store.CostMaxRows)
+	capIngest(t, s)
+	if n := capCount(t, path, "cost_samples"); n > store.CostMaxRows+8 {
+		t.Errorf("cost_samples %d rows, want at most %d", n, store.CostMaxRows+8)
+	}
+}
+
+func capSetup(t *testing.T) (string, *store.Store) {
+	t.Helper()
+	path := dbPath(t)
+	s := open(t, path)
+	usageSession(t, s, "s1")
+	return path, s
+}
+
+// capFill inserts bound+700 rows of fill (a statement over the CTE c with
+// one parameter, the time) an hour before usageNow.
+func capFill(t *testing.T, path, fill string, bound int) {
+	t.Helper()
+	at := usageNow.Add(-time.Hour).UTC().Format("2006-01-02T15:04:05.000000000Z")
+	if _, err := rawDB(t, path).Exec(`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < ?) `+fill, bound+700, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// capIngest runs 8 readings for s1 (each ingest deletes at most PruneBatch).
+func capIngest(t *testing.T, s *store.Store) {
+	t.Helper()
+	for i := range 8 {
+		r := store.Reading{
+			SessionID: "s1", At: usageNow, CostUSD: usageF(5e4 + float64(i)),
+			Limits: []model.UsageSample{{Window: model.WindowFiveHour, UsedPct: float64(i), ResetsAt: usageNow.Add(time.Hour)}},
+		}
+		usageIngest(t, s, r, usageNow)
+	}
+}
+
+func capCount(t *testing.T, path, table string) int {
+	t.Helper()
+	var n int
+	if err := rawDB(t, path).QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func TestIngestSkipsRepeatedReading(t *testing.T) {
@@ -1028,6 +1098,9 @@ func TestConcurrentIngestsMergeIntoOneSeries(t *testing.T) {
 	path := dbPath(t)
 	hs := handles(t, path, 3)
 	sessions := []string{"s1", "s2", "s3"}
+	for _, id := range sessions {
+		usageSession(t, hs[0], id) // readings are stored for known sessions only
+	}
 	const each = 10
 	errs := make([]error, len(sessions))
 	start := make(chan struct{})
@@ -1098,6 +1171,8 @@ func TestUsageSinceOrderAndBound(t *testing.T) {
 	}
 	now := usageNow.Add(time.Hour)
 	resets := usageNow.Add(3 * time.Hour)
+	usageSession(t, s, "a")
+	usageSession(t, s, "b")
 	for _, r := range []store.Reading{
 		{SessionID: "a", At: usageNow.Add(10 * time.Minute), Limits: five(3, resets)},
 		{SessionID: "a", At: usageNow, Limits: five(1, resets)},
