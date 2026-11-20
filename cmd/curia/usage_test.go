@@ -25,12 +25,23 @@ func usageSeries(t *testing.T, db string, reset time.Time, pcts ...float64) {
 		t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
+	usageFeedSession(t, st, "feed")
 	for i, p := range pcts {
 		at := fleetNow.Add(-agos[i])
 		r := store.Reading{SessionID: "feed", At: at, Limits: []model.UsageSample{{Window: model.WindowFiveHour, UsedPct: p, ResetsAt: reset}}}
 		if _, err := st.Ingest(context.Background(), r, at); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// usageFeedSession stores the ended session whose ingests carry a test's
+// usage readings: a reading is stored only for a session that exists.
+func usageFeedSession(t *testing.T, st *store.Store, id string) {
+	t.Helper()
+	sess := model.Session{ID: id, State: model.StateEnded, UpdatedAt: fleetNow.Add(-24 * time.Hour)}
+	if err := st.UpsertSession(context.Background(), sess); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -171,6 +182,7 @@ func TestUsageNothingRecent(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := fleetNow.Add(-3 * time.Hour)
+	usageFeedSession(t, st, "feed")
 	r := store.Reading{SessionID: "feed", At: at, Limits: []model.UsageSample{{Window: model.WindowFiveHour, UsedPct: 5}}}
 	if _, err = st.Ingest(context.Background(), r, at); err != nil {
 		t.Fatal(err)

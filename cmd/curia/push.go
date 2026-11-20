@@ -19,6 +19,7 @@ import (
 	"github.com/ZachFara/curia/internal/notify"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/usage"
 )
 
 // The push outbox's timing (plan section 4.7).
@@ -287,7 +288,12 @@ func (f pushFlusher) stakes(ctx context.Context, d model.Decision) string {
 	return ""
 }
 
-// pushStakes is decision.Stakes(t, now) when t's cache values are sane, else "".
+// pushStakes is decision.Stakes(t, now) when t's cache values are sane, else
+// "". When the rebuild's dollar figure is unknown (Ruling P5-R2: the status
+// line gives tokens only) but its tokens are known, the line shows the
+// tokens as the dashboard does (usage.TokensCell) where it would show the
+// dollars, or the cold line's size where the context size is unknown; with
+// neither the line names no cost.
 func pushStakes(t model.Ticket, now time.Time) string {
 	switch {
 	case t.CacheExpiresAt.IsZero(),
@@ -296,7 +302,19 @@ func pushStakes(t model.Ticket, now time.Time) string {
 		math.IsNaN(t.CacheRebuildUSD), t.CacheRebuildUSD < 0, t.CacheRebuildUSD > pushStakesMaxUSD:
 		return ""
 	}
-	return decision.Stakes(t, now)
+	line := decision.Stakes(t, now)
+	known := t.CacheRecacheTokens > 0 && t.CacheRecacheTokens <= pushStakesMaxTokens
+	if !known || math.Round(t.CacheRebuildUSD*100) > 0 {
+		return line
+	}
+	tokens := usage.TokensCell(int(t.CacheRecacheTokens), true)
+	switch {
+	case t.CacheExpiresAt.After(now): // warm: decision.Stakes left the unknown dollars out
+		return line + " (rebuild ≈ " + tokens + ")"
+	case t.ContextUsed == 0: // cold, and no context size to name
+		return "cache cold: next turn re-writes ~" + tokens
+	}
+	return line
 }
 
 // buildReview is build for a review push.

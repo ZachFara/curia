@@ -547,3 +547,53 @@ func TestStatuslineProcessLatency(t *testing.T) {
 		t.Errorf("log = %q, want none", b)
 	}
 }
+
+// TestStatuslineUnknownSessionPrintsStoresNothing: the status line may run
+// before the session's first hook, and anything can run it with any id. It
+// prints its line and exits 0, stores nothing and creates no session row;
+// the problem is logged once however many runs repeat it. The first
+// seconds of samples of a new session are lost: that is accepted.
+func TestStatuslineUnknownSessionPrintsStoresNothing(t *testing.T) {
+	db := hookHome(t)
+	ingestSeed(t, db, "other")
+	ingestFixClock(t, statuslineNow)
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	ingestLogAt(t, &now)
+	prev := statuslineLimit
+	statuslineLimit = 5 * time.Second // a loaded machine must not turn this into a timeout
+	t.Cleanup(func() { statuslineLimit = prev })
+	for range 5 {
+		stdout, stderr := ingestExec(t, bytes.NewReader(ingestFixture(t, "statusline-built.json")), "statusline")
+		if stdout != statuslineBuiltText+"\n" || stderr != "" {
+			t.Fatalf("stdout %q stderr %q, want the text and nothing else", stdout, stderr)
+		}
+		now = now.Add(300 * time.Millisecond)
+	}
+	if got := ingestSnap(t, db, "built-session-1"); got.found || got.usage != 0 || got.cost != 0 {
+		t.Errorf("unknown session stored %+v, want nothing", got)
+	}
+	if log := readLog(t); len(log) != 1 || !strings.Contains(log[0], "unknown session") {
+		t.Errorf("log = %q, want one line about an unknown session", log)
+	}
+}
+
+// TestStatuslineLogBoundedWhenStoreBroken: a store that cannot be opened is
+// one log line per interval, not one per run.
+func TestStatuslineLogBoundedWhenStoreBroken(t *testing.T) {
+	db := hookHome(t)
+	ingestFixClock(t, statuslineNow)
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	ingestLogAt(t, &now)
+	ingestBadConfig(t, db)
+	t.Setenv("CURIA_DB", filepath.Join(t.TempDir(), "none", "curia.db"))
+	for range 20 {
+		stdout, _ := ingestExec(t, bytes.NewReader(ingestFixture(t, "statusline-built.json")), "statusline")
+		if stdout != statuslineBuiltText+"\n" {
+			t.Fatalf("stdout %q", stdout)
+		}
+		now = now.Add(300 * time.Millisecond)
+	}
+	if log := readLog(t); len(log) != 1 {
+		t.Errorf("log = %q, want one line", log)
+	}
+}
