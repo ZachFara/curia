@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/deliver"
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
@@ -67,11 +68,17 @@ func sendCheckPane(pane string) error {
 }
 
 // sendPaneSession is the one live session (neither ended nor stale) bound to
-// pane. It refuses with a sendPaneError when pane is not a pane id, when no
+// pane on the caller's own tmux server (Ruling 133: a pane id is matched only
+// with its server; share one helper with show.go's showPane when plan-6
+// merges). It refuses with a sendPaneError when pane is not a pane id, when no
 // live session is in it, and (shared, see sendShared) when more than one is.
 func sendPaneSession(ctx context.Context, st *store.Store, pane string) (model.Session, error) {
 	if err := sendCheckPane(pane); err != nil {
 		return model.Session{}, err
+	}
+	socket := seenSocket(os.Getenv("TMUX"))
+	if socket == "" {
+		return model.Session{}, sendPaneError{msg: "a pane id names a pane on your tmux server, and TMUX is not set here: use a session or task target instead"}
 	}
 	sessions, err := st.ListSessions(ctx, store.ListFilter{})
 	if err != nil {
@@ -79,7 +86,7 @@ func sendPaneSession(ctx context.Context, st *store.Store, pane string) (model.S
 	}
 	var live []model.Session
 	for _, s := range sessions {
-		if s.Pane == pane && s.State != model.StateEnded && s.State != model.StateStale {
+		if s.Pane == pane && !fleet.OtherSocket(socket, s) && s.State != model.StateEnded && s.State != model.StateStale {
 			live = append(live, s)
 		}
 	}

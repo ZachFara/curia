@@ -501,9 +501,10 @@ func (r *reviewsRun) wantResumed(t *testing.T) {
 }
 
 // twoServers: a second private server's pane %1 shows Claude Code's idle
-// prompt, like the restored agent's pane %1. A message sent through that
-// server is not typed into it; sent through the agent's own server it is
-// typed, and the one held back is handed over by the agent's next Stop.
+// prompt, like the restored agent's pane %1. A pane id is matched only on
+// the sender's server (Ruling 133): sent through that server, %1 is refused
+// and nothing is stored or typed; sent through the agent's own server it is
+// typed.
 func (r *reviewsRun) twoServers(t *testing.T) {
 	t.Helper()
 	if r.leadPane != "%1" {
@@ -512,23 +513,17 @@ func (r *reviewsRun) twoServers(t *testing.T) {
 	other := startTmux(t, filepath.Join(r.tmp, "tmuxhome-b"), r.paneFile("b0"), r.paneFile("b1"), r.paneFile("b2"))
 	env := envWith(r.h.env, "TMUX="+other.tmuxVar, "TMUX_TMPDIR="+other.dir)
 	stdout, stderr, code := r.term.run(t, r.h, env, "send", "%1", "check the empty list case again")
-	if want := "M-2 queued: the agent is on another tmux server (" + r.srv.name + "); nothing typed"; code != 0 || stderr != "" ||
-		!strings.HasPrefix(stdout, want) {
-		t.Errorf("curia send %%1 through the second server: exit %d, stdout %q, stderr %q, want %q...", code, stdout, stderr, want)
+	if want := "pane %1 is not the pane of a live agent session"; code == 0 || stdout != "" || !strings.Contains(stderr, want) {
+		t.Errorf("curia send %%1 through the second server: exit %d, stdout %q, stderr %q, want a refusal containing %q", code, stdout, stderr, want)
 	}
 	r.wantNothingTyped(t, 2)
 	if got := readFile(t, r.paneFile("b1")); got != "" {
 		t.Errorf("the second server's %%1 received %q, want nothing", got)
 	}
-	if got := r.user(t, "send", "%1", "back on the restored session."); got != "M-3 delivered (send_keys)\n" {
-		t.Errorf("curia send %%1 through the agent's server = %q, want %q", got, "M-3 delivered (send_keys)\n")
+	if got := r.user(t, "send", "%1", "back on the restored session."); got != "M-2 delivered (send_keys)\n" {
+		t.Errorf("curia send %%1 through the agent's server = %q, want %q", got, "M-2 delivered (send_keys)\n")
 	}
 	r.waitTyped(t, r.inputLines(t, 3))
-	for deadline := time.Now().Add(reviewsWait); r.message(t, "M-2").DeliveredVia != "stop_hook"; time.Sleep(20 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatalf("M-2 = %+v, want it handed over by the Stop hook after M-3", r.message(t, "M-2"))
-		}
-	}
 }
 
 // Step 9: every review as stored, the agent's MCP responses (checked in
