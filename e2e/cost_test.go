@@ -306,7 +306,9 @@ func (r *costRun) statusLine(t *testing.T) {
 }
 
 // Step 6: under the forecast a spawn starts the agent on the cheaper model
-// and says so first; --model wins without a note.
+// and says so first; --model wins without a note. The cheaper model is this
+// spawn's only (Ruling P5-R7): the argv carries it, the task does not store it
+// (tasks.golden.json: T-3 agent_model ""), while --model opus is stored (T-4).
 func (r *costRun) cheaperModel(t *testing.T) {
 	t.Helper()
 	r.user(t, "task", "add", "Add the audit log", "--repo", r.repo)
