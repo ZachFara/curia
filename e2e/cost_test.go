@@ -644,6 +644,8 @@ func (r *costRun) pauseSuggestion(t *testing.T) {
 	})
 	r.ingest(t, "T-2's cold cache", doc, "--statusline")
 	pane := r.view(t, "ui")
+	r.screen(t, pane, "tab sessions") // the popup opens on the inbox (Ruling 154)
+	r.keys(t, pane, "\t")
 	got := r.screen(t, pane, "cold 85k tok")
 	if !strings.Contains(got, "P pauses T-2 (P3) api-server") {
 		t.Errorf("the dashboard shows:\n%s\nwant the suggestion to pause T-2 (P3) api-server", got)

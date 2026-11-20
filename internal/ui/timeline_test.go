@@ -10,7 +10,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/tmux"
 )
 
 var timelineT0 = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
@@ -149,4 +151,33 @@ func timelineWith(t *testing.T, m tea.Model, open func() tea.Model) tea.Model {
 		t.Fatalf("model is a %T, want Model", m)
 	}
 	return dm.WithTimeline(open)
+}
+
+// T opens the timeline from the session list reached with Tab from the
+// inbox, and q returns to that list (not the inbox: the timeline is not an inbox item).
+func TestTKeyFromSessionListBehindInbox(t *testing.T) {
+	src := &fakeInbox{}
+	src.set(inboxItems()...)
+	tm := &tmux.Fake{Panes: []tmux.Pane{{ID: "%3", Session: "work", WindowID: "@1"}}}
+	now := func() time.Time { return testNow }
+	f := &timelineFake{n: 2}
+	d := New(&fakeSource{sessions: threeSessions()}, tm, config.Default(), now, ModePopup).
+		WithInbox(func() tea.Model { return NewInbox(src, tm, now) }).
+		WithTimeline(func() tea.Model { return NewTimeline(f.src, now) })
+	var m tea.Model = d
+	m, _ = m.Update(m.Init()())
+	m, _ = m.Update(dashboard(m).child.Init()())
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = drain(m, cmd)
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("T")})
+	m = drain(m, cmd)
+	if v := m.View(); !strings.HasPrefix(v, "TIMELINE") || !strings.Contains(v, "turn_end") {
+		t.Fatalf("T did not open the timeline:\n%s", v)
+	}
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m = drain(m, cmd)
+	if v := m.View(); !strings.Contains(v, "SESSION:WINDOW") {
+		t.Errorf("q did not return to the session list:\n%s", v)
+	}
 }

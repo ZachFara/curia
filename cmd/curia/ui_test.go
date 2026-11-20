@@ -38,12 +38,25 @@ func useFakeProgram(t *testing.T) *dashboardRun {
 	prev := runProgram
 	runProgram = func(m tea.Model, opts ...tea.ProgramOption) error {
 		run.opts = len(opts)
-		m, _ = m.Update(m.Init()())
+		m = uiToSessionList(m)
 		run.view = m.View()
 		return nil
 	}
 	t.Cleanup(func() { runProgram = prev })
 	return run
+}
+
+// uiToSessionList runs the popup's first messages: it opens on the inbox
+// (Ruling 154), so Tab shows the session list and its first refresh.
+func uiToSessionList(m tea.Model) tea.Model {
+	m, _ = m.Update(m.Init()())
+	if !strings.Contains(m.View(), "tab sessions") {
+		return m // the sidebar, or a view without the inbox
+	}
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m, cmd = m.Update(cmd()) // the inbox closes and the list refreshes
+	m, _ = m.Update(cmd())
+	return m
 }
 
 // dashboardSessions: a waiting and a working session in live panes, one
@@ -131,7 +144,7 @@ func uiDriveProgram(t *testing.T, drive func(m tea.Model) tea.Model) *dashboardR
 	prev := runProgram
 	runProgram = func(m tea.Model, opts ...tea.ProgramOption) error {
 		run.opts = len(opts)
-		m, _ = m.Update(m.Init()())
+		m = uiToSessionList(m)
 		run.view = drive(m).View()
 		return nil
 	}
@@ -635,7 +648,7 @@ func uiRunActions(t *testing.T, f *spawnFixture, keys []string, pump bool) strin
 	var view string
 	prev := runProgram
 	runProgram = func(m tea.Model, _ ...tea.ProgramOption) error {
-		m, _ = m.Update(m.Init()())
+		m = uiToSessionList(m)
 		for _, k := range keys {
 			f.now = f.now.Add(2 * time.Second)
 			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
