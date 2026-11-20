@@ -424,7 +424,9 @@ func TestTmuxFenceAddedOnceAndRemoved(t *testing.T) {
 			`"bind A display-popup -E -w 90% -h 80% '` + testBin + ` decide'"` + "\n",
 		`if-shell '[ -n "$TMUX" ] && tmux show -g status >/dev/null 2>&1 && ! tmux list-keys -T prefix N 2>/dev/null | grep -qv curia' ` +
 			`"bind N run-shell '` + testBin + ` next'"` + "\n",
-		`set-hook -g pane-focus-in "run-shell -b '` + testBin + ` seen #{pane_id}'"` + "\n",
+		`if-shell "[ -n \"\$TMUX\" ] && tmux show -g status >/dev/null 2>&1 && tmux show-hooks -g 'pane-focus-in[77]' 2>/dev/null | ` +
+			`grep -qE '^pane-focus-in\\[77\\] *\$|^pane-focus-in\\[77\\] run-shell -b .* seen .\\{pane_id\\}.?\$'" ` +
+			`"set-hook -g 'pane-focus-in[77]' \"run-shell -b '` + testBin + ` seen #{pane_id}'\""` + "\n",
 		"set -g @curia_marker_format '#{?#{==:#{@curia_marker},red},#[fg=red] ●,#{?#{==:#{@curia_marker},blue},#[fg=blue] ●,}}'\n",
 		`if -F '#{m:*@curia_marker*,#{window-status-current-format}}' '' "set -ag window-status-current-format '#{E:@curia_marker_format}'"` + "\n",
 	} {
