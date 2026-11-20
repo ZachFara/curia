@@ -1542,3 +1542,16 @@ func TestHookLatencyUnchangedWithAgentFlag(t *testing.T) {
 		t.Errorf("log = %q, want none", lines)
 	}
 }
+
+// Ruling 133: a red session in the same pane id on ANOTHER tmux server is not
+// ended by a start here, so its window is not touched.
+func TestHookPeerInSamePaneIDOnOtherServerIsIgnored(t *testing.T) {
+	m := newMarkerHook(t)
+	m.fake.Panes = []tmux.Pane{{ID: "%1", Session: "s", WindowID: "@9", Socket: "/other.sock"}}
+	t.Setenv("TMUX", "/other.sock,1,0")
+	m.event("SessionStart", "A")
+	m.event("Notification", "A")
+	m.fake.Panes = []tmux.Pane{{ID: "%1", Session: "s", WindowID: "@7", Socket: "/mine.sock"}}
+	t.Setenv("TMUX", "/mine.sock,1,0")
+	wantCalls(t, m.event("SessionStart", "B"))
+}
