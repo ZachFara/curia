@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -363,5 +364,78 @@ func TestOtherCommandsNeverTouchTheMonitor(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(db), "monitor.lock")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a command other than monitor made the lock file: %v", err)
+	}
+}
+
+// uninstall stops a running monitor (the real binary, a temp store): no
+// Curia process outlives it and the lock is free; a second uninstall says
+// none is running.
+func TestUninstallStopsTheMonitor(t *testing.T) {
+	bin := monitorBinary(t)
+	installRecord(t)
+	h := installSetup(t, "")
+	db := filepath.Join(h.home, "curia.db")
+	t.Setenv("CURIA_DB", db)
+	start := exec.Command(bin, "monitor", "start")
+	start.Env = append(os.Environ(), "HOME="+h.home, "CURIA_DB="+db, "TMUX=", "TMUX_PANE=")
+	if out, err := start.CombinedOutput(); err != nil {
+		t.Fatalf("start: %v\n%s", err, out)
+	}
+	lock := filepath.Join(h.home, "monitor.lock")
+	waitFor(t, "the monitor", func() bool { r, _ := monitorRunning(lock); return r })
+	_, pid := monitorRunning(lock)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
+	out, err := installRun(t, "uninstall")
+	if err != nil || !strings.Contains(out, "monitor: stopped") {
+		t.Fatalf("uninstall = %v\n%s\nwant it to say the monitor stopped", err, out)
+	}
+	if r, _ := monitorRunning(lock); r {
+		t.Error("the lock is still held after uninstall")
+	}
+	waitFor(t, "the process to exit", func() bool { return syscall.Kill(pid, 0) != nil })
+	out, err = installRun(t, "uninstall")
+	if err != nil || !strings.Contains(out, "monitor: not running") {
+		t.Errorf("second uninstall = %v\n%s\nwant it to say none was running", err, out)
+	}
+}
+
+// A lock file naming a pid that is not the Curia monitor (a reused pid) is
+// never signaled: uninstall reports it, gives the command to look at it,
+// and still succeeds; so does `monitor stop`.
+func TestStopNeverSignalsAnUnrelatedPid(t *testing.T) {
+	installRecord(t)
+	h := installSetup(t, "")
+	t.Setenv("CURIA_DB", filepath.Join(h.home, "curia.db"))
+	sleeper := exec.Command("sleep", "60")
+	if err := sleeper.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sleeper.Process.Kill(); _ = sleeper.Wait() })
+	lock, held, err := takeMonitorLock(filepath.Join(h.home, "monitor.lock"))
+	if err != nil || held {
+		t.Fatalf("lock: %v %v", held, err)
+	}
+	defer lock.release()
+	// The file now names the sleeper, as it would a reused pid.
+	if err = lock.f.Truncate(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = lock.f.WriteAt([]byte(strconv.Itoa(sleeper.Process.Pid)+"\n/opt/curia/curia\n"), 0); err != nil {
+		t.Fatal(err)
+	}
+	prev := monitorSignal
+	monitorSignal = func(pid int) error { t.Errorf("signaled pid %d, which is not the monitor", pid); return nil }
+	t.Cleanup(func() { monitorSignal = prev })
+
+	out, err := installRun(t, "uninstall")
+	if err != nil || !strings.Contains(out, "not the Curia monitor") || !strings.Contains(out, "ps -p "+strconv.Itoa(sleeper.Process.Pid)) {
+		t.Errorf("uninstall = %v\n%s\nwant success, and a line naming the unrelated process", err, out)
+	}
+	if _, err = runRoot(t, "monitor", "stop"); err == nil || !strings.Contains(err.Error(), "not the Curia monitor") {
+		t.Errorf("monitor stop = %v, want it to refuse an unrelated pid", err)
+	}
+	if syscall.Kill(sleeper.Process.Pid, 0) != nil {
+		t.Error("the unrelated process is gone")
 	}
 }

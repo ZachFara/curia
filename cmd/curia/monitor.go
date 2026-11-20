@@ -237,7 +237,8 @@ func takeMonitorLock(path string) (lock monitorLock, held bool, err error) {
 		return lock, errors.Is(err, syscall.EWOULDBLOCK), err
 	}
 	if err = f.Truncate(0); err == nil {
-		_, err = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+		exe, _ := os.Executable()
+		_, err = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"+exe+"\n"), 0)
 	}
 	if err != nil {
 		_ = f.Close()
@@ -246,27 +247,88 @@ func takeMonitorLock(path string) (lock monitorLock, held bool, err error) {
 	return monitorLock{f}, false, nil
 }
 
-// monitorRunning reports whether a monitor holds the lock, and its pid when
-// the file names one (an integer above 1; anything else is 0). It only
-// reads: a shared, non-blocking lock attempt that is released at once.
+// monitorRunning reports whether a monitor holds the lock, and its pid.
 func monitorRunning(path string) (running bool, pid int) {
+	running, pid, _ = monitorHolder(path)
+	return running, pid
+}
+
+// monitorHolder reports whether a monitor holds the lock, the pid the file
+// names (an integer above 1; anything else is 0) and the binary path it
+// recorded. It only reads: a shared, non-blocking lock attempt that is
+// released at once.
+func monitorHolder(path string) (running bool, pid int, exe string) {
 	f, err := os.Open(filepath.Clean(path))
 	if err != nil {
-		return false, 0
+		return false, 0, ""
 	}
 	defer func() { _ = f.Close() }()
-	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err == nil {
-		return false, 0
+	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err == nil || !errors.Is(err, syscall.EWOULDBLOCK) {
+		return false, 0, ""
 	}
-	if !errors.Is(err, syscall.EWOULDBLOCK) {
-		return false, 0
-	}
-	b := make([]byte, 32)
+	b := make([]byte, 4096)
 	n, _ := f.Read(b)
-	if p, perr := strconv.Atoi(strings.TrimSpace(string(b[:n]))); perr == nil && p > 1 {
+	first, rest, _ := strings.Cut(string(b[:n]), "\n")
+	if p, perr := strconv.Atoi(strings.TrimSpace(first)); perr == nil && p > 1 {
 		pid = p
 	}
-	return true, pid
+	exe, _, _ = strings.Cut(rest, "\n")
+	return true, pid, exe
+}
+
+// monitorProcArgs is the full command line of process pid (`ps -p pid -o
+// args=`); tests replace it.
+var monitorProcArgs = func(pid int) (string, error) {
+	ps, err := psPath()
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out boundedBuffer
+	out.max = 64 << 10
+	cmd := exec.CommandContext(ctx, ps, "-p", strconv.Itoa(pid), "-o", "args=")
+	cmd.Stdout = &out
+	if err = cmd.Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out.String()), nil
+}
+
+// isMonitorProcess reports whether process pid is the monitor that recorded
+// exe: its command line is exactly `<exe> monitor start --foreground`. A pid
+// the lock file names may have been reused by an unrelated program, which
+// must never be signaled.
+func isMonitorProcess(pid int, exe string) bool {
+	if exe == "" {
+		return false
+	}
+	args, err := monitorProcArgs(pid)
+	return err == nil && args == exe+" monitor start --foreground"
+}
+
+// stopMonitor stops the running monitor through the lock's pid, after
+// checking that the pid is the monitor. It returns one line to say what
+// happened and an error when a monitor runs and was not stopped.
+func stopMonitor(cfg config.Config) (string, error) {
+	path := monitorLockPath(cfg)
+	running, pid, exe := monitorHolder(path)
+	if !running {
+		return "monitor: not running", nil
+	}
+	if pid == 0 || pid == os.Getpid() || !isMonitorProcess(pid, exe) {
+		return "", fmt.Errorf("monitor: the lock is held by process %d, which is not the Curia monitor (or its command cannot be read); not signaled. "+
+			"Look at it with: ps -p %d -o args=", pid, pid)
+	}
+	if err := monitorSignal(pid); err != nil {
+		return "", fmt.Errorf("monitor: could not stop process %d: %w; stop it by hand: kill %d", pid, err, pid)
+	}
+	for deadline := time.Now().Add(monitorStopWait); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if still, _ := monitorRunning(path); !still {
+			return "monitor: stopped", nil
+		}
+	}
+	return "", fmt.Errorf("monitor: process %d was asked to stop and still holds the lock; stop it by hand: kill %d", pid, pid)
 }
 
 // ---- the commands ----
@@ -431,25 +493,10 @@ func runMonitorStop(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	path := monitorLockPath(cfg)
-	running, pid := monitorRunning(path)
-	switch {
-	case !running:
-		_, err = fmt.Fprintln(cmd.OutOrStdout(), "monitor: not running")
+	line, err := stopMonitor(cfg)
+	if err != nil {
 		return err
-	case pid == 0 || pid == os.Getpid():
-		return errors.New("monitor: running, but its lock file names no process to stop")
 	}
-	// The lock is held, so the pid in the file is the holder's: the file is
-	// rewritten under the lock by every monitor that takes it.
-	if err = monitorSignal(pid); err != nil {
-		return fmt.Errorf("monitor: could not stop process %d: %w", pid, err)
-	}
-	for deadline := time.Now().Add(monitorStopWait); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		if still, _ := monitorRunning(path); !still {
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), "monitor: stopped")
-			return err
-		}
-	}
-	return fmt.Errorf("monitor: process %d was asked to stop and still holds the lock", pid)
+	_, err = fmt.Fprintln(cmd.OutOrStdout(), line)
+	return err
 }
