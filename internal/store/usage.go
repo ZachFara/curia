@@ -357,10 +357,20 @@ func pruneCapped(ctx context.Context, tx *sql.Tx, limit int64) (int64, error) {
 	}
 	var total int64
 	for i, q := range []struct {
-		sql  string
-		keep int
-	}{{pruneUsageCap, UsageMaxRows}, {pruneCostCap, CostMaxRows}} {
+		sql, table string
+		keep       int
+	}{{pruneUsageCap, "usage_samples", UsageMaxRows}, {pruneCostCap, "cost_samples", CostMaxRows}} {
 		if !over[i].Bool {
+			continue
+		}
+		// The probe is a rowid span, which gaps (old deletions) inflate: only
+		// a real count over the bound, found by a scan that stops at keep+1
+		// rows, may delete. It runs only when the probe fires.
+		var really bool
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) > ? FROM (SELECT 1 FROM `+q.table+` LIMIT ?)`, q.keep, q.keep+1).Scan(&really); err != nil {
+			return 0, err
+		}
+		if !really {
 			continue
 		}
 		out, err := tx.ExecContext(ctx, q.sql, q.keep, limit-total)
