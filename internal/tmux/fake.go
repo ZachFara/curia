@@ -25,6 +25,7 @@ type Fake struct {
 	CursorKnown  bool
 	CaptureErr   error
 	NewWindowErr error
+	Socket       string // the Socket of the panes NewWindow opens
 	Tail         string
 	Calls        []string
 	windows      int // windows NewWindow has opened
@@ -120,7 +121,7 @@ func (f *Fake) NewWindow(_ context.Context, w WindowSpec) (Pane, error) {
 	if f.NewWindowErr != nil {
 		return Pane{}, f.NewWindowErr
 	}
-	p := Pane{ID: fmt.Sprintf("%%%d", 100+f.windows), Session: w.Session, WindowName: w.Name}
+	p := Pane{ID: fmt.Sprintf("%%%d", 100+f.windows), Session: w.Session, WindowName: w.Name, Socket: f.Socket}
 	f.windows++
 	f.Panes = append(f.Panes, p)
 	return p, nil

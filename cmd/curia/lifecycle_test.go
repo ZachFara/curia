@@ -1088,3 +1088,32 @@ func TestPauseNeverKillsOtherServersPane(t *testing.T) {
 		t.Errorf("--force: kills = %q, want none\n%s", got, out)
 	}
 }
+
+// The same with no live session yet: the task's own record of its window's
+// server tells the panes apart. A task with no recorded server (an older
+// row) is unknown, never "the same".
+func TestPauseNeverKillsOtherServersPaneWithoutSession(t *testing.T) {
+	for _, c := range []struct{ name, recorded, want string }{
+		{"recorded", "", "of another tmux server (first)"},
+		{"older row", "-", "may still be open on another server"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := lifecycleSpawned(t, spawnOptions{})
+			if c.recorded == "-" {
+				f.update("T-1", func(tk *model.Task) { tk.PaneSocket = "" })
+			}
+			for i := range f.fake.Panes {
+				f.fake.Panes[i].Socket = "/tmp/tmux-501/second"
+			}
+			f.now = f.now.Add(time.Hour) // the launch claim has run out
+			_, err := lifecycleRun(t, "pause", "T-1")
+			if err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "Nothing was done") {
+				t.Fatalf("pause = %v, want a refusal with %q", err, c.want)
+			}
+			out, _ := lifecycleRun(t, "pause", "T-1", "--force")
+			if got := lifecycleKills(f); len(got) != 0 {
+				t.Errorf("kills = %q, want none\n%s", got, out)
+			}
+		})
+	}
+}

@@ -36,6 +36,7 @@ type Task struct {
 	SourceRef                                             string
 	Tags                                                  []string
 	Branch, Worktree, AgentModel, Pane, ResumeSession     string
+	PaneSocket                                            string // the tmux server of Pane; empty: unknown
 	Team                                                  bool
 	CreatedAt, UpdatedAt, LaunchedAt, PausedAt, CleanedAt time.Time
 	// Priority is 1 to 3; a zero value means PriorityNormal. Agent is empty
