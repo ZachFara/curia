@@ -250,8 +250,8 @@ func upsert(ctx context.Context, e dbtx, sess model.Session) error {
 INSERT INTO sessions (
   id, agent, tmux_pane, tmux_session, tmux_window, cwd, repo, branch, state, model,
   context_used, context_max, subagents_active, last_update, seen_at, transcript_path,
-  started_at, updated_at, transcript_offset, task_id, worktree, tmux_socket, end_reason
-) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)
+  started_at, updated_at, transcript_offset, task_id, worktree, tmux_socket, end_reason, checked_cwd
+) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''))
 ON CONFLICT(id) DO UPDATE SET
   agent = excluded.agent, tmux_pane = excluded.tmux_pane,
   tmux_session = excluded.tmux_session, tmux_window = excluded.tmux_window,
@@ -264,11 +264,11 @@ ON CONFLICT(id) DO UPDATE SET
   started_at = excluded.started_at, updated_at = excluded.updated_at,
   transcript_offset = excluded.transcript_offset,
   task_id = excluded.task_id, worktree = excluded.worktree, tmux_socket = excluded.tmux_socket,
-  end_reason = excluded.end_reason`,
+  end_reason = excluded.end_reason, checked_cwd = excluded.checked_cwd`,
 		sess.ID, sess.Agent, sess.Pane, sess.TmuxSession, sess.TmuxWindow, sess.Cwd, sess.Repo, sess.Branch,
 		sess.State, sess.Model, sess.ContextUsed, sess.ContextMax, sess.SubagentsActive, sess.LastUpdate,
 		formatTime(sess.SeenAt), sess.TranscriptPath, formatTime(sess.StartedAt), formatTime(sess.UpdatedAt),
-		sess.TranscriptOffset, sess.TaskID, sess.Worktree, sess.Socket, endReason(sess))
+		sess.TranscriptOffset, sess.TaskID, sess.Worktree, sess.Socket, endReason(sess), sess.CheckedCwd)
 	return err
 }
 
@@ -306,7 +306,7 @@ SELECT COALESCE(id, ''), COALESCE(agent, ''), COALESCE(tmux_pane, ''), COALESCE(
   started_at, updated_at, transcript_offset, COALESCE(task_id, ''), COALESCE(worktree, ''),
   COALESCE(team_id, ''), COALESCE(team_role, ''), COALESCE(team_member, ''), COALESCE(tmux_socket, ''),
   COALESCE(end_reason, ''), cost_usd, cache_expires_at, COALESCE(cache_rebuild_usd, 0),
-  COALESCE(recache_tokens, 0)
+  COALESCE(recache_tokens, 0), COALESCE(checked_cwd, '')
 FROM sessions`
 
 // GetSession returns the session with the given id, and false if there is none.
@@ -368,7 +368,7 @@ func scanSession(sc scanner) (model.Session, error) {
 		&sess.Repo, &sess.Branch, &sess.State, &sess.Model, &sess.ContextUsed, &sess.ContextMax,
 		&sess.SubagentsActive, &sess.LastUpdate, &seen, &sess.TranscriptPath, &started, &updated,
 		&sess.TranscriptOffset, &sess.TaskID, &sess.Worktree, &sess.TeamID, &sess.TeamRole, &sess.TeamMember,
-		&sess.Socket, &sess.EndReason, &cost, &cache, &sess.CacheRebuildUSD, &sess.CacheRecacheTokens)
+		&sess.Socket, &sess.EndReason, &cost, &cache, &sess.CacheRebuildUSD, &sess.CacheRecacheTokens, &sess.CheckedCwd)
 	if err != nil {
 		return model.Session{}, err
 	}

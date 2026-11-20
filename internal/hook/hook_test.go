@@ -2960,3 +2960,95 @@ func TestCodexHookAddsNoCall(t *testing.T) {
 		}
 	}
 }
+
+// repoAt is a fake Env whose Git knows only the directories in repos (cwd to
+// repository) and counts its calls per directory.
+func repoAt(repos map[string]string) (hook.Env, *[]string) {
+	var calls []string
+	env := (&fakeEnv{}).env("%3")
+	env.Git = func(cwd string) (string, string, string) {
+		calls = append(calls, cwd)
+		if r, ok := repos[cwd]; ok {
+			return r, "main", ""
+		}
+		return "", "", ""
+	}
+	return env, &calls
+}
+
+func cwdPayload(cwd string) []byte {
+	b, _ := json.Marshal(map[string]string{"session_id": "A", "cwd": cwd})
+	return b
+}
+
+func TestSessionOutsideRepoGetsRepoOnceFromFirstRepoCwd(t *testing.T) {
+	parent, repoA, repoB := t.TempDir(), t.TempDir(), t.TempDir()
+	env, calls := repoAt(map[string]string{repoA: "/r/a", repoB: "/r/b"})
+	st := openStore(t)
+	run(t, st, env, model.SessionStart, cwdPayload(parent))
+	if s := get(t, st, "A"); s.Repo != "" {
+		t.Fatalf("repo outside a repository = %q", s.Repo)
+	}
+	run(t, st, env, model.PreToolUse, cwdPayload(parent))
+	if len(*calls) != 1 {
+		t.Fatalf("same cwd as the start checked again: %v", *calls)
+	}
+	run(t, st, env, model.PreToolUse, cwdPayload(repoA))
+	if s := get(t, st, "A"); s.Repo != "/r/a" || s.Branch != "main" {
+		t.Fatalf("after moving into a repository: repo %q branch %q", s.Repo, s.Branch)
+	}
+	run(t, st, env, model.PreToolUse, cwdPayload(repoB))
+	run(t, st, env, model.PreToolUse, cwdPayload(repoA))
+	if s := get(t, st, "A"); s.Repo != "/r/a" {
+		t.Errorf("repo followed cd: %q", s.Repo)
+	}
+	if len(*calls) != 2 {
+		t.Errorf("git calls = %v, want the start and one more", *calls)
+	}
+}
+
+func TestSessionOutsideRepoChecksEachNewCwdOnce(t *testing.T) {
+	d1, d2, repo := t.TempDir(), t.TempDir(), t.TempDir()
+	env, calls := repoAt(map[string]string{repo: "/r/a"})
+	st := openStore(t)
+	run(t, st, env, model.SessionStart, cwdPayload(d1))
+	for _, d := range []string{d2, d2, d2, d1, d1} {
+		run(t, st, env, model.PreToolUse, cwdPayload(d))
+	}
+	if want := []string{d1, d2, d1}; !slices.Equal(*calls, want) {
+		t.Errorf("git calls = %v, want %v", *calls, want)
+	}
+	run(t, st, env, model.PreToolUse, cwdPayload(repo))
+	if s := get(t, st, "A"); s.Repo != "/r/a" {
+		t.Errorf("repo = %q", s.Repo)
+	}
+}
+
+func TestSessionStartedInRepoIsNeverRederived(t *testing.T) {
+	repoA, repoB := t.TempDir(), t.TempDir()
+	env, calls := repoAt(map[string]string{repoA: "/r/a", repoB: "/r/b"})
+	st := openStore(t)
+	run(t, st, env, model.SessionStart, cwdPayload(repoA))
+	run(t, st, env, model.PreToolUse, cwdPayload(repoB))
+	if s := get(t, st, "A"); s.Repo != "/r/a" || len(*calls) != 1 {
+		t.Errorf("repo %q, git calls %v", s.Repo, *calls)
+	}
+}
+
+func TestHostileOrMissingCwdChangesNothing(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range []string{"", "relative/dir", "/no/such/dir", file, "-C/etc"} {
+		repos := map[string]string{cwd: "/r/evil"}
+		env, calls := repoAt(repos)
+		st := openStore(t)
+		run(t, st, env, model.SessionStart, cwdPayload(t.TempDir()))
+		n := len(*calls)
+		run(t, st, env, model.PreToolUse, cwdPayload(cwd))
+		if s := get(t, st, "A"); s.Repo != "" || len(*calls) != n {
+			t.Errorf("cwd %q: repo %q, git calls %v", cwd, s.Repo, *calls)
+		}
+	}
+}
