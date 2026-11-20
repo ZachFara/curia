@@ -1,0 +1,10 @@
+{
+ "session_id": "<uuid>",
+ "transcript_path": "<scratch>/scratchpad/probe-claude-config/projects/-private-tmp-p6r2-11F3-repo/<uuid>.jsonl",
+ "cwd": "/private<tmp>/repo",
+ "scratchpad_dir": "<scratch>/scratchpad",
+ "prompt_id": "<uuid>",
+ "permission_mode": "default",
+ "hook_event_name": "UserPromptSubmit",
+ "prompt": "run the shell command: touch ok-1   then reply with the single word ok"
+}
