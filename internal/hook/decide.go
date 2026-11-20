@@ -133,13 +133,13 @@ func protectedFile(ev model.Event, payload []byte, cfg config.Config) (reason st
 		if json.Unmarshal(in.ToolInput[key], &p) != nil || p == "" {
 			continue // missing or not a string: the tool itself refuses it
 		}
-		target, ok := resolveTarget(p, ev.Cwd, home)
+		found, ok := targets(p, ev.Cwd, home)
 		if !ok { // fail closed: a path that cannot be checked is not let through
 			return "Curia could not verify where this path " + sanitize.Line(p, 60) +
 				" leads (too long, unreadable, a symlink loop, or \"..\" after a missing directory), so this tool may not change it. Use a plain absolute path.", false
 		}
-		if inside(target, roots) {
-			return "Curia protects its own configuration and data: this tool may not change " + sanitize.Line(target, 80) +
+		if i := slices.IndexFunc(found, func(t string) bool { return inside(t, roots) }); i >= 0 {
+			return "Curia protects its own configuration and data: this tool may not change " + sanitize.Line(found[i], 80) +
 				". Only the user edits these files (curia config set). Do not retry; tell the user what change you need.", false
 		}
 	}
@@ -169,10 +169,12 @@ func protectedRoots(home string, cfg config.Config) []string {
 	return roots
 }
 
-// resolveTarget is where path p (relative to cwd) really lands, by one
-// fail-closed walk over the UNCLEANED joined path (see walk). ok is false when
-// that cannot be said: longer than maxCheckedPath or any error on the way.
-func resolveTarget(p, cwd, home string) (string, bool) {
+// targets are the two places path p (relative to cwd) is checked at: the
+// cleaned absolute path as written, and where it really lands by one
+// fail-closed walk over the UNCLEANED joined path (see walk). Either one
+// inside the protected roots denies. ok is false when the walk cannot say:
+// longer than maxCheckedPath or any error on the way.
+func targets(p, cwd, home string) (found []string, ok bool) {
 	if rest, found := strings.CutPrefix(p, "~/"); found && home != "" {
 		p = filepath.Join(home, rest)
 	}
@@ -180,15 +182,16 @@ func resolveTarget(p, cwd, home string) (string, bool) {
 		if !filepath.IsAbs(cwd) { // a hostile cwd leaves the hook's own working directory
 			var err error
 			if cwd, err = os.Getwd(); err != nil {
-				return "", false
+				return nil, false
 			}
 		}
 		p = cwd + string(filepath.Separator) + p // not Join: Join would clean ".." away
 	}
 	if len(p) > maxCheckedPath {
-		return "", false
+		return nil, false
 	}
-	return walk(p)
+	resolved, ok := walk(p)
+	return []string{filepath.Clean(p), resolved}, ok
 }
 
 // maxCheckedPath is the longest path checked; no real edit has a longer one.

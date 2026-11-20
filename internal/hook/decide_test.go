@@ -333,8 +333,8 @@ func TestProtectedFilesSymlinkThenDotDot(t *testing.T) {
 	for _, p := range []string{proj + "/link/../config.toml", "link/../config.toml", "link/../new/dir/x", proj + "/link/../sub/../config.toml"} {
 		wantDeny(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(p)+`}`, proj, "")), "bypass via "+p)
 	}
-	// Lexically inside, really outside: the disk decides.
-	wantQuiet(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(cfgDir+"/back/../x")+`}`, proj, "")), "lexically inside, really outside")
+	// Lexically inside, really outside: over-denied on purpose (defense in depth).
+	wantDeny(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(cfgDir+"/back/../x")+`}`, proj, "")), "lexically inside, really outside")
 	wantQuiet(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/../proj/b.go")+`}`, proj, "")), "dotdot over existing components")
 }
 
@@ -400,4 +400,29 @@ func TestProtectedFilesOneFailClosedWalk(t *testing.T) {
 	for _, p := range []string{"new/sub/x.go", "a.go", "/tmp/curia-hook-test-x", proj + "/new/dir/x"} {
 		wantQuiet(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(p)+`}`, proj, "")), p)
 	}
+}
+
+// Curia's own directory may itself be a symlink (dotfiles): the link path and the real path both match.
+func TestProtectedRootThatIsASymlink(t *testing.T) {
+	home, proj, cfg := denyHome(t)
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	dotfiles := filepath.Join(home, "dotfiles", "curia")
+	link := filepath.Join(home, ".config", "curia")
+	if err := os.MkdirAll(filepath.Dir(dotfiles), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dotfiles, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dotfiles, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{link + "/config.toml", dotfiles + "/config.toml", link + "/new/x"} {
+		wantDeny(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(p)+`}`, proj, "")), p)
+	}
+	wantQuiet(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(home+"/dotfiles/other.txt")+`}`, proj, "")), "beside the real directory")
 }
