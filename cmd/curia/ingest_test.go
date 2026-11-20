@@ -538,3 +538,20 @@ func ingestFillSamples(t *testing.T, db string, ids []string, now time.Time) {
 		t.Fatal(err)
 	}
 }
+
+func TestIngestStatuslineSetsContextWindow(t *testing.T) {
+	db := hookHome(t)
+	ingestSeed(t, db, "s1")
+	ingestFixClock(t, time.Date(2026, 11, 15, 19, 0, 0, 0, time.UTC))
+	doc := strings.ReplaceAll(string(ingestFixture(t, "statusline-captured.json")), "5cd98763-d94d-417d-b2ee-d172b8f63e81", "s1")
+	ingestExec(t, strings.NewReader(doc), "ingest", "--statusline")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	s, _, _ := st.GetSession(context.Background(), "s1")
+	if s.ContextMax != 1000000 || s.ContextUsed*100/s.ContextMax != 4 {
+		t.Errorf("used %d max %d, want 4%% of 1000000", s.ContextUsed, s.ContextMax)
+	}
+}
