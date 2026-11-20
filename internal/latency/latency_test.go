@@ -48,3 +48,15 @@ func TestVerdictProductOverThresholdTimesScaleFails(t *testing.T) {
 		t.Error("30 ms against a 30 ms limit passed")
 	}
 }
+
+// A runner whose commit tail is inflated (a slow fsync) is excused up to the
+// clamp; a product that sleeps is not excused by it.
+func TestVerdictInflatedReferenceTailStillCatchesAProductSleep(t *testing.T) {
+	ref := latency.Nominal * 3 / 2 // scale 1.5, limit 30 ms
+	if _, _, fail := latency.Verdict(25*ms, threshold, ref); fail != "" {
+		t.Errorf("a slow-commit runner at 25 ms (limit 30 ms) failed: %s", fail)
+	}
+	if _, _, fail := latency.Verdict(25*ms+30*ms, threshold, ref); fail == "" {
+		t.Error("a 30 ms sleep in the product passed on an inflated reference tail")
+	}
+}
