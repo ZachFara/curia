@@ -470,18 +470,17 @@ func TestIngestLatency(t *testing.T) {
 	if got := ingestSnap(t, db, "s0"); got.usage+got.cost != 5000 {
 		t.Fatalf("filled %d samples, want 5000", got.usage+got.cost)
 	}
+	// The captured status-line payload carries context_window, as every real one does.
 	doc := func(i int) string {
-		return fmt.Sprintf(`{"schema_version":1,"session_id":%q,"cost_usd":%g,"cache_expires_at":%q,"cache_rebuild_usd":1.5,`+
-			`"rate_limits":{"five_hour":{"used_percentage":%d,"resets_at":%d},"seven_day":{"used_percentage":31,"resets_at":%q}}}`,
-			ids[i%len(ids)], 10+float64(i)/100, now.Add(30*time.Minute).Format(time.RFC3339),
-			i%100, now.Add(2*time.Hour).Unix(), now.Add(72*time.Hour).Format(time.RFC3339))
+		return string(statuslineLivePayload(t, "statusline-captured.json", ids[i%len(ids)], time.Now(), 10+float64(i)/100))
 	}
 	const runs, gatedRuns = 200, 1000 // reported; gated (Ruling 114)
 	timed := func(from, runs int) []time.Duration {
 		d := make([]time.Duration, 0, runs)
 		for i := range runs {
+			in := strings.NewReader(doc(from + i)) // built before the clock starts
 			start := time.Now()
-			if _, err := ingestRun(context.Background(), strings.NewReader(doc(from+i)), false); err != nil {
+			if _, err := ingestRun(context.Background(), in, true); err != nil {
 				t.Fatal(err)
 			}
 			d = append(d, time.Since(start))
