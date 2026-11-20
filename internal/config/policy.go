@@ -46,6 +46,8 @@ var keyPolicy = map[string]Policy{
 	"ntfy.devices":           PolicyNone,
 	"serve.listen":           PolicyNone,
 	"serve.public_url":       PolicyNone,
+	"serve.web":              PolicyNone, // widens the network surface (F26)
+	"serve.web_session":      PolicyNone,
 	"restore.max_age":        PolicyNone,
 	"usage.cheaper_model":    PolicyNone,
 	"obsidian.dir":           PolicyNone,
