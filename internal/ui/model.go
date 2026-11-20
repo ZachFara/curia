@@ -61,6 +61,10 @@ type Source interface {
 type Budget struct {
 	Status string             // the forecast warning or the API projection; "" when there is none
 	Burn   map[string]float64 // USD per hour by session id; nil when unknown
+	// Res is each session's CPU/RAM cell by session id (F19), only for a
+	// current sample; nil when the source has no resource data, empty when
+	// the monitor has none (the column then shows "?").
+	Res map[string]string
 
 	// The pause suggestion (section 4.4), only while a limit forecast is in
 	// force; PauseTask is "" when there is none.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -301,5 +302,10 @@ func usagePrintJSON(w io.Writer, rep usageReport) error {
 	if rep.PauseTask != "" {
 		out.Suggest = &rep.PauseTask
 	}
-	return json.NewEncoder(w).Encode(out)
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(out); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
+	return err
 }

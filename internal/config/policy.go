@@ -51,10 +51,13 @@ var keyPolicy = map[string]Policy{
 	"obsidian.dir":             PolicyNone,
 	"linear.url":               PolicyNone,
 	"linear.team":              PolicyNone,
-	"costlens.analyzer":        PolicyNone, // an exec path
+	"costlens.analyzer":        PolicyNone,  // an exec path
+	"cost.task_budget_default": PolicyLower, // lower, if nonzero (F28; 0 = none counts as the loosest)
+	"cost.budget_hard_stop":    PolicyTrue,  // set true only (F28)
 	"activity.idle_cap":        PolicyNone,
 	"activity.task_types":      PolicyNone,
 	"activity.rules":           PolicyRepoRules, // measurement only (F27, F28)
-	"cost.task_budget_default": PolicyLower,     // lower, if nonzero (F28; 0 = none counts as the loosest)
-	"cost.budget_hard_stop":    PolicyTrue,      // set true only (F28)
+	"resources.enabled":        PolicyNone,      // the spec's F28 table: nothing
+	"resources.interval":       PolicyNone,      // monitor.* and resources.*: a repository cannot change when Curia samples
+	"monitor.autostart":        PolicyNone,
 }

@@ -251,3 +251,26 @@ func TestRepoFileBudgetKeys(t *testing.T) {
 		t.Error("a negative default was accepted")
 	}
 }
+
+func TestMonitorKeysDefaultsPolicyAndBounds(t *testing.T) {
+	d := Default()
+	if !d.Resources.Enabled || d.Resources.Interval != 10*time.Second || !d.Monitor.Autostart {
+		t.Errorf("defaults = %+v %+v, want enabled, 10s, autostart", d.Resources, d.Monitor)
+	}
+	o := layerRepo(t, "", "[resources]\nenabled = false\ninterval = \"1s\"\n[monitor]\nautostart = false\n")
+	c, r, err := Resolve(o)
+	if err != nil || c.Resources != d.Resources || c.Monitor != d.Monitor {
+		t.Errorf("a repository file changed the monitor settings: %v %+v %+v", err, c.Resources, c.Monitor)
+	}
+	for _, k := range []string{"resources.enabled", "resources.interval", "monitor.autostart"} {
+		if !refused(r, k) {
+			t.Errorf("repository's %s was not refused: %+v", k, r.Refused)
+		}
+	}
+	for _, bad := range []string{"500ms", "2h", "0s"} {
+		o = layerRepo(t, "[resources]\ninterval = \""+bad+"\"\n", "")
+		if _, _, err = Resolve(o); err == nil || !strings.Contains(err.Error(), "resources.interval") {
+			t.Errorf("interval %s: err = %v, want one naming resources.interval", bad, err)
+		}
+	}
+}
