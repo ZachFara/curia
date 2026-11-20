@@ -12,6 +12,7 @@ const (
 	PolicyFalse                   // a bool: only false
 	PolicyTrue                    // a bool: only true
 	PolicyRepoRules               // a list of rules that apply to that repository only (RepoActivityRules); never merged into the global Config
+	PolicyLevel                   // off < backlog < ready: only a lower level
 )
 
 // keyPolicy is the compiled-in per-key table. A new key is a Config field,
@@ -55,4 +56,7 @@ var keyPolicy = map[string]Policy{
 	"activity.idle_cap":      PolicyNone,
 	"activity.task_types":    PolicyNone,
 	"activity.rules":         PolicyRepoRules, // measurement only (F27, F28)
+
+	"tasks.agent_filed.level":       PolicyLevel,
+	"tasks.agent_filed.max_per_day": PolicyLower,
 }

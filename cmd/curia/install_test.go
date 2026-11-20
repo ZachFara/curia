@@ -154,12 +154,12 @@ func installAllow(t *testing.T, path string) []string {
 var installToolRules = []string{
 	"mcp__curia__search_decisions", "mcp__curia__request_decision",
 	"mcp__curia__check_decision", "mcp__curia__withdraw_decision",
-	"mcp__curia__check_messages", "mcp__curia__complete_task",
+	"mcp__curia__check_messages", "mcp__curia__complete_task", "mcp__curia__file_task",
 }
 
-const installWantToolsHint = "MCP tools not allowed without a prompt; to allow the six curia tools, run curia install without --no-allow-mcp-tools"
+const installWantToolsHint = "MCP tools not allowed without a prompt; to allow the seven curia tools, run curia install without --no-allow-mcp-tools"
 
-const installWantAllowedLine = "MCP tools: the six curia tools are allowed without a prompt in %s; to skip this step, run curia install --no-allow-mcp-tools"
+const installWantAllowedLine = "MCP tools: the seven curia tools are allowed without a prompt in %s; to skip this step, run curia install --no-allow-mcp-tools"
 
 func installAddCall(bin string) string {
 	return "mcp add --scope user curia -- " + bin + " mcp"
@@ -392,7 +392,7 @@ func TestInstallAllowsSixToolsByDefault(t *testing.T) {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
 	if got := installAllow(t, h.settings); !slices.Equal(got, installToolRules) {
-		t.Errorf("allow = %q, want exactly the six rules", got)
+		t.Errorf("allow = %q, want exactly the seven rules", got)
 	}
 	if want := fmt.Sprintf(installWantAllowedLine, h.settings) + "\n"; strings.Count(out, want) != 1 {
 		t.Errorf("install output lacks the line %q:\n%s", want, out)

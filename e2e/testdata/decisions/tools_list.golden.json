@@ -95,6 +95,19 @@
           }
         },
         "name": "complete_task"
+      },
+      {
+        "description": "File a task for the user when you notice work outside your own task: a title, a body saying what to do, and the reason you are filing it. The user decides whether it is ever started; you cannot mark it ready or start it, and you may file only a few a day.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["title", "reason"],
+          "properties": {
+            "title": {"type": "string", "maxLength": 120},
+            "body": {"type": "string", "maxLength": 49152},
+            "reason": {"type": "string", "maxLength": 300}
+          }
+        },
+        "name": "file_task"
       }
     ]
   }

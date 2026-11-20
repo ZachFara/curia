@@ -104,9 +104,10 @@ const withdrawSchema = `{"type":"object","required":["id","reason"],"properties"
   "reason":{"type":"string","maxLength":300},
   "precedent_id":{"type":"string","description":"The past decision that settles this, if one does."}}}`
 
-// Tools returns the tools, exactly six, in this order: search_decisions,
+// Tools returns the tools, exactly seven, in this order: search_decisions,
 // request_decision, check_decision, withdraw_decision, check_messages,
-// complete_task. None of them answers, confirms, overrides, rescopes or
+// complete_task, file_task (which only stores a backlog task, or a ready one
+// when the user's setting says so, and cannot spawn or mark one ready). None of them answers, confirms, overrides, rescopes or
 // supersedes a ticket, sends a message, changes another session, or
 // approves, merges or closes a review (complete_task only opens or updates
 // the caller's own task's pending review). Each decision tool
@@ -142,6 +143,7 @@ func Tools(d Deps) []Tool {
 			InputSchema: json.RawMessage(messagesSchema), Call: t.messages,
 		},
 		t.completeTool(),
+		t.fileTool(),
 	}
 }
 

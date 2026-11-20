@@ -42,4 +42,8 @@ type Task struct {
 	// for claude.
 	Priority int
 	Agent    string
+	// FiledBy is the session that filed the task through file_task, "" for a
+	// task the user wrote; FiledReason is its reason and FiledLineage the
+	// JSON of what Curia saw of its team (display and audit only).
+	FiledBy, FiledReason, FiledLineage string
 }

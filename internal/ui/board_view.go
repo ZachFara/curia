@@ -175,7 +175,7 @@ func (m BoardModel) listView(w int) []string {
 			if selected {
 				sel = len(lines)
 			}
-			text := cardMark(selected) + fit(cardID(c), idW, false) + "  " + fit(cardRepo(c), repoW, false) + "  " + cardTitle(c)
+			text := cardMark(selected) + fit(cardID(c), idW, false) + "  " + fit(cardRepo(c), repoW, false) + "  " + cardTitle(c) + cardFiledWhy(c)
 			lines = append(lines, markCard(truncate(text, w), selected))
 		}
 	}
@@ -204,7 +204,7 @@ func markCard(s string, selected bool) string {
 
 // cardTitle is c's title as drawn.
 func cardTitle(c task.Card) string {
-	return sanitize.Line(c.Task.Title, task.MaxTitle)
+	return cardFiledTag(c) + sanitize.Line(c.Task.Title, task.MaxTitle)
 }
 
 // cardRepo is the basename of c's repository as drawn, or "-".

@@ -60,6 +60,7 @@ type Config struct {
 
 	// Plan 6 additions.
 	Activity Activity `toml:"activity"`
+	Tasks    Tasks    `toml:"tasks"`
 }
 
 // maxEditor bounds the editor option, in bytes.
@@ -131,6 +132,7 @@ func Default() Config {
 
 		// Plan 6 additions.
 		Activity: defaultActivity(),
+		Tasks:    defaultTasks(),
 	}
 }
 
@@ -157,6 +159,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.validatePlan4(); err != nil {
+		return err
+	}
+	if err := c.Tasks.validate(); err != nil {
 		return err
 	}
 	return c.validatePlan5()

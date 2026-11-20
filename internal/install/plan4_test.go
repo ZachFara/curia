@@ -22,7 +22,7 @@ func TestAllowToolsAddsSixthToAPlan3Install(t *testing.T) {
 	if err := AllowTools(path, testNow); err != nil {
 		t.Fatal(err)
 	}
-	want := append(append([]string{"Bash(ls:*)"}, wantToolRules[:5]...), "mcp__curia__complete_task")
+	want := append(append([]string{"Bash(ls:*)"}, wantToolRules[:5]...), "mcp__curia__complete_task", "mcp__curia__file_task")
 	if got := readAllow(t, path); !slices.Equal(got, want) {
 		t.Errorf("allow = %q, want %q", got, want)
 	}
@@ -42,8 +42,8 @@ func TestAllowToolsAddsSixthToAPlan3Install(t *testing.T) {
 }
 
 func TestUnhooksRemovesTheSixToolRules(t *testing.T) {
-	if len(wantToolRules) != 6 || !slices.Equal(toolRules, wantToolRules) {
-		t.Fatalf("toolRules = %q, want the six %q", toolRules, wantToolRules)
+	if len(wantToolRules) != 7 || !slices.Equal(toolRules, wantToolRules) {
+		t.Fatalf("toolRules = %q, want the seven %q", toolRules, wantToolRules)
 	}
 	path := settingsIn(t)
 	allow, _ := json.Marshal(append([]string{"Bash(ls:*)", "mcp__curia"}, wantToolRules...))
