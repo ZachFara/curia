@@ -1210,6 +1210,8 @@ func userOnlyRefused(t *testing.T, argv []string, env, want string) {
 // above, and run with no controlling terminal, and again with CLAUDECODE set,
 // each is refused by userOnly before it opens the store or calls tmux.
 func TestUserOnlyCommandsGoThroughTheGuard(t *testing.T) {
+	// Running "review R-1 --drop" leaves the flag set, and would fail the next review test run in this process.
+	t.Cleanup(func() { reviewDropFlag = false })
 	marked := userOnlyMarked(t)
 	for path := range userOnlyCommands {
 		if !marked[path] {
