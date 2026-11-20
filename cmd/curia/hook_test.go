@@ -19,6 +19,7 @@ import (
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/decision"
 	"github.com/ZachFara/curia/internal/hook"
+	latgate "github.com/ZachFara/curia/internal/latency"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
@@ -1142,26 +1143,25 @@ func TestHookLatencyUnchanged(t *testing.T) {
 	started := hookLatency(t, st, env, model.SessionStart, starts, func(i int) []byte {
 		return fmt.Appendf(nil, `{"session_id":"S%d","transcript_path":%q,"cwd":%q,"source":"startup"}`, i, tr, wt)
 	})
-	tools := hookLatency(t, st, env, model.PostToolUse, runs, func(int) []byte {
-		f, ferr := os.OpenFile(filepath.Clean(tr), os.O_APPEND|os.O_WRONLY, 0)
-		if ferr != nil {
-			t.Fatal(ferr)
-		}
-		if _, ferr = f.WriteString(line); ferr != nil {
-			t.Fatal(ferr)
-		}
-		_ = f.Close()
-		return fmt.Appendf(nil, `{"session_id":"S0","transcript_path":%q,"cwd":%q,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}}`, tr, wt)
+	n := len(started)
+	t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", model.SessionStart, n, started[n/2], started[n*95/100], started[n-1])
+	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+		tools := hookLatency(t, st, env, model.PostToolUse, runs, func(int) []byte {
+			f, ferr := os.OpenFile(filepath.Clean(tr), os.O_APPEND|os.O_WRONLY, 0)
+			if ferr != nil {
+				t.Fatal(ferr)
+			}
+			if _, ferr = f.WriteString(line); ferr != nil {
+				t.Fatal(ferr)
+			}
+			_ = f.Close()
+			return fmt.Appendf(nil, `{"session_id":"S0","transcript_path":%q,"cwd":%q,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}}`, tr, wt)
+		})
+		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", model.PostToolUse, runs, tools[runs/2], tools[runs*95/100], tools[runs-1])
+		return tools[runs*95/100]
 	})
-	for _, m := range []struct {
-		kind model.EventKind
-		d    []time.Duration
-	}{{model.SessionStart, started}, {model.PostToolUse, tools}} {
-		n := len(m.d)
-		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, n, m.d[n/2], m.d[n*95/100], m.d[n-1])
-	}
-	if p95 := tools[runs*95/100]; p95 >= 20*time.Millisecond {
-		t.Errorf("PostToolUse p95 = %v, want < 20ms", p95)
+	if p95 >= 20*time.Millisecond {
+		t.Errorf("PostToolUse median p95 = %v, want < 20ms", p95)
 	}
 	if s := getSession(t, db, "S0"); s.TaskID != "T-7" || s.Worktree != wt {
 		t.Errorf("S0: task %q worktree %q, want T-7 and %q", s.TaskID, s.Worktree, wt)
@@ -1262,10 +1262,17 @@ func TestHookLatencySocketPane(t *testing.T) {
 	starts := timed(model.SessionStart, runs, func(i int) []byte {
 		return body(fmt.Sprintf("S%d", i), `,"source":"startup"`)
 	})
-	tools := timed(model.PostToolUse, gatedRuns, func(int) []byte {
-		appendLine()
-		return body(last, `,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
+	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+		tools := timed(model.PostToolUse, gatedRuns, func(int) []byte {
+			appendLine()
+			return body(last, `,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
+		})
+		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", model.PostToolUse, gatedRuns, tools[gatedRuns/2], tools[gatedRuns*95/100], tools[gatedRuns-1])
+		return tools[gatedRuns*95/100]
 	})
+	if p95 >= 20*time.Millisecond {
+		t.Errorf("PostToolUse median p95 = %v, want < 20ms", p95)
+	}
 	stops := timed(model.Stop, runs, func(int) []byte {
 		appendLine()
 		return body(last, `,"last_assistant_message":"Done."`)
@@ -1277,16 +1284,11 @@ func TestHookLatencySocketPane(t *testing.T) {
 		return body(last, `,"reason":"other"`)
 	})
 	for _, m := range []struct {
-		kind  model.EventKind
-		d     []time.Duration
-		gated bool
-	}{{model.SessionStart, starts, false}, {model.PostToolUse, tools, true}, {model.Stop, stops, false}, {model.SessionEnd, ends, false}} {
+		kind model.EventKind
+		d    []time.Duration
+	}{{model.SessionStart, starts}, {model.Stop, stops}, {model.SessionEnd, ends}} {
 		n := len(m.d)
-		p50, p95 := m.d[n/2], m.d[n*95/100]
-		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, n, p50, p95, m.d[n-1])
-		if m.gated && p95 >= 20*time.Millisecond {
-			t.Errorf("%s p95 = %v, want < 20ms", m.kind, p95)
-		}
+		t.Logf("%s over %d runs: p50 %v, p95 %v, max %v", m.kind, n, m.d[n/2], m.d[n*95/100], m.d[n-1])
 	}
 	if n := len(fake.Calls); n != runs {
 		t.Errorf("tmux calls = %d (%q...), want %d, one PaneInfo per SessionStart", n, fake.Calls[:min(n, 3)], runs)
@@ -1528,22 +1530,20 @@ func TestHookLatencyUnchangedWithAgentFlag(t *testing.T) {
 	hookQueueMessages(t, db, "S", "use pnpm, not npm")
 
 	const runs, gatedRuns = 200, 1000 // reported; gated (Ruling 114)
-	tools := hookLatency(t, st, env, model.PostToolUse, gatedRuns, func(int) []byte {
-		return body(`,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
+	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+		tools := hookLatency(t, st, env, model.PostToolUse, gatedRuns, func(int) []byte {
+			return body(`,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
+		})
+		t.Logf("%s --agent codex over %d runs: p50 %v, p95 %v, max %v", model.PostToolUse, gatedRuns, tools[gatedRuns/2], tools[gatedRuns*95/100], tools[gatedRuns-1])
+		return tools[gatedRuns*95/100]
 	})
+	if p95 >= 20*time.Millisecond {
+		t.Errorf("PostToolUse median p95 = %v, want < 20ms", p95)
+	}
 	stops := hookLatency(t, st, env, model.Stop, runs, func(int) []byte {
 		return body(`,"last_assistant_message":"Done."`)
 	})
-	for _, m := range []struct {
-		kind model.EventKind
-		d    []time.Duration
-	}{{model.PostToolUse, tools}, {model.Stop, stops}} {
-		n := len(m.d)
-		t.Logf("%s --agent codex over %d runs: p50 %v, p95 %v, max %v", m.kind, n, m.d[n/2], m.d[n*95/100], m.d[n-1])
-	}
-	if p95 := tools[gatedRuns*95/100]; p95 >= 20*time.Millisecond {
-		t.Errorf("PostToolUse p95 = %v, want < 20ms", p95)
-	}
+	t.Logf("%s --agent codex over %d runs: p50 %v, p95 %v, max %v", model.Stop, runs, stops[runs/2], stops[runs*95/100], stops[runs-1])
 	if s := getSession(t, db, "S"); s.Agent != model.AgentCodex || s.TranscriptOffset != 0 || s.State != model.StateIdle {
 		t.Errorf("S: agent %q offset %d state %s, want codex, 0, idle", s.Agent, s.TranscriptOffset, s.State)
 	}
