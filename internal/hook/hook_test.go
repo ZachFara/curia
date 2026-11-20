@@ -864,7 +864,7 @@ func TestHookLatency(t *testing.T) {
 	body := payload("A", tr, `,"tool_name":"Edit","tool_input":{"file_path":"src/api.ts"}`)
 
 	const runs = latencyGateRuns
-	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+	latgate.Gate(t, "PostToolUse", 20*time.Millisecond, func() time.Duration {
 		durations := make([]time.Duration, 0, runs)
 		for range runs {
 			appendLine(t, tr, `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}`)
@@ -878,9 +878,6 @@ func TestHookLatency(t *testing.T) {
 		t.Logf("PostToolUse over %d runs: p50 %v, p95 %v, max %v", runs, durations[runs/2], durations[runs*95/100], durations[runs-1])
 		return durations[runs*95/100]
 	})
-	if p95 >= 20*time.Millisecond {
-		t.Errorf("median p95 = %v, want < 20ms", p95)
-	}
 }
 
 // Decisions at Stop (plan sections 4.3 and 4.9).
@@ -1516,20 +1513,15 @@ func TestStopLatencyWithDecisions(t *testing.T) {
 	stopOnce() // warm-up, untimed
 
 	const runs = latencyGateRuns
-	var p50, worst time.Duration
-	p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+	latgate.Gate(t, "Stop with 500 decisions", 20*time.Millisecond, func() time.Duration {
 		durations := make([]time.Duration, 0, runs)
 		for range runs {
 			durations = append(durations, stopOnce())
 		}
 		slices.Sort(durations)
-		p50, worst = durations[runs/2], durations[runs-1]
-		t.Logf("Stop with 500 decisions over %d runs: p50 %v, p95 %v, max %v (load average %s)", runs, p50, durations[runs*95/100], worst, loadAverage())
+		t.Logf("Stop with 500 decisions over %d runs: p50 %v, p95 %v, max %v (load average %s)", runs, durations[runs/2], durations[runs*95/100], durations[runs-1], loadAverage())
 		return durations[runs*95/100]
 	})
-	if p95 >= 20*time.Millisecond {
-		t.Errorf("median p95 = %v, want < 20ms (last batch p50 %v, max %v, load average %s)", p95, p50, worst, loadAverage())
-	}
 }
 
 // Task link and main repository (plan section 4.5).
@@ -2423,15 +2415,12 @@ func TestStopLatencyWithMessages(t *testing.T) {
 		}
 	}
 	gate := func(name string, prep func(), op func() hook.Result) {
-		p95 := latgate.MedianP95(t.Logf, func() time.Duration {
+		latgate.Gate(t, name, 20*time.Millisecond, func() time.Duration {
 			d := latency(t, latencyGateRuns, prep, op)
 			runs, p50, p95, worst := len(d), d[len(d)/2], d[len(d)*95/100], d[len(d)-1]
 			t.Logf("%s, over %d runs: p50 %v, p95 %v, max %v (load average %s)", name, runs, p50, p95, worst, loadAverage())
 			return p95
 		})
-		if p95 >= 20*time.Millisecond {
-			t.Errorf("%s: median p95 = %v, want < 20ms (load average %s)", name, p95, loadAverage())
-		}
 	}
 	gate("Stop, none queued", topUp(0), hookOnce(model.Stop, stopBody, 0))
 	gate("Stop, 1 queued", topUp(1), claim(hookOnce(model.Stop, stopBody, 1)))

@@ -829,7 +829,7 @@ func TestIngestProcessLatency(t *testing.T) {
 	}
 	timed(0) // warm-up, untimed
 	sent := 0
-	p := medianP95(t.Logf, func() time.Duration {
+	latencyGate(t, "curia ingest", func() time.Duration {
 		var runs []time.Duration
 		for len(runs) < costLatencyRuns {
 			sent++
@@ -838,9 +838,6 @@ func TestIngestProcessLatency(t *testing.T) {
 		t.Logf("%-12s %s (load average %s)", "ingest", stats(runs), loadAverage())
 		return percentile(runs, 95)
 	})
-	if p >= p95Budget {
-		t.Errorf("median p95 wall time of curia ingest = %v, want under %v (load average %s)", p, p95Budget, loadAverage())
-	}
 	if out := h.mustRun(t, "usage", "--json"); !strings.Contains(out, fmt.Sprintf(`"window":"five_hour","used_pct":%g`, 10+float64(sent)/20)) {
 		t.Errorf("curia usage --json after the pass = %s, want the last reading stored", out)
 	}

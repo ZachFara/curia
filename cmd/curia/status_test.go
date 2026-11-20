@@ -461,13 +461,10 @@ VALUES (?, 's1', ?, '[{"key":"A","label":"a","tradeoffs":""}]', 'A', 'r', 'costl
 		t.Fatal(err)
 	}
 	defer func() { _ = rd.Close() }()
-	f95 := latgate.MedianP95(t.Logf, func() time.Duration {
+	latgate.Gate(t, "the forecast read", 20*time.Millisecond, func() time.Duration {
 		p50, p95 := timed(func() { _ = statusForecast(context.Background(), rd, fleetNow) })
 		t.Logf("the forecast read alone (statusForecast), %d runs: p50 %v, p95 %v", runs, p50, p95)
 		return p95
 	})
 	t.Logf("statusBadge with 3000 tickets and 20000 samples, %d runs (not gated: the ticket counts it already did cost most of it under -race): p50 %v, p95 %v", runs, b50, b95)
-	if f95 >= 20*time.Millisecond {
-		t.Errorf("the forecast read median p95 = %v, want < 20ms", f95)
-	}
 }
