@@ -152,6 +152,9 @@ func (d detailSource) activity(ctx context.Context, s model.Session) ([]string, 
 	if len(split) > 0 {
 		lines = append(lines, strings.Join(split, " · "))
 	}
+	if line := usage.ActivityBackgroundLine(t.Background, t.Unfinished); line != "" {
+		lines = append(lines, line)
+	}
 	for _, e := range evs[max(len(evs)-detailActivityEvents, 0):] {
 		lines = append(lines, sanitize.Line(e.At.Local().Format("15:04:05")+" "+string(e.Kind)+" "+e.Tool, 80))
 	}
