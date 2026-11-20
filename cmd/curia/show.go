@@ -169,5 +169,8 @@ func showJSONOf(d ui.DetailData, diff ui.DetailDiff) map[string]any {
 	if d.ActivityOK {
 		out["activity"] = d.Activity
 	}
+	if d.Resources != "" {
+		out["resources"] = c(d.Resources)
+	}
 	return out
 }
