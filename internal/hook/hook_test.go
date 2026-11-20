@@ -2996,6 +2996,30 @@ func TestSessionOutsideRepoGetsRepoOnceFromFirstRepoCwd(t *testing.T) {
 	}
 }
 
+// An event the state machine ignores (idle_prompt) never reaches enrich, so
+// it must not ask git either: a repository-less session cost one git call
+// per such event.
+func TestIgnoredEventsDoNotAskGit(t *testing.T) {
+	d1, d2 := t.TempDir(), t.TempDir()
+	env, calls := repoAt(nil)
+	st := openStore(t)
+	run(t, st, env, model.SessionStart, cwdPayload(d1))
+	idle := func() []byte {
+		b, _ := json.Marshal(map[string]string{"session_id": "A", "cwd": d2, "notification_type": "idle_prompt"})
+		return b
+	}
+	run(t, st, env, model.Notification, idle())
+	run(t, st, env, model.Notification, idle())
+	if len(*calls) != 1 {
+		t.Fatalf("git calls after two ignored events in a new directory = %v, want only the start's", *calls)
+	}
+	run(t, st, env, model.PreToolUse, cwdPayload(d2))
+	run(t, st, env, model.PreToolUse, cwdPayload(d2))
+	if len(*calls) != 2 {
+		t.Errorf("git calls = %v, want the start and one for the new directory", *calls)
+	}
+}
+
 func TestSessionOutsideRepoChecksEachNewCwdOnce(t *testing.T) {
 	d1, d2, repo := t.TempDir(), t.TempDir(), t.TempDir()
 	env, calls := repoAt(map[string]string{repo: "/r/a"})
