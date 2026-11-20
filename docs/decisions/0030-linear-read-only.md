@@ -18,3 +18,8 @@ Spec F13 and the non-goals: Linear is an import source, adapters only map fields
 - Importing a teammate's issue needs a code change; a priority changed in Linear after the first import is not picked up.
 - A second workspace needs a second environment.
 - The query and filter names follow Linear's published API and are unverified until probe L1.
+
+Amended 2026-11-19 (Plan 5 records; Rulings in `PROGRESS.md`):
+
+- Ruling 168: a failed page imports nothing (all or nothing); a retry imports everything. A `started` issue is skipped, and the 200-issue cap (4 pages of 50) is inferred from the count.
+- Probe L1 (the owner's, needs the Linear key) has not run; the query, the filter and the `Authorization` form are unverified against the real API.

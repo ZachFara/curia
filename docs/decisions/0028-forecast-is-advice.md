@@ -22,3 +22,10 @@ Spec F16 wants a warning when the usage limit will land before the reset, attrib
 - A single long turn produces no sample and so no warning until it ends.
 - The pause suggestion can name the only running task.
 - Owner questions 2, 3 and 11 of the plan record the defaults taken.
+
+Amended 2026-11-19 (Plan 5 records; Rulings in `PROGRESS.md`):
+
+- Ruling 169 (PR #140, in progress): the cheaper model applies to the one spawn it was chosen for and is not stored on the task; a stored model is used only with the agent it was stored for, and a task whose agent changes loses its model.
+- Ruling 163: where a dollar figure is unknown, cells and the stakes line show tokens, never an invented dollar figure.
+- Migration `0007_usage_forecast.sql` (PR #135): the badge's forecast reads `usage_samples` through a covering index (read p95 under `-race` 16 to 19 ms down to about 7 ms). The advice itself is unchanged.
+- Owner decision D-1 (Ruling 172): a latency gate passes on the median of three batches. It does not change this record's rules.
