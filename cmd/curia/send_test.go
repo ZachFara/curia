@@ -142,7 +142,7 @@ func TestSendRefusesSharedPane(t *testing.T) {
 }
 
 // sendAgentShell is the pid of the first process of a2's pane %2.
-const sendAgentShell = 4242
+const sendAgentShell = fakePID + 2
 
 // sendUnderAgent makes the caller's processes those of a tool shell of the
 // Claude Code agent a2 runs in pane %2: curia's parent a shell, then claude,
@@ -156,8 +156,8 @@ func sendUnderAgent(t *testing.T, fake *tmux.Fake) {
 	}
 	fake.Panes[i].PID = paneShell
 	userProcessesAs(t, map[int]userProc{
-		os.Getppid(): {PPID: 8001, Comm: "/bin/zsh"}, 8001: {PPID: paneShell, Comm: "claude"},
-		paneShell: {PPID: 8000, Comm: "-zsh"}, 8000: {PPID: 1, Comm: "tmux"},
+		os.Getppid(): {PPID: fakePID + 1, Comm: "/bin/zsh"}, fakePID + 1: {PPID: paneShell, Comm: "claude"},
+		paneShell: {PPID: fakePID + 3, Comm: "-zsh"}, fakePID + 3: {PPID: 1, Comm: "tmux"},
 	})
 }
 
@@ -466,7 +466,7 @@ func sendAncestryCleared(t *testing.T) {
 // sendAncestryUnreadable: ancestry unreadable.
 func sendAncestryUnreadable(t *testing.T) {
 	db, _ := sendAncestryHome(t)
-	userProcessesAs(t, map[int]userProc{os.Getppid(): {PPID: 8001, Comm: "/bin/zsh"}}) // 8001 cannot be read
+	userProcessesAs(t, map[int]userProc{os.Getppid(): {PPID: fakePID + 1, Comm: "/bin/zsh"}}) // fakePID + 1 cannot be read
 	t.Setenv("TMUX_PANE", "%2")
 	if _, err := readRun(t, "", "send", "%1", "hello"); err != nil {
 		t.Fatal(err)
