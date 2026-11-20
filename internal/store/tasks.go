@@ -39,7 +39,7 @@ func failTask(op, id string, err error) error {
 const selectTasks = `
 SELECT n, id, title, body, repo, base_branch, status, source, source_ref, tags, branch, worktree,
   team, agent_model, pane, resume_session, created_at, updated_at, launched_at, paused_at, cleaned_at,
-  priority, agent
+  priority, agent, pane_socket
 FROM tasks`
 
 // scanTask reads one row of selectTasks.
@@ -49,7 +49,7 @@ func scanTask(sc scanner) (model.Task, error) {
 	var created, updated, launched, paused, cleaned sql.NullString
 	err := sc.Scan(&t.N, &t.ID, &t.Title, &t.Body, &t.Repo, &t.BaseBranch, &t.Status, &t.Source, &t.SourceRef,
 		&tags, &t.Branch, &t.Worktree, &t.Team, &t.AgentModel, &t.Pane, &t.ResumeSession,
-		&created, &updated, &launched, &paused, &cleaned, &t.Priority, &t.Agent)
+		&created, &updated, &launched, &paused, &cleaned, &t.Priority, &t.Agent, &t.PaneSocket)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -143,15 +143,15 @@ func insertTask(ctx context.Context, tx *sql.Tx, t model.Task) (string, error) {
 INSERT INTO tasks (
   id, title, body, repo, base_branch, status, source, source_ref, tags, branch, worktree,
   team, agent_model, pane, resume_session, created_at, updated_at, launched_at, paused_at, cleaned_at,
-  priority, agent
+  priority, agent, pane_socket
 ) VALUES (
   'T-' || (SELECT COALESCE(MAX(n), 0) + 1 FROM tasks), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 ) RETURNING id`,
 		t.Title, t.Body, t.Repo, t.BaseBranch, t.Status, t.Source, t.SourceRef, strings.Join(t.Tags, " "),
 		t.Branch, t.Worktree, t.Team, t.AgentModel, t.Pane, t.ResumeSession,
 		formatTime(t.CreatedAt), formatTime(t.CreatedAt), formatTime(t.LaunchedAt), formatTime(t.PausedAt),
-		formatTime(t.CleanedAt), t.Priority, t.Agent).Scan(&id)
+		formatTime(t.CleanedAt), t.Priority, t.Agent, t.PaneSocket).Scan(&id)
 	return id, err
 }
 
@@ -293,12 +293,12 @@ func (s *Store) UpdateTask(ctx context.Context, id string, fn func(model.Task) (
 		_, err = tx.ExecContext(ctx, `
 UPDATE tasks SET title = ?, body = ?, repo = ?, base_branch = ?, status = ?, source = ?, source_ref = ?,
   tags = ?, branch = ?, worktree = ?, team = ?, agent_model = ?, pane = ?, resume_session = ?,
-  updated_at = ?, launched_at = ?, paused_at = ?, cleaned_at = ?, priority = ?, agent = ?
+  updated_at = ?, launched_at = ?, paused_at = ?, cleaned_at = ?, priority = ?, agent = ?, pane_socket = ?
 WHERE n = ?`,
 			next.Title, next.Body, next.Repo, next.BaseBranch, next.Status, next.Source, next.SourceRef,
 			strings.Join(next.Tags, " "), next.Branch, next.Worktree, next.Team, next.AgentModel, next.Pane,
 			next.ResumeSession, formatTime(next.UpdatedAt), formatTime(next.LaunchedAt), formatTime(next.PausedAt),
-			formatTime(next.CleanedAt), next.Priority, next.Agent, cur.N)
+			formatTime(next.CleanedAt), next.Priority, next.Agent, next.PaneSocket, cur.N)
 	}
 	if err != nil {
 		return model.Task{}, failTask("update task", id, err)

@@ -154,6 +154,21 @@ func spawnTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.
 	return r, nil
 }
 
+// spawnChosenOption names the first option that chooses how the agent runs.
+func spawnChosenOption(o spawnOptions) string {
+	switch {
+	case o.Agent != "":
+		return "--agent"
+	case o.Model != "":
+		return "--model"
+	case o.Team:
+		return "--team"
+	case o.Resume != "":
+		return "--resume"
+	}
+	return ""
+}
+
 // spawnCheckOptions refuses an id, agent, model or session id that is not
 // of the form Curia accepts, before anything else happens. The agent is
 // one of two fixed names; a model or session id that starts with a dash
@@ -201,6 +216,9 @@ func spawnCheckAgent(t model.Task, o *spawnOptions) error {
 	o.Agent = spawnAgentOf(t, *o)
 	if o.Agent == model.AgentCodex && o.Team {
 		return fmt.Errorf("agent teams are Claude Code's; spawn %s without --team or without --agent codex", t.ID)
+	}
+	if _, err := launchLookPath(o.Agent); o.Agent == model.AgentCodex && err != nil {
+		return fmt.Errorf("codex is not installed (not on PATH): install the Codex CLI, or spawn %s with --agent claude", t.ID)
 	}
 	return nil
 }
@@ -276,6 +294,9 @@ func spawnCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 
 // spawnCheckTask is spawnCheck's checks of the options and the task.
 func spawnCheckTask(ctx context.Context, st *store.Store, id string, o *spawnOptions) (model.Task, error) {
+	if opt := spawnChosenOption(*o); o.ReadyOnly && opt != "" {
+		return model.Task{}, fmt.Errorf("%s is the user's choice: %s's stored values apply to a spawn that is not the user's", opt, id)
+	}
 	if err := spawnCheckOptions(id, *o); err != nil {
 		return model.Task{}, err
 	}
@@ -349,7 +370,7 @@ func spawnCheckIdle(ctx context.Context, st *store.Store, tm tmux.Client, cfg co
 // lists it and it is not a recycled id (lifecyclePaneStateOf), or it is
 // listed and cannot be told apart.
 func spawnPaneOpen(panes []tmux.Pane, perr error, t model.Task) bool {
-	switch lifecyclePaneStateOf(panes, perr, t.Pane, "", t.LaunchedAt) {
+	switch lifecycleTaskPaneState(panes, perr, t) {
 	case lifecyclePaneOurs:
 		return true
 	case lifecyclePaneUnknown:
@@ -593,7 +614,7 @@ func spawnLink(ctx context.Context, st *store.Store, tm tmux.Client, t model.Tas
 		keep = ""
 	}
 	stored, err := st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
-		cur.Pane, cur.Team, cur.AgentModel, cur.UpdatedAt = pane.ID, o.Team, keep, clock()
+		cur.Pane, cur.PaneSocket, cur.Team, cur.AgentModel, cur.UpdatedAt = pane.ID, pane.Socket, o.Team, keep, clock()
 		if o.Agent != "" {
 			cur.Agent = o.Agent
 		}
