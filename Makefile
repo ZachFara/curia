@@ -191,12 +191,23 @@ test-unit-cmd: latency-names
 	scripts/with-test-lock.sh go test -race -skip '$(LATENCY_TESTS)' -run "^($$run)$$" ./cmd/curia
 
 ## test-latency: step 2; with SHARD set (CI job `latency`) only shard SHARD of LATENCY_SHARDS
-## of the packages that hold a latency gate, each still run alone with -p 1
+## of the packages that hold a latency gate, each still run alone with -p 1.
+## Three passes, each running every gate with ONE batch (so a burst of runner
+## noise spoils one batch of a gate, not all three); then internal/latency/verdict
+## applies the median-of-three rule to the results file (docs/decisions/0012).
+## A pass fails on a non-latency assertion; the p95 is judged by the verdict.
 test-latency: latency-names
 	@pkgs=./...; \
 	if [ -n "$(SHARD)" ]; then pkgs="$$(scripts/shard.sh list latency | scripts/shard.sh pick $(SHARD) $(LATENCY_SHARDS))"; fi; \
-	echo "==> go test -race -p 1 $$pkgs (the latency gates alone)"; \
-	scripts/with-test-lock.sh go test -race -p 1 -timeout 30m -run '$(LATENCY_TESTS)' $$pkgs
+	dir="$$(mktemp -d)"; rc=0; \
+	for pass in 1 2 3; do \
+		echo "==> latency pass $$pass of 3: go test -race -p 1 $$pkgs (the latency gates alone, one batch each)"; \
+		CURIA_LATENCY_SPACED=1 scripts/with-test-lock.sh go test -v -race -count=1 -p 1 -timeout 30m -run '$(LATENCY_TESTS)' $$pkgs >"$$dir/$$pass" 2>&1 || { rc=1; cat "$$dir/$$pass"; }; \
+		grep -E '^(--- (FAIL|SKIP)|ok |FAIL|panic)' "$$dir/$$pass" || true; \
+	done; \
+	echo "==> latency verdict (median of the three passes per gate)"; \
+	cat "$$dir/1" "$$dir/2" "$$dir/3" | go run ./internal/latency/verdict || rc=1; \
+	exit $$rc
 
 ## check-shards: fail unless the CI shards partition the latency packages and cmd/curia tests (part of check-gates and CI job `static`)
 check-shards:
