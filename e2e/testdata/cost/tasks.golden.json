@@ -25,7 +25,11 @@
     "updated_at": "<time>",
     "launched_at": null,
     "paused_at": null,
-    "cleaned_at": null
+    "cleaned_at": null,
+    "budget_usd": null,
+    "spent_usd": null,
+    "budget_pct": null,
+    "budget_level": "none"
   },
   {
     "id": "T-6",
@@ -54,7 +58,11 @@
     "updated_at": "<time>",
     "launched_at": null,
     "paused_at": null,
-    "cleaned_at": null
+    "cleaned_at": null,
+    "budget_usd": null,
+    "spent_usd": null,
+    "budget_pct": null,
+    "budget_level": "none"
   },
   {
     "id": "T-1",
@@ -82,7 +90,11 @@
     "updated_at": "<time>",
     "launched_at": "<time>",
     "paused_at": null,
-    "cleaned_at": null
+    "cleaned_at": null,
+    "budget_usd": null,
+    "spent_usd": null,
+    "budget_pct": null,
+    "budget_level": "none"
   },
   {
     "id": "T-2",
@@ -110,7 +122,11 @@
     "updated_at": "<time>",
     "launched_at": "<time>",
     "paused_at": null,
-    "cleaned_at": null
+    "cleaned_at": null,
+    "budget_usd": null,
+    "spent_usd": null,
+    "budget_pct": null,
+    "budget_level": "none"
   },
   {
     "id": "T-3",
@@ -138,7 +154,11 @@
     "updated_at": "<time>",
     "launched_at": "<time>",
     "paused_at": null,
-    "cleaned_at": null
+    "cleaned_at": null,
+    "budget_usd": null,
+    "spent_usd": null,
+    "budget_pct": null,
+    "budget_level": "none"
   },
   {
     "id": "T-4",
@@ -166,6 +186,10 @@
     "updated_at": "<time>",
     "launched_at": "<time>",
     "paused_at": null,
-    "cleaned_at": null
+    "cleaned_at": null,
+    "budget_usd": null,
+    "spent_usd": null,
+    "budget_pct": null,
+    "budget_level": "none"
   }
 ]

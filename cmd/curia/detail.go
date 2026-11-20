@@ -61,6 +61,9 @@ func (d detailSource) Detail(ctx context.Context, id string) (ui.DetailData, err
 	if t, ok, _ := d.st.GetTask(ctx, s.TaskID); ok && s.TaskID != "" {
 		out.TaskCostUSD, out.TaskCostKnown = costlensTaskCost(d.cfg, t)
 	}
+	if out.Budget, err = d.st.TaskBudget(ctx, s.TaskID, d.cfg.Cost.TaskBudgetDefault); err != nil {
+		return out, err
+	}
 	out.Activity, out.ActivityOK = d.activity(ctx, s)
 	out.Resources = d.resources(ctx, s)
 	return out, nil

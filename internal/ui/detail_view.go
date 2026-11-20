@@ -149,6 +149,12 @@ func (m DetailModel) costText() string {
 	if d.TaskCostKnown {
 		parts = append(parts, "task branch "+usage.CostCell(d.TaskCostUSD, true))
 	}
+	if c := usage.BudgetCell(d.Budget); c != "" {
+		if d.Budget.Level() != model.BudgetUnknown {
+			c = "budget " + c
+		}
+		parts = append(parts, c)
+	}
 	if c := usage.CacheCell(d.Session, m.now()); c != "" {
 		parts = append(parts, "cache "+c)
 	}

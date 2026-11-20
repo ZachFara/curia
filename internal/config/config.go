@@ -62,6 +62,7 @@ type Config struct {
 	Activity  Activity  `toml:"activity"`
 	Resources Resources `toml:"resources"`
 	Monitor   Monitor   `toml:"monitor"`
+	Cost      Cost      `toml:"cost"`
 }
 
 // maxEditor bounds the editor option, in bytes.
@@ -164,6 +165,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.Resources.validate(); err != nil {
+		return err
+	}
+	if err := c.Cost.validate(); err != nil {
 		return err
 	}
 	return c.validatePlan5()
