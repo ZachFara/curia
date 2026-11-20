@@ -60,6 +60,9 @@ type Config struct {
 	Obsidian Obsidian `toml:"obsidian"`
 	Linear   Linear   `toml:"linear"`
 	CostLens CostLens `toml:"costlens"`
+
+	// Plan 6 additions.
+	Activity Activity `toml:"activity"`
 }
 
 // maxEditor bounds the editor option, in bytes.
@@ -128,6 +131,9 @@ func Default() Config {
 		// Plan 5 additions.
 		Usage:  Usage{CheaperModel: "sonnet"},
 		Linear: Linear{URL: DefaultLinearURL},
+
+		// Plan 6 additions.
+		Activity: defaultActivity(),
 	}
 }
 
