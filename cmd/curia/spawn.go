@@ -217,6 +217,9 @@ func spawnCheckAgent(t model.Task, o *spawnOptions) error {
 	if o.Agent == model.AgentCodex && o.Team {
 		return fmt.Errorf("agent teams are Claude Code's; spawn %s without --team or without --agent codex", t.ID)
 	}
+	if _, err := launchLookPath(o.Agent); o.Agent == model.AgentCodex && err != nil {
+		return fmt.Errorf("codex is not installed (not on PATH): install the Codex CLI, or spawn %s with --agent claude", t.ID)
+	}
 	return nil
 }
 
