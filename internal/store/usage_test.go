@@ -1634,6 +1634,19 @@ func BenchmarkIngest(b *testing.B) {
 	b.ReportMetric(float64(durations[len(durations)*95/100].Microseconds()), "p95-µs")
 }
 
+// A reading with no context (the status line's null used_percentage, which
+// the cmd layer turns into size 0) leaves the last known context in place.
+func TestIngestWithoutContextKeepsLastKnown(t *testing.T) {
+	s := open(t, dbPath(t))
+	usageSession(t, s, "s1")
+	usageIngest(t, s, store.Reading{SessionID: "s1", At: usageNow, ContextSize: 200_000, ContextPct: 40}, usageNow)
+	before := get(t, s, "s1")
+	usageIngest(t, s, store.Reading{SessionID: "s1", At: usageNow.Add(time.Minute), CostUSD: usageF(1)}, usageNow.Add(time.Minute))
+	if after := get(t, s, "s1"); after.ContextUsed != before.ContextUsed || after.ContextMax != before.ContextMax || before.ContextUsed == 0 {
+		t.Errorf("context %d/%d after a reading without one, want the last known %d/%d", after.ContextUsed, after.ContextMax, before.ContextUsed, before.ContextMax)
+	}
+}
+
 func TestIngestContextWindowOwnsContextFields(t *testing.T) {
 	s := open(t, dbPath(t))
 	usageSession(t, s, "s1")
