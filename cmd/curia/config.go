@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 
@@ -366,13 +367,21 @@ func runConfigDoctor(cmd *cobra.Command, _ []string) error {
 	} else {
 		defer func() { _ = st.Close() }()
 	}
-	if _, rep, err := configResolve(path); err != nil {
+	if c, rep, err := configResolve(path); err != nil {
 		say("invalid: %s", sanitize.Line(err.Error(), 300))
 	} else {
 		for _, r := range rep.Refused {
 			say("repository value refused: %s = %s: %s", r.Key, sanitize.Line(r.Value, 100), sanitize.Line(r.Reason, 200))
 		}
 		for _, p := range rep.Problems {
+			say("%s", sanitize.Line(p, 300))
+		}
+		wd, _ := os.Getwd()
+		_, rp := activityRepoRules(c.Activity.Rules, config.FindRepoRoot(wd))
+		for _, p := range rp {
+			if slices.Contains(rep.Problems, p) {
+				continue
+			}
 			say("%s", sanitize.Line(p, 300))
 		}
 	}

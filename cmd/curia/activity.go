@@ -8,12 +8,15 @@ import (
 	"io"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/ui"
 	"github.com/ZachFara/curia/internal/usage"
@@ -88,9 +91,7 @@ type activityItem struct {
 }
 
 // activityBuild classifies every session with events in the window.
-// rulesFor gives the rules table for a repository: today the user's rules
-// for every repository; the repository's own layer (.curia/config.toml,
-// F28) is to be connected when F28 merges, by passing a func that adds them.
+// rulesFor gives the rules table for a repository (see activityRulesFor).
 func activityBuild(ctx context.Context, st *store.Store, now time.Time, rulesFor func(repo string) *usage.ActivityRules, idleCap time.Duration, types []string) (activityReport, error) {
 	since := now.Add(-activitySince)
 	evs, err := st.ActivityEvents(ctx, since, "")
@@ -195,8 +196,7 @@ func runActivity(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	rules, err := usage.NewActivityRules(cfg.Activity.Rules)
-	if err != nil {
+	if _, err = usage.NewActivityRules(cfg.Activity.Rules); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
 	st, err := openStore(cfg)
@@ -204,7 +204,7 @@ func runActivity(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	rep, err := activityBuild(cmd.Context(), st, clock(), func(string) *usage.ActivityRules { return rules }, max(cfg.Activity.IdleCap, time.Minute), cfg.Activity.TaskTypes)
+	rep, err := activityBuild(cmd.Context(), st, clock(), activityRulesFor(cfg.Activity.Rules), max(cfg.Activity.IdleCap, time.Minute), cfg.Activity.TaskTypes)
 	if err != nil {
 		return err
 	}
@@ -233,3 +233,45 @@ func activityPrint(w io.Writer, rep activityReport) error {
 	}
 	return tw.Flush()
 }
+
+// activityRepoRules returns the repository's own rules (F28) that may be
+// added after the user's: each one compiled alone, those that fail dropped
+// with a finding, the total capped at the user-rule limit. It never errors.
+func activityRepoRules(user []config.ActivityRule, root string) ([]config.ActivityRule, []string) {
+	rules, problems := config.RepoActivityRules(root)
+	var ok []config.ActivityRule
+	for i, r := range rules {
+		if len(user)+len(ok) >= activityMaxRules {
+			problems = append(problems, "repository config: activity rules over the limit of "+strconv.Itoa(activityMaxRules)+" ignored")
+			break
+		}
+		if _, err := usage.NewActivityRules([]config.ActivityRule{r}); err != nil {
+			problems = append(problems, fmt.Sprintf("repository config: activity rule %d ignored: %s", i, sanitize.Line(err.Error(), 200)))
+			continue
+		}
+		ok = append(ok, r)
+	}
+	return ok, problems
+}
+
+// activityRulesFor is activityBuild's rulesFor: the user's rules, then the
+// rules of the repository's own .curia/config.toml, for that repository only.
+func activityRulesFor(user []config.ActivityRule) func(string) *usage.ActivityRules {
+	byRepo := map[string]*usage.ActivityRules{}
+	return func(repo string) *usage.ActivityRules {
+		if r, ok := byRepo[repo]; ok {
+			return r
+		}
+		extra, _ := activityRepoRules(user, config.FindRepoRoot(repo))
+		r, err := usage.NewActivityRules(append(slices.Clone(user), extra...))
+		if err != nil { // cannot happen: every rule compiled alone and the total is capped
+			r, _ = usage.NewActivityRules(user)
+		}
+		byRepo[repo] = r
+		return r
+	}
+}
+
+// activityMaxRules is usage's cap on user rules (64); the repository's rules
+// share it, so the table the classifier compiles never exceeds it.
+const activityMaxRules = 64

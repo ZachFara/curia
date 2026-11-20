@@ -6,11 +6,12 @@ type Policy int
 
 // The policies, one per kind of tightening.
 const (
-	PolicyNone  Policy = iota // nothing: the repository file cannot change this key
-	PolicyLower               // a number or duration: only a lower value
-	PolicyRaise               // a number or duration: only a higher value
-	PolicyFalse               // a bool: only false
-	PolicyTrue                // a bool: only true
+	PolicyNone      Policy = iota // nothing: the repository file cannot change this key
+	PolicyLower                   // a number or duration: only a lower value
+	PolicyRaise                   // a number or duration: only a higher value
+	PolicyFalse                   // a bool: only false
+	PolicyTrue                    // a bool: only true
+	PolicyRepoRules               // a list of rules that apply to that repository only (RepoActivityRules); never merged into the global Config
 )
 
 // keyPolicy is the compiled-in per-key table. A new key is a Config field,
@@ -51,4 +52,7 @@ var keyPolicy = map[string]Policy{
 	"linear.url":             PolicyNone,
 	"linear.team":            PolicyNone,
 	"costlens.analyzer":      PolicyNone, // an exec path
+	"activity.idle_cap":      PolicyNone,
+	"activity.task_types":    PolicyNone,
+	"activity.rules":         PolicyRepoRules, // measurement only (F27, F28)
 }

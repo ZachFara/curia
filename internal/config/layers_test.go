@@ -200,3 +200,18 @@ func TestUpdateFile(t *testing.T) {
 		}
 	}
 }
+
+func TestRepoActivityRulesDoNotChangeGlobalConfig(t *testing.T) {
+	o := layerRepo(t, "", "[activity]\nidle_cap = \"9999h\"\ntask_types = [\"x\"]\n[[activity.rules]]\nclass = \"git\"\nmatch = \"^a\"\n")
+	c, r, err := Resolve(o)
+	if err != nil || len(c.Activity.Rules) != 0 || c.Activity.IdleCap != Default().Activity.IdleCap || len(c.Activity.TaskTypes) != 7 {
+		t.Errorf("repository changed the global activity config: %v %+v", err, c.Activity)
+	}
+	if !refused(r, "activity.idle_cap") || !refused(r, "activity.task_types") || refused(r, "activity.rules") {
+		t.Errorf("refusals = %+v", r.Refused)
+	}
+	rules, problems := RepoActivityRules(o.RepoRoot)
+	if len(rules) != 1 || rules[0].Match != "^a" || len(problems) != 0 {
+		t.Errorf("rules = %+v %v", rules, problems)
+	}
+}

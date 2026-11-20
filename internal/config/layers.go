@@ -386,6 +386,9 @@ func applyRepoKey(c Config, l leaf, v any, rep *Report) Config {
 		return c
 	}
 	pol := keyPolicy[l.key]
+	if pol == PolicyRepoRules {
+		return c
+	}
 	if pol == PolicyNone {
 		return no("a repository file cannot change this key")
 	}
@@ -460,4 +463,37 @@ func UpdateFile(data []byte, key, value string) ([]byte, error) {
 		return nil, err
 	}
 	return []byte(b.String()), nil
+}
+
+// maxRepoRules bounds the rules read from one repository file.
+const maxRepoRules = 64
+
+// RepoActivityRules returns the activity.rules of the repository at root's
+// .curia/config.toml (untrusted: same size cap, symlink rule and strict TOML
+// as the other keys), at most maxRepoRules of them, and what went wrong
+// reading them. The caller compiles each and drops the ones that fail.
+func RepoActivityRules(root string) ([]ActivityRule, []string) {
+	if root == "" {
+		return nil, nil
+	}
+	data, problem := readRepoFile(root)
+	if problem != "" {
+		return nil, []string{problem}
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var f struct {
+		Activity struct {
+			Rules []ActivityRule `toml:"rules"`
+		} `toml:"activity"`
+	}
+	if err := toml.Unmarshal(data, &f); err != nil {
+		return nil, []string{"repository config activity.rules not read: " + err.Error()}
+	}
+	r := f.Activity.Rules
+	if len(r) > maxRepoRules {
+		return r[:maxRepoRules], []string{fmt.Sprintf("repository config: more than %d activity rules, the rest ignored", maxRepoRules)}
+	}
+	return r, nil
 }
