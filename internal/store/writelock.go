@@ -5,10 +5,12 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -42,6 +44,28 @@ var errWriterLockTimeout = errors.New("writer lock busy")
 // writerLock is the writer lock of one database file.
 type writerLock struct {
 	path string
+	off  *atomic.Bool // set once the filesystem is found not to support flock
+}
+
+// Seams for tests: the flock call and the logger.
+var (
+	flockSys = syscall.Flock
+	logf     = log.Printf
+)
+
+// noQueue turns the writer lock off for the connector when err says the
+// filesystem does not support flock: the store then relies on SQLite's own
+// locking (as before the queue) and says so once.
+func (w writerLock) noQueue(err error) bool {
+	for _, e := range []error{syscall.ENOTSUP, syscall.ENOLCK, syscall.ENOSYS} {
+		if errors.Is(err, e) {
+			if !w.off.Swap(true) {
+				logf("curia: store: fair queuing is off: %s does not support flock (%v); relying on SQLite's own locking", w.path, err)
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // gates holds, per lock file, the in-process queue in front of the flock.
@@ -71,6 +95,9 @@ func (w writerLock) gate() chan struct{} {
 // Every call opens the lock file afresh: a flock belongs to the open file,
 // so two connections of one process exclude each other as two processes do.
 func (w writerLock) lock(ctx context.Context) (func(), error) {
+	if w.off.Load() {
+		return func() {}, nil
+	}
 	gate := w.gate()
 	timer := time.NewTimer(busyTimeout)
 	defer timer.Stop()
@@ -97,16 +124,19 @@ func (w writerLock) flock(ctx context.Context, timer *time.Timer) (func(), error
 	}
 	fd := int(f.Fd())
 	release := func() { _ = f.Close() } // closing the file releases the flock
-	err = syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+	err = flockSys(fd, syscall.LOCK_EX|syscall.LOCK_NB)
 	if err == nil {
 		return release, nil
 	}
 	if !errors.Is(err, syscall.EWOULDBLOCK) {
 		release()
+		if w.noQueue(err) {
+			return func() {}, nil
+		}
 		return nil, fmt.Errorf("writer lock: %w", err)
 	}
 	got := make(chan error, 1)
-	go func() { got <- syscall.Flock(fd, syscall.LOCK_EX) }()
+	go func() { got <- flockSys(fd, syscall.LOCK_EX) }()
 	select {
 	case err = <-got:
 		if err != nil {
@@ -133,7 +163,7 @@ type writerConnector struct {
 
 // newWriterConnector returns the connector Open uses for the database at abs.
 func newWriterConnector(c driver.Connector, abs string) writerConnector {
-	return writerConnector{Connector: c, lock: writerLock{path: filepath.Clean(abs + writerLockSuffix)}}
+	return writerConnector{Connector: c, lock: writerLock{path: filepath.Clean(abs + writerLockSuffix), off: new(atomic.Bool)}}
 }
 
 // Connect opens a connection wrapped in writerConn.
