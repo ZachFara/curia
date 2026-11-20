@@ -173,6 +173,8 @@ When an agent has finished a task it calls `complete_task` with a summary and wh
 
 **What leaves the machine, in all.** Only these, each when you have turned it on or run it: phone pushes to your `[ntfy] url` (see Phone pushes below); `curia task import --linear`, one query to the Linear API (or the `[linear] url` you set) with your Linear key; and the one `claude -p` call `curia say` makes to route an unaddressed message, which carries your text and the candidate targets through your own Claude login. `curia serve` only receives. The status line, the forecast, the exports and the review's branch cost run locally (the branch cost runs cost-lens's analyzer, a local program). Curia reads secrets only from environment variables (`CURIA_LINEAR_API_KEY`, `CURIA_NTFY_TOKEN`); no key is a config option, and none is stored, logged or printed.
 
+The config file is `$XDG_CONFIG_HOME/curia/config.toml` when that variable is an absolute path, else `~/.config/curia/config.toml`; the database and log follow `XDG_DATA_HOME` and `XDG_STATE_HOME` the same way, and `CURIA_DB` still wins.
+
 **Config keys of this section** (in `~/.config/curia/config.toml`): `[usage] cheaper_model`, `[obsidian] dir`, `[linear] url` and `team`, and `[costlens] analyzer` (the path of cost-lens's analyzer script; empty means the one beside the `cost-lens` command on `PATH`, which also needs `node`).
 
 ## Phone pushes and `curia serve`

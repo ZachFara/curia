@@ -620,3 +620,31 @@ func TestBadAnalyzerRejected(t *testing.T) {
 	wantAccepted(t, "[costlens]\nanalyzer = \"/x/cli.js\"\n")
 	wantAccepted(t, "[costlens]\nanalyzer = \"/x/cli.ts\"\n")
 }
+
+func TestDefaultPathsHonourXDGDataAndStateHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CURIA_DB", "")
+	xdg := t.TempDir()
+	for _, tc := range []struct {
+		name, env, value string
+		db, log          string
+	}{
+		{"unset", "", "", filepath.Join(home, ".local/share/curia/curia.db"), filepath.Join(home, ".local/state/curia/curia.log")},
+		{"absolute", "XDG_DATA_HOME", xdg, filepath.Join(xdg, "curia", "curia.db"), filepath.Join(home, ".local/state/curia/curia.log")},
+		{"relative is ignored", "XDG_STATE_HOME", "relative/state", filepath.Join(home, ".local/share/curia/curia.db"), filepath.Join(home, ".local/state/curia/curia.log")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv(tc.env, tc.value)
+			}
+			c := config.Default()
+			if c.DBPath != tc.db {
+				t.Errorf("DBPath = %q, want %q", c.DBPath, tc.db)
+			}
+			if c.LogPath != tc.log {
+				t.Errorf("LogPath = %q, want %q", c.LogPath, tc.log)
+			}
+		})
+	}
+}
