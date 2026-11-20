@@ -14,13 +14,13 @@ State as written on 2026-11-20, from the orchestrator's ledger, `git log origin/
 - **Plan 4 is in `main`** (PR #132, 49db0a1) and `plan-5` holds it: the fix branch merged across in PR #125 (up to 3d22060), then `main` in PR #136 (e7177c0). `main` also holds PR #134 (`go install` works again), which `plan-5` got with PR #136.
 - **Fix waves merged into `plan-5`** (2026-11-19 to 2026-11-20). Early: PR #135 (forecast read from a covering index, migration `0007_usage_forecast.sql`), #136 (merge of `main`), #138 (fast pre-commit hook), #139 (guarded export marks, skip-and-remember, Ruling 175), #140 (spawn, restore and stakes: Rulings 169, 170, 163), #141 (`curia uninstall` undoes Curia's settings in running tmux servers, Ruling 171), #143 (made-up process ids in tests, Ruling 173), #146 (ingest bounds, Ruling 176), #148 (golangci-lint runs in parallel across worktrees), #115 (the test-step split, Plan 4's Ruling 134). Then: #149 (the hook runs static checks and build only, Ruling 180), #144 (CI split into parallel jobs with an aggregate job named `check`) and #166 (shards: `cmd/curia` 4, latency 3; Ruling 181), #145 (fair writer queue, Ruling 177, decision 0032), #155 (latency gates pass on the median of three batches, Ruling 172), #156 (ingest cap probe off the hot path), #158 (context window and percentage from the status line, Ruling 179, migration `0008_context_live.sql`), #163 (repo refresh once per cwd change, Ruling 182, migration `0009_session_checked_cwd.sql`), #165 (send, read and the MCP caller match a pane only on their own tmux server, Ruling 184), #167 (latency gates scaled by a reference workload) and #170 (three spaced passes, Ruling 183). After the final review (three Sonnet reviewers, reports in the ledger's `final-review/`): #172 (review B: Rulings 185 and 186, migration `0010_task_pane_socket.sql`), #177 (review A: Rulings 187 and 188) and #180 (answer delivery, Ruling 189) and #173 (review C: pause wording and suggestion, narrow prompt, `AGENTS.md` and the latency-name check corrected, the CI push trigger covers `plan-*`).
 - **In progress on 2026-11-20:** nothing into `plan-5` but this records pull request. PR #180 (a confirmed assume ticket that carries the user's note is delivered to the asking session, Ruling 189) merged during the writing of this change. Draft PR #164 (`probe/plan5-latency-ref`, the ratio gate's calibration branch) is not to be merged. The spec pull request #142 (Rulings 140 to 161) is merged into `main`.
-- **Not done:** the live check with real, isolated Claude Code sessions has NOT been run for Plan 5 (live checks A and B below are still "none yet"; the Plan 6 probes on 2026-11-20 are not that check). Owner-run probes still open: X1 (Codex hooks and payloads, which holds Task 10), L1 (Linear's real API), O1 (Obsidian), a real usage limit (what the status line and hooks do at one), and the phone button (one press through `curia serve`); A1 (Agent Commons) is optional. The owner's own binary is `main`'s, so the context fix and the status line reach the owner only after Plan 5 is in `main` and `curia install` is run again. Still to come: the live check; Task 23 (V1 docs: `docs/v1-as-built.md`, `CHANGELOG.md`, V1 completion tables); the PR `plan-5` into `main`; the tag `v1.0.0`, which the owner pushes (Open Question 10). The final whole-branch review is done (see "Plan 5 final review" below).
+- **Not done:** the live check with real, isolated Claude Code sessions has NOT been run for Plan 5 (live checks A and B below are still "none yet"; the Plan 6 probes on 2026-11-20 are not that check). Owner-run probes still open: X1 (Codex hooks and payloads, which holds Task 10), L1 (Linear's real API), O1 (Obsidian), a real usage limit (what the status line and hooks do at one), and the phone button (one press through `curia serve`); A1 (Agent Commons) is optional. The owner's own binary is `main`'s, so the context fix and the status line reach the owner only after Plan 5 is in `main` and `curia install` is run again. Task 23 (V1 docs: `docs/v1-as-built.md`, `CHANGELOG.md`, the README, the V1 completion tables below) is written. Still to come: the live check; the PR `plan-5` into `main`; the tag `v1.0.0`, which the owner pushes (Open Question 10). The final whole-branch review is done (see "Plan 5 final review" below).
 - **Rules in force:** one commit per task; a task merges when its named tests and CI are green; a pull request merges only through the exit status of `gh pr checks <n> --required` (the orchestrator once merged Task 20 with a red third CI run, ledger 2026-11-19), one at a time, each refreshed from `plan-5` first, and the push run on `plan-5` is watched before the next merge (two pull requests were each green alone and red together). Sonnet only from 2026-11-19, Haiku for the simplest tenth of the work. The smallest-change rule (owner, 2026-11-19: read the code first, no abstraction nobody asked for, never cut validation) binds every task and fix.
 - **Decision record numbers differ from the plan's.** The plan numbers its five records 0025 to 0029; they are **0027** (ingest contract and samples), **0028** (the forecast is advice), **0029** (one-way exports), **0030** (Linear is read-only) and **0031** (Codex as a second agent); each carries dated amendments. **0032** (the store's fair writer queue) is added in this records change and describes #145 as amended by #177. Decision 0007 (one `make check`) is amended by Rulings 174, 180 and 181.
 - **Migrations:** `0006_cost.sql` (Task 6: `usage_samples`, `cost_samples`, `sessions.recache_tokens`, `tasks.priority`, `tasks.agent`, `decisions.exported_at`), `0007_usage_forecast.sql` (PR #135: the partial covering index the badge's forecast reads), `0008_context_live.sql` (PR #158: `sessions.context_live`), `0009_session_checked_cwd.sql` (PR #163: `sessions.checked_cwd`) and `0010_task_pane_socket.sql` (PR #172: `tasks.pane_socket`). Two files numbered 0005 exist; migrations are tracked by file name. `plan-6` has its own 0008 and 0009 with other names: both sets are kept there, by name.
 - **Live probes S1, C2 and X2 ran on 2026-11-15** (orchestrator, local only; Claude Code 2.1.325, codex-cli 0.166.0, cost-lens 0.3.0; evidence in the ledger's `live-probes.md`, fixtures `internal/usage/testdata/statusline-captured*.json` and `summary-captured.json`). **X1, L1 and O1 (the owner's) and A1 (optional) have not run.**
 - **Reviews:** only at the final PR (owner, 2026-11-13). A task merged on its report and green CI. The final review ran on 2026-11-20 (below).
-- **V1 completion:** section 17 of the plan is copied into this file by Task 23, not here.
+- **V1 completion:** see "V1 completion" below.
 
 
 ## Plan 5 tasks
@@ -90,7 +90,7 @@ Model column: the plan's suggested models (section 7), **suggested, confirmed at
 
 | Task | Title | Model | Needs | Done criteria | Status |
 | --- | --- | --- | --- | --- | --- |
-| 23 | V1 docs and release notes (orchestrator's docs task) | orchestrator | 22 | `README.md`, `CHANGELOG.md`, `AGENTS.md`, `PROGRESS.md` (with section 17's V1 completion tables) and `docs/` updated; `docs/v1-as-built.md` lists every difference from `docs/DESIGN.md` (default of question 9); the changelog prepared and the tag `v1.0.0` left to the owner (question 10) | not started |
+| 23 | V1 docs and release notes (orchestrator's docs task) | orchestrator | 22 | `README.md`, `CHANGELOG.md`, `AGENTS.md`, `PROGRESS.md` (with section 17's V1 completion tables) and `docs/` updated; `docs/v1-as-built.md` lists every difference from `docs/DESIGN.md` (default of question 9); the changelog prepared and the tag `v1.0.0` left to the owner (question 10) | written (`docs/plan5-v1-docs`); see "V1 completion" below |
 
 ## Plan 5 probes
 
@@ -283,6 +283,42 @@ Cost is given as subagent tokens (thousands). The Plan 5 ledger records no token
 | Final review (A, B, C) and its fixes | Sonnet | n/a | 0 | n/a | reviews A, B, C; fixes PRs #177, #172, #173 |
 
 
+
+## V1 completion
+
+Section 17 of the plan, with each row's final state. Verified by a test means the plan's named tests pass in CI on `plan-5`; verified by a live check means a live check of Plans 1 to 4 saw it with real sessions; owner means it is the owner's to confirm. The Plan 5 live check has not been run, so no row below rests on it.
+
+**The spec's goals for V1**
+
+| # | Goal | State |
+| --- | --- | --- |
+| 1 | An agent needing me is visible within 2 seconds, from any tmux window | Test (`TestHookLatency`, the replay test, p95 under 20 ms on a median of three batches) and the live checks of Plans 1 and 2. Known gap: a permission prompt shows up to 6 seconds late (Ruling 48). |
+| 2 | A decision can be answered in under 30 seconds from a popup or over SSH | Tests (`TestDecideViaSSH`, `TestDecideNarrowWidth`, the Plan 4 acceptance test). The 30 seconds and the phone's width are the owner's. |
+| 3 | Every decision is stored with reasoning and searchable | Tests (Plan 2's acceptance test, `TestSearchScopeTable`); the Obsidian copy is test-verified, Obsidian rendering (probe O1) is the owner's. |
+| 4 | A task goes from backlog to running agent in one command | Tests (Plan 3's and Plan 5's acceptance tests); Linear's real API (probe L1) is the owner's. |
+| 5 | Finished work lands in a review queue with diff, decisions, assumptions and cost | Tests (Plan 4's acceptance test); the cost reads `cost not recorded` without a cost source; the branch cost from the real analyzer was probed (C2) but not seen in a live check. |
+| 6 | Works headless, over SSH, survives sleep or disconnect | Tests on a detached tmux server; sleep itself is not tested. |
+| 7 | Agent-agnostic where hooks allow: Claude Code, then Codex | Partial by design: Codex is tracked and spawned on built fixtures; probe X1 (owner) and Task 10 (`curia install --codex`) are open. |
+
+**The features**
+
+| Feature | State |
+| --- | --- |
+| F1 to F4, F7 to F9, F18 | Built; tested; live-checked in Plans 1 to 3. SessionStart is idle (Ruling 37); the badge is amended (Ruling 91). |
+| F5 Task board | Built; priority is not on the board. |
+| F6 Spawning | Built; Claude Code's native worktrees and the per-repository permission switch are not. |
+| F10 Review queue, F11 Notifications, F12 Restore | Built; tested; Plan 4's live check done. The phone button and `curia serve` through a real phone are the owner's. |
+| F13 Integrations | Obsidian, Linear, the analyzer and Codex tracking and spawn are built and tested; probes O1, L1, X1 and A1 have not run; nothing is sent to Agent Commons. |
+| F14 Agent Teams | Built; the operator skill is deferred by the spec. |
+| F15 cost-lens integration | `curia ingest`, the schema file, the status-line source and the analyzer pull are built; the push in cost-lens is not (owner, question 8). |
+| F16 Forecasting | Built and tested; no live check, and not seen at a real usage limit; the model advisor, token deltas and the one-key pause are not built. |
+| F17 Cache-aware triage | Built; cache values come from the status line (Ruling 162); not seen in a live check. |
+
+**The owner still has to:** run `curia install` on the real machine and the three-session check (open since Plan 1); the phone checks of Plan 4; probes X1, L1, O1 (and optionally A1); build or schedule the cost-lens push; confirm the questions of Plan 5; push the tag `v1.0.0` (question 10).
+
+## After V1
+
+Everything this plan and the earlier ones cut or left deferred, first the plan's own order: `curia forget` (a session outside tmux that died without SessionEnd); the direct Agent Commons publish, if the owner wants it; Codex delivery at Stop and Codex restore once probe X1 has run, with `curia install --codex` (Task 10); the typing path's wording minors with a live check; the board showing priority; the operator skill. Then: a liveness check of a pane's foreground process; uninstalling entries of a binary that moved; `synchronous=NORMAL` on Linux; CI printing latency numbers (Open Question 17, ticket D-15); a status-line hint for tickets with no session; the decide view's face and stakes line; a per-repository permission switch and Claude Code's native worktrees; cost-lens's model advisor and a Linux cache path; splitting the `cmd/curia` test package; the deferred minors listed under "Plan 5 deferred minors" and in each earlier plan's list.
 
 # Plan 4 (Review Queue, Remote Answers and Restore): all tasks merged, PR into main next
 
