@@ -126,20 +126,24 @@ var userProcesses = psTable
 // (re-review A, M10).
 var psPaths = []string{"/bin/ps", "/usr/bin/ps"}
 
+// psPath is the first of psPaths that exists.
+func psPath() (string, error) {
+	for _, p := range psPaths {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("no ps at %s", strings.Join(psPaths, " or "))
+}
+
 // psTable is userProcesses from ps under one deadline: `ps -A -o
 // pid=,ppid=,comm=`, then `ps -A -o pid=,args=` when an interpreter
 // (claudeInterpreters) is running. One snapshot, so the walk sees one
 // consistent table.
 func psTable() (map[int]userProc, error) {
-	ps := ""
-	for _, p := range psPaths {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			ps = p
-			break
-		}
-	}
-	if ps == "" {
-		return nil, fmt.Errorf("no ps at %s", strings.Join(psPaths, " or "))
+	ps, err := psPath()
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*subprocessTimeout)
 	defer cancel()

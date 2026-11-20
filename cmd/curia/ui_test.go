@@ -807,7 +807,7 @@ func uiBudgetSource(t *testing.T, readings ...uiCost) storeSource {
 
 func TestStoreSourceBudget(t *testing.T) {
 	got, err := uiBudgetSource(t).Budget(context.Background())
-	if err != nil || !reflect.DeepEqual(got, ui.Budget{}) {
+	if err != nil || !reflect.DeepEqual(got, ui.Budget{Res: map[string]string{}}) {
 		t.Errorf("Budget with no samples = %+v, %v, want the zero Budget", got, err)
 	}
 	// The five-hour window goes from 50% to 62% in 16 minutes (45%/h): the
@@ -826,6 +826,7 @@ func TestStoreSourceBudget(t *testing.T) {
 	want := ui.Budget{
 		Status: "5h 62% → limit ~50m (resets 1h50m)",
 		Burn:   map[string]float64{"working": 3, "waiting": 1.5},
+		Res:    map[string]string{},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Budget = %+v, want %+v", got, want)
