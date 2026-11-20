@@ -188,7 +188,9 @@ type Model struct {
 	pausing    string          // the task a pause in flight is for; "" when none
 
 	inbox    func() tea.Model // builds the inbox, the popup's default view; nil: none
-	viaInbox bool             // the shown child was opened from the inbox, which a closing decide or review view returns to
+	inboxKey string           // the item the inbox opened a view for, and where it stood
+	inboxAt  int
+	viaInbox bool // the shown child was opened from the inbox, which a closing decide or review view returns to
 }
 
 // rowKind is what a row of the table stands for.
@@ -376,6 +378,15 @@ func (m Model) openInbox() (Model, tea.Cmd) {
 	}
 	m.viaInbox = true
 	return m.showChild(m.inbox())
+}
+
+// rebuiltInbox is a fresh inbox with the cursor where the item last opened stood.
+func (m Model) rebuiltInbox() tea.Model {
+	c := m.inbox()
+	if in, ok := c.(InboxModel); ok {
+		return in.keep(m.inboxKey, m.inboxAt)
+	}
+	return c
 }
 
 // openFromInbox opens the decide or review view for an item the inbox has
@@ -640,6 +651,7 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch msg := msg.(type) {
 	case InboxOpenMsg:
+		m.inboxKey, m.inboxAt = msg.Item.Key, msg.Index
 		return m.openFromInbox(msg.Item)
 	case InboxClosedMsg:
 		m.child, m.viaInbox, m.chain = nil, false, m.chain+1
@@ -649,7 +661,7 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.refresh()
 	case DecideClosedMsg, ReviewClosedMsg:
 		if m.viaInbox && m.inbox != nil { // back to the list the item came from
-			return m.showChild(m.inbox())
+			return m.showChild(m.rebuiltInbox())
 		}
 		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
 		m.chain++

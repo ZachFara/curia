@@ -1086,6 +1086,7 @@ var userNotOnlyCommands = map[string]string{
 	"curia config get":            "reads one effective setting only",
 	"curia config history":        "reads the revisions only",
 	"curia config doctor":         "reports problems; acknowledges an external edit only when the user guard passes",
+	"curia inbox":                 "reads the tickets, sessions and reviews and prints cleaned, bounded text, as decisions ls and reviews ls do; changes nothing",
 	"curia hook":                  "run by Claude Code's hooks; records the calling session's own event",
 	"curia ingest":                "run by cost-lens and status lines inside agent sessions; writes only cost, cache and usage readings, which nothing automatic depends on",
 	"curia launch":                "runs the agent in the caller's own process; spawn decides what is started",

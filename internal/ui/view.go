@@ -619,6 +619,9 @@ func (m Model) helpText() string {
 	}
 	if m.mode == ModePopup {
 		text += "  enter jump  d decisions  r review  t tasks  b burn  / filter  x kill  q quit"
+		if m.inbox != nil {
+			text += "  tab inbox"
+		}
 	}
 	return text
 }
