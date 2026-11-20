@@ -272,3 +272,29 @@ func dashboard(m tea.Model) Model {
 	}
 	return d
 }
+
+// Detail opens from the session list reached through Tab, and closing it
+// returns to that list, not the inbox.
+func TestDetailFromTheListReachedByTabClosesToTheList(t *testing.T) {
+	clk := testNow
+	src := &fakeInbox{}
+	src.set(inboxItems()...)
+	tm := &tmux.Fake{}
+	now := func() time.Time { return clk }
+	var m tea.Model = New(&fakeSource{sessions: threeSessions()}, tm, config.Default(), now, ModePopup).
+		WithInbox(func() tea.Model { return NewInbox(src, tm, now) }).
+		WithDetail(func(id string) tea.Model { return stubChild{view: "DETAIL " + id} })
+	m, _ = m.Update(m.Init()())
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = drain(m, cmd)
+	m, cmd = press(m, "i")
+	m = drain(m, cmd)
+	if !strings.Contains(m.View(), "DETAIL a") {
+		t.Fatalf("i did not open the detail view:\n%s", m.View())
+	}
+	m, cmd = m.Update(childMsg{gen: dashboard(m).childGen, msg: DetailClosedMsg{}})
+	m = drain(m, cmd)
+	if v := m.View(); strings.Contains(v, "DECISIONS") || !strings.Contains(v, "SESSION:WINDOW") {
+		t.Errorf("closing the detail view did not return to the session list:\n%s", v)
+	}
+}

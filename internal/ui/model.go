@@ -168,6 +168,7 @@ type Model struct {
 	noReview string                           // why r cannot open a review; "": inside an agent session
 	child    tea.Model                        // the decide view, the board or the review view while it is shown
 	childGen int                              // which child is (or was last) shown
+	detail   func(sessionID string) tea.Model // builds the agent detail view; nil: i says it is not available
 
 	rowFace  string        // the selected row and its task's pending review, as last drawn
 	rowSince time.Time     // when rowFace came, or an r too soon restarted the wait
@@ -651,7 +652,11 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
 		m.chain++
 		return m, m.refresh()
-	case BoardClosedMsg:
+	case DetailJumpMsg:
+		m.child, m.chain = nil, m.chain+1
+		next, cmd := m.jump()
+		return next, tea.Batch(cmd, next.refresh())
+	case BoardClosedMsg, DetailClosedMsg:
 		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
 		m.chain++
 		return m, m.refresh()
@@ -942,6 +947,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case msg.Paste: // pasted text is never a command
 		return m, nil
 	}
+	if msg.Type == tea.KeyTab {
+		return m.openInbox()
+	}
 	return m.commandKey(msg)
 }
 
@@ -974,8 +982,8 @@ func (m Model) commandKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.toggleBurn(), nil
 	case "P":
 		return m.askPause(), nil
-	case "tab":
-		return m.openInbox()
+	case "i":
+		return m.openDetail()
 	}
 	return m, nil
 }
@@ -1218,4 +1226,25 @@ func (m Model) suggestionMoved() string {
 		return noticeSuggestionMoved + ": nothing to pause now"
 	}
 	return noticeSuggestionMoved + ": now " + m.budget.PauseLabel
+}
+
+// WithDetail returns m with the i key enabled in the popup: it shows the
+// model open builds for the selected session's id until it sends DetailClosedMsg.
+func (m Model) WithDetail(open func(sessionID string) tea.Model) Model {
+	m.detail = open
+	return m
+}
+
+// openDetail shows the detail view of the selected row's session (a team's
+// row: the member Enter would jump to).
+func (m Model) openDetail() (Model, tea.Cmd) {
+	r, ok := m.current()
+	switch {
+	case !ok:
+		return m, nil
+	case m.mode != ModePopup || m.detail == nil:
+		m.notice = "the agent detail opens in the popup (curia ui)"
+		return m, nil
+	}
+	return m.showChild(m.detail(r.target().ID))
 }
