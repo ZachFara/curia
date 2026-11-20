@@ -158,7 +158,7 @@ func TestProtectedFilesHostilePayloads(t *testing.T) {
 	cfgFile := filepath.Join(home, ".config/curia/config.toml")
 	huge := strings.Repeat("a", 900<<10)
 	res := pre(t, st, env, cfg, preBody("Edit", `{"file_path":`+quote(proj+"/"+huge)+`}`, proj, ""))
-	wantQuiet(t, res, "a 900 KB path outside Curia's directories")
+	wantDeny(t, res, "a 900 KB path is too long to check")
 	res = pre(t, st, env, cfg, preBody("Edit", `{"file_path":`+quote(filepath.Join(home, ".config/curia", huge))+`}`, proj, ""))
 	if reason := wantDeny(t, res, "a 900 KB path inside"); len(reason) > 600 {
 		t.Errorf("reason is %d bytes, want it bounded", len(reason))
@@ -335,5 +335,35 @@ func TestProtectedFilesSymlinkThenDotDot(t *testing.T) {
 	}
 	// Lexically inside, really outside: denying is fine; pinned so a change is noticed.
 	wantDeny(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(cfgDir+"/back/../x")+`}`, proj, "")), "lexically inside")
-	wantQuiet(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/a/../b.go")+`}`, proj, "")), "plain dotdot in the project")
+	wantQuiet(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/../proj/b.go")+`}`, proj, "")), "dotdot over existing components")
+}
+
+// A path that cannot be checked is denied, not waved through: padding past
+// the length limit, and ".." after a component that does not exist.
+func TestProtectedFilesFailClosed(t *testing.T) {
+	home, proj, cfg := denyHome(t)
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	cfgDir := filepath.Join(home, ".config", "curia")
+	if err := os.Symlink(cfgDir, filepath.Join(proj, "link")); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("./", 3000)
+	for name, p := range map[string]string{
+		"dot padding":      proj + "/" + long + "link/config.toml",
+		"dotdot padding":   proj + "/" + strings.Repeat("a/../", 1000) + "link/config.toml",
+		"relative":         long + "link/config.toml",
+		"missing, dotdot":  proj + "/missing/../link/config.toml",
+		"missing deeper":   proj + "/missing/x/../../link/config.toml",
+		"relative missing": "missing/../link/config.toml",
+	} {
+		reason := wantDeny(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(p)+`}`, proj, "")), name)
+		if len(reason) > 600 {
+			t.Errorf("%s: reason is %d bytes", name, len(reason))
+		}
+	}
+	// A long path that goes nowhere near Curia is denied too: no edit has a 4 kB path.
+	wantDeny(t, pre(t, st, env, cfg, preBody("Edit", `{"file_path":`+quote(proj+"/"+long+"a.go")+`}`, proj, "")), "long harmless path")
+	// ".." in the part that exists is resolved on disk, and is fine.
+	wantQuiet(t, pre(t, st, env, cfg, preBody("Edit", `{"file_path":`+quote(proj+"/link/../../proj/new.go")+`}`, proj, "")), "dotdot over existing components")
 }

@@ -131,7 +131,12 @@ func protectedFile(ev model.Event, payload []byte, cfg config.Config) (reason st
 		if json.Unmarshal(in.ToolInput[key], &p) != nil || p == "" {
 			continue // missing or not a string: the tool itself refuses it
 		}
-		for _, cand := range candidates(p, ev.Cwd, home) {
+		cands, ok := candidates(p, ev.Cwd, home)
+		if !ok { // fail closed: a path that cannot be checked is not let through
+			return "Curia could not check where this path " + sanitize.Line(p, 60) +
+				" leads (too long, or \"..\" after a missing directory), so this tool may not change it. Use a plain absolute path.", false
+		}
+		for _, cand := range cands {
 			if inside(cand, roots) {
 				return "Curia protects its own configuration and data: this tool may not change " + sanitize.Line(cand, 80) +
 					". Only the user edits these files (curia config set). Do not retry; tell the user what change you need.", false
@@ -156,7 +161,8 @@ func protectedRoots(home string, cfg config.Config) []string {
 	}
 	var roots []string
 	for _, r := range raw {
-		roots = append(roots, strings.ToLower(r), strings.ToLower(realPath(r)))
+		resolved, _ := realPath(r)
+		roots = append(roots, strings.ToLower(r), strings.ToLower(resolved))
 	}
 	return roots
 }
@@ -164,43 +170,54 @@ func protectedRoots(home string, cfg config.Config) []string {
 // candidates are the forms of path p (relative to cwd) to check: cleaned
 // and absolute (lexical), and resolved on disk from the UNCLEANED path, so a
 // symlink followed by ".." lands where the disk says, not where the text
-// says. Both are checked: a path that only looks inside is denied too.
-func candidates(p, cwd, home string) []string {
-	if rest, ok := strings.CutPrefix(p, "~/"); ok && home != "" {
+// says. Both are checked: a path that only looks inside is denied too. ok is
+// false when the path cannot be checked: longer than maxCheckedPath, or
+// with ".." after a component that does not exist (on disk that path
+// resolves to nothing, and a parent created in between could change it).
+func candidates(p, cwd, home string) (cands []string, ok bool) {
+	if rest, found := strings.CutPrefix(p, "~/"); found && home != "" {
 		p = filepath.Join(home, rest)
 	}
 	raw := p
 	if !filepath.IsAbs(p) && filepath.IsAbs(cwd) {
 		raw = cwd + string(filepath.Separator) + p // not Join: Join would clean ".." away
 	}
+	if len(raw) > maxCheckedPath {
+		return nil, false
+	}
 	abs, err := filepath.Abs(raw) // a hostile cwd leaves the hook's own working directory
 	if err != nil {
 		abs = filepath.Clean(raw)
 	}
-	if len(raw) > 4096 { // shortcut: no symlink walk for a path no system accepts; upgrade if a real limit above PATH_MAX appears
-		return []string{abs}
-	}
 	if !filepath.IsAbs(raw) {
 		raw = abs
 	}
-	return []string{abs, realPath(raw)}
+	resolved, ok := realPath(raw)
+	return []string{abs, resolved}, ok
 }
+
+// maxCheckedPath is the longest path checked; no real edit has a longer one.
+const maxCheckedPath = 4096
 
 // realPath is p with symlinks resolved, ".." applied after them as the disk
 // does: p is cut at its last separator, by text and never cleaned, until a
-// prefix exists; the part that does not exist is then cleaned lexically.
-func realPath(p string) string {
+// prefix exists. ok is false when the part that does not exist holds "..".
+func realPath(p string) (string, bool) {
 	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r
+		return r, true
 	}
 	for d := p; ; {
 		i := strings.LastIndexByte(d, filepath.Separator)
-		if i <= 0 {
-			return filepath.Clean(p)
+		if i < 0 {
+			return filepath.Clean(p), false
 		}
-		d = d[:i]
+		d = d[:max(i, 1)] // keep the root itself
 		if r, err := filepath.EvalSymlinks(d); err == nil {
-			return filepath.Join(r, p[i+1:])
+			tail := p[i+1:]
+			return filepath.Join(r, tail), !slices.Contains(strings.Split(tail, string(filepath.Separator)), "..")
+		}
+		if i == 0 {
+			return filepath.Clean(p), false
 		}
 	}
 }
