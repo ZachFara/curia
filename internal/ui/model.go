@@ -171,6 +171,8 @@ type Model struct {
 	childGen int                              // which child is (or was last) shown
 	detail   func(sessionID string) tea.Model // builds the agent detail view; nil: i says it is not available
 
+	decisionlog func() tea.Model // builds the decision log view; nil: L says why
+
 	rowFace  string        // the selected row and its task's pending review, as last drawn
 	rowSince time.Time     // when rowFace came, or an r too soon restarted the wait
 	rowWait  time.Duration // how long r waits from rowSince: dwell, then quietPeriod after an r too soon
@@ -640,6 +642,8 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case InboxOpenMsg:
 		return m.openFromInbox(msg.Item)
+	case TimelineOpenMsg:
+		return m.openFromTimeline(msg.Event)
 	case InboxClosedMsg:
 		m.child, m.viaInbox, m.chain = nil, false, m.chain+1
 		if msg.Board {
@@ -657,7 +661,7 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.child, m.chain = nil, m.chain+1
 		next, cmd := m.jump()
 		return next, tea.Batch(cmd, next.refresh())
-	case BoardClosedMsg, DetailClosedMsg, TimelineClosedMsg:
+	case BoardClosedMsg, DetailClosedMsg, TimelineClosedMsg, DecisionLogClosedMsg:
 		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
 		m.chain++
 		return m, m.refresh()
@@ -983,7 +987,7 @@ func (m Model) commandKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m.toggleBurn(), nil
 	case "P":
 		return m.askPause(), nil
-	case "T", "i":
+	case "T", "i", "L":
 		return m.openReadView(msg.String())
 	}
 	return m, nil
@@ -992,8 +996,11 @@ func (m Model) commandKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 // openReadView opens the views that only read: T the timeline, i the agent
 // detail. One case in commandKey keeps it within the complexity limit.
 func (m Model) openReadView(key string) (Model, tea.Cmd) {
-	if key == "T" {
+	switch key {
+	case "T":
 		return m.openTimeline()
+	case "L":
+		return m.openDecisionLog()
 	}
 	return m.openDetail()
 }

@@ -88,7 +88,8 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 	if mode == ui.ModePopup {
 		bsrc := boardSource{st: st, tm: client, cfg: cfg, refused: refused}
 		m = m.WithBoard(func() tea.Model { return ui.NewBoard(bsrc, client, clock, true) })
-		m = m.WithTimeline(func() tea.Model { return ui.NewTimeline(timelineSource(st), clock) })
+		m = m.WithTimeline(func() tea.Model { return ui.NewTimeline(timelineSource(st), clock).WithText(st.TimelineText) })
+		m = m.WithDecisionLog(func() tea.Model { return ui.NewDecisionLog(decisionlogSource(st), clock) })
 		if refused == nil {
 			m = m.WithPause()
 		}
@@ -378,7 +379,7 @@ func (b boardSource) Spawn(ctx context.Context, id string) (string, error) {
 
 // timelineSource reads the dashboard's timeline view from the store; the view only reads.
 func timelineSource(st *store.Store) ui.TimelineSource {
-	return func(ctx context.Context, f ui.TimelineFilter, before time.Time, limit int) ([]model.TimelineEvent, error) {
-		return st.Timeline(ctx, store.TimelineQuery{Since: f.Since, Before: before, Repo: f.Repo, TaskID: f.TaskID, Limit: limit})
+	return func(ctx context.Context, f ui.TimelineFilter, after model.TimelineEvent, limit int) ([]model.TimelineEvent, error) {
+		return st.Timeline(ctx, store.TimelineQuery{Since: f.Since, Cursor: after, Repo: f.Repo, TaskID: f.TaskID, Limit: limit})
 	}
 }
