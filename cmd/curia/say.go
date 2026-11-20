@@ -19,6 +19,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/deliver"
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/route"
@@ -185,6 +186,9 @@ func sayHeadless(ctx context.Context, w io.Writer, src *saySource, text string) 
 		return err
 	}
 	p := plan.p
+	if len(p.Targets) > 0 {
+		return errors.New("not sent: a broadcast always needs your confirmation, and there is no terminal to ask on; run it in a terminal")
+	}
 	switch {
 	case p.Auto:
 		return sayHeadlessAuto(ctx, w, src, plan)
@@ -381,11 +385,18 @@ func (s *saySource) Send(ctx context.Context, c ui.Choice) (model.MessageOutcome
 	if err != nil {
 		return model.MessageOutcome{}, err
 	}
+	if c.Target.Type == route.TargetBroadcast {
+		return out, nil // its note is the tally
+	}
 	return sayViewOutcome(out, notice), nil
 }
 
 // send is Send with the outcome as stored and the gate's notice apart.
 func (s *saySource) send(ctx context.Context, c ui.Choice) (model.MessageOutcome, string, error) {
+	if c.Target.Type == route.TargetBroadcast {
+		out, err := s.sendBroadcast(ctx, c)
+		return out, "", err
+	}
 	now := clock()
 	plan, _ := s.lastPlan()
 	m, err := sayRow(plan, c, model.MsgQueued, sayRoutedBy(c), now)
@@ -641,4 +652,52 @@ func (s *saySource) cancelPlan(ctx context.Context, plan sayPlan, now time.Time)
 	}
 	m, err := s.st.CreateMessage(ctx, sayPlanRow(plan, plan.p.Text, plan.p.Kind, model.MsgCanceled, routed, now))
 	return m.ID, err
+}
+
+// sendBroadcast stores one queued instruction per session of the proposal
+// that is still live on this tmux server (never one the user was not shown)
+// under one broadcast id, then delivers each through deliver.Message, the
+// one guarded typing path: typed only into an empty prompt, else left for
+// the Stop hook or check_messages. The outcome's message is the first row
+// with the broadcast id as its id, and its note the tally.
+func (s *saySource) sendBroadcast(ctx context.Context, c ui.Choice) (model.MessageOutcome, error) {
+	if c.Kind != model.KindInstruction {
+		return model.MessageOutcome{}, errors.New("a broadcast is an instruction")
+	}
+	now := clock()
+	plan, _ := s.lastPlan()
+	socket := seenSocket(os.Getenv("TMUX"))
+	var rows []model.Message
+	for _, t := range c.Proposal.Targets {
+		cur, found, err := s.st.GetSession(ctx, t.Session.ID)
+		if err != nil {
+			return model.MessageOutcome{}, err
+		}
+		if !found || socket == "" || fleet.OtherSocket(socket, cur) || cur.TeamRole == model.RoleTeammate ||
+			cur.State == model.StateEnded || cur.State == model.StateStale {
+			continue
+		}
+		m := sayPlanRow(plan, c.Proposal.Text, model.KindInstruction, model.MsgQueued, c.Proposal.Routed, now)
+		m.TargetSession, m.TargetTask, m.TargetRepo = cur.ID, cur.TaskID, cur.Repo
+		rows = append(rows, m)
+	}
+	if len(rows) == 0 {
+		return model.MessageOutcome{}, errors.New("none of the sessions is live any more; nothing sent")
+	}
+	stored, err := s.st.CreateBroadcast(ctx, rows)
+	if err != nil {
+		return model.MessageOutcome{}, err
+	}
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sayBroadcastLimit)
+	defer cancel()
+	typed := 0
+	for _, m := range stored {
+		if s.apply(dctx, m).Message.Status == model.MsgDelivered {
+			typed++
+		}
+	}
+	head := stored[0]
+	head.ID = head.BroadcastID
+	return model.MessageOutcome{Message: head, Note: fmt.Sprintf("%d sessions: %d delivered, %d queued for their next stop",
+		len(stored), typed, len(stored)-typed)}, nil
 }

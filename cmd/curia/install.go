@@ -70,7 +70,7 @@ func installRunClaude(ctx context.Context, args ...string) ([]byte, error) {
 
 // installToolsHint is what install prints when --no-allow-mcp-tools skipped
 // the rules.
-const installToolsHint = "MCP tools not allowed without a prompt; to allow the six curia tools, run curia install without --no-allow-mcp-tools"
+const installToolsHint = "MCP tools not allowed without a prompt; to allow the seven curia tools, run curia install without --no-allow-mcp-tools"
 
 // installPaths are the user-owned files the install commands edit, and the
 // Claude config JSON they only read.
@@ -268,26 +268,26 @@ func installTmux(ctx context.Context, out io.Writer, p installPaths, bin string)
 	return nil
 }
 
-// installTools adds the six tool rules unless --no-allow-mcp-tools was given
-// (Ruling 78); with the flag it says how to allow them, unless all six are
+// installTools adds the seven tool rules unless --no-allow-mcp-tools was given
+// (Ruling 78); with the flag it says how to allow them, unless all seven are
 // there already (Ruling 57).
 func installTools(out io.Writer, settings string) error {
 	if installNoAllowMCPTools {
 		if install.ToolsAllowed(settings) {
-			installSay(out, "MCP tools: the six curia tools are already allowed without a prompt in %s", settings)
+			installSay(out, "MCP tools: the seven curia tools are already allowed without a prompt in %s", settings)
 		} else {
 			installSay(out, "%s", installToolsHint)
 		}
 		return nil
 	}
 	if install.ToolsAllowed(settings) {
-		installSay(out, "MCP tools: the six curia tools are already allowed without a prompt in %s", settings)
+		installSay(out, "MCP tools: the seven curia tools are already allowed without a prompt in %s", settings)
 		return nil
 	}
 	if err := install.AllowTools(settings, time.Now()); err != nil {
 		return err
 	}
-	installSay(out, "MCP tools: the six curia tools are allowed without a prompt in %s; "+
+	installSay(out, "MCP tools: the seven curia tools are allowed without a prompt in %s; "+
 		"to skip this step, run curia install --no-allow-mcp-tools", settings)
 	return nil
 }
@@ -382,6 +382,7 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	for _, line := range install.UnloadTmux(cmd.Context(), installRunTmux, p.tmuxConf, bin, uninstallKeys(), uninstallDefaultKeys()) {
 		installSay(cmd.OutOrStdout(), "%s", line)
 	}
+	uninstallMonitor(cmd.OutOrStdout())
 	if err = uninstallSkill(cmd.OutOrStdout(), p.skills); err != nil {
 		return err
 	}
@@ -390,6 +391,23 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	}
 	_, err = fmt.Fprintln(cmd.OutOrStdout(), "Curia is uninstalled.\nRestart running Claude Code sessions.")
 	return err
+}
+
+// uninstallMonitor stops a running monitor so that no Curia process outlives
+// the uninstall, and says what happened in one line. It never fails the
+// uninstall: when the monitor cannot be stopped the line says why and how to
+// stop it by hand.
+func uninstallMonitor(out io.Writer) {
+	cfg, err := loadConfig()
+	if err != nil {
+		installSay(out, "monitor: not stopped (the config cannot be read: %v); if one runs, stop it with: curia monitor stop", err)
+		return
+	}
+	line, err := stopMonitor(cfg)
+	if err != nil {
+		line = err.Error()
+	}
+	installSay(out, "%s", line)
 }
 
 // uninstallDefaultKeys are the keys of Curia's default configuration, which
@@ -459,7 +477,7 @@ func init() {
 		RunE: userOnlyRunE("install", "install Curia", runInstall),
 	}
 	installCmd.Flags().BoolVar(&installNoAllowMCPTools, "no-allow-mcp-tools", false,
-		"do not add the six curia MCP tools to Claude's permissions.allow (they are allowed by default)")
+		"do not add the seven curia MCP tools to Claude's permissions.allow (they are allowed by default)")
 	installCmd.Flags().BoolVar(&installNoStatusLine, "no-statusline", false,
 		"do not register curia statusline as Claude Code's status line (it is registered by default when you have none)")
 	rootCmd.AddCommand(

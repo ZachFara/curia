@@ -183,7 +183,7 @@ func (r *reviewsRun) firstReview(t *testing.T) {
 	env := append(slices.Clone(r.h.env), "CLAUDE_PROJECT_DIR="+r.worktree, "TMUX_PANE="+r.leadPane)
 	r.agent = startClient(t, r.h, "client_agent", r.worktree, script, env)
 	r.agent.handshake(t)
-	r.agent.call(t) // tools/list: the six tools
+	r.agent.call(t) // tools/list: the seven tools
 	r.agent.call(t) // request_decision: D-1, assume
 	r.agentWorks(t, "auth/refresh.go", "package auth\n\n// rotate is called on every use.\n")
 	r.agent.call(t) // complete_task: R-1

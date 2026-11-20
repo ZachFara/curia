@@ -163,7 +163,7 @@ func TestMessagesLsJSON(t *testing.T) {
 	keys := []string{
 		"id", "text", "kind", "sender", "sender_session", "target_session", "target_task", "target_repo",
 		"suggested_target", "suggested_kind", "runner_up", "confidence", "routed_by", "auto_eligible", "status",
-		"delivered_via", "result_ref", "created_at", "hold_until", "delivered_at", "confirmed_at",
+		"delivered_via", "result_ref", "created_at", "hold_until", "delivered_at", "confirmed_at", "broadcast_id",
 	}
 	if len(rows) != 2 || len(rows[0]) != len(keys) {
 		t.Fatalf("rows = %v", rows)
