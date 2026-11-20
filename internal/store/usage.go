@@ -66,7 +66,10 @@ type Reading struct {
 	// CacheRecacheTokens is how many tokens a rebuild of the cold cache would
 	// write (Ruling P5-R2: the status line's prompt_cache.recache_tokens_if_cold).
 	CacheRecacheTokens *int64
-	Limits             []model.UsageSample // Window, UsedPct and ResetsAt set; At and SessionID are filled from the Reading
+	// ContextSize and ContextPct are Claude Code's own window and percentage
+	// (status line); ContextSize 0 means not carried.
+	ContextSize, ContextPct int
+	Limits                  []model.UsageSample // Window, UsedPct and ResetsAt set; At and SessionID are filled from the Reading
 }
 
 // IngestResult says what an ingest changed.
@@ -86,6 +89,7 @@ const (
 UPDATE sessions SET cost_usd = COALESCE(?, cost_usd), cache_expires_at = COALESCE(?, cache_expires_at),
   cache_rebuild_usd = COALESCE(?, cache_rebuild_usd), recache_tokens = COALESCE(?, recache_tokens)
 WHERE id = ?`
+	ingestContext       = `UPDATE sessions SET context_used = ?, context_max = ?, context_live = 1 WHERE id = ?`
 	ingestSessionExists = `SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ?)`
 	// newestCost is a session's newest cost sample; newestUsage a window's.
 	newestCost  = `SELECT cost_usd, at FROM cost_samples WHERE session_id = ? ORDER BY at DESC, n DESC LIMIT 1`
@@ -227,6 +231,13 @@ func ingest(ctx context.Context, tx *sql.Tx, r Reading, now time.Time) (IngestRe
 // ingestSessionRow writes r's session values and reports whether the
 // session exists. A reading that carries none only looks.
 func ingestSessionRow(ctx context.Context, tx *sql.Tx, r Reading) (bool, error) {
+	if r.ContextSize >= 1000 && r.ContextSize <= 10_000_000 && r.ContextPct >= 0 && r.ContextPct <= 100 {
+		// context_used is the least count whose floor percentage is Claude Code's, so the
+		// existing used*100/max code shows its number; context_live stops the hook overwriting both.
+		if _, err := tx.ExecContext(ctx, ingestContext, (r.ContextPct*r.ContextSize+99)/100, r.ContextSize, r.SessionID); err != nil {
+			return false, err
+		}
+	}
 	if r.CostUSD == nil && r.CacheExpiresAt.IsZero() && r.CacheRebuildUSD == nil && r.CacheRecacheTokens == nil {
 		var found bool
 		err := tx.QueryRowContext(ctx, ingestSessionExists, r.SessionID).Scan(&found)

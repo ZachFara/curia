@@ -3465,3 +3465,15 @@ func TestPauseNoticeFitsEveryWidth(t *testing.T) {
 		}
 	}
 }
+
+func TestOverfullContextShowsQuestionMark(t *testing.T) {
+	s := threeSessions()[0]
+	s.ContextUsed, s.ContextMax = 436000, 200000 // 218%
+	m, _, _ := newTest(t, ModePopup, s)
+	if v := m.View(); strings.Contains(v, "218") || !strings.Contains(v, "?") {
+		t.Errorf("want ? and no 218:\n%s", v)
+	}
+	if l := ContextLevel(s.ContextUsed, s.ContextMax, 60, 85); l != LevelUnknown {
+		t.Errorf("level = %v, want Unknown", l)
+	}
+}

@@ -81,7 +81,7 @@ func ingestArgs(args []string) (statusLine bool, extra []string) {
 
 // ingestReading converts an accepted document into what the store takes.
 func ingestReading(d usage.Doc) store.Reading {
-	r := store.Reading{SessionID: d.SessionID, At: d.At}
+	r := store.Reading{SessionID: d.SessionID, At: d.At, ContextSize: d.ContextSize, ContextPct: d.ContextPct}
 	if d.HasCost {
 		r.CostUSD = &d.CostUSD
 	}

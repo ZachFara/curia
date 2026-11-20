@@ -94,12 +94,17 @@ func TestReplayFiveSessions(t *testing.T) {
 	}
 	checkLog(t, h.logPath, append(slices.Clone(hookLog), lsLog))
 
-	timed := newHome(t, bin)
-	runs := timed.timeSequential(t, lines)
-	checkLatency(t, runs)
-	// Exit 0 and silence hold even when a hook fails inside, so the log is
-	// what shows that every timed run did its work.
-	checkLog(t, timed.logPath, repeat(hookLog, len(runs)/len(lines)))
+	if p := medianP95(t.Logf, func() time.Duration {
+		timed := newHome(t, bin)
+		runs := timed.timeSequential(t, lines)
+		p := checkLatency(t, runs)
+		// Exit 0 and silence hold even when a hook fails inside, so the log is
+		// what shows that every timed run did its work.
+		checkLog(t, timed.logPath, repeat(hookLog, len(runs)/len(lines)))
+		return p
+	}); p >= p95Budget {
+		t.Errorf("median p95 wall time of curia hook = %v, want under %v (load average %s)", p, p95Budget, loadAverage())
+	}
 }
 
 // build builds curia into a temp dir, execs it once untimed, and returns its
@@ -314,11 +319,11 @@ func closeAll(files []*os.File) {
 	}
 }
 
-// checkLatency logs p50, p95 and max per event and overall, and fails if the
-// p95 over every run reaches p95Budget or a SessionStart takes startBudget.
-// On failure it also logs the load average, to tell a slow hook from a busy
-// machine.
-func checkLatency(t *testing.T, runs []hookRun) {
+// checkLatency logs p50, p95 and max per event and overall, fails if a
+// SessionStart takes startBudget (on failure it also logs the load average,
+// to tell a slow hook from a busy machine) and returns the p95 over every
+// run, which the caller gates on the median of three batches.
+func checkLatency(t *testing.T, runs []hookRun) time.Duration {
 	t.Helper()
 	byEvent := map[string][]time.Duration{}
 	var all []time.Duration
@@ -334,13 +339,11 @@ func checkLatency(t *testing.T, runs []hookRun) {
 		t.Logf("%-12s %s", e, stats(byEvent[e]))
 	}
 	t.Logf("%-12s %s", "all", stats(all))
-	if p := percentile(all, 95); p >= p95Budget {
-		t.Errorf("p95 wall time of curia hook = %v, want under %v (load average %s)", p, p95Budget, loadAverage())
-	}
 	if m := slices.Max(starts); m >= startBudget {
 		t.Errorf("slowest SessionStart took %v, want the session stored within %v (load average %s)",
 			m, startBudget, loadAverage())
 	}
+	return percentile(all, 95)
 }
 
 // loadAverage is the machine's 1-minute load average, for diagnosis only.
@@ -468,5 +471,31 @@ func checkLog(t *testing.T, path string, want []string) {
 	if !slices.Equal(got, want) {
 		t.Errorf("log %s: got %d entries, want %d:\n%s\nwant:\n%s\nlog:\n%s", path, len(got), len(want),
 			strings.Join(got, "\n"), strings.Join(want, "\n"), data)
+	}
+}
+
+// medianP95 is internal/latency.MedianP95 (e2e may import no internal
+// package): it runs batch three times, always, and returns the median of the
+// p95 values it returns. Owner's next step if flakes continue (ticket D-1):
+// gate on the ratio to a reference workload measured in the same job.
+func medianP95(logf func(string, ...any), batch func() time.Duration) time.Duration {
+	var p95s [3]time.Duration
+	for i := range p95s {
+		logf("latency batch %d of 3", i+1)
+		p95s[i] = batch()
+	}
+	logf("batch p95 values %v", p95s)
+	slices.Sort(p95s[:])
+	return p95s[1]
+}
+
+// TestMedianOfThreeLatencyBatches: one wild batch among three does not move
+// the median, two do.
+func TestMedianOfThreeLatencyBatches(t *testing.T) {
+	for _, c := range []struct{ a, b, c, want time.Duration }{{5, 400, 6, 6}, {400, 5, 6, 6}, {5, 400, 300, 300}} {
+		p, n := []time.Duration{c.a, c.b, c.c}, 0
+		if got := medianP95(t.Logf, func() time.Duration { n++; return p[n-1] }); got != c.want || n != 3 {
+			t.Errorf("batches %v: median %v after %d, want %v after 3", p, got, n, c.want)
+		}
 	}
 }

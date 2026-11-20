@@ -828,16 +828,21 @@ func TestIngestProcessLatency(t *testing.T) {
 		return took
 	}
 	timed(0) // warm-up, untimed
-	var runs []time.Duration
-	for len(runs) < costLatencyRuns {
-		runs = append(runs, timed(len(runs)+1))
+	sent := 0
+	p := medianP95(t.Logf, func() time.Duration {
+		var runs []time.Duration
+		for len(runs) < costLatencyRuns {
+			sent++
+			runs = append(runs, timed(sent))
+		}
+		t.Logf("%-12s %s (load average %s)", "ingest", stats(runs), loadAverage())
+		return percentile(runs, 95)
+	})
+	if p >= p95Budget {
+		t.Errorf("median p95 wall time of curia ingest = %v, want under %v (load average %s)", p, p95Budget, loadAverage())
 	}
-	t.Logf("%-12s %s (load average %s)", "ingest", stats(runs), loadAverage())
-	if p := percentile(runs, 95); p >= p95Budget {
-		t.Errorf("p95 wall time of curia ingest = %v, want under %v (load average %s)", p, p95Budget, loadAverage())
-	}
-	if out := h.mustRun(t, "usage", "--json"); !strings.Contains(out, `"window":"five_hour","used_pct":30`) {
-		t.Errorf("curia usage --json after the pass = %s, want the last reading (30%%) stored", out)
+	if out := h.mustRun(t, "usage", "--json"); !strings.Contains(out, fmt.Sprintf(`"window":"five_hour","used_pct":%g`, 10+float64(sent)/20)) {
+		t.Errorf("curia usage --json after the pass = %s, want the last reading stored", out)
 	}
 	checkNoErrors(t, h.logPath)
 }

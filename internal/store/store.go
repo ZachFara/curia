@@ -59,10 +59,11 @@ func Open(path string) (*Store, error) {
 	if err = os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
 		return nil, fmt.Errorf("store: create directory for %s: %w", abs, err)
 	}
-	db, err := sql.Open("sqlite", dsn(abs))
+	conn, err := sqlite.NewConnector(dsn(abs))
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", abs, err)
 	}
+	db := sql.OpenDB(newWriterConnector(conn, abs)) // writes take the writer lock, see writelock.go
 	s := &Store{db: db}
 	ctx := context.Background()
 	if err = s.enableWAL(ctx); err != nil {
@@ -256,7 +257,8 @@ ON CONFLICT(id) DO UPDATE SET
   tmux_session = excluded.tmux_session, tmux_window = excluded.tmux_window,
   cwd = excluded.cwd, repo = excluded.repo, branch = excluded.branch,
   state = excluded.state, model = excluded.model,
-  context_used = excluded.context_used, context_max = excluded.context_max,
+  context_used = CASE WHEN sessions.context_live = 1 THEN sessions.context_used ELSE excluded.context_used END,
+  context_max = CASE WHEN sessions.context_live = 1 THEN sessions.context_max ELSE excluded.context_max END,
   subagents_active = excluded.subagents_active, last_update = excluded.last_update,
   seen_at = excluded.seen_at, transcript_path = excluded.transcript_path,
   started_at = excluded.started_at, updated_at = excluded.updated_at,
