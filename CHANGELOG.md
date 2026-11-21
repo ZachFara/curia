@@ -30,9 +30,10 @@ Not verified against real Claude Code sessions yet; see `README.md` "Status" and
 - An optional web page on `curia serve` (off): board, timeline, decision log, usage, settings; device tokens; with `serve.web_write`, three task moves and confirmed messages.
 
 ### Upgrade notes
-- Run `curia install` again: it adds the seventh tool rule and three `Edit(...)` deny rules for Curia's directories (default directories only), and the tmux snippet gains a `client-attached` line that starts `curia monitor`; then `tmux source-file ~/.tmux.conf`. Restart Claude Code sessions.
+- Run `curia install` again: it adds the seventh tool rule and `Edit(...)` deny rules for Curia's directories (the default ones, the `XDG_*_HOME` ones and a relocated database or log), and the tmux snippet gains a `client-attached` line that starts `curia monitor`; then `tmux source-file ~/.tmux.conf`. Restart Claude Code sessions.
 - The database migrates itself. The monitor starts when you attach tmux (`monitor.autostart = false` stops that).
 - Agents Curia launches have the Docker wrapper first on `PATH`; set the three `resources` caps to 0 to turn the caps off (the labels stay).
+- A budget-stopped task can no longer file tasks; away agents still can.
 - Agents may now file tasks into the backlog (`tasks.agent_filed.level = off` stops that).
 - The popup now opens on the inbox.
 - `curia mcp --help` still says six tools; there are seven.
