@@ -1,0 +1,41 @@
+{
+  "session_id": "00000001-0000-4000-8000-000000000001",
+  "transcript_path": "/nonexistent/claude/projects/api-server/00000001-0000-4000-8000-000000000001.jsonl",
+  "cwd": "/nonexistent/src/.curia-worktrees/api-server-T-1",
+  "session_name": "Fix the auth refresh",
+  "model": {
+    "id": "claude-opus-5-5",
+    "display_name": "Opus 5.5"
+  },
+  "workspace": {
+    "current_dir": "/nonexistent/src/.curia-worktrees/api-server-T-1",
+    "project_dir": "/nonexistent/src/.curia-worktrees/api-server-T-1",
+    "added_dirs": [],
+    "git_worktree": "api-server-T-1"
+  },
+  "version": "2.1.325",
+  "output_style": {
+    "name": "default"
+  },
+  "cost": {
+    "total_cost_usd": 4.12,
+    "total_duration_ms": 900000,
+    "total_api_duration_ms": 312000,
+    "total_lines_added": 40,
+    "total_lines_removed": 6
+  },
+  "context_window": {
+    "total_input_tokens": 142000,
+    "total_output_tokens": 9100,
+    "context_window_size": 200000,
+    "used_percentage": 71,
+    "remaining_percentage": 29
+  },
+  "exceeds_200k_tokens": false,
+  "rate_limits": {
+    "five_hour": {
+      "used_percentage": 62,
+      "resets_at": "<resets_at>"
+    }
+  }
+}

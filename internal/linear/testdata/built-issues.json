@@ -1,0 +1,36 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "identifier": "ENG-101",
+          "title": "Fix the login redirect loop",
+          "description": "Users bounce between /login and /home.\n\n- [ ] reproduce\n- [ ] fix",
+          "priority": 2,
+          "url": "https://linear.app/built-team/issue/ENG-101/fix-the-login-redirect-loop",
+          "state": { "type": "unstarted" },
+          "labels": { "nodes": [ { "name": "Backend" }, { "name": "Needs Review!" } ] }
+        },
+        {
+          "identifier": "ENG-102",
+          "title": "Write the onboarding guide",
+          "description": null,
+          "priority": 0,
+          "url": "https://linear.app/built-team/issue/ENG-102/write-the-onboarding-guide",
+          "state": { "type": "backlog" },
+          "labels": { "nodes": [] }
+        },
+        {
+          "identifier": "eng 7",
+          "title": "An issue whose identifier is malformed",
+          "description": "Never imported.",
+          "priority": 3,
+          "url": "https://linear.app/built-team/issue/eng-7",
+          "state": { "type": "backlog" },
+          "labels": { "nodes": [] }
+        }
+      ],
+      "pageInfo": { "hasNextPage": true, "endCursor": "built-cursor-1" }
+    }
+  }
+}

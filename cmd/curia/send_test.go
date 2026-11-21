@@ -142,7 +142,7 @@ func TestSendRefusesSharedPane(t *testing.T) {
 }
 
 // sendAgentShell is the pid of the first process of a2's pane %2.
-const sendAgentShell = 4242
+const sendAgentShell = fakePID + 2
 
 // sendUnderAgent makes the caller's processes those of a tool shell of the
 // Claude Code agent a2 runs in pane %2: curia's parent a shell, then claude,
@@ -156,8 +156,8 @@ func sendUnderAgent(t *testing.T, fake *tmux.Fake) {
 	}
 	fake.Panes[i].PID = paneShell
 	userProcessesAs(t, map[int]userProc{
-		os.Getppid(): {PPID: 8001, Comm: "/bin/zsh"}, 8001: {PPID: paneShell, Comm: "claude"},
-		paneShell: {PPID: 8000, Comm: "-zsh"}, 8000: {PPID: 1, Comm: "tmux"},
+		os.Getppid(): {PPID: fakePID + 1, Comm: "/bin/zsh"}, fakePID + 1: {PPID: paneShell, Comm: "claude"},
+		paneShell: {PPID: fakePID + 3, Comm: "-zsh"}, fakePID + 3: {PPID: 1, Comm: "tmux"},
 	})
 }
 
@@ -466,7 +466,7 @@ func sendAncestryCleared(t *testing.T) {
 // sendAncestryUnreadable: ancestry unreadable.
 func sendAncestryUnreadable(t *testing.T) {
 	db, _ := sendAncestryHome(t)
-	userProcessesAs(t, map[int]userProc{os.Getppid(): {PPID: 8001, Comm: "/bin/zsh"}}) // 8001 cannot be read
+	userProcessesAs(t, map[int]userProc{os.Getppid(): {PPID: fakePID + 1, Comm: "/bin/zsh"}}) // fakePID + 1 cannot be read
 	t.Setenv("TMUX_PANE", "%2")
 	if _, err := readRun(t, "", "send", "%1", "hello"); err != nil {
 		t.Fatal(err)
@@ -497,5 +497,54 @@ func sendAncestryRotating(t *testing.T) {
 		if m.SenderSession != "" {
 			t.Errorf("message %s stored as from %q, want unknown", m.ID, m.SenderSession)
 		}
+	}
+}
+
+const (
+	sendSockA = "/tmp/tmux-1/a"
+	sendSockB = "/tmp/tmux-1/b"
+)
+
+// sendOnServer is readSession on the tmux server at socket.
+func sendOnServer(id, pane, socket string) model.Session {
+	s := readSession(id, model.StateIdle, pane)
+	s.Socket = socket
+	return s
+}
+
+// A pane id is matched only with its tmux server (Ruling 133).
+func TestSendPaneMatchesCallersServer(t *testing.T) {
+	both := []model.Session{sendOnServer("sa", "%7", sendSockA), sendOnServer("sb", "%7", sendSockB)}
+	for _, c := range []struct {
+		name, tmuxEnv string
+		sessions      []model.Session
+		want          string // target session, or "" for a refusal
+	}{
+		{"caller on A", sendSockA + ",1,0", both, "sa"},
+		{"caller on B", sendSockB + ",1,0", both, "sb"},
+		{"third server", "/tmp/tmux-1/c,1,0", both, ""},
+		{"no TMUX", "", both, ""},
+		{"only on other server", sendSockA + ",1,0", both[1:], ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db, fake := readHome(t, []string{"%7"}, c.sessions...)
+			t.Setenv("TMUX", c.tmuxEnv)
+			_, err := readRun(t, "", "send", "%7", "hello")
+			if c.want == "" {
+				if err == nil {
+					t.Fatal("send: no error, want a refusal")
+				}
+				if ms := sendMessages(t, db); len(ms) != 0 || len(sendTyped(fake)) != 0 {
+					t.Errorf("refused send stored %+v, typed %q", ms, sendTyped(fake))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m := sendOne(t, db); m.TargetSession != c.want {
+				t.Errorf("target = %q, want %q", m.TargetSession, c.want)
+			}
+		})
 	}
 }

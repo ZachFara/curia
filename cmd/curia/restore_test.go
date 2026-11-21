@@ -467,7 +467,7 @@ func TestPlanClassifiesEverySession(t *testing.T) {
 		restoreID(2):      {"other server", "on another tmux server (other)"},
 		restoreID(3):      {"outside tmux", "it ran outside tmux"},
 		restoreID(4):      {"teammate", "a teammate: its lead respawns its team"},
-		restoreID(5):      {"not Claude Code", "not a Claude Code session"},
+		restoreID(5):      {"not Claude Code", restoreCodexDetail},
 		"abc;kill-server": {"bad id", "not a Claude Code session id"},
 		restoreID(7):      {"paused", "paused; use curia resume T-2"},
 		restoreID(8):      {"no directory", "its directory is gone or not a directory"},
@@ -595,7 +595,7 @@ func TestRestoreDryRunChangesNothing(t *testing.T) {
 	}
 	for _, want := range []string{
 		"SESSION", "WINDOW", "TASK", "REPO@BRANCH", "LAST ACTIVE", "ACTION",
-		restoreID(1)[:8], "restore", "skip: not a Claude Code session",
+		restoreID(1)[:8], "restore", "skip: " + restoreCodexDetail, restoreCodexByHand(b.ID, b.Cwd),
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
@@ -1565,5 +1565,124 @@ func TestRestoreKeepsReviewMarker(t *testing.T) {
 		if got := f.get(s.ID); got.SeenAt.IsZero() != unseen || blue != unseen {
 			t.Errorf("unseen before %v: seen at %v, blue marker %v (calls %q)", unseen, got.SeenAt, blue, f.tm.Calls)
 		}
+	}
+}
+
+// restoreCodexDetail is the plan's skip detail of a Codex session (Ruling
+// P5-R8: Codex resume is unverified until probe X1).
+const restoreCodexDetail = "a Codex session: restore does not resume Codex sessions yet (see below)"
+
+// restoreCodexByHand is the line restore prints for a skipped Codex session.
+func restoreCodexByHand(id, dir string) string {
+	return "skipped " + id[:8] + ": a Codex session, not restored until Codex resume is verified; " +
+		"to resume it by hand, run in " + dir + ": codex resume " + id
+}
+
+// TestRestoreSkipsCodexSessions: restore never resumes a Codex session with
+// claude (Ruling P5-R8). Until Codex resume is verified it skips every
+// Codex session, linked to a task or not, closed here or lost with tmux,
+// says once per session what the user can run by hand, and does not count
+// it as restored.
+func TestRestoreSkipsCodexSessions(t *testing.T) {
+	f := restoreNewFixture(t)
+	codex := func(s *model.Session) { s.Agent = model.AgentCodex }
+	unlinked := f.seed(1, codex)
+	tk := f.restoreLinked("T-1", func(tk *model.Task) { tk.Agent, tk.AgentModel = model.AgentCodex, "gpt-5" })
+	linked := f.seed(2, func(s *model.Session) {
+		s.Agent, s.TaskID, s.Worktree, s.Cwd, s.Repo, s.Branch = model.AgentCodex, tk.ID, tk.Worktree, tk.Worktree, tk.Repo, tk.Branch
+	})
+	closed := f.seed(3, func(s *model.Session) {
+		s.Agent, s.State, s.EndReason, s.StartedAt = model.AgentCodex, model.StateEnded, "other", f.start.Add(time.Minute)
+	})
+	plain := f.seed(4, nil)
+	f.reportAfter(1, plain.ID)
+	out, err := f.run(nil, "--yes")
+	if err != nil {
+		t.Fatalf("restore: %v\n%s", err, out)
+	}
+	if len(f.tm.specs) != 1 || !slices.Equal(f.tm.specs[0].Command, []string{restoreTestClaude, "--resume", plain.ID}) {
+		t.Fatalf("windows %+v, want only the Claude Code session's", f.tm.specs)
+	}
+	for _, s := range []model.Session{unlinked, linked, closed} {
+		dir := s.Cwd
+		if line := restoreCodexByHand(s.ID, dir); strings.Count(out, line) != 1 {
+			t.Errorf("output lacks %q once:\n%s", line, out)
+		}
+		if strings.Contains(out, "restored "+s.ID[:8]) || strings.Contains(out, "claude --resume "+s.ID) {
+			t.Errorf("session %s counted as restored or offered to claude:\n%s", s.ID[:8], out)
+		}
+		if got := f.get(s.ID); got.EndReason == restoreEndReason {
+			t.Errorf("skipped row %s was ended by restore: %+v", s.ID[:8], got)
+		}
+	}
+	if got, _, _ := f.st.GetTask(context.Background(), tk.ID); got.Pane != tk.Pane || !got.LaunchedAt.Equal(tk.LaunchedAt) || got.Agent != model.AgentCodex {
+		t.Errorf("T-1 changed: %+v", got)
+	}
+	if strings.Count("\n"+out, "\nrestored ") != 1 {
+		t.Errorf("want one restored line:\n%s", out)
+	}
+}
+
+// TestRestoreLinkedClaudeSessionOfCodexTask: a Claude Code session of a task
+// whose stored agent is now codex is not resumed through curia launch,
+// which would start codex on a Claude Code session id.
+func TestRestoreLinkedClaudeSessionOfCodexTask(t *testing.T) {
+	f := restoreNewFixture(t)
+	tk := f.restoreLinked("T-1", func(tk *model.Task) { tk.Agent, tk.AgentModel = model.AgentCodex, "gpt-5" })
+	s := f.linkedSession(1, tk)
+	out, _ := f.run(nil, "--yes")
+	if len(f.tm.specs) != 0 {
+		t.Fatalf("windows %+v, want none\n%s", f.tm.specs, out)
+	}
+	if !strings.Contains(out, "skip: T-1 now runs codex, not this session's Claude Code") || strings.Contains(out, "restored "+s.ID[:8]) {
+		t.Errorf("output:\n%s", out)
+	}
+}
+
+// TestRestoreSpecRefusesOtherAgents: restoreSpec itself never builds a
+// claude window for a session that is not Claude Code's, nor a launch of a
+// task whose stored agent is not the session's.
+func TestRestoreSpecRefusesOtherAgents(t *testing.T) {
+	f := restoreNewFixture(t)
+	wt := filepath.Join(f.root, "wt")
+	if err := os.Mkdir(wt, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	codex := f.session(1, func(s *model.Session) { s.Agent = model.AgentCodex })
+	if w, err := restoreSpec(restoreRow{Session: codex, Action: restoreDo}, restoreTestBin, restoreTestClaude); err == nil {
+		t.Errorf("unlinked Codex session: spec %+v, want an error", w)
+	}
+	for _, c := range []struct {
+		session model.Session
+		agent   string
+	}{
+		{codex, model.AgentCodex},
+		{f.session(2, nil), model.AgentCodex},
+		{codex, model.AgentClaude},
+	} {
+		row := restoreRow{
+			Session: c.session, Linked: true, Action: restoreDo,
+			Task: model.Task{ID: "T-1", Repo: "/src/api-server", Worktree: wt, Agent: c.agent, AgentModel: "gpt-5"},
+		}
+		if w, err := restoreSpec(row, restoreTestBin, restoreTestClaude); err == nil {
+			t.Errorf("session agent %s, task agent %s: spec %+v, want an error", c.session.Agent, c.agent, w)
+		}
+	}
+}
+
+// A session in the same-numbered pane of another tmux server is not the
+// window's agent coming back.
+func TestRestoreCheckBackIgnoresOtherServer(t *testing.T) {
+	opened := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	l := &restoreLaunch{pane: tmux.Pane{ID: "%100", Socket: "/tmp/tmux-501/first"}, opened: opened}
+	other := model.Session{ID: "s1", Pane: "%100", Socket: "/tmp/tmux-501/second", StartedAt: opened.Add(time.Second)}
+	restoreCheckBack(l, []model.Session{other}, nil, false)
+	if l.state != restorePending {
+		t.Errorf("state = %v, want pending", l.state)
+	}
+	other.Socket = "/tmp/tmux-501/first"
+	restoreCheckBack(l, []model.Session{other}, nil, false)
+	if l.state != restoreBack {
+		t.Errorf("same server: state = %v, want back", l.state)
 	}
 }

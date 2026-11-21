@@ -1,0 +1,76 @@
+{
+ "session_id": "5cd98763-d94d-417d-b2ee-d172b8f63e81",
+ "transcript_path": "/Users/dev/.claude/projects/-tmp-probe-r--curia-worktrees-a-T-1/5cd98763-d94d-417d-b2ee-d172b8f63e81.jsonl",
+ "cwd": "/tmp/probe/r/.curia-worktrees/a-T-1",
+ "scratchpad_dir": "/tmp/claude-uid/-tmp-probe-r--curia-worktrees-a-T-1/5cd98763-d94d-417d-b2ee-d172b8f63e81/scratchpad",
+ "prompt_id": "9bd0662d-1033-4644-8b57-6b06a137ca6a",
+ "effort": {
+  "level": "medium"
+ },
+ "session_name": "Probe statusline task T-1",
+ "model": {
+  "id": "claude-haiku-5-5",
+  "display_name": "Haiku 5.5"
+ },
+ "workspace": {
+  "current_dir": "/tmp/probe/r/.curia-worktrees/a-T-1",
+  "project_dir": "/tmp/probe/r/.curia-worktrees/a-T-1",
+  "added_dirs": [],
+  "git_worktree": "a-T-1"
+ },
+ "version": "2.1.325",
+ "output_style": {
+  "name": "default"
+ },
+ "cost": {
+  "total_cost_usd": 0.011722364999999998,
+  "total_duration_ms": 439158,
+  "total_api_duration_ms": 20635,
+  "total_lines_added": 0,
+  "total_lines_removed": 0
+ },
+ "context_window": {
+  "total_input_tokens": 42211,
+  "total_output_tokens": 679,
+  "context_window_size": 1000000,
+  "current_usage": {
+   "input_tokens": 2,
+   "output_tokens": 679,
+   "cache_creation_input_tokens": 89,
+   "cache_read_input_tokens": 42120
+  },
+  "used_percentage": 4,
+  "remaining_percentage": 96
+ },
+ "exceeds_200k_tokens": false,
+ "prompt_cache": {
+  "warm": true,
+  "caching_observed": true,
+  "ttl": "1h",
+  "expires_at": 1794771246,
+  "requests": 11,
+  "misses": 0,
+  "expected_rebuilds": 0,
+  "hit_ratio": 0.9700461032219465,
+  "cache_write_tokens": 13594,
+  "miss_recache_tokens": 0,
+  "last_miss_at": null,
+  "last_miss_cause": null,
+  "miss_causes": {},
+  "recache_tokens_if_cold": 42211
+ },
+ "fast_mode": false,
+ "thinking": {
+  "enabled": true
+ },
+ "rate_limits": {
+  "five_hour": {
+   "used_percentage": 40,
+   "resets_at": 1794784200
+  },
+  "seven_day": {
+   "used_percentage": 79,
+   "resets_at": 1795147200
+  }
+ }
+}

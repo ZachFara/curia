@@ -106,6 +106,9 @@ type Decision struct {
 	DeliveredVia                               DeliveryVia
 	CreatedAt, ExpiresAt, AnsweredAt, ClosedAt time.Time
 	SupersededAt, DeliveredAt, ConfirmedAt     time.Time
+	// ExportedAt is when the decision was last written to the Obsidian
+	// folder; zero means never.
+	ExportedAt time.Time
 }
 
 // Ticket is an open decision with what the queue shows about its session.
@@ -116,6 +119,7 @@ type Ticket struct {
 	ContextUsed                           int
 	CacheExpiresAt                        time.Time // zero: unknown
 	CacheRebuildUSD                       float64
+	CacheRecacheTokens                    int64 // tokens a cold-cache rebuild writes; 0: unknown
 }
 
 // Answer is what curia decide writes. Exactly one of Key and Text is set.

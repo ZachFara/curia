@@ -861,15 +861,14 @@ func TestStopHookLatencyWithTickets(t *testing.T) {
 		"stop_hook_active": false, "last_assistant_message": "Raised the tickets; waiting for answers.",
 	})
 	h.timedStop(t, stop) // warm-up, untimed
-	var runs []time.Duration
-	for len(runs) < minTimedRuns {
-		runs = append(runs, h.timedStop(t, stop))
-	}
-	t.Logf("%-12s %s (load average %s)", "Stop", stats(runs), loadAverage())
-	if p := percentile(runs, 95); p >= p95Budget {
-		t.Errorf("p95 wall time of curia hook Stop with %d tickets = %v, want under %v (load average %s)",
-			latencyTickets, p, p95Budget, loadAverage())
-	}
+	latencyGate(t, "curia hook Stop with tickets", func() time.Duration {
+		var runs []time.Duration
+		for len(runs) < minTimedRuns {
+			runs = append(runs, h.timedStop(t, stop))
+		}
+		t.Logf("%-12s %s (load average %s)", "Stop", stats(runs), loadAverage())
+		return percentile(runs, 95)
+	})
 	var rows []struct {
 		ID    string `json:"id"`
 		State string `json:"state"`

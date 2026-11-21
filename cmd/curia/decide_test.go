@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/ZachFara/curia/internal/export"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
@@ -553,5 +555,137 @@ func TestDecideHelpInsideAgentIsExempt(t *testing.T) {
 	}
 	if _, statErr := os.Stat(db); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("help touched the database: %v", statErr)
+	}
+}
+
+// decideVault sets obsidian.dir to a new temp folder and returns it.
+func decideVault(t *testing.T) string {
+	t.Helper()
+	vault := t.TempDir()
+	exportWriteConfig(t, vault)
+	return vault
+}
+
+func TestDecideExportsAfterAnswer(t *testing.T) {
+	db, _ := decideHome(t, decideOpenSpecs()...)
+	vault := decideVault(t)
+	out, errOut, err := decideRun(t, strings.NewReader(""), "D-1", "--option", "B", "--reason", "x")
+	if err != nil {
+		t.Fatalf("decide: %v\n%s", err, errOut)
+	}
+	if strings.Count(out, "\n") != 1 || !strings.HasPrefix(out, "D-1 answered: B: Redis") {
+		t.Errorf("output %q, want the decide line alone", out)
+	}
+	d := decisionsGet(t, db, "D-1")
+	note := exportRead(t, filepath.Join(vault, export.NoteName(d)))
+	if !bytes.Equal(note, export.Note(d)) {
+		t.Errorf("note:\n%s\nwant:\n%s", note, export.Note(d))
+	}
+	if !strings.Contains(string(note), "## Answer\n```\nB: Redis\n```\n## Reasoning\n```\nx\n```\n") {
+		t.Errorf("note lacks the answer and the reasoning:\n%s", note)
+	}
+	if d.ExportedAt.IsZero() {
+		t.Error("D-1 not marked exported")
+	}
+}
+
+func TestDecideExportsAfterPopup(t *testing.T) {
+	db, _ := decideHome(t, decisionsSpecs()[1]) // D-1: an open, cheap assume ticket
+	vault := decideVault(t)
+	decideDriveView(t, "2")
+	if out, _, err := decideRun(t, strings.NewReader("")); err != nil || out != "" {
+		t.Fatalf("popup: %v, printed %q", err, out)
+	}
+	d := decisionsGet(t, db, "D-1")
+	if got := exportNames(t, vault); !slices.Equal(got, []string{export.NoteName(d)}) {
+		t.Errorf("vault holds %q after the popup answered D-1", got)
+	}
+}
+
+func TestDecidePopupWithoutAnswerExportsNothing(t *testing.T) {
+	decideHome(t, decisionsSpecs()[:3]...) // D-3 is answered and due
+	vault := decideVault(t)
+	prev := runProgram
+	runProgram = func(tea.Model, ...tea.ProgramOption) error { return nil }
+	t.Cleanup(func() { runProgram = prev })
+	if _, _, err := decideRun(t, strings.NewReader("")); err != nil {
+		t.Fatal(err)
+	}
+	if got := exportNames(t, vault); len(got) != 0 {
+		t.Errorf("a popup closed without an answer exported %q", got)
+	}
+}
+
+func TestDecideWithoutObsidianWritesNothing(t *testing.T) {
+	db, _ := decideHome(t, decideOpenSpecs()...)
+	home := os.Getenv("HOME")
+	out, _, err := decideRun(t, strings.NewReader(""), "D-1", "--option", "B", "--reason", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out, "\n") != 1 || strings.Contains(out, "obsidian") {
+		t.Errorf("output %q, want the decide line alone", out)
+	}
+	if d := decisionsGet(t, db, "D-1"); !d.ExportedAt.IsZero() {
+		t.Error("D-1 marked exported with no folder")
+	}
+	for n := range exportSnapshot(t, home) {
+		if strings.HasSuffix(n, ".md") || strings.HasPrefix(filepath.Base(n), ".curia-export") {
+			t.Errorf("decide without obsidian.dir wrote %q", n)
+		}
+	}
+}
+
+func TestDecideExportFailureDoesNotFailTheAnswer(t *testing.T) {
+	for _, jsonOut := range []bool{false, true} {
+		db, fake := decideHome(t, decideOpenSpecs()...)
+		// A read-only folder (0500): listing and looking work, creating the
+		// temporary note fails. Left empty, so t.TempDir's cleanup removes it.
+		vault := filepath.Join(t.TempDir(), "Decisions")
+		if err := os.Mkdir(vault, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		exportWriteConfig(t, vault)
+		args := []string{"D-1", "--option", "B", "--reason", "x"}
+		if jsonOut {
+			args = append(args, "--json")
+		}
+		out, errOut, err := decideRun(t, strings.NewReader(""), args...)
+		if err != nil {
+			t.Fatalf("json %v: decide failed with the export: %v", jsonOut, err)
+		}
+		decideCheckFailedExport(t, jsonOut, out, errOut)
+		d := decisionsGet(t, db, "D-1")
+		if d.Status != model.StatusAnswered || d.Delivery != model.DeliveryDelivered || d.DeliveredVia != model.ViaSendKeys {
+			t.Errorf("json %v: D-1 = %s / %s via %s, calls %q: the answer was not stored and delivered",
+				jsonOut, d.Status, d.Delivery, d.DeliveredVia, fake.Calls)
+		}
+		if !d.ExportedAt.IsZero() {
+			t.Error("D-1 marked exported though its note failed")
+		}
+		if logs := strings.Join(readLog(t), "\n"); !strings.Contains(logs, "obsidian export: note failed") || !strings.Contains(logs, "create a temporary note") {
+			t.Errorf("the failure is not logged: %q", logs)
+		}
+		if got := exportNames(t, vault); len(got) != 0 {
+			t.Errorf("vault holds %q", got)
+		}
+	}
+}
+
+// decideCheckFailedExport checks the output of an answer whose export
+// failed: the decide line (or the JSON object) and then the failure line,
+// on stderr with --json.
+func decideCheckFailedExport(t *testing.T, jsonOut bool, out, errOut string) {
+	t.Helper()
+	const line = "obsidian export failed: see the log\n"
+	if jsonOut {
+		var r decideResult
+		if json.Unmarshal([]byte(out), &r) != nil || r.ID != "D-1" || errOut != line {
+			t.Errorf("json: stdout %q stderr %q, want the JSON object and the line on stderr", out, errOut)
+		}
+		return
+	}
+	if !strings.HasPrefix(out, "D-1 answered: B: Redis · delivered (send_keys)\n") || !strings.HasSuffix(out, line) {
+		t.Errorf("output %q, want the decide line then %q", out, line)
 	}
 }

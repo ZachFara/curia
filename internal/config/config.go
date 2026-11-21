@@ -54,6 +54,12 @@ type Config struct {
 	Ntfy    Ntfy    `toml:"ntfy"`
 	Serve   Serve   `toml:"serve"`
 	Restore Restore `toml:"restore"`
+
+	// Plan 5 additions.
+	Usage    Usage    `toml:"usage"`
+	Obsidian Obsidian `toml:"obsidian"`
+	Linear   Linear   `toml:"linear"`
+	CostLens CostLens `toml:"costlens"`
 }
 
 // maxEditor bounds the editor option, in bytes.
@@ -94,12 +100,22 @@ func validateEditor(v string) error {
 	return nil
 }
 
+// XDGDir is Curia's directory under an XDG base directory: $env when that is
+// an absolute path, else home/fallback. The XDG spec says a relative value is
+// invalid and must be ignored.
+func XDGDir(env, home, fallback string) string {
+	if d := os.Getenv(env); filepath.IsAbs(d) {
+		return filepath.Join(d, "curia")
+	}
+	return filepath.Join(home, fallback, "curia")
+}
+
 // Default returns the configuration used when no file overrides it.
 func Default() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		DBPath:            filepath.Join(home, ".local/share/curia/curia.db"),
-		LogPath:           filepath.Join(home, ".local/state/curia/curia.log"),
+		DBPath:            filepath.Join(XDGDir("XDG_DATA_HOME", home, ".local/share"), "curia.db"),
+		LogPath:           filepath.Join(XDGDir("XDG_STATE_HOME", home, ".local/state"), "curia.log"),
 		ContextMax:        map[string]int{},
 		DefaultContextMax: 200000,
 		ContextWarnPct:    60,
@@ -118,6 +134,10 @@ func Default() Config {
 		Review:  Review{Approve: "merge", Remote: "origin", DiffTool: "git"},
 		Ntfy:    Ntfy{Devices: map[string]string{}},
 		Restore: Restore{MaxAge: 24 * time.Hour},
+
+		// Plan 5 additions.
+		Usage:  Usage{CheaperModel: "sonnet"},
+		Linear: Linear{URL: DefaultLinearURL},
 	}
 }
 
@@ -146,6 +166,9 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
 	if err := c.validatePlan4(); err != nil {
+		return Config{}, fmt.Errorf("config %s: %w", path, err)
+	}
+	if err := c.validatePlan5(); err != nil {
 		return Config{}, fmt.Errorf("config %s: %w", path, err)
 	}
 	c.DBPath = expandHome(c.DBPath)
@@ -385,4 +408,121 @@ func privateHost(host string) bool {
 	}
 	a, err := netip.ParseAddr(host)
 	return err == nil && (a.IsLoopback() || TailscaleAddr(a))
+}
+
+// ---- Plan 5: usage, obsidian, linear and costlens ----
+
+// DefaultLinearURL is the Linear GraphQL endpoint.
+const DefaultLinearURL = "https://api.linear.app/graphql"
+
+// Usage configures limit forecasting.
+type Usage struct {
+	CheaperModel string `toml:"cheaper_model"` // default "sonnet"; "" turns the spawn default off
+}
+
+// Obsidian configures the decision-note export.
+type Obsidian struct {
+	Dir string `toml:"dir"` // "~" expanded; "" means no export
+}
+
+// Linear configures `curia task import --linear`. The API key is never a
+// config option: it comes only from CURIA_LINEAR_API_KEY.
+type Linear struct {
+	URL  string `toml:"url"` // default DefaultLinearURL
+	Team string `toml:"team"`
+}
+
+// CostLens configures the cost-lens analyzer.
+type CostLens struct {
+	Analyzer string `toml:"analyzer"` // "~" expanded
+}
+
+// maxPath bounds the Plan 5 path options, in bytes.
+const maxPath = 1024
+
+var (
+	cheaperModel = regexp.MustCompile(`^[A-Za-z0-9._\[\]-]{1,64}$`)
+	linearTeam   = regexp.MustCompile(`^[A-Z][A-Z0-9]{0,9}$`)
+)
+
+// validatePlan5 checks the Plan 5 sections, each error naming its key, and
+// expands "~" in the two path options.
+func (c *Config) validatePlan5() error {
+	if c.Usage.CheaperModel != "" && !cheaperModel.MatchString(c.Usage.CheaperModel) {
+		return fmt.Errorf("usage.cheaper_model must match %s or be empty, got %q", cheaperModel, c.Usage.CheaperModel)
+	}
+	dir, err := absPathOption("obsidian.dir", c.Obsidian.Dir)
+	if err != nil {
+		return err
+	}
+	c.Obsidian.Dir = dir
+	if err = c.Linear.validate(); err != nil {
+		return err
+	}
+	an, err := absPathOption("costlens.analyzer", c.CostLens.Analyzer)
+	if err != nil {
+		return err
+	}
+	if an != "" && !strings.HasSuffix(an, ".js") && !strings.HasSuffix(an, ".ts") {
+		return fmt.Errorf("costlens.analyzer must end in .js or .ts, got %q", c.CostLens.Analyzer)
+	}
+	c.CostLens.Analyzer = an
+	return nil
+}
+
+// absPathOption expands "~" in v and requires an absolute path of at most
+// maxPath bytes with no rune below 0x20. Empty is allowed.
+func absPathOption(key, v string) (string, error) {
+	if v == "" {
+		return "", nil
+	}
+	p := expandHome(v)
+	if len(p) > maxPath {
+		return "", fmt.Errorf("%s must be at most %d bytes, got %d", key, maxPath, len(p))
+	}
+	for _, r := range p {
+		if r < 0x20 {
+			return "", fmt.Errorf("%s must not hold control characters, found %U", key, r)
+		}
+	}
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("%s must be an absolute path (after ~ is expanded), got %q", key, v)
+	}
+	return p, nil
+}
+
+func (l Linear) validate() error {
+	if l.Team != "" && !linearTeam.MatchString(l.Team) {
+		return fmt.Errorf("linear.team must match %s or be empty, got %q", linearTeam, l.Team)
+	}
+	raw := l.URL
+	if len(raw) > maxURL {
+		return fmt.Errorf("linear.url must be at most %d bytes, got %d", maxURL, len(raw))
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("linear.url does not parse: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("linear.url must be an http or https URL")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("linear.url has no host")
+	}
+	if u.User != nil || strings.ContainsAny(raw, "?#") {
+		return errors.New("linear.url must not hold user info, a query or a fragment")
+	}
+	if u.Scheme == "http" && !loopbackHost(host) {
+		return errors.New("linear.url: plain http is allowed only to localhost or a loopback address")
+	}
+	return nil
+}
+
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.IsLoopback()
 }

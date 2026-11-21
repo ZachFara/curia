@@ -47,6 +47,7 @@ const (
 	restoreClosedHere   restoreAction = "closed here"
 	restoreTeammate     restoreAction = "teammate"
 	restoreNotClaude    restoreAction = "not Claude Code"
+	restoreOtherAgent   restoreAction = "other agent"
 	restoreBadID        restoreAction = "bad id"
 	restorePaused       restoreAction = "paused"
 	restoreNoDir        restoreAction = "no directory"
@@ -193,6 +194,7 @@ func restoreRun(ctx context.Context, e restoreEnv, cfg config.Config, since time
 		return err
 	}
 	restorePrintPlan(e.out, rows, claimed)
+	restorePrintByHand(e.out, rows)
 	todo := restoreTodo(rows)
 	if len(todo) == 0 {
 		_, err = fmt.Fprintf(e.out, "nothing to restore from the last %v (curia restore --since <duration> looks further back)\n", since)
@@ -402,9 +404,13 @@ func restoreCheckOutside(r restoreRow, _ restoreServer, _ time.Time, _ time.Dura
 // did and is not on another server (restoreCheckServer comes first): its pane closed while the server it ran
 // on kept running, because the user closed it (or killed it from the dashboard), not because tmux went down
 // (Ruling P4-R7). Claude Code reports "other" either way, so the end reason cannot tell.
+//
+// A session that is not Claude Code's is left to restoreCheckAgent, whose
+// skip names the agent's own resume command.
 func restoreCheckClosed(r restoreRow, srv restoreServer, _ time.Time, _ time.Duration) (restoreAction, string) {
 	s := r.Session
-	if restoreIncludeClosed || srv.start.IsZero() || s.StartedAt.IsZero() || s.StartedAt.Before(srv.start) {
+	if restoreIncludeClosed || srv.start.IsZero() || s.StartedAt.IsZero() || s.StartedAt.Before(srv.start) ||
+		s.Agent != model.AgentClaude {
 		return "", ""
 	}
 	return restoreClosedHere, "its pane was closed while tmux kept running; reopen it with claude --resume " +
@@ -418,11 +424,40 @@ func restoreCheckTeammate(r restoreRow, _ restoreServer, _ time.Time, _ time.Dur
 	return "", ""
 }
 
+// restoreCheckAgent skips a session that is not Claude Code's: restore
+// resumes a session only with its own agent, and Codex resume is unverified
+// until probe X1 (Ruling P5-R8), so a Codex session is skipped and
+// restorePrintByHand says what to run. It also skips a Claude Code session
+// of a task whose stored agent is now another: curia launch would start
+// that agent on this session's id.
 func restoreCheckAgent(r restoreRow, _ restoreServer, _ time.Time, _ time.Duration) (restoreAction, string) {
-	if r.Session.Agent != "claude" {
+	switch {
+	case r.Session.Agent == model.AgentCodex:
+		return restoreNotClaude, "a Codex session: restore does not resume Codex sessions yet (see below)"
+	case r.Session.Agent != model.AgentClaude:
 		return restoreNotClaude, "not a Claude Code session"
+	case r.Linked && spawnStoredAgent(r.Task) != model.AgentClaude:
+		return restoreOtherAgent, r.Task.ID + " now runs " + sanitize.Line(spawnStoredAgent(r.Task), 20) +
+			", not this session's Claude Code"
 	}
 	return "", ""
+}
+
+// restorePrintByHand prints one line for each Codex session the plan skips:
+// why, and what the user can run by hand in its directory.
+func restorePrintByHand(w io.Writer, rows []restoreRow) {
+	for _, r := range rows {
+		if r.Action != restoreNotClaude || r.Session.Agent != model.AgentCodex {
+			continue
+		}
+		why := "skipped " + spawnShortID(r.Session.ID) + ": a Codex session, not restored until Codex resume is verified; "
+		if !restoreSessionID.MatchString(r.Session.ID) {
+			_, _ = fmt.Fprintln(w, why+"its id is not one codex resume takes")
+			continue
+		}
+		dir := cmp.Or(sanitize.Line(restoreDir(r), restorePathMax), "its directory")
+		_, _ = fmt.Fprintln(w, why+"to resume it by hand, run in "+dir+": codex resume "+r.Session.ID)
+	}
 }
 
 func restoreCheckID(r restoreRow, _ restoreServer, _ time.Time, _ time.Duration) (restoreAction, string) {
@@ -539,15 +574,17 @@ func restoreTarget(r restoreRow) (session, window string) {
 
 // restoreSpec is the window for one row whose Action is "restore" (section 4.10, step 5).
 //
-// Every field comes from a validated value: the session id against the
+// Only a Claude Code session is resumed, and a linked one only when its
+// task's stored agent is Claude Code too, so the task's stored model is
+// Claude Code's. Every field comes from a validated value: the session id against the
 // UUID pattern, the task id by task.ValidID, the model by task.ValidModel
 // (a stored model that fails is left out), names by restoreName, claude and
 // bin absolute paths, the directory an absolute clean path os.Stat showed
 // to be a directory. No permission flag is ever passed.
 func restoreSpec(row restoreRow, bin, claude string) (tmux.WindowSpec, error) {
 	id := row.Session.ID
-	if !restoreSessionID.MatchString(id) {
-		return tmux.WindowSpec{}, errors.New("not a Claude Code session id")
+	if err := restoreSpecAgent(row); err != nil {
+		return tmux.WindowSpec{}, err
 	}
 	dir := restoreDir(row)
 	if fi, err := os.Stat(dir); !restoreSafePath(dir) || err != nil || !fi.IsDir() {
@@ -575,6 +612,21 @@ func restoreSpec(row restoreRow, bin, claude string) (tmux.WindowSpec, error) {
 		command = append(command, "--team")
 	}
 	return tmux.WindowSpec{Session: session, Name: name, Dir: dir, Env: []string{"CURIA_TASK_ID=" + t.ID}, Command: command}, nil
+}
+
+// restoreSpecAgent refuses a row restoreSpec may not build a window for: a
+// session that is not Claude Code's, a linked one whose task's stored agent
+// is not the session's, or an id that is not a Claude Code session id.
+func restoreSpecAgent(row restoreRow) error {
+	switch {
+	case row.Session.Agent != model.AgentClaude:
+		return errors.New("not a Claude Code session: restore resumes only Claude Code sessions")
+	case row.Linked && spawnStoredAgent(row.Task) != row.Session.Agent:
+		return fmt.Errorf("%s now runs another agent than this session's", sanitize.Line(row.Task.ID, 20))
+	case !restoreSessionID.MatchString(row.Session.ID):
+		return errors.New("not a Claude Code session id")
+	}
+	return nil
 }
 
 // restoreTodo is the rows to restore, in plan order.
@@ -874,7 +926,7 @@ func restoreAwait(ctx context.Context, e restoreEnv, launches []*restoreLaunch) 
 // tmux listed its panes and the window's is gone.
 func restoreCheckBack(l *restoreLaunch, sessions []model.Session, panes []tmux.Pane, listed bool) {
 	for _, s := range sessions {
-		if s.Pane != l.pane.ID || s.State == model.StateStale || s.StartedAt.Before(l.opened) {
+		if s.Pane != l.pane.ID || fleet.OtherSocket(l.pane.Socket, s) || s.State == model.StateStale || s.StartedAt.Before(l.opened) {
 			continue
 		}
 		l.state = restoreBack

@@ -1,0 +1,27 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "identifier": "ENG-11",
+          "title": "Add a health check endpoint",
+          "description": "The load balancer needs GET /healthz.",
+          "priority": 2,
+          "url": "https://linear.app/e2e-team/issue/ENG-11/add-a-health-check-endpoint",
+          "state": { "type": "unstarted" },
+          "labels": { "nodes": [ { "name": "Backend" } ] }
+        },
+        {
+          "identifier": "eng 12",
+          "title": "An issue whose identifier is malformed",
+          "description": "Never imported.",
+          "priority": 3,
+          "url": "https://linear.app/e2e-team/issue/eng-12",
+          "state": { "type": "backlog" },
+          "labels": { "nodes": [] }
+        }
+      ],
+      "pageInfo": { "hasNextPage": true, "endCursor": "e2e-cursor-1" }
+    }
+  }
+}

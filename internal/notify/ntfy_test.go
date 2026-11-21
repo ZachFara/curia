@@ -90,7 +90,7 @@ func TestNotBeforeTable(t *testing.T) {
 }
 
 func TestDecisionPushWording(t *testing.T) {
-	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken)
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 	if n.Topic != ntfyTopic {
 		t.Errorf("topic = %q", n.Topic)
 	}
@@ -109,13 +109,13 @@ func TestDecisionPushWording(t *testing.T) {
 	}
 	d := ntfyTicket(3)
 	d.Repo = ""
-	if got := DecisionPush(d, ntfyTopic, "", "").Title; got != "D-117: decision needed" {
+	if got := DecisionPush(d, ntfyTopic, "", "", "").Title; got != "D-117: decision needed" {
 		t.Errorf("title without repo = %q", got)
 	}
 }
 
 func TestDecisionPushButtons(t *testing.T) {
-	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken)
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 	if len(n.Actions) != 3 {
 		t.Fatalf("actions = %+v", n.Actions)
 	}
@@ -138,14 +138,14 @@ func TestDecisionPushButtons(t *testing.T) {
 	// A recommendation that names no option: ticket order.
 	d := ntfyTicket(3)
 	d.Recommendation = "Z"
-	n = DecisionPush(d, ntfyTopic, ntfyAnswerURL, ntfyToken)
+	n = DecisionPush(d, ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 	if got := []string{n.Actions[0].Label[:1], n.Actions[1].Label[:1], n.Actions[2].Label[:1]}; !reflect.DeepEqual(got, []string{"A", "B", "C"}) {
 		t.Errorf("order without a matching recommendation = %v", got)
 	}
 }
 
 func TestDecisionPushFourOptions(t *testing.T) {
-	n := DecisionPush(ntfyTicket(4), ntfyTopic, ntfyAnswerURL, ntfyToken)
+	n := DecisionPush(ntfyTicket(4), ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 	if len(n.Actions) != MaxActions {
 		t.Fatalf("actions = %d, want %d", len(n.Actions), MaxActions)
 	}
@@ -162,7 +162,7 @@ func TestDecisionPushIrreversibleHasNoButtons(t *testing.T) {
 	for _, opts := range []int{3, 4} {
 		d := ntfyTicket(opts)
 		d.Reversibility = model.ReversIrreversible
-		n := DecisionPush(d, ntfyTopic, ntfyAnswerURL, ntfyToken)
+		n := DecisionPush(d, ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 		if len(n.Actions) != 0 {
 			t.Errorf("%d options: irreversible ticket has actions %+v", opts, n.Actions)
 		}
@@ -177,9 +177,9 @@ func TestDecisionPushIrreversibleHasNoButtons(t *testing.T) {
 
 func TestDecisionPushWithoutServe(t *testing.T) {
 	for _, opts := range []int{3, 4} {
-		with := DecisionPush(ntfyTicket(opts), ntfyTopic, ntfyAnswerURL, ntfyToken)
+		with := DecisionPush(ntfyTicket(opts), ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 		for _, c := range []struct{ url, token string }{{"", ntfyToken}, {ntfyAnswerURL, ""}, {"", ""}} {
-			n := DecisionPush(ntfyTicket(opts), ntfyTopic, c.url, c.token)
+			n := DecisionPush(ntfyTicket(opts), ntfyTopic, c.url, c.token, "")
 			if len(n.Actions) != 0 {
 				t.Errorf("url %q token %q: actions %+v", c.url, c.token, n.Actions)
 			}
@@ -218,7 +218,7 @@ func TestPushTextIsClean(t *testing.T) {
 		},
 		Recommendation: "A", Mode: model.ModeBlocking, Reversibility: model.ReversCostly,
 	}
-	n := DecisionPush(d, ntfyTopic, ntfyAnswerURL, ntfyToken)
+	n := DecisionPush(d, ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 	ntfyAssertClean(t, "decision title", n.Title, MaxPushTitle, false)
 	ntfyAssertClean(t, "decision message", n.Message, MaxPushText, true)
 	if len(n.Actions) != 3 {
@@ -350,7 +350,7 @@ func TestPublishMatchesCapturedRequest(t *testing.T) {
 		Options:        []model.Option{{Key: "A", Label: "option A"}, {Key: "B", Label: "option B"}, {Key: "C", Label: "option C"}},
 		Recommendation: "A", Reversibility: model.ReversCheap, Mode: model.ModeBlocking,
 	}
-	n := DecisionPush(d, "curia-probe-one", "http://127.0.0.1:56841/v1/answer", ntfyToken)
+	n := DecisionPush(d, "curia-probe-one", "http://127.0.0.1:56841/v1/answer", ntfyToken, "")
 	if err := (Publisher{URL: s.URL}).Publish(context.Background(), n); err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +409,7 @@ func TestPublishWireDetails(t *testing.T) {
 }
 
 func TestPublishSetsBearerOnlyWhenGiven(t *testing.T) {
-	n := DecisionPush(ntfyTicket(3), ntfyTopic, "", "")
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, "", "", "")
 	s := newNtfyServer(t, http.StatusOK, nil)
 	if err := (Publisher{URL: s.URL}).Publish(context.Background(), n); err != nil {
 		t.Fatal(err)
@@ -492,7 +492,7 @@ func ntfyFailures() []ntfyFailure {
 
 func TestPublishStatusTable(t *testing.T) {
 	ok := newNtfyServer(t, http.StatusOK, nil)
-	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken)
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 	if err := (Publisher{URL: ok.URL}).Publish(context.Background(), n); err != nil {
 		t.Errorf("200: %v", err)
 	}
@@ -547,7 +547,7 @@ func ntfyReplay(t *testing.T, name string) *httptest.Server {
 }
 
 func TestPublishFixtureReplies(t *testing.T) {
-	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken)
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 	for _, name := range []string{"publish-reply.full.txt", "auth-valid-token.txt"} {
 		if err := (Publisher{URL: ntfyReplay(t, name).URL, AccessToken: ntfyAccess}).Publish(context.Background(), n); err != nil {
 			t.Errorf("%s: %v", name, err)
@@ -586,7 +586,7 @@ func TestPublishFixtureReplies(t *testing.T) {
 }
 
 func TestPublishRetryAfterIsBounded(t *testing.T) {
-	n := DecisionPush(ntfyTicket(3), ntfyTopic, "", "")
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, "", "", "")
 	cases := []struct {
 		header string
 		want   time.Duration
@@ -659,7 +659,7 @@ func TestPushFitsNtfyByteLimits(t *testing.T) {
 			},
 			Mode: model.ModeBlocking, Reversibility: model.ReversCheap,
 		}
-		dn := DecisionPush(d, ntfyTopic, "https://"+strings.Repeat("h", 180)+".ts.net/v1/answer", ntfyToken)
+		dn := DecisionPush(d, ntfyTopic, "https://"+strings.Repeat("h", 180)+".ts.net/v1/answer", ntfyToken, "")
 		rn := ReviewPush(model.Review{ID: "R-3", TaskID: "T-42", Summary: long, Tests: model.TestsPassed}, model.Task{Title: long}, ntfyTopic)
 		for _, n := range []Notification{dn, rn} {
 			if !utf8.ValidString(n.Message) || len(n.Message) >= 4096 {
@@ -677,7 +677,7 @@ func TestPushFitsNtfyByteLimits(t *testing.T) {
 		}
 	}
 	// A message that fits is not cut.
-	if n := DecisionPush(ntfyTicket(3), ntfyTopic, "", ""); strings.Contains(n.Message, "…") {
+	if n := DecisionPush(ntfyTicket(3), ntfyTopic, "", "", ""); strings.Contains(n.Message, "…") {
 		t.Errorf("short message cut: %q", n.Message)
 	}
 }
@@ -697,7 +697,7 @@ func ntfyRedirect(t *testing.T, p Publisher, n Notification) (int32, error) {
 }
 
 func TestPublishDoesNotFollowRedirect(t *testing.T) {
-	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken)
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 	hits, err := ntfyRedirect(t, Publisher{AccessToken: ntfyAccess}, n)
 	if err == nil || hits != 0 {
 		t.Errorf("err %v, second server saw %d requests", err, hits)
@@ -733,7 +733,7 @@ func ntfyHang(t *testing.T, p Publisher, n Notification) (time.Duration, error) 
 }
 
 func TestPublishTimesOut(t *testing.T) {
-	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken)
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 	took, err := ntfyHang(t, Publisher{}, n)
 	if err == nil || took > time.Second {
 		t.Errorf("err %v after %v", err, took)
@@ -756,7 +756,7 @@ func (d *ntfyDeadlines) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func TestPublishBoundsItselfWithPublishLimit(t *testing.T) {
-	n := DecisionPush(ntfyTicket(3), ntfyTopic, "", "")
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, "", "", "")
 	rt := &ntfyDeadlines{}
 	p := Publisher{URL: "http://127.0.0.1:9", Client: &http.Client{Transport: rt}}
 	start := time.Now()
@@ -791,14 +791,14 @@ func TestPublishReadsAtMost4KiB(t *testing.T) {
 	}))
 	t.Cleanup(func() { close(release); s.Close() })
 	start := time.Now()
-	err := (Publisher{URL: s.URL}).Publish(context.Background(), DecisionPush(ntfyTicket(3), ntfyTopic, "", ""))
+	err := (Publisher{URL: s.URL}).Publish(context.Background(), DecisionPush(ntfyTicket(3), ntfyTopic, "", "", ""))
 	if err != nil || time.Since(start) > time.Second {
 		t.Errorf("err %v after %v: the reply was read to its end", err, time.Since(start))
 	}
 }
 
 func TestPublishErrorLeaksNothing(t *testing.T) {
-	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken)
+	n := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken, "")
 	secrets := []string{ntfyToken, ntfyAccess, ntfyTopic, n.Message, "Which queue", "Redis", "127.0.0.1", "http:"}
 	for _, f := range ntfyFailures() {
 		err := f.publish(t, Publisher{AccessToken: ntfyAccess}, n)
@@ -815,7 +815,7 @@ func TestPublishErrorLeaksNothing(t *testing.T) {
 }
 
 func TestPublishRefusesBadNotification(t *testing.T) {
-	good := func() Notification { return DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken) }
+	good := func() Notification { return DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken, "") }
 	cases := []struct {
 		name   string
 		change func(*Notification, *Publisher)
@@ -885,5 +885,97 @@ func TestPublishDefaultClientIgnoresProxyEnvironment(t *testing.T) {
 	}
 	if defaultClient.CheckRedirect == nil {
 		t.Error("the default client follows redirects")
+	}
+}
+
+const ntfyWarmStakes = "answer within 12m to keep cache warm (rebuild ≈ $1.68)"
+
+func TestDecisionPushStakesLine(t *testing.T) {
+	plain := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken, "")
+	with := DecisionPush(ntfyTicket(3), ntfyTopic, ntfyAnswerURL, ntfyToken, ntfyWarmStakes)
+	if want := plain.Message + "\n" + ntfyWarmStakes; with.Message != want {
+		t.Errorf("message = %q, want %q", with.Message, want)
+	}
+	lines := strings.Split(with.Message, "\n")
+	if lines[len(lines)-1] != ntfyWarmStakes {
+		t.Errorf("last line = %q, want the stakes line", lines[len(lines)-1])
+	}
+	if with.Title != plain.Title || with.Priority != plain.Priority || !reflect.DeepEqual(with.Actions, plain.Actions) {
+		t.Errorf("stakes changed more than the message: %+v vs %+v", with, plain)
+	}
+	// No stakes: the message of Plan 4, byte for byte.
+	want := "Which queue should carry job events?\nA: Postgres LISTEN & NOTIFY\nB: Redis stream\nC: Kafka\nRecommended: B"
+	if plain.Message != want {
+		t.Errorf("message without stakes = %q, want %q", plain.Message, want)
+	}
+}
+
+func TestDecisionPushStakesIsCleanedAndBounded(t *testing.T) {
+	n := DecisionPush(ntfyTicket(2), ntfyTopic, "", "", "line one\nforged: line\x1b[31m "+strings.Repeat("x", 500))
+	lines := strings.Split(n.Message, "\n")
+	last := lines[len(lines)-1]
+	if utf8.RuneCountInString(last) > 120 || strings.ContainsAny(n.Message, "\x1b") || strings.Contains(last, "forged: line\n") {
+		t.Errorf("stakes line not cleaned to one line of at most 120 runes: %q", last)
+	}
+	if !strings.HasPrefix(last, "line one forged: line") {
+		t.Errorf("stakes line = %q", last)
+	}
+	// Only whitespace: no line at all.
+	plain := DecisionPush(ntfyTicket(2), ntfyTopic, "", "", "")
+	if got := DecisionPush(ntfyTicket(2), ntfyTopic, "", "", " \n\t "); got.Message != plain.Message {
+		t.Errorf("blank stakes added %q", got.Message)
+	}
+}
+
+func TestDecisionPushIrreversibleIgnoresStakes(t *testing.T) {
+	d := ntfyTicket(3)
+	d.Reversibility = model.ReversIrreversible
+	a := DecisionPush(d, ntfyTopic, ntfyAnswerURL, ntfyToken, "")
+	b := DecisionPush(d, ntfyTopic, ntfyAnswerURL, ntfyToken, ntfyWarmStakes)
+	if a.Message != b.Message || strings.Contains(b.Message, "cache") {
+		t.Errorf("irreversible push changed by stakes: %q", b.Message)
+	}
+}
+
+func TestDecisionPushStakesSurvivesTheCut(t *testing.T) {
+	for _, fill := range []string{"a", "é", "€", "😀", `"`, "\\"} {
+		for _, qlen := range []int{1500, 5000} {
+			d := ntfyTicket(2)
+			d.Question = strings.Repeat(fill, qlen)
+			n := DecisionPush(d, ntfyTopic, "", "", ntfyWarmStakes)
+			if !utf8.ValidString(n.Message) || len(n.Message) >= 4096 || jsonLen(n.Message) > maxMessageBytes {
+				t.Errorf("fill %q: message of %d bytes (json %d)", fill, len(n.Message), jsonLen(n.Message))
+			}
+			if utf8.RuneCountInString(n.Message) > MaxPushText {
+				t.Errorf("fill %q: %d runes, want at most %d", fill, utf8.RuneCountInString(n.Message), MaxPushText)
+			}
+			if !strings.HasSuffix(n.Message, "\n"+ntfyWarmStakes) {
+				t.Errorf("fill %q: message does not end with the stakes line", fill)
+			}
+			lines := strings.Split(n.Message, "\n")
+			if !strings.HasSuffix(lines[0], "…") || !strings.Contains(n.Message, "Recommended: B") {
+				t.Errorf("fill %q: the question should be the cut text, with the options kept: %q", fill, n.Message[:min(60, len(n.Message))])
+			}
+		}
+	}
+}
+
+func TestDecisionPushStakesWithHugeOptionsStillEndsWithIt(t *testing.T) {
+	s, last := ntfyLimitsServer(t)
+	for _, fill := range []string{"😀", "€", `"`, "a"} {
+		long := strings.Repeat(fill, 5000)
+		d := model.Decision{
+			ID: "D-117", Repo: "/src/api", Question: long, Recommendation: "B",
+			Options: []model.Option{{Key: "A", Label: long}, {Key: "B", Label: long}, {Key: "C", Label: long}, {Key: "D", Label: long}},
+			Mode:    model.ModeBlocking, Reversibility: model.ReversCheap,
+		}
+		n := DecisionPush(d, ntfyTopic, "https://h.ts.net/v1/answer", ntfyToken, ntfyWarmStakes)
+		if !strings.HasSuffix(n.Message, "\n"+ntfyWarmStakes) || len(n.Message) >= 4096 || !utf8.ValidString(n.Message) ||
+			utf8.RuneCountInString(n.Message) > MaxPushText {
+			t.Errorf("fill %q: %d bytes, %d runes, tail %q", fill, len(n.Message), utf8.RuneCountInString(n.Message), n.Message[max(0, len(n.Message)-70):])
+		}
+		if err := (Publisher{URL: s.URL}).Publish(context.Background(), n); err != nil {
+			t.Errorf("fill %q: the limits server refused a %d-byte body: %v", fill, len(*last), err)
+		}
 	}
 }

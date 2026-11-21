@@ -40,6 +40,8 @@ type Session struct {
 	StartedAt, UpdatedAt, SeenAt                                                                   time.Time
 	// TaskID is the task whose agent this is; Worktree its worktree. TeamID,
 	// TeamRole and TeamMember place the session in an agent team.
+	// CheckedCwd is the directory the hook last asked git about.
+	CheckedCwd                                     string
 	TaskID, Worktree, TeamID, TeamRole, TeamMember string
 	// Socket is the tmux server's socket path (stored). ReviewPending is
 	// never stored; fleet.WithReviews sets it.
@@ -50,6 +52,15 @@ type Session struct {
 	// 117): "other" when tmux was killed or crashed, a user's own exit
 	// otherwise.
 	EndReason string
+	// Plan 5 cost columns, written only by store.Ingest. CostKnown false:
+	// cost_usd is NULL. A zero CacheExpiresAt means unknown.
+	CostUSD         float64
+	CostKnown       bool
+	CacheExpiresAt  time.Time
+	CacheRebuildUSD float64
+	// CacheRecacheTokens is what a cold cache would have to re-read, as a
+	// count of tokens (Curia keeps no price table, Ruling P5-R2); 0 unknown.
+	CacheRecacheTokens int64
 }
 
 // Team roles.
@@ -82,4 +93,6 @@ type Event struct {
 	// EndReason is SessionEnd's reason (Ruling 117), untrusted and at most
 	// 64 bytes: "other" when tmux was killed or crashed.
 	EndReason string
+	// Agent is the agent that sent the event; empty means Claude Code.
+	Agent string
 }

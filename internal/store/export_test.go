@@ -52,3 +52,20 @@ const (
 func (s *Store) PushForTest(ctx context.Context, n int64) (model.Push, error) {
 	return scanPush(s.db.QueryRowContext(ctx, selectPushes+` WHERE n = ?`, n))
 }
+
+// The ingest path's and the usage readers' statements, for their query plans.
+const (
+	IngestSessionQuery       = ingestSession
+	IngestSessionExistsQuery = ingestSessionExists
+	NewestCostQuery          = newestCost
+	NewestUsageQuery         = newestUsage
+	PruneUsageQuery          = pruneUsage
+	PruneCostQuery           = pruneCost
+	PruneWalkQuery           = pruneWalkIDs
+	UsageSinceQuery          = usageSince
+	UsageReadingsQuery       = usageReadings
+	CostSinceQuery           = costSince
+)
+
+// PruneWalk is how many sessions' cost samples one ingest prunes.
+const PruneWalk = pruneWalk

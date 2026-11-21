@@ -8,12 +8,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -56,7 +58,7 @@ func taskHome(t *testing.T) string {
 }
 
 // taskFlagNames are the flags of `curia task`'s subcommands.
-var taskFlagNames = []string{"repo", "body", "base", "tag", "status", "json", "title", "backlog-md"}
+var taskFlagNames = []string{"repo", "body", "base", "tag", "status", "json", "title", "backlog-md", "priority"}
 
 // taskResetFlags restores every flag of `curia task`'s subcommands to its
 // default and clears its Changed mark, which cobra keeps between runs. A
@@ -188,6 +190,8 @@ type taskLsRow struct {
 	Repo         string   `json:"repo"`
 	Status       string   `json:"status"`
 	StoredStatus string   `json:"stored_status"`
+	Priority     int      `json:"priority"`
+	Agent        string   `json:"agent"`
 	Sessions     []string `json:"sessions"`
 }
 
@@ -356,7 +360,7 @@ func TestTaskLsJSONGolden(t *testing.T) {
 	body := taskWriteFile(t, t.TempDir(), "body.md", "Rotate the token\n\tbefore expiry.\n")
 	taskMust(t, "task", "add", "Fix the auth refresh", "--repo", repo, "--body", body, "--tag", "auth")
 	taskMust(t, "task", "add", "Add rate limits", "--repo", repo)
-	taskMust(t, "task", "add", "Pick a cache", "--repo", repo, "--tag", "infra", "--tag", "cache")
+	taskMust(t, "task", "add", "Pick a cache", "--repo", repo, "--tag", "infra", "--tag", "cache", "--priority", "P1")
 	taskMust(t, "task", "add", "Old idea", "--repo", repo)
 	taskMust(t, "task", "ready", "T-2")
 	taskMust(t, "task", "ready", "T-3")
@@ -822,5 +826,104 @@ func TestTaskLsStatusFilterReviewAndDone(t *testing.T) {
 		if got := taskLsIDs(t, c.args...); !slices.Equal(got, c.want) {
 			t.Errorf("task ls %v = %v, want %v", c.args, got, c.want)
 		}
+	}
+}
+
+func TestTaskAddPriority(t *testing.T) {
+	db := taskHome(t)
+	repo := taskRepo(t, "main")
+	taskMust(t, "task", "add", "Urgent", "--repo", repo, "--priority", "P3")
+	taskMust(t, "task", "add", "Default", "--repo", repo)
+	taskMust(t, "task", "add", "Digit", "--repo", repo, "--priority", "1")
+	taskMust(t, "task", "add", "Lower", "--repo", repo, "--priority", "p2")
+	for id, want := range map[string]int{"T-1": 3, "T-2": 2, "T-3": 1, "T-4": 2} {
+		if got := taskGet(t, db, id); got.Priority != want || got.Agent != "claude" {
+			t.Errorf("%s: priority %d, agent %q, want %d, claude", id, got.Priority, got.Agent, want)
+		}
+	}
+	for _, bad := range []string{"urgent", "P4", "0", "", "P 1"} {
+		out, err := taskRun(t, nil, "task", "add", "Nope", "--repo", repo, "--priority", bad)
+		taskWantErr(t, err, out, "--priority")
+	}
+	if n := taskCount(t, db); n != 4 {
+		t.Errorf("%d tasks after refused adds, want 4", n)
+	}
+}
+
+func TestTaskEditPriority(t *testing.T) {
+	db := taskHome(t)
+	repo := taskRepo(t, "main")
+	taskMust(t, "task", "add", "Original", "--repo", repo, "--tag", "one")
+	before := taskGet(t, db, "T-1")
+	if before.Priority != 2 {
+		t.Fatalf("priority %d, want 2", before.Priority)
+	}
+	if out := taskMust(t, "task", "edit", "T-1", "--priority", "P1"); out != "T-1 updated\n" {
+		t.Errorf("output = %q", out)
+	}
+	after := taskGet(t, db, "T-1")
+	want := before
+	want.Priority, want.UpdatedAt = 1, after.UpdatedAt
+	if !reflect.DeepEqual(after, want) {
+		t.Errorf("after edit %+v, want only priority changed: %+v", after, want)
+	}
+	// An edit of something else keeps the priority.
+	taskMust(t, "task", "edit", "T-1", "--title", "Renamed")
+	if got := taskGet(t, db, "T-1"); got.Priority != 1 || got.Title != "Renamed" {
+		t.Errorf("after a title edit: priority %d, title %q", got.Priority, got.Title)
+	}
+	out, err := taskRun(t, nil, "task", "edit", "T-1", "--priority", "high")
+	taskWantErr(t, err, out, "--priority")
+	if got := taskGet(t, db, "T-1"); got.Priority != 1 {
+		t.Errorf("a refused edit changed the priority to %d", got.Priority)
+	}
+	// Nothing else to change and no terminal: --priority counts as a change.
+	if out, err = taskRun(t, strings.NewReader(""), "task", "edit", "T-1", "--priority", "3"); err != nil {
+		t.Fatalf("edit --priority 3: %v\n%s", err, out)
+	}
+	if got := taskGet(t, db, "T-1"); got.Priority != 3 {
+		t.Errorf("priority %d, want 3", got.Priority)
+	}
+}
+
+func TestTaskLsShowsPriority(t *testing.T) {
+	taskHome(t)
+	repo := taskRepo(t, "main")
+	taskMust(t, "task", "add", "First", "--repo", repo, "--priority", "P1")
+	taskMust(t, "task", "add", "Second", "--repo", repo)
+	taskMust(t, "task", "add", "Third", "--repo", repo, "--priority", "P3")
+	lines := strings.Split(strings.TrimSuffix(taskMust(t, "task", "ls"), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("table:\n%s", strings.Join(lines, "\n"))
+	}
+	if f := strings.Fields(lines[0]); len(f) < 2 || f[0] != "ID" || f[1] != "PRI" {
+		t.Errorf("header %q, want PRI right after ID", lines[0])
+	}
+	for i, want := range []string{"P1", "P2", "P3"} {
+		if f := strings.Fields(lines[i+1]); len(f) < 2 || f[1] != want {
+			t.Errorf("row %d %q, want priority %s second", i+1, lines[i+1], want)
+		}
+	}
+	for _, l := range lines {
+		if n := utf8.RuneCountInString(l); n > 80 {
+			t.Errorf("row of %d columns: %q", n, l)
+		}
+	}
+	rows := taskLs(t)
+	for i, want := range []int{1, 2, 3} {
+		if rows[i].Priority != want || rows[i].Agent != "claude" {
+			t.Errorf("json row %d: priority %d, agent %q, want %d, claude", i, rows[i].Priority, rows[i].Agent, want)
+		}
+	}
+}
+
+func TestTaskAddPriorityInsideAgent(t *testing.T) {
+	db := taskHome(t)
+	repo := taskRepo(t, "main")
+	t.Setenv("CLAUDECODE", "1")
+	out, err := taskRun(t, nil, "task", "add", "From an agent", "--repo", repo, "--priority", "P1")
+	taskWantErr(t, err, out)
+	if n := taskCount(t, db); n != 0 {
+		t.Errorf("%d tasks after an agent's add, want 0: priority does not lift the guard", n)
 	}
 }

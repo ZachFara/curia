@@ -51,14 +51,13 @@ func join(sep, a, b string) string {
 	return a + sep + b
 }
 
-// wording is the fixed sentence of a delivered answer to d (a confirmed
-// ticket gets the answered wording). choice is "option B, Postgres",
+// wording is the fixed sentence of a delivered answer to d. choice is "option B, Postgres",
 // "option B [Postgres]" or free text, and may be empty; reasoning may be
 // empty. Neither ends in a period. An override says "use option B" for a
 // key but gives free text as written, so the text "use the existing queue"
 // reads the same in both wordings of section 4.9.
 func wording(d model.Decision, choice, reasoning string) string {
-	overridden := d.Status == model.StatusOverridden
+	overridden, confirmed := d.Status == model.StatusOverridden, d.Status == model.StatusConfirmed
 	var b strings.Builder
 	b.WriteString("Decision " + idOf(d))
 	switch {
@@ -68,13 +67,18 @@ func wording(d model.Decision, choice, reasoning string) string {
 		b.WriteString(" overridden: " + choice + ", not your assumption")
 	case overridden:
 		b.WriteString(" overridden")
+	case confirmed && choice != "":
+		b.WriteString(" confirmed: " + choice + ", your assumption stands")
 	case choice != "":
 		b.WriteString(" answered: " + choice)
 	default:
 		b.WriteString(" answered")
 	}
 	b.WriteString(".")
-	if reasoning != "" {
+	switch {
+	case reasoning != "" && confirmed:
+		b.WriteString(" Note from the user: " + reasoning + ".")
+	case reasoning != "":
 		b.WriteString(" Reasoning: " + reasoning + ".")
 	}
 	if overridden {
@@ -101,7 +105,7 @@ func Retraction(d model.Decision) string {
 // starts with the fixed words "Decision D-<n>" (Ruling 51); the label also
 // loses its "." and ":", so it cannot forge the sentence (Ruling 83). When Keys
 // dropped or cut anything, the line ends with " Exact wording: call
-// check_decision D-<n>.". A confirmed ticket gets the answered wording, and
+// check_decision D-<n>.". A confirmed ticket says so, and
 // a superseded one the Retraction.
 func TypedMessage(d model.Decision) string {
 	if !d.SupersededAt.IsZero() {

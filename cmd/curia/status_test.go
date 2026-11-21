@@ -3,11 +3,16 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 
+	latgate "github.com/ZachFara/curia/internal/latency"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 )
@@ -350,4 +355,116 @@ func TestStatusDoesNotCallTmuxForReviews(t *testing.T) {
 	if len(fake.Calls) != 0 {
 		t.Errorf("tmux calls = %q, want none", fake.Calls)
 	}
+}
+
+const statusForecastBadge = "5h 62% → limit ~43m (resets 1h50m)"
+
+func TestStatusShowsForecastWarning(t *testing.T) {
+	db, _ := fleetHome(t, nil, model.Session{ID: "a", Agent: "claude", State: model.StateWaiting, Pane: "%1"})
+	usageSeries(t, db, fleetNow.Add(110*time.Minute), 50, 56, 62)
+	if out, err := runRoot(t, "status"); err != nil || out != "W1 "+statusForecastBadge {
+		t.Errorf("status = %q, %v, want %q", out, err, "W1 "+statusForecastBadge)
+	}
+}
+
+func TestStatusNoForecastWithoutWarning(t *testing.T) {
+	db, _ := fleetHome(t, nil, model.Session{ID: "a", Agent: "claude", State: model.StateWaiting, Pane: "%1"})
+	usageSeries(t, db, fleetNow.Add(110*time.Minute), 40, 40, 40) // steady
+	if out, err := runRoot(t, "status"); err != nil || out != "W1" {
+		t.Errorf("steady: status = %q, %v, want \"W1\"", out, err)
+	}
+	db, _ = fleetHome(t, nil, model.Session{ID: "a", Agent: "claude", State: model.StateWaiting, Pane: "%1"})
+	usageSeries(t, db, fleetNow.Add(20*time.Minute), 50, 56, 62) // resets first
+	if out, err := runRoot(t, "status"); err != nil || out != "W1" {
+		t.Errorf("resets first: status = %q, %v, want \"W1\"", out, err)
+	}
+}
+
+func TestStatusForecastAloneWhenNoCounts(t *testing.T) {
+	db, _ := fleetHome(t, nil)
+	usageSeries(t, db, fleetNow.Add(110*time.Minute), 50, 56, 62)
+	if out, err := runRoot(t, "status"); err != nil || out != statusForecastBadge {
+		t.Errorf("status = %q, %v, want %q", out, err, statusForecastBadge)
+	}
+}
+
+func TestStatusStillSilentOnUsageError(t *testing.T) {
+	db, _ := fleetHome(t, nil, model.Session{ID: "a", Agent: "claude", State: model.StateWaiting, Pane: "%1"})
+	usageSeries(t, db, fleetNow.Add(110*time.Minute), 50, 56, 62)
+	statusExec(t, db, "DROP TABLE usage_samples")
+	if out, err := runRoot(t, "status"); err != nil || out != "W1" {
+		t.Errorf("status = %q, %v, want the counts alone and no error text", out, err)
+	}
+}
+
+// TestStatusLatencyCostOfTheExtraRead reports what the forecast read adds to
+// curia status on a store with 3000 tickets and 20000 samples, and gates the
+// read's own p95. (The brief's name is TestStatusCostOfTheExtraRead;
+// "Latency" is what the test step selects latency gates by.)
+func TestStatusLatencyCostOfTheExtraRead(t *testing.T) {
+	db := decisionsHome(t)
+	clock = func() time.Time { return fleetNow }
+	raw, err := sql.Open("sqlite", db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := raw.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3000 { // one open blocking ticket each, as CreateDecision stores them
+		if _, err = tx.ExecContext(context.Background(), `
+INSERT INTO decisions (id, session_id, question, options, recommendation, rationale, reversibility, mode, scope, status, args_hash, created_at)
+VALUES (?, 's1', ?, '[{"key":"A","label":"a","tradeoffs":""}]', 'A', 'r', 'costly', 'blocking', 'repo', 'open', ?, ?)`,
+			fmt.Sprintf("D-%d", i+1), fmt.Sprintf("question %d", i), fmt.Sprintf("h%d", i), "2026-11-11T11:00:00.000000000Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const layout = "2006-01-02T15:04:05.000000000Z"
+	for i := range 20000 {
+		at := fleetNow.Add(-24*time.Hour + time.Duration(i)*4320*time.Millisecond).Format(layout)
+		w := "five_hour"
+		if i%2 == 1 {
+			w = "seven_day"
+		}
+		if _, err = tx.ExecContext(context.Background(), `INSERT INTO usage_samples (at, window, used_pct, resets_at, session_id) VALUES (?, ?, ?, ?, 'feed')`,
+			at, w, float64(i%100), fleetNow.Add(time.Hour).Format(layout)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+
+	const runs = 200
+	timed := func(f func()) (p50, p95 time.Duration) {
+		d := make([]time.Duration, 0, runs)
+		for range runs {
+			start := time.Now()
+			f()
+			d = append(d, time.Since(start))
+		}
+		slices.Sort(d)
+		return d[runs/2], d[runs*95/100]
+	}
+	if badge, berr := statusBadge(context.Background(), nil); berr != nil || !strings.HasPrefix(badge, "D3000") {
+		t.Fatalf("badge = %q, %v, want the 3000 tickets counted", badge, berr)
+	}
+	b50, b95 := timed(func() {
+		if _, berr := statusBadge(context.Background(), nil); berr != nil {
+			t.Fatal(berr)
+		}
+	})
+	rd, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rd.Close() }()
+	latgate.Gate(t, "the forecast read", 20*time.Millisecond, func() time.Duration {
+		p50, p95 := timed(func() { _ = statusForecast(context.Background(), rd, fleetNow) })
+		t.Logf("the forecast read alone (statusForecast), %d runs: p50 %v, p95 %v", runs, p50, p95)
+		return p95
+	})
+	t.Logf("statusBadge with 3000 tickets and 20000 samples, %d runs (not gated: the ticket counts it already did cost most of it under -race): p50 %v, p95 %v", runs, b50, b95)
 }

@@ -1,0 +1,19 @@
+{
+ "currentProject": {
+  "branches": [
+   {
+    "branch": "curia/T-2-add-hello",
+    "spend": {
+     "requests": 4,
+     "cost": {
+      "input": 8.000000000000001e-07,
+      "output": 0.0003015,
+      "cacheWrite": 0.0022766,
+      "cacheRead": 0.00146124
+     },
+     "lastActive": "2026-11-15T18:28:03.048Z"
+    }
+   }
+  ]
+ }
+}

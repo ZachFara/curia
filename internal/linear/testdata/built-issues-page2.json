@@ -1,0 +1,28 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "identifier": "OPS-9",
+          "title": "Rotate the CI runners",
+          "description": "Old runners use the retired image.",
+          "priority": 4,
+          "url": "https://linear.app.evil.example/OPS-9",
+          "estimate": 3,
+          "state": { "type": "backlog", "name": "Backlog" },
+          "labels": { "nodes": [ { "name": "Infra" }, { "name": "infra" }, { "name": "CI/CD pipeline" } ] }
+        },
+        {
+          "identifier": "ENG-103",
+          "title": "Show the \u001b[31mred\u001b[0m banner",
+          "description": "The banner is \u001b[31mred\u001b[0m text.",
+          "priority": 1,
+          "url": "https://linear.app/built-team/issue/ENG-103/show-the-red-banner",
+          "state": { "type": "unstarted" },
+          "labels": { "nodes": [ { "name": "UI" } ] }
+        }
+      ],
+      "pageInfo": { "hasNextPage": false, "endCursor": "built-cursor-2" }
+    }
+  }
+}

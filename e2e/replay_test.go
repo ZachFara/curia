@@ -94,12 +94,15 @@ func TestReplayFiveSessions(t *testing.T) {
 	}
 	checkLog(t, h.logPath, append(slices.Clone(hookLog), lsLog))
 
-	timed := newHome(t, bin)
-	runs := timed.timeSequential(t, lines)
-	checkLatency(t, runs)
-	// Exit 0 and silence hold even when a hook fails inside, so the log is
-	// what shows that every timed run did its work.
-	checkLog(t, timed.logPath, repeat(hookLog, len(runs)/len(lines)))
+	latencyGate(t, "curia hook", func() time.Duration {
+		timed := newHome(t, bin)
+		runs := timed.timeSequential(t, lines)
+		p := checkLatency(t, runs)
+		// Exit 0 and silence hold even when a hook fails inside, so the log is
+		// what shows that every timed run did its work.
+		checkLog(t, timed.logPath, repeat(hookLog, len(runs)/len(lines)))
+		return p
+	})
 }
 
 // build builds curia into a temp dir, execs it once untimed, and returns its
@@ -314,11 +317,11 @@ func closeAll(files []*os.File) {
 	}
 }
 
-// checkLatency logs p50, p95 and max per event and overall, and fails if the
-// p95 over every run reaches p95Budget or a SessionStart takes startBudget.
-// On failure it also logs the load average, to tell a slow hook from a busy
-// machine.
-func checkLatency(t *testing.T, runs []hookRun) {
+// checkLatency logs p50, p95 and max per event and overall, fails if a
+// SessionStart takes startBudget (on failure it also logs the load average,
+// to tell a slow hook from a busy machine) and returns the p95 over every
+// run, which the caller gates on the median of three batches.
+func checkLatency(t *testing.T, runs []hookRun) time.Duration {
 	t.Helper()
 	byEvent := map[string][]time.Duration{}
 	var all []time.Duration
@@ -334,13 +337,11 @@ func checkLatency(t *testing.T, runs []hookRun) {
 		t.Logf("%-12s %s", e, stats(byEvent[e]))
 	}
 	t.Logf("%-12s %s", "all", stats(all))
-	if p := percentile(all, 95); p >= p95Budget {
-		t.Errorf("p95 wall time of curia hook = %v, want under %v (load average %s)", p, p95Budget, loadAverage())
-	}
 	if m := slices.Max(starts); m >= startBudget {
 		t.Errorf("slowest SessionStart took %v, want the session stored within %v (load average %s)",
 			m, startBudget, loadAverage())
 	}
+	return percentile(all, 95)
 }
 
 // loadAverage is the machine's 1-minute load average, for diagnosis only.

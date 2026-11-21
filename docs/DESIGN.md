@@ -434,11 +434,11 @@ There is deliberately no tool to answer a ticket. Answers only come through `cur
 
 ### F13. Integrations
 
-- **Obsidian:** each answered decision is exported as a note under a configured vault folder (`Decisions/D-117 Postgres for events.md`) with frontmatter (id, repo, task, scope, status, date) and the question, options, answer and reasoning in the body. One-way export; the store stays the source of truth.
-- **Linear:** read-only import of issues into tasks (F5). Never writes statuses.
+- **Obsidian:** each answered decision is exported as a note under a configured vault folder (`Decisions/D-117 Postgres for events.md`) with frontmatter (id, repo, task, scope, status, date) and the question, options, answer and reasoning in the body. One-way export; the store stays the source of truth. (amended, Ruling 175: a note without Curia's marker is never rewritten; the decision is skipped, the skip is remembered, and `curia export obsidian --retry-skipped` tries it again.)
+- **Linear:** read-only import of issues into tasks (F5). Never writes statuses. (amended, Ruling 168: a failed page imports nothing; a retry imports everything.)
 - **cost-lens:** if installed, it supplies per-session cost to F2.
 - **Agent Commons:** decisions with `global` scope can be published as entries, so precedent is shared beyond `curia`.
-- **Codex:** same hook adapter keyed by agent type, since Codex now exposes compatible lifecycle hooks; MCP tools work unchanged.
+- **Codex:** same hook adapter keyed by agent type, since Codex now exposes compatible lifecycle hooks; MCP tools work unchanged. (amended, Rulings 166 and 170: Curia never rewrites Codex's configuration and never calls `codex mcp add` when a `curia` table exists; `curia restore` skips a Codex session and prints the command to run by hand. Codex support is partial until `curia install --codex` exists, so a Codex session has no Curia tools or hooks yet.)
 
 ### F14. Agent Teams as first-class units
 
@@ -476,9 +476,9 @@ There is deliberately no tool to answer a ticket. Answers only come through `cur
 
 Curia validates `schema_version`, ignores unknown fields, and never fails the caller: a bad document is logged and dropped.
 
-**Pull (history):** for per-branch and per-task cost in reviews (F10), Curia runs the cost-lens analyzer CLI and reads its JSON output.
+**Pull (history):** for per-branch and per-task cost in reviews (F10), Curia runs the cost-lens analyzer CLI and reads its JSON output. (amended, Ruling 165: it is run on the task's worktree path, since sessions in a worktree are not counted under the main repository, and only `currentProject` is read.)
 
-**Without cost-lens:** Curia registers its own status-line command, which forwards `rate_limits` and cost from Claude Code's status-line JSON into the same ingest path. Cache state is then unknown and shown as blank.
+**Without cost-lens:** Curia registers its own status-line command, which forwards `rate_limits` and cost from Claude Code's status-line JSON into the same ingest path. Cache state is then unknown and shown as blank. (amended, Ruling 162: Claude Code's status-line JSON carries the session's prompt-cache expiry and rebuild size in tokens, so cache state is known without cost-lens; Ruling 167: the status line is added only when none exists and never replaces one.)
 
 **Contract ownership:** the JSON schema lives in Curia's repo as `docs/ingest-schema.json`; cost-lens adds the push behind a setting, off unless Curia is on `PATH`.
 
@@ -496,7 +496,7 @@ Curia validates `schema_version`, ignores unknown fields, and never fails the ca
 
 **Attribution:** per-session token deltas show which agent is eating the window; the dashboard sorts by burn on request.
 
-**Acting on it:** tasks gain a `priority` field (P1 to P3, default P2). When the forecast says I'll hit the limit before reset, Curia (1) suggests pausing the lowest-priority running task, with one key to accept, and (2) defaults new spawns to the cheaper model, using cost-lens's model advisor where available. It never pauses anything on its own.
+**Acting on it:** tasks gain a `priority` field (P1 to P3, default P2). When the forecast says I'll hit the limit before reset, Curia (1) suggests pausing the lowest-priority running task, with one key to accept, and (2) defaults new spawns to the cheaper model, using cost-lens's model advisor where available. (amended, Ruling 169: the cheaper model is the configured name `usage.cheaper_model`, applies to that one spawn only and is not stored on the task; the advisor has no command to call and is not used.) It never pauses anything on its own.
 
 **Per-task budget (amended, Ruling 143):** a task may carry a budget, `curia task add --budget 5.00` or `curia task edit T-42 --budget 8` (user-only), or the default `cost.task_budget_default` (0, meaning none). Task cost is the sum of `cost_usd` over every session linked to the task, teams included. The dashboard cost column shows `$4.10/$5`, red past 100%. With `cost.budget_hard_stop = true` (default false) the PreToolUse hook denies every tool call of the task's sessions once the cost reaches 100%, except Curia's own MCP tools, so the agent can still raise a ticket or call `complete_task`; the deny reason tells it to stop and report. Raising the budget lifts the stop. This is the one case where Curia stops work without my keypress, and it is a stop, not a pause: nothing is removed or committed. Cost is known only at turn end (F15), so a stop lands up to one turn late; a session with no cost data cannot be stopped and shows `budget ?`. Agents cannot set or raise a budget. The stop is enforced by the PreToolUse hook, so it is best-effort against a crashed or hung hook: Claude Code lets a call through when a hook fails or times out (section 7).
 
@@ -506,9 +506,9 @@ Curia validates `schema_version`, ignores unknown fields, and never fails the ca
 
 **Queue order:** blocking tickets sort by the asking session's `cache_expires_at`, soonest first, then by age. Tickets from sessions with unknown cache state sort by age after them.
 
-**Ticket display:** each ticket shows the stakes, e.g. `answer within 12m to keep cache warm (rebuild ≈ $1.68)`. The same line goes into the ntfy push (F11). Once the cache is cold, the line changes to `cache cold: next turn re-writes ~84k tokens`.
+**Ticket display:** each ticket shows the stakes, e.g. `answer within 12m to keep cache warm (rebuild ≈ $1.68)`. (amended, Ruling 163: where the dollar figure is unknown, as with the status line, the line gives tokens, never an invented dollar figure.) The same line goes into the ntfy push (F11). Once the cache is cold, the line changes to `cache cold: next turn re-writes ~84k tokens`.
 
-**Dashboard:** a cache column for every idle or waiting session: time left, or cold with the rebuild cost.
+**Dashboard:** a cache column for every idle or waiting session: time left, or cold with the rebuild cost. (amended, Ruling 163: tokens where dollars are unknown.)
 
 ### F18. Message routing
 
