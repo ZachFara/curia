@@ -37,7 +37,7 @@ BOUNDARY_LINTERS   := depguard
 # Every tracked or untracked-but-not-ignored Go file (skips .scratch/ etc.).
 GO_FILES = $$(git ls-files --cached --others --exclude-standard -- '*.go')
 
-.PHONY: check check-fast check-gates check-static latency-names test-unit test-latency test-unit-cmd check-shards test-staged tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test build release-snapshot clean
+.PHONY: check check-fast check-gates check-static size-report latency-names test-unit test-latency test-unit-cmd check-shards test-staged tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test build release-snapshot clean
 
 ## check: run every gate, in order, under the lock. CI runs this; run it by hand for the full gate.
 check:
@@ -215,6 +215,10 @@ check-shards:
 	@scripts/check-shards.sh
 
 test: test-unit test-latency
+
+## size-report: print file, package and duplication sizes (report only, never fails)
+size-report:
+	@scripts/size-report.sh
 
 ## build: build the curia binary into ./curia
 build:
