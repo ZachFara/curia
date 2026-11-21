@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -165,7 +166,11 @@ func uiFeed(m tea.Model, cmd tea.Cmd) tea.Model {
 		}
 	case nil:
 	default:
-		m, _ = m.Update(msg)
+		var next tea.Cmd
+		m, next = m.Update(msg)
+		if strings.Contains(fmt.Sprintf("%#v", msg), "ConfirmMsg") { // the taken y's action after burstGap; a child view wraps the message
+			m = uiFeed(m, next)
+		}
 	}
 	return m
 }

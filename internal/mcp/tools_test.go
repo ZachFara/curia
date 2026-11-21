@@ -217,7 +217,7 @@ func precedentIDs(t *testing.T, m map[string]any) []string {
 	return ids
 }
 
-func TestToolSurfaceIsExactlySix(t *testing.T) {
+func TestToolSurfaceIsExactlySevenWithFileTaskTheSeventh(t *testing.T) {
 	f := newFixture(t)
 	var names []string
 	for _, tool := range f.tools {

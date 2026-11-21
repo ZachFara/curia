@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"time"
@@ -79,9 +78,7 @@ func runRoutingStats(cmd *cobra.Command, _ []string) error {
 
 func routingPrint(w io.Writer, s routingStats) error {
 	if routingJSON {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(s)
+		return writeJSON(w, s, "  ")
 	}
 	pct := 0
 	if s.Labeled > 0 {

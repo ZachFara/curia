@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -603,14 +602,7 @@ func runExportCommons(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err = enc.Encode(e); err != nil {
-		return err
-	}
-	if _, err = io.WriteString(cmd.OutOrStdout(), escapeUnprintable(buf.String())); err != nil {
+	if err = writeJSON(cmd.OutOrStdout(), e, "  "); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintln(cmd.ErrOrStderr(), exportCommonsWarn)
