@@ -26,7 +26,7 @@ const (
 // DockerCall is what the wrapper learned from a command line.
 type DockerCall struct {
 	// Kind is "run" (docker run, create, container run|create), "compose"
-	// (compose up|run) or "" (anything else, or anything not understood:
+	// (compose up) or "" (anything else, or anything not understood:
 	// passed through untouched).
 	Kind string
 	// At is, for "run", the index where added flags go: the image, or the
@@ -38,6 +38,9 @@ type DockerCall struct {
 	CPUSet, CPUOK bool
 	CPUs          float64
 	CPUOther      bool // --cpu-quota and friends: --cpus would conflict
+	// For "compose" (up only): the project name (-p), project directory and
+	// first file (-f) as written, to tell a project that already runs.
+	Project, Dir, File string
 }
 
 // flagSet says which flags take a value; any flag not named is unknown and
@@ -147,10 +150,7 @@ func ParseDocker(args []string) DockerCall {
 			return parseRun(args, i+2)
 		}
 	case "compose":
-		j, ok := scanFlags(args, i+1, dockerComposeFlags, func(string, string) {})
-		if ok && j < len(args) && (args[j] == "up" || args[j] == "run") {
-			return DockerCall{Kind: "compose"}
-		}
+		return parseCompose(args, i+1)
 	}
 	return DockerCall{}
 }
@@ -409,4 +409,54 @@ func noteProject(project map[string]string, name, id string) {
 	} else {
 		project[name] = ""
 	}
+}
+
+// ComposeRunning reports whether the project a `compose up` names already has
+// running containers: by its -p name (or env's COMPOSE_PROJECT_NAME), else by
+// its project directory, the first -f file's directory or cwd. Such an up
+// only adds what is missing, so the caller does not refuse it at the cap.
+func ComposeRunning(cs []Container, c DockerCall, envProject, cwd string) bool {
+	name := c.Project
+	if name == "" {
+		name = envProject
+	}
+	dir := c.Dir
+	if dir == "" && c.File != "" {
+		dir = filepath.Dir(c.File)
+	}
+	if dir == "" {
+		dir = cwd
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(cwd, dir)
+	}
+	dir = filepath.Clean(dir)
+	for _, x := range cs {
+		if (name != "" && x.ComposeProject == name) || (x.ComposeDir != "" && filepath.Clean(x.ComposeDir) == dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseCompose reads the options of `docker compose` and says whether the
+// subcommand is up.
+func parseCompose(args []string, from int) DockerCall {
+	c := DockerCall{Kind: "compose"}
+	j, ok := scanFlags(args, from, dockerComposeFlags, func(name, val string) {
+		switch name {
+		case "p", "project-name":
+			c.Project = val
+		case "project-directory":
+			c.Dir = val
+		case "f", "file":
+			if c.File == "" {
+				c.File = val
+			}
+		}
+	})
+	if ok && j < len(args) && args[j] == "up" {
+		return c
+	}
+	return DockerCall{}
 }

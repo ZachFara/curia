@@ -139,14 +139,10 @@ func dockerPrepare(bin string, call usage.DockerCall, args []string) []string {
 	if task == "" {
 		task = os.Getenv("CURIA_TASK_ID")
 	}
-	if msg := dockerCapMessage(ctx, bin, cfg, refs, id); msg != "" {
-		if call.Kind == "run" {
-			dockerRefuse(cfg, id, msg)
-		}
-		// compose up|run: counted and attributed, never refused (D-16, owner
-		// decision pending). A refusal at the cap would go HERE: print msg as
-		// it is and os.Exit(1), as dockerRefuse does for run and create.
-		fmt.Fprintln(os.Stderr, strings.Replace(msg, "refused:", "WARNING (compose is not refused):", 1))
+	// D-16 = A: compose up is refused at a cap like run and create, unless its
+	// project already runs (it then only adds what is missing).
+	if msg := dockerCapMessage(ctx, bin, cfg, refs, id, call); msg != "" {
+		dockerRefuse(cfg, id, msg)
 	}
 	if call.Kind != "run" {
 		return args
@@ -163,12 +159,16 @@ func dockerPrepare(bin string, call usage.DockerCall, args []string) []string {
 
 // dockerCapMessage is the one count check (the caller decides what over cap
 // means): "" while under the caps or when docker cannot be asked.
-func dockerCapMessage(ctx context.Context, bin string, cfg config.Config, refs []usage.SessionRef, session string) string {
+func dockerCapMessage(ctx context.Context, bin string, cfg config.Config, refs []usage.SessionRef, session string, call usage.DockerCall) string {
 	out, err := dockerOutput(ctx, bin, dockerCallTimeout, "ps", "--format", usage.DockerPSFormat)
 	if err != nil {
 		return ""
 	}
-	cs := usage.AttributeContainers(usage.ParseDockerPS(out), refs)
+	ps := usage.ParseDockerPS(out)
+	if cwd, _ := os.Getwd(); call.Kind == "compose" && usage.ComposeRunning(ps, call, os.Getenv("COMPOSE_PROJECT_NAME"), cwd) {
+		return ""
+	}
+	cs := usage.AttributeContainers(ps, refs)
 	if !dockerSafeID.MatchString(session) {
 		session = ""
 	}

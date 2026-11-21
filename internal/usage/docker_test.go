@@ -23,7 +23,8 @@ func TestParseDockerKinds(t *testing.T) {
 		{"dashdash before image", []string{"run", "--rm", "--", "img", "--memory=1"}, "run", 2},
 		{"cmd flags look like ours", []string{"run", "img", "--label", "x", "-m", "1g", "--cpus=1"}, "run", 1},
 		{"compose up", []string{"compose", "-f", "a.yml", "-p", "n", "up", "-d"}, "compose", 0},
-		{"compose run", []string{"compose", "run", "web"}, "compose", 0},
+		{"compose run is not counted", []string{"compose", "run", "web"}, "", 0},
+		{"compose down", []string{"compose", "down"}, "", 0},
 		{"compose ps is not counted", []string{"compose", "ps"}, "", 0},
 		{"compose unknown flag", []string{"compose", "--weird", "up"}, "", 0},
 		{"ps", []string{"ps", "-a"}, "", 0},
@@ -169,6 +170,24 @@ func TestAttributeContainers(t *testing.T) {
 	for _, c := range AttributeContainers(cs, sessions) {
 		if got := [2]string{c.SessionID, c.By}; got != want[c.ID] {
 			t.Errorf("%s = %v, want %v", c.ID, got, want[c.ID])
+		}
+	}
+}
+
+func TestComposeRunning(t *testing.T) {
+	cs := []Container{{ComposeProject: "app", ComposeDir: "/w/app"}}
+	for _, c := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"compose", "-p", "app", "up"}, true},
+		{[]string{"compose", "-p", "other", "-f", "/x/c.yml", "up"}, false},
+		{[]string{"compose", "up"}, true}, // cwd is the project's directory
+		{[]string{"compose", "-f", "/w/app/compose.yml", "up"}, true},
+		{[]string{"compose", "--project-directory", "/w/new", "up"}, false},
+	} {
+		if got := ComposeRunning(cs, ParseDocker(c.args), "", "/w/app"); got != c.want {
+			t.Errorf("%q = %v, want %v", c.args, got, c.want)
 		}
 	}
 }

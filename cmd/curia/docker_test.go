@@ -212,20 +212,44 @@ func TestDockerWrapperRefusesAtTheCapAndOnlyThatSession(t *testing.T) {
 	}
 }
 
-func TestDockerWrapperComposeIsWarnedNotRefused(t *testing.T) {
+func TestDockerWrapperComposeUpRefusedAtTheCap(t *testing.T) {
 	r := newDockerRig(t, "[resources]\nmax_containers_total = 1\n")
-	r.write(r.ps, psRow("aaaaaaaaaaa1", "S1", "", ""))
+	r.write(r.ps, psRow("aaaaaaaaaaa1", "S1", "/w/old", "old"))
 	st, _ := store.Open(filepath.Join(filepath.Dir(r.log), "c.db"))
 	dockerSeedSessions(t, st, "S1")
 	_ = st.Close()
-	args := []string{"compose", "-p", "x", "up", "-d"}
-	out, errOut, code := r.run("", []string{"CURIA_SESSION_ID=S1"}, args...)
+	env := []string{"CURIA_SESSION_ID=S1"}
+	_, errOut, code := r.run("", env, "compose", "-p", "new", "up", "-d")
+	if code != 1 || strings.Count(errOut, "\n") != 1 || !strings.Contains(errOut, "resources.max_containers_total") || !strings.Contains(errOut, "1 containers") {
+		t.Errorf("up at the cap: exit %d stderr %q, want one refusal line with cap and count", code, errOut)
+	}
+	if b, _ := os.ReadFile(filepath.Join(filepath.Dir(r.log), "c.log")); !strings.Contains(string(b), "docker: refused") {
+		t.Errorf("not recorded: %q", b)
+	}
+	for _, c := range r.calls() {
+		if c[0] == "compose" {
+			t.Errorf("compose up reached docker: %q", c)
+		}
+	}
+	// Other compose subcommands pass through at the cap, and so does an up
+	// for a project that already runs (its own containers).
+	for _, args := range [][]string{{"compose", "down"}, {"compose", "ps"}, {"compose", "logs", "-f"}, {"compose", "-p", "old", "up", "-d"}} {
+		_ = os.Remove(r.log)
+		_, _, code = r.run("", env, args...)
+		calls := r.calls()
+		if code != 0 || !slices.Equal(calls[len(calls)-1], args) {
+			t.Errorf("%q at the cap: exit %d, saw %q", args, code, calls[len(calls)-1])
+		}
+	}
+}
+
+func TestDockerWrapperComposeUpUnderTheCapPassesUntouched(t *testing.T) {
+	r := newDockerRig(t, "")
+	args := []string{"compose", "-f", "a.yml", "up", "-d"}
+	out, _, code := r.run("", []string{"CURIA_SESSION_ID=S1"}, args...)
 	calls := r.calls()
 	if code != 0 || !slices.Equal(calls[len(calls)-1], args) || !strings.HasPrefix(out, "out ") {
-		t.Errorf("compose up: exit %d, saw %q: must pass through unchanged", code, calls[len(calls)-1])
-	}
-	if !strings.Contains(errOut, "WARNING") || !strings.Contains(errOut, "resources.max_containers_total") {
-		t.Errorf("no warning on stderr: %q", errOut)
+		t.Errorf("exit %d, saw %q", code, calls[len(calls)-1])
 	}
 }
 
