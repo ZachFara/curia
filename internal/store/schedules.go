@@ -193,6 +193,15 @@ func (s *Store) FinishScheduleRun(ctx context.Context, id int64, outcome, result
 	return failIf("finish schedule run", "", err)
 }
 
+// InterruptScheduleRuns marks every run recorded fired before cutoff whose
+// results were never written (a crash or a store error after the claim) as
+// interrupted: its message was not sent, and it is not fired again.
+func (s *Store) InterruptScheduleRuns(ctx context.Context, cutoff time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE schedule_runs SET outcome = 'interrupted', results = '{"note":"claimed but never finished; nothing was sent"}'
+WHERE outcome = 'fired' AND results IN ('', '{}') AND ran_at < ?`, formatTime(cutoff))
+	return failIf("interrupt schedule runs", "", err)
+}
+
 // ScheduleRuns returns up to limit runs of schedule id, newest first.
 func (s *Store) ScheduleRuns(ctx context.Context, id string, limit int) ([]ScheduleRun, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, schedule_id, due_at, ran_at, outcome, results FROM schedule_runs

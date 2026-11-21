@@ -42,12 +42,14 @@ type monitorJob struct {
 
 // monitorJobs are run in order on every tick.
 var monitorJobs = []monitorJob{
+	// The state changers come first so a slow sampler (a hung docker) delays none of them; end away
+	// is first and fire schedules stays before auto-spawn, or a session spawned in a pass would get that pass's scheduled message.
+	{"end away", (*monitorEnv).expireAway},
+	{"fire schedules", (*monitorEnv).fireSchedules},
+	{"auto-spawn", (*monitorEnv).autoSpawn},
 	{"sample resources", (*monitorEnv).sampleResources},
 	{"prune resources", (*monitorEnv).pruneResources},
-	{"fire schedules", (*monitorEnv).fireSchedules},
 	{"sample containers", (*monitorEnv).sampleContainers},
-	{"end away", (*monitorEnv).expireAway},
-	{"auto-spawn", (*monitorEnv).autoSpawn},
 }
 
 // monitorEnv is what a job may use.
