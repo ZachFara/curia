@@ -335,28 +335,30 @@ const (
 )
 
 // Denials groups the denied calls in [from, to] by session, tool and command
-// line, most frequent first, and returns how many there were in all.
-func (s *Store) Denials(ctx context.Context, from, to time.Time) (groups []Denial, total int, err error) {
+// line, most frequent first, and returns how many there were in all; capped
+// says a session reached PermissionEventCap, so the counts are "or more".
+func (s *Store) Denials(ctx context.Context, from, to time.Time) (groups []Denial, total int, capped bool, err error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT session_id, tool, substr(summary, 1, ?), COUNT(*) AS c FROM permission_events
 WHERE verdict = 'deny' AND at >= ? AND at <= ? GROUP BY session_id, tool, substr(summary, 1, ?) ORDER BY c DESC, MIN(id) LIMIT ?`,
 		maxDenialSummary, formatTime(from), formatTime(to), maxDenialSummary, maxDenialGroups)
 	if err != nil {
-		return nil, 0, fmt.Errorf("store: denials: %w", err)
+		return nil, 0, false, fmt.Errorf("store: denials: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var d Denial
 		if err = rows.Scan(&d.SessionID, &d.Tool, &d.Summary, &d.Count); err != nil {
-			return nil, 0, fmt.Errorf("store: denials: %w", err)
+			return nil, 0, false, fmt.Errorf("store: denials: %w", err)
 		}
 		groups = append(groups, d)
 	}
 	if err = rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("store: denials: %w", err)
+		return nil, 0, false, fmt.Errorf("store: denials: %w", err)
 	}
-	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM permission_events WHERE verdict = 'deny' AND at >= ? AND at <= ?`,
-		formatTime(from), formatTime(to)).Scan(&total)
-	return groups, total, err
+	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(c), 0), COALESCE(MAX(c), 0) >= ? FROM
+(SELECT COUNT(*) AS c FROM permission_events WHERE verdict = 'deny' AND at >= ? AND at <= ? GROUP BY session_id)`,
+		PermissionEventCap, formatTime(from), formatTime(to)).Scan(&total, &capped)
+	return groups, total, capped, err
 }
 
 // AwayWaiting is what waits for the user at the end of a period.

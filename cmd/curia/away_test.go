@@ -184,6 +184,22 @@ func TestBackSummaryGroupsDenialsAndNeverShowsRawInput(t *testing.T) {
 	}
 }
 
+// A flooding session stops counting at the cap, and the summary says so.
+func TestBackSummarySaysOrMoreAtTheCap(t *testing.T) {
+	st, now := awayEnv(t, awaySess("s1", "idle", ""))
+	if _, err := runRoot(t, "away", "2h"); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(30 * time.Minute)
+	for range store.PermissionEventCap + 50 {
+		_ = st.AddPermissionEvent(context.Background(), store.PermissionEvent{SessionID: "s1", Mode: "away", Tool: "Bash", Summary: "rm x", Verdict: "deny", At: *now})
+	}
+	out, err := runRoot(t, "back")
+	if err != nil || !strings.Contains(out, "Refused (500 or more call(s)") || !strings.Contains(out, "500+x s1") {
+		t.Errorf("summary at the cap: %v\n%.400s", err, out)
+	}
+}
+
 func TestBackSummaryGolden(t *testing.T) {
 	st, now := awayEnv(t, awaySess("s1abcdef", "idle", ""))
 	if _, err := runRoot(t, "away", "2h"); err != nil {

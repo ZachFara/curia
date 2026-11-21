@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -179,7 +180,25 @@ func configWrite(ctx context.Context, st *store.Store, path string, data []byte,
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return 0, err
 	}
-	if err := install.WriteAtomic(path, data); err != nil {
+	// The file as it is now must be a revision before it is replaced (the
+	// first write, or a hand edit since the last revision), so a rollback
+	// restores it byte for byte.
+	cur, err := configReadUser(path)
+	if err != nil {
+		return 0, err
+	}
+	if revs, rerr := st.ConfigRevisions(ctx, 1); rerr != nil {
+		return 0, rerr
+	} else if len(cur) > 0 && (len(revs) == 0 || revs[0].File != string(cur)) {
+		old := ""
+		if len(revs) > 0 {
+			old = configSum(revs[0].File)
+		}
+		if _, err = st.AddConfigRevision(ctx, store.ConfigRevision{At: time.Now(), Actor: "baseline", Key: "*", Old: old, New: configSum(string(cur)), File: string(cur)}); err != nil {
+			return 0, err
+		}
+	}
+	if err = install.WriteAtomic(path, data); err != nil {
 		return 0, err
 	}
 	rev.At, rev.File = time.Now(), string(data)
@@ -196,11 +215,16 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	before, _ := configReadUser(path)
 	nv, n, err := configSetKey(cmd.Context(), st, path, args[0], args[1], "cli")
 	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s = %s (revision %d)\n", args[0], sanitize.Line(nv, 200), n)
+	// shortcut: the file is re-encoded, not edited in place (the TOML library keeps no comments); upgrade if a comment-preserving writer is added.
+	if bytes.Contains(before, []byte("#")) {
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "comments were not kept; `curia config history` lists the original (baseline) and `curia config rollback <n>` restores it")
+	}
 	return nil
 }
 

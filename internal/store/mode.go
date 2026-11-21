@@ -53,13 +53,23 @@ type PermissionEvent struct {
 // maxPermissionSummary bounds a stored summary, in bytes.
 const maxPermissionSummary = 200
 
-// AddPermissionEvent stores e; the summary is cut to maxPermissionSummary.
+// PermissionEventCap bounds the rows one session keeps in the open away
+// period: further denials are dropped (an agent controls the rate), and the
+// summary says "or more" for a session at the cap. The count reads at most
+// the cap, so the hook does bounded work.
+const PermissionEventCap = 500
+
+// AddPermissionEvent stores e unless its session already has
+// PermissionEventCap rows since the open away period began (all its rows when
+// none is open); the summary is cut to maxPermissionSummary.
 func (s *Store) AddPermissionEvent(ctx context.Context, e PermissionEvent) error {
 	if len(e.Summary) > maxPermissionSummary {
 		e.Summary = e.Summary[:maxPermissionSummary]
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO permission_events (session_id, at, mode, tool, summary, verdict) VALUES (?, ?, ?, ?, ?, ?)`,
-		e.SessionID, formatTime(e.At), e.Mode, e.Tool, e.Summary, e.Verdict); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO permission_events (session_id, at, mode, tool, summary, verdict)
+SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE (SELECT COUNT(*) FROM (SELECT 1 FROM permission_events WHERE session_id = ?1
+  AND at >= COALESCE((SELECT started_at FROM away_runs WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1), '') LIMIT ?7)) < ?7`,
+		e.SessionID, formatTime(e.At), e.Mode, e.Tool, e.Summary, e.Verdict, PermissionEventCap); err != nil {
 		return fmt.Errorf("store: add permission event: %w", err)
 	}
 	return nil
