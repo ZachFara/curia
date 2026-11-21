@@ -20,6 +20,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 	"github.com/ZachFara/curia/internal/ui"
 )
@@ -62,7 +63,7 @@ func saySession(id, pane, repo, branch string) model.Session {
 // database path, the fake and the clock.
 func sayWorld(t *testing.T, sessions ...model.Session) (string, *tmux.Fake, *decideClock) {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	if len(sessions) == 0 {
 		sessions = []model.Session{saySession("S1", "%1", sayRepo, "main")}
 	}
@@ -514,8 +515,8 @@ func TestSayGlobalRuleNeedsNoRepo(t *testing.T) {
 }
 
 func TestSayTaskIsFiled(t *testing.T) {
-	repo := filepath.Join(hermeticGit(t), "api-server")
-	gitInit(t, repo, "trunk")
+	repo := filepath.Join(testkit.HermeticGit(t), "api-server")
+	testkit.GitInit(t, repo, "trunk")
 	db, fake, _ := sayWorld(t, saySession("S1", "%1", repo, "trunk"))
 	sayUseRouter(t, sayRouterNever(t))
 	out, _, err := sayRun(t, strings.NewReader(""), "@api-server", "task:", "fix", "the", "flaky", "login", "test")
@@ -701,7 +702,7 @@ func sayTestSource(t *testing.T, db string, fake tmux.Client) *saySource {
 	if err != nil {
 		t.Fatal(err)
 	}
-	log, _ := testLogger()
+	log, _ := testkit.TestLogger()
 	return sayNewSource(sayOpen(t, db), fake, log, cfg, model.AnsweredCLI)
 }
 

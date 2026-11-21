@@ -217,7 +217,7 @@ func modeConfirmBypass(out io.Writer, label string, until time.Time, native bool
 		"Still prompting: AskUserQuestion and tools that need you, rm and rmdir on critical paths, ask rules, edits in plan mode.\n"+
 		"Curia's own files and the task budget stop stay protected. Any prompt injection that reaches an agent runs unprompted.\n",
 		label, modeUntilText(until))
-	answer, err := lifecycle.SetupConfirm("To turn it on, type the word " + modeBypassWord + ": ")
+	answer, err := promptTerminal("To turn it on, type the word " + modeBypassWord + ": ")
 	if err != nil || strings.TrimSpace(answer) != modeBypassWord {
 		return errors.New("not turned on: bypass needs the word " + modeBypassWord + " typed on the terminal; nothing changed")
 	}

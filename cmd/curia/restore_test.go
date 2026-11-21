@@ -21,6 +21,7 @@ import (
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
 	"github.com/ZachFara/curia/internal/team"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -129,7 +130,7 @@ type restoreFixture struct {
 func restoreNewFixture(t *testing.T) *restoreFixture {
 	t.Helper()
 	userTerminalAs(t, true) // the user, at a terminal: restore is user-only
-	f := &restoreFixture{t: t, db: hookHome(t)}
+	f := &restoreFixture{t: t, db: testkit.HookHome(t)}
 	f.start = time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
 	f.now = f.start.Add(time.Hour)
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -182,7 +183,7 @@ func restoreID(n int) string { return fmt.Sprintf("%08x-0000-4000-8000-%012x", n
 // touch writes a transcript at path, last modified age before now.
 func (f *restoreFixture) touch(path string, age time.Duration) {
 	f.t.Helper()
-	worktreeWrite(f.t, path, "{}\n")
+	testkit.WorktreeWrite(f.t, path, "{}\n")
 	at := f.now.Add(-age)
 	if err := os.Chtimes(path, at, at); err != nil {
 		f.t.Fatal(err)
@@ -302,7 +303,7 @@ func (f *restoreFixture) restoreLinked(id string, edit func(*model.Task)) model.
 	f.t.Helper()
 	ctx := context.Background()
 	if f.repo == "" {
-		f.repo = worktreeRepo(f.t, "api-server")
+		f.repo = testkit.WorktreeRepo(f.t, "api-server")
 	}
 	tk, err := f.st.CreateTask(ctx, task.Normalize(model.Task{
 		Title: "Task " + id, Repo: f.repo, BaseBranch: "main", Status: model.TaskReady, CreatedAt: f.now,
@@ -315,7 +316,7 @@ func (f *restoreFixture) restoreLinked(id string, edit func(*model.Task)) model.
 	}
 	branch := task.Branch(id, tk.Title)
 	wt := task.WorktreePath(f.repo, id)
-	gitRun(f.t, f.repo, "worktree", "add", "-q", "-b", branch, wt, "main")
+	testkit.GitRun(f.t, f.repo, "worktree", "add", "-q", "-b", branch, wt, "main")
 	stored, err := f.st.UpdateTask(ctx, id, func(cur model.Task) (model.Task, error) {
 		cur.Branch, cur.Worktree, cur.Pane, cur.LaunchedAt = branch, wt, "%7", f.start.Add(-2*time.Hour)
 		if edit != nil {
@@ -396,7 +397,7 @@ func TestRestoreRefusesInsideAgent(t *testing.T) {
 }
 
 func TestRestoreNeedsATmuxServer(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	userTerminalAs(t, true)
 	_, err := runRoot(t, "restore", "--yes")
 	if err == nil || err.Error() != "no tmux server is running: start tmux, then run curia restore again" {
@@ -878,7 +879,7 @@ func TestRestoreNeverPassesStoredTextToTmux(t *testing.T) {
 		t.Fatal(err)
 	}
 	file := filepath.Join(f.root, "a-file")
-	worktreeWrite(t, file, "x")
+	testkit.WorktreeWrite(t, file, "x")
 	evil := func(cwd string) func(*model.Session) {
 		return func(s *model.Session) {
 			s.TmuxSession, s.Repo, s.Cwd = "s;kill-server $(x)\nnext", "/x/$(rm -rf ~);\nkill-server;", cwd
@@ -1314,7 +1315,7 @@ func TestRestoreInRealTmux(t *testing.T) {
 		out, rerr := exec.CommandContext(ctx, "tmux", append([]string{"-L", restoreRealSocket, "-f", os.DevNull}, args...)...).CombinedOutput()
 		return strings.TrimSpace(string(out)), rerr
 	}
-	t.Cleanup(func() { spawnKillServer(restoreRealSocket) })
+	t.Cleanup(func() { testkit.SpawnKillServer(restoreRealSocket) })
 	_, _ = raw("kill-server")
 	if out, nerr := raw("new-session", "-d", "-s", "keep"); nerr != nil {
 		t.Fatalf("new-session: %v: %s", nerr, out)

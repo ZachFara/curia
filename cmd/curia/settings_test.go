@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 // settingsBadge is `curia status` after the config commands ran.
@@ -92,7 +93,7 @@ func TestSettingsRowsMatchConfigList(t *testing.T) {
 // by itself (the second layer under the view's read-only mode): the user
 // file is not written and the store is not touched.
 func TestSettingsSourceSetRefusesAnAgent(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	useFakeTmux(t)
 	userTerminalAs(t, true)
 	t.Setenv("CLAUDECODE", "1")

@@ -20,6 +20,7 @@ import (
 	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -97,7 +98,7 @@ func decisionsParse(t *testing.T, s string) time.Time {
 func decisionsHome(t *testing.T, specs ...decisionsSpec) string {
 	t.Helper()
 	userTerminalAs(t, true) // the user, at a terminal
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	prevClock := clock
 	clock = func() time.Time { return decisionsParse(t, decisionsNow) }
 	t.Cleanup(func() {
@@ -441,7 +442,7 @@ func TestEditRefusesInsideAgentBeforeTheStore(t *testing.T) {
 		{"D-3", "--superseded-by", "x"},
 		{"D-3", "--scope", "task", "--supersede", "--superseded-by", "D-4"},
 	} {
-		db := hookHome(t)
+		db := testkit.HookHome(t)
 		decisionsResetFlags(t)
 		t.Setenv("CLAUDECODE", "1")
 		out, err := runRoot(t, append([]string{"decisions", "edit"}, args...)...)
@@ -476,7 +477,7 @@ func TestEditRefusesInsideAgent(t *testing.T) {
 // Ruling 69: help is exempt from the guard. It prints usage, reaches no
 // store step and writes nothing.
 func TestEditHelpInsideAgentIsExempt(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	decisionsResetFlags(t)
 	t.Setenv("CLAUDECODE", "1")
 	t.Cleanup(func() {
@@ -592,7 +593,7 @@ func TestUserOnlyRefusesBySessionEnv(t *testing.T) {
 		}
 	}
 	t.Run("session id", func(t *testing.T) {
-		hookHome(t)
+		testkit.HookHome(t)
 		useFakeTmux(t)
 		t.Setenv("CLAUDE_CODE_SESSION_ID", "1a2b3c4d-0000-4000-8000-000000000000")
 		refusedAll(t, "CLAUDE_CODE_SESSION_ID is set")
@@ -619,7 +620,7 @@ func TestUserOnlyRefusesBySessionEnv(t *testing.T) {
 		}
 	})
 	t.Run("no store yet", func(t *testing.T) {
-		db := hookHome(t)
+		db := testkit.HookHome(t)
 		useFakeTmux(t)
 		t.Setenv("TMUX_PANE", "%1")
 		if sign := agentSign(); sign != "" {
@@ -792,7 +793,7 @@ func TestUserAncestry(t *testing.T) {
 		{"a loop", map[int]userProc{me: {fakePID + 1, "sh", ""}, fakePID + 1: {me, "sh", ""}}, "more than 64 deep"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			hookHome(t)
+			testkit.HookHome(t)
 			useFakeTmux(t)
 			userProcessesAs(t, c.table)
 			if got := agentAncestor(); (c.want == "" && got != "") || !strings.Contains(got, c.want) {
@@ -826,7 +827,7 @@ func TestUserAncestryWithoutPaneList(t *testing.T) {
 	underClaude := map[int]userProc{me: {fakePID + 1, "/bin/zsh", ""}, fakePID + 1: {fakePID + 2, "claude", ""}, fakePID + 2: {1, "tmux", ""}} // fakePID + 1 is claude
 	unreachable := func(t *testing.T) {
 		t.Helper()
-		db := hookHome(t) // the guard's tmux: unreachable
+		db := testkit.HookHome(t) // the guard's tmux: unreachable
 		seedSessions(t, db, readSession("agent-1", model.StateIdle, "%1"))
 	}
 	otherServer := func(t *testing.T) {
@@ -865,7 +866,7 @@ func TestUserAncestryWithoutPaneList(t *testing.T) {
 		}
 	})
 	t.Run("store unreadable", func(t *testing.T) {
-		db := hookHome(t)
+		db := testkit.HookHome(t)
 		if err := os.MkdirAll(db, 0o700); err != nil { // a directory where the database file should be
 			t.Fatal(err)
 		}
@@ -875,7 +876,7 @@ func TestUserAncestryWithoutPaneList(t *testing.T) {
 		}
 	})
 	t.Run("no live agent in a pane", func(t *testing.T) {
-		db := hookHome(t)
+		db := testkit.HookHome(t)
 		seedSessions(t, db, readSession("old", model.StateEnded, "%1"), readSession("outside", model.StateIdle, ""))
 		userProcessesAs(t, shell)
 		if got := agentAncestor(); got != "" {
@@ -1218,7 +1219,7 @@ func userOnlyMarked(t *testing.T) map[string]bool {
 // store or called tmux.
 func userOnlyRefused(t *testing.T, argv []string, env, want string) {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	fake := useFakeTmux(t)
 	userTerminalAs(t, false)
 	if env != "" {

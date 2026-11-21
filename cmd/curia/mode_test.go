@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 func modeReset(t *testing.T) {
@@ -24,11 +24,11 @@ func modeReset(t *testing.T) {
 func modeEnv(t *testing.T, typed string) *store.Store {
 	t.Helper()
 	modeReset(t)
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	userTerminalAs(t, true)
-	old := lifecycle.SetupConfirm
-	lifecycle.SetupConfirm = func(string) (string, error) { return typed, nil }
-	t.Cleanup(func() { lifecycle.SetupConfirm = old })
+	old := promptTerminal
+	promptTerminal = func(string) (string, error) { return typed, nil }
+	t.Cleanup(func() { promptTerminal = old })
 	st, err := store.Open(db)
 	if err != nil {
 		t.Fatal(err)

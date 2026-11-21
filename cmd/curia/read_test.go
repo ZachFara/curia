@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -29,7 +30,7 @@ func readSession(id string, st model.State, pane string) model.Session {
 // the fake.
 func readHome(t *testing.T, panes []string, sessions ...model.Session) (string, *tmux.Fake) {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	userTerminalAs(t, true)
 	t.Setenv("TMUX", sendSockA+",1,0") // a pane id is matched on the caller's server
 	prevClock := clock

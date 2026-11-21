@@ -16,6 +16,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 	"github.com/ZachFara/curia/internal/usage"
 )
@@ -27,7 +28,7 @@ var monitorNow = time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 // process table where 100 has two descendants.
 func monitorFixture(t *testing.T) (*monitorEnv, *store.Store) {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	st, err := store.Open(db)
 	if err != nil {
 		t.Fatal(err)
@@ -322,7 +323,7 @@ func TestMonitorQuietStartRespectsAutostart(t *testing.T) {
 
 func TestMonitorStopThroughTheGuard(t *testing.T) {
 	bin := monitorBinary(t)
-	home := hookHome(t)
+	home := testkit.HookHome(t)
 	cmd := exec.Command(bin, "monitor", "start")
 	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"), "CURIA_DB="+home, "TMUX=", "TMUX_PANE=")
 	if out, err := cmd.CombinedOutput(); err != nil {

@@ -20,6 +20,7 @@ import (
 	"github.com/ZachFara/curia/internal/export"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/ui"
 )
 
@@ -44,7 +45,7 @@ func (c *exportClock) now() time.Time { return c.t }
 // database path and the clock.
 func exportHome(t *testing.T, vault string, specs ...exportSpec) (string, *exportClock) {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	useFakeTmux(t)
 	userTerminalAs(t, true)
 	exportWriteConfig(t, vault)

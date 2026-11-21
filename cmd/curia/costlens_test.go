@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/usage"
 )
 
@@ -126,7 +127,7 @@ func costlensLookIn(dir string) func(string) (string, error) {
 // costlensFile writes content at path and returns path.
 func costlensFile(t *testing.T, path, content string) string {
 	t.Helper()
-	worktreeWrite(t, path, content)
+	testkit.WorktreeWrite(t, path, content)
 	return path
 }
 

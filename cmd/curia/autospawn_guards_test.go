@@ -14,7 +14,7 @@ import (
 func TestAutoSpawnUnreadableSetupScriptCountsAsNotApproved(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "")
-	f.setupScript("#!/bin/sh\ntouch RAN\n", false) // committed and approved, but not executable
+	f.SetupScript("#!/bin/sh\ntouch RAN\n", false) // committed and approved, but not executable
 	tk := autoReady(f, "a")
 	if w := autoPass(t, f, autoEnv(f)); len(w) != 0 {
 		t.Fatalf("windows = %q: an unreadable setup script was treated as approved", w)
@@ -29,7 +29,7 @@ func TestAutoSpawnMaxAgentsCountsIdleButNotEnded(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "max_agents = 2\n")
 	for id, state := range map[string]model.State{"s1": model.StateWorking, "s2": model.StateIdle, "s3": model.StateEnded} {
-		if err := f.st.UpsertSession(context.Background(), model.Session{ID: id, State: state, Agent: "claude", StartedAt: f.now, UpdatedAt: f.now}); err != nil {
+		if err := f.St.UpsertSession(context.Background(), model.Session{ID: id, State: state, Agent: "claude", StartedAt: f.Now, UpdatedAt: f.Now}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -49,18 +49,18 @@ func TestAutoSpawnTicksOnlyEveryThirtySeconds(t *testing.T) {
 	e := autoEnv(f)
 	autoPass(t, f, e) // the pass that records the tick; nothing is ready yet
 	autoReady(f, "a")
-	f.now = f.now.Add(autoEvery - time.Second)
+	f.Now = f.Now.Add(autoEvery - time.Second)
 	if err := e.autoSpawn(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if w := f.windows(); len(w) != 0 {
+	if w := f.Windows(); len(w) != 0 {
 		t.Fatalf("windows = %q: the job ran again %v after its last pass", w, autoEvery-time.Second)
 	}
-	f.now = f.now.Add(time.Second)
+	f.Now = f.Now.Add(time.Second)
 	if err := e.autoSpawn(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if w := f.windows(); len(w) != 1 {
+	if w := f.Windows(); len(w) != 1 {
 		t.Fatalf("windows = %q, want the start once the tick has passed", w)
 	}
 }
@@ -72,14 +72,14 @@ func TestAutoSpawnStatusShowsWouldStartTheLastTenAndCleansText(t *testing.T) {
 	hostile := "evil \x1b[2J\x1b]0;pwn\x07\nFORGED T-99 running"
 	ctx := context.Background()
 	for i := range 12 {
-		if _, err := f.st.LogAuto(ctx, store.AutoRun{At: f.now.Add(time.Duration(i) * time.Minute), Outcome: "refused", Check: "interval", TaskID: "T-" + string(rune('a'+i)), Detail: hostile}); err != nil {
+		if _, err := f.St.LogAuto(ctx, store.AutoRun{At: f.Now.Add(time.Duration(i) * time.Minute), Outcome: "refused", Check: "interval", TaskID: "T-" + string(rune('a'+i)), Detail: hostile}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	tk := f.task("plain", "b")
-	statusExec(t, f.db, `UPDATE tasks SET title = ? WHERE id = ?`, hostile, tk.ID) // as a store written by something else would hold it
-	f.update(tk.ID, func(x *model.Task) { x.Status = model.TaskReady })
-	if err := f.st.MarkReady(ctx, tk.ID); err != nil {
+	tk := f.Task("plain", "b")
+	statusExec(t, f.DB, `UPDATE tasks SET title = ? WHERE id = ?`, hostile, tk.ID) // as a store written by something else would hold it
+	f.Update(tk.ID, func(x *model.Task) { x.Status = model.TaskReady })
+	if err := f.St.MarkReady(ctx, tk.ID); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runRoot(t, "auto-spawn", "status")

@@ -21,6 +21,7 @@ import (
 	"github.com/ZachFara/curia/internal/mcp"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 // mcpUnexpectedRun is mcpRun under test: no test may run osascript.
@@ -493,8 +494,8 @@ func TestProjectDirDoesNotIdentifyACaller(t *testing.T) {
 func TestRepoIsTheDirectoryWithoutGit(t *testing.T) {
 	db := mcpEnv(t)
 	st := mcpOpenStore(t, db)
-	dir := filepath.Join(hermeticGit(t), "repo")
-	gitInit(t, dir, "main")
+	dir := filepath.Join(testkit.HermeticGit(t), "repo")
+	testkit.GitInit(t, dir, "main")
 	sub := filepath.Join(dir, "sub")
 	if err := os.Mkdir(sub, 0o700); err != nil {
 		t.Fatal(err)

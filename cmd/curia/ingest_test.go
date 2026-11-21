@@ -18,6 +18,7 @@ import (
 	latgate "github.com/ZachFara/curia/internal/latency"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 // ingestSpecNow sits inside the windows of the spec's example document
@@ -124,7 +125,7 @@ func ingestLogWithoutTime(lines []string) string {
 }
 
 func TestIngestStoresDocument(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "s1")
 	ingestFixClock(t, ingestSpecNow)
 
@@ -190,7 +191,7 @@ func TestIngestNeverFails(t *testing.T) {
 		{"config does not parse", good, func(t *testing.T, db string) string { ingestBadConfig(t, db); return "" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db := hookHome(t)
+			db := testkit.HookHome(t)
 			ingestSeed(t, db, "s1")
 			ingestFixClock(t, ingestSpecNow)
 			before := ingestSnap(t, db, "s1")
@@ -222,7 +223,7 @@ func ingestWantMissing(t *testing.T, path string) {
 }
 
 func TestIngestPrintsNothing(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "s1")
 	ingestFixClock(t, ingestSpecNow)
 	for _, doc := range []string{ingestSpecDoc(t, "s1"), `{"schema_version":1,"session_id":"bad id"}`} {
@@ -234,7 +235,7 @@ func TestIngestPrintsNothing(t *testing.T) {
 }
 
 func TestIngestLogsNamesNotValues(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "s1")
 	ingestFixClock(t, ingestSpecNow)
 
@@ -283,7 +284,7 @@ func TestIngestLogsNamesNotValues(t *testing.T) {
 }
 
 func TestIngestStatuslineFlag(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "built-session-1")
 	ingestFixClock(t, statuslineNow)
 
@@ -307,7 +308,7 @@ func TestIngestStatuslineFlag(t *testing.T) {
 }
 
 func TestIngestAllowedInsideAgent(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "s1")
 	ingestFixClock(t, ingestSpecNow)
 	fake := useFakeTmux(t)
@@ -326,7 +327,7 @@ func TestIngestAllowedInsideAgent(t *testing.T) {
 }
 
 func TestIngestStdinDeadline(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "s1")
 	prev := ingestLimit
 	ingestLimit = 100 * time.Millisecond
@@ -358,7 +359,7 @@ type ingestPanicReader struct{}
 func (ingestPanicReader) Read([]byte) (int, error) { panic("ingest test: reader panicked") }
 
 func TestIngestRecoversPanic(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	stdout, stderr := ingestExec(t, ingestPanicReader{}, "ingest")
 	if stdout != "" || stderr != "" {
 		t.Errorf("stdout %q stderr %q, want both empty", stdout, stderr)
@@ -376,7 +377,7 @@ func TestIngestRecoversPanic(t *testing.T) {
 // on with every call and the document's at is exactly 24 hours before the
 // first, the oldest the parser takes.
 func TestIngestPassesParserNowToStore(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "s1")
 	base := ingestSpecNow
 	calls := 0
@@ -396,7 +397,7 @@ func TestIngestPassesParserNowToStore(t *testing.T) {
 // nothing is stored (no row, no cost, no usage sample) and the log says
 // "unknown session" once. Once the session exists the same reading stores.
 func TestIngestUnknownSessionStoresNothing(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "s1")
 	ingestFixClock(t, ingestSpecNow)
 	before := ingestSnap(t, db, "s1")
@@ -422,7 +423,7 @@ func TestIngestUnknownSessionStoresNothing(t *testing.T) {
 // TestIngestDoesNotCreateStore: a store that does not exist yet is not
 // created by ingest (the status line runs before the first hook).
 func TestIngestDoesNotCreateStore(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	db := filepath.Join(t.TempDir(), "curia.db")
 	t.Setenv("CURIA_DB", db)
 	ingestFixClock(t, ingestSpecNow)
@@ -436,7 +437,7 @@ func TestIngestDoesNotCreateStore(t *testing.T) {
 }
 
 func TestIngestArgumentsLoggedNotPrinted(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "s1")
 	ingestFixClock(t, ingestSpecNow)
 	stdout, stderr := ingestExec(t, strings.NewReader(ingestSpecDoc(t, "s1")), "ingest", "--bogus", "x", "--help")
@@ -460,7 +461,7 @@ func TestIngestArgumentsLoggedNotPrinted(t *testing.T) {
 // that open and close the store themselves, as a process does; the
 // process gate is TestStatuslineProcessLatency.
 func TestIngestLatency(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ids := make([]string, 50)
 	for i := range ids {
 		ids[i] = fmt.Sprintf("s%d", i)
@@ -551,7 +552,7 @@ func ingestFillSamples(t *testing.T, db string, ids []string, now time.Time) {
 }
 
 func TestIngestStatuslineSetsContextWindow(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "s1")
 	ingestFixClock(t, time.Date(2026, 11, 15, 19, 0, 0, 0, time.UTC))
 	doc := strings.ReplaceAll(string(ingestFixture(t, "statusline-captured.json")), "5cd98763-d94d-417d-b2ee-d172b8f63e81", "s1")
@@ -579,7 +580,7 @@ func ingestLogAt(t *testing.T, now *time.Time) {
 // interval per kind, across runs (each run is a process, so the state is a
 // file), the first time always, and again once it has been gone.
 func TestIngestLogBoundedPerKind(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "s1")
 	ingestFixClock(t, ingestSpecNow)
 	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
@@ -616,7 +617,7 @@ func TestIngestLogBoundedPerKind(t *testing.T) {
 // is logged when it returns, inside the interval; one that only alternates
 // with good runs (several sessions share the log) is not.
 func TestIngestLogAgainWhenProblemReturns(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "s1")
 	ingestFixClock(t, ingestSpecNow)
 	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
@@ -643,7 +644,7 @@ func TestIngestLogAgainWhenProblemReturns(t *testing.T) {
 // TestIngestLogMarkerCannotFailTheRun: a marker that cannot be read or
 // written changes nothing but the bound.
 func TestIngestLogMarkerCannotFailTheRun(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	ingestFixClock(t, ingestSpecNow)
 	marker := config.Default().LogPath + ".throttle"
 	if err := os.MkdirAll(filepath.Join(marker, "x"), 0o700); err != nil {
@@ -661,7 +662,7 @@ func TestIngestLogMarkerCannotFailTheRun(t *testing.T) {
 // TestIngestLogMarkerStaysSmall: the marker holds one entry per kind, never
 // anything from the payload.
 func TestIngestLogMarkerStaysSmall(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	ingestFixClock(t, ingestSpecNow)
 	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	ingestLogAt(t, &now)

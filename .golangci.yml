@@ -440,9 +440,42 @@ linters:
             - github.com/ZachFara/curia/internal/tmux$
             - github.com/ZachFara/curia/internal/usage$
             - github.com/ZachFara/curia/internal/lifecycle$
+            - github.com/ZachFara/curia/internal/testkit$
           deny:
             - pkg: github.com/ZachFara/curia
               desc: "internal/lifecycle may import only config, fleet, gitops, model, sanitize, store, task, tmux and usage: no ui, hook, mcp or cmd"
+
+        # Test support shared by several packages' tests (git repository,
+        # temp HOME and store, spawn fixture). Test files only import it: the
+        # rule below denies it everywhere else.
+        testkit:
+          list-mode: strict
+          files:
+            - "**/internal/testkit/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/fleet$
+            - github.com/ZachFara/curia/internal/gitops$
+            - github.com/ZachFara/curia/internal/lifecycle$
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/tmux$
+            - github.com/ZachFara/curia/internal/testkit$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/testkit may import only config, fleet, gitops, lifecycle, model, store, task and tmux"
+
+        # No production file may import the test support.
+        testkit-tests-only:
+          list-mode: lax
+          files:
+            - "!$test"
+            - "!**/internal/testkit/**"
+          deny:
+            - pkg: github.com/ZachFara/curia/internal/testkit
+              desc: "internal/testkit is test support: only _test.go files may import it"
 
         tmux:
           list-mode: strict
@@ -727,6 +760,7 @@ linters:
             - github.com/ZachFara/curia/internal/latency$
             - github.com/ZachFara/curia/internal/gitops$
             - github.com/ZachFara/curia/internal/lifecycle$
+            - github.com/ZachFara/curia/internal/testkit$
           deny:
             - pkg: github.com/ZachFara/curia
               desc: "cmd/curia may import only the internal packages in the plan's File structure table (docs/decisions/0003)"
@@ -754,6 +788,7 @@ linters:
             - "!**/internal/latency/**"
             - "!**/internal/gitops/**"
             - "!**/internal/lifecycle/**"
+            - "!**/internal/testkit/**"
             - "!**/internal/decision/**"
             - "!**/internal/precedent/**"
             - "!**/internal/task/**"

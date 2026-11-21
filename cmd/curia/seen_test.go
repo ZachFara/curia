@@ -9,6 +9,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 func seedSessions(t *testing.T, db string, sessions ...model.Session) {
@@ -26,7 +27,7 @@ func seedSessions(t *testing.T, db string, sessions ...model.Session) {
 }
 
 func TestSeenClearsWindowMarker(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	fake := useFakeTmux(t)
 	seedSessions(t, db, model.Session{
 		ID: "A", Pane: "%1", TmuxWindow: "@7",
@@ -44,7 +45,7 @@ func TestSeenClearsWindowMarker(t *testing.T) {
 }
 
 func TestSeenUnknownPaneDoesNothing(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	fake := useFakeTmux(t)
 	seedSessions(t, db, model.Session{ID: "A", Pane: "%1", TmuxWindow: "@7", State: model.StateWaiting})
 
@@ -58,7 +59,7 @@ func TestSeenUnknownPaneDoesNothing(t *testing.T) {
 }
 
 func TestSeenBadStoreLogsAndSucceeds(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	t.Setenv("CURIA_DB", t.TempDir()) // a directory, not a database
 	useFakeTmux(t)
 	res := runHookCmd(t, strings.NewReader(""), "seen", "%1")
