@@ -52,11 +52,10 @@ func TestPruneResources(t *testing.T) {
 	if n := resourceRows(t, path); n != 1 {
 		t.Errorf("rows = %d, want the fresh one", n)
 	}
-	var batch []store.ResourceSample
-	for range store.ResourceMaxRows + 30 {
-		batch = append(batch, store.ResourceSample{SessionID: "b", At: now})
-	}
-	if err := s.AddResourceSamples(ctx, batch); err != nil {
+	// One bulk statement: 100 000 single-row inserts take ~20 s under -race.
+	if _, err := rawDB(t, path).Exec(`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < ?)
+INSERT INTO resource_samples (at, session_id, cpu_pct, rss_mb) SELECT ?, 'b', 0, 0 FROM c`,
+		store.ResourceMaxRows+30, now.UTC().Format("2006-01-02T15:04:05.000000000Z")); err != nil {
 		t.Fatal(err)
 	}
 	for range 3 {

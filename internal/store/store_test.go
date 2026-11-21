@@ -26,9 +26,39 @@ func dbPath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "curia.db")
 }
 
-// open opens a Store and closes it when the test ends.
+var (
+	templateOnce sync.Once
+	templateDB   *sql.DB
+)
+
+// migratedTemplate returns a connection to a fresh, fully migrated
+// database, built once per test binary: migrating from scratch costs about
+// 250 ms under -race, which was most of the per-test cost. The file lives
+// in the OS temp directory for the rest of the run.
+func migratedTemplate() *sql.DB {
+	templateOnce.Do(func() {
+		p := filepath.Join(os.TempDir(), fmt.Sprintf("curia-store-template-%d.db", os.Getpid()))
+		s, err := store.Open(p)
+		if err == nil {
+			err = s.Close()
+		}
+		if err == nil {
+			templateDB, err = sql.Open("sqlite", p)
+		}
+		if err != nil {
+			panic(err)
+		}
+	})
+	return templateDB
+}
+
+// open opens a Store and closes it when the test ends. A path with no
+// database yet starts as a copy of the migrated template (VACUUM INTO
+// refuses an existing file, which then goes to Open as it is); tests of
+// migrating from scratch call store.Open directly.
 func open(t *testing.T, path string) *store.Store {
 	t.Helper()
+	_, _ = migratedTemplate().Exec(`VACUUM INTO ?`, path)
 	s, err := store.Open(path)
 	if err != nil {
 		t.Fatalf("Open(%q): %v", path, err)
