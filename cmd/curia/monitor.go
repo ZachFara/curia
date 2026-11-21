@@ -44,6 +44,7 @@ type monitorJob struct {
 var monitorJobs = []monitorJob{
 	{"sample resources", (*monitorEnv).sampleResources},
 	{"prune resources", (*monitorEnv).pruneResources},
+	{"auto-spawn", (*monitorEnv).autoSpawn},
 }
 
 // monitorEnv is what a job may use.
@@ -58,6 +59,7 @@ type monitorEnv struct {
 	ps    func(ctx context.Context) ([]usage.ProcRow, error)
 
 	lastPrune time.Time
+	lastAuto  time.Time
 }
 
 const (

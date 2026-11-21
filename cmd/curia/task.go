@@ -472,6 +472,9 @@ func taskStatusText(c task.Card) string {
 	if c.Task.Worktree != "" && len(c.Sessions) == 0 && taskOnDisk(c.Task.Worktree) {
 		notes = append(notes, "worktree")
 	}
+	if !c.Task.AutoSpawnedAt.IsZero() {
+		notes = append(notes, "auto")
+	}
 	if len(notes) == 0 {
 		return string(c.Status)
 	}
@@ -747,6 +750,19 @@ func runTaskReady(cmd *cobra.Command, args []string) error {
 	if err = taskUpdate(cmd.Context(), cfg, id, nil, func(t *model.Task) { t.Status = model.TaskReady }); err != nil {
 		return err
 	}
+	if err = taskMarkReady(cmd.Context(), cfg, id); err != nil {
+		return err
+	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s ready\n", id)
 	return err
+}
+
+// taskMarkReady stores F29's ready_hash: this command is the user marking the task ready.
+func taskMarkReady(ctx context.Context, cfg config.Config, id string) error {
+	st, err := openStore(cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+	return st.MarkReady(ctx, id)
 }

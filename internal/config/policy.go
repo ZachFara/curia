@@ -66,6 +66,10 @@ var keyPolicy = map[string]Policy{
 	"mode.bypass_for":               PolicyNone,
 	"tasks.agent_filed.level":       PolicyLevel,
 	"tasks.agent_filed.max_per_day": PolicyLower,
-	"serve.web":                     PolicyNone, // widens the network surface (F26)
+	"tasks.auto_spawn.enabled":      PolicyFalse, // F29, Ruling 159: a repository can turn it off, never on
+	"tasks.auto_spawn.max_agents":   PolicyLower,
+	"tasks.auto_spawn.max_per_day":  PolicyLower,
+	"tasks.auto_spawn.interval":     PolicyRaise, // lengthen only
+	"serve.web":                     PolicyNone,  // widens the network surface (F26)
 	"serve.web_session":             PolicyNone,
 }

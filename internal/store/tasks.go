@@ -39,19 +39,20 @@ func failTask(op, id string, err error) error {
 const selectTasks = `
 SELECT n, id, title, body, repo, base_branch, status, source, source_ref, tags, branch, worktree,
   team, agent_model, pane, resume_session, created_at, updated_at, launched_at, paused_at, cleaned_at,
-  priority, agent, COALESCE(filed_by, ''), COALESCE(filed_reason, ''), COALESCE(filer_lineage, ''), budget_usd
+  priority, agent, COALESCE(filed_by, ''), COALESCE(filed_reason, ''), COALESCE(filer_lineage, ''), budget_usd,
+  COALESCE(ready_hash, ''), auto_spawned_at
 FROM tasks`
 
 // scanTask reads one row of selectTasks.
 func scanTask(sc scanner) (model.Task, error) {
 	var t model.Task
 	var tags string
-	var created, updated, launched, paused, cleaned sql.NullString
+	var created, updated, launched, paused, cleaned, autoAt sql.NullString
 	var budget sql.NullFloat64
 	err := sc.Scan(&t.N, &t.ID, &t.Title, &t.Body, &t.Repo, &t.BaseBranch, &t.Status, &t.Source, &t.SourceRef,
 		&tags, &t.Branch, &t.Worktree, &t.Team, &t.AgentModel, &t.Pane, &t.ResumeSession,
 		&created, &updated, &launched, &paused, &cleaned, &t.Priority, &t.Agent,
-		&t.FiledBy, &t.FiledReason, &t.FiledLineage, &budget)
+		&t.FiledBy, &t.FiledReason, &t.FiledLineage, &budget, &t.ReadyHash, &autoAt)
 	if err != nil {
 		return model.Task{}, err
 	}
@@ -66,6 +67,7 @@ func scanTask(sc scanner) (model.Task, error) {
 		{&t.LaunchedAt, launched},
 		{&t.PausedAt, paused},
 		{&t.CleanedAt, cleaned},
+		{&t.AutoSpawnedAt, autoAt},
 	} {
 		v, err := parseTime(f.src)
 		if err != nil {
@@ -304,12 +306,13 @@ func (s *Store) UpdateTask(ctx context.Context, id string, fn func(model.Task) (
 		_, err = tx.ExecContext(ctx, `
 UPDATE tasks SET title = ?, body = ?, repo = ?, base_branch = ?, status = ?, source = ?, source_ref = ?,
   tags = ?, branch = ?, worktree = ?, team = ?, agent_model = ?, pane = ?, resume_session = ?,
-  updated_at = ?, launched_at = ?, paused_at = ?, cleaned_at = ?, priority = ?, agent = ?, budget_usd = ?
+  updated_at = ?, launched_at = ?, paused_at = ?, cleaned_at = ?, priority = ?, agent = ?, budget_usd = ?,
+  ready_hash = CASE WHEN ? = 'ready' AND launched_at IS ? THEN ready_hash END
 WHERE n = ?`,
 			next.Title, next.Body, next.Repo, next.BaseBranch, next.Status, next.Source, next.SourceRef,
 			strings.Join(next.Tags, " "), next.Branch, next.Worktree, next.Team, next.AgentModel, next.Pane,
 			next.ResumeSession, formatTime(next.UpdatedAt), formatTime(next.LaunchedAt), formatTime(next.PausedAt),
-			formatTime(next.CleanedAt), next.Priority, next.Agent, budgetArg(next.BudgetUSD), cur.N)
+			formatTime(next.CleanedAt), next.Priority, next.Agent, budgetArg(next.BudgetUSD), next.Status, formatTime(next.LaunchedAt), cur.N)
 	}
 	if err != nil {
 		return model.Task{}, failTask("update task", id, err)
@@ -341,7 +344,7 @@ func (s *Store) ClaimLaunch(ctx context.Context, id, seenPane string, now time.T
 		err = ErrTaskBusy
 	}
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `UPDATE tasks SET launched_at = ?, pane = '' WHERE n = ?`, formatTime(now), cur.N)
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET launched_at = ?, pane = '', ready_hash = NULL WHERE n = ?`, formatTime(now), cur.N)
 	}
 	if err != nil {
 		return model.Task{}, failTask("claim launch of", id, err)
