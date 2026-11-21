@@ -1071,6 +1071,7 @@ var userOnlyCommands = map[string][]string{
 	"curia uninstall":       {},
 	"curia review":          {"R-1", "--drop"},
 	"curia restore":         {"--dry-run"},
+	"curia rc":              {"--all"},
 	"curia serve":           {},
 	"curia serve token":     {"phone"},
 	"curia serve revoke":    {"phone"},

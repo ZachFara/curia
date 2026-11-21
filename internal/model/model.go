@@ -61,6 +61,10 @@ type Session struct {
 	// CacheRecacheTokens is what a cold cache would have to re-read, as a
 	// count of tokens (Curia keeps no price table, Ruling P5-R2); 0 unknown.
 	CacheRecacheTokens int64
+	// RC, RCHow and RCCheckedAt are F21's Remote Control belief (off, pending,
+	// on or unknown; "" reads as off), how Curia knows it and when it looked.
+	RC, RCHow   string
+	RCCheckedAt time.Time
 }
 
 // Team roles.

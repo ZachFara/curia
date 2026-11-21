@@ -271,7 +271,7 @@ func TestMigrationOnPlan2Database(t *testing.T) {
 
 	s := open(t, path)
 	if names := migrationNames(t, db); !reflect.DeepEqual(names,
-		[]string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql"}) {
+		[]string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0022_remote_control.sql"}) {
 		t.Errorf("migrations = %v, want 0001 to 0009 (both 0005 files)", names)
 	}
 	sess := get(t, s, "old")

@@ -64,6 +64,7 @@ type Config struct {
 	Resources Resources `toml:"resources"`
 	Monitor   Monitor   `toml:"monitor"`
 	Cost      Cost      `toml:"cost"`
+	RC        RC        `toml:"rc"`
 }
 
 // maxEditor bounds the editor option, in bytes.

@@ -65,4 +65,5 @@ var keyPolicy = map[string]Policy{
 	"tasks.agent_filed.max_per_day": PolicyLower,
 	"serve.web":                     PolicyNone, // widens the network surface (F26)
 	"serve.web_session":             PolicyNone,
+	"rc.launch":                     PolicyNone, // Remote Control is a reach extension (F21, F28)
 }
