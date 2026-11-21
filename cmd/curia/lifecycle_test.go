@@ -20,7 +20,7 @@ import (
 )
 
 // lifecycleBranch is task T-1's branch ("Fix auth").
-const lifecycleBranch = "curia/T-1-fix-auth"
+const lifecycleBranch = testkit.LifecycleBranch
 
 // lifecycleSpawned is a spawn fixture whose repository ignores node_modules/
 // and .env, with task T-1 "Fix auth" spawned with o (window pane %100, no
@@ -28,13 +28,7 @@ const lifecycleBranch = "curia/T-1-fix-auth"
 func lifecycleSpawned(t *testing.T, o lifecycle.SpawnOptions) *spawnFixture {
 	t.Helper()
 	f := spawnNewFixture(t)
-	testkit.WorktreeWrite(t, filepath.Join(f.Repo, ".gitignore"), "node_modules/\n.env\n")
-	testkit.GitRun(t, f.Repo, "add", "-A")
-	testkit.GitRun(t, f.Repo, "commit", "-q", "-m", "ignore")
-	f.Task("Fix auth", "Make it work.")
-	if _, out, err := f.Spawn("T-1", o); err != nil {
-		t.Fatalf("spawn: %v\n%s", err, out)
-	}
+	testkit.SpawnedFrom(f.SpawnFixture, o)
 	return f
 }
 
@@ -96,38 +90,6 @@ func lifecycleCommits(f *spawnFixture) []string {
 		return nil
 	}
 	return strings.Split(out, "\n")
-}
-
-// lifecycleRead returns the content of path.
-func lifecycleRead(t *testing.T, path string) string {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
-}
-
-// lifecycleHooks makes core.hooksPath of the fixture's repository a
-// directory holding one executable hook, name, with content. The hook is
-// made executable through the index and a checkout, so no test writes a
-// file with an execute bit.
-func lifecycleHooks(f *spawnFixture, name, content string) {
-	f.T.Helper()
-	dir := filepath.Join(filepath.Dir(f.Repo), "hooks")
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		f.T.Fatal(err)
-	}
-	testkit.GitInit(f.T, dir, "main")
-	testkit.WorktreeWrite(f.T, filepath.Join(dir, name), content)
-	testkit.GitRun(f.T, dir, "add", "-A")
-	testkit.GitRun(f.T, dir, "update-index", "--chmod=+x", name)
-	testkit.GitRun(f.T, dir, "commit", "-q", "-m", "hook")
-	if err := os.Remove(filepath.Join(dir, name)); err != nil {
-		f.T.Fatal(err)
-	}
-	testkit.GitRun(f.T, dir, "checkout", "--", name)
-	testkit.GitRun(f.T, f.Repo, "config", "core.hooksPath", dir)
 }
 
 func TestLifecycleCommandsRefuseInsideAgent(t *testing.T) {
@@ -235,10 +197,10 @@ func TestPauseKeepsWorktreeWithIgnoredFiles(t *testing.T) {
 	if files := testkit.WorktreeGit(t, f.Repo, "show", "--name-only", "--format=", lifecycleBranch); files != "README" {
 		t.Errorf("WIP commit holds %q, want README only", files)
 	}
-	if got := lifecycleRead(t, filepath.Join(wt, "node_modules", "left-pad", "index.js")); got != "x\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(wt, "node_modules", "left-pad", "index.js")); got != "x\n" {
 		t.Errorf("ignored file = %q, want it kept", got)
 	}
-	if got := lifecycleRead(t, filepath.Join(wt, ".env")); got != "TOKEN=1\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(wt, ".env")); got != "TOKEN=1\n" {
 		t.Errorf(".env = %q, want it kept", got)
 	}
 	if got := testkit.WorktreeGit(t, wt, "symbolic-ref", "HEAD"); got != "refs/heads/"+lifecycleBranch {
@@ -284,7 +246,7 @@ func TestResumeReusesKeptWorktree(t *testing.T) {
 	if !strings.Contains(out, "Worktree: reusing") {
 		t.Errorf("resume did not reuse the kept worktree:\n%s", out)
 	}
-	if got := lifecycleRead(t, filepath.Join(wt, ".env")); got != "TOKEN=1\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(wt, ".env")); got != "TOKEN=1\n" {
 		t.Errorf(".env = %q, want it kept", got)
 	}
 	if got := testkit.WorktreeGit(t, wt, "log", "-1", "--format=%s"); got != "curia: WIP T-1 (paused)" {
@@ -320,7 +282,7 @@ func TestCleanNamesIgnoredFilesAndNeedsForce(t *testing.T) {
 			t.Errorf("error lacks %q: %v", want, err)
 		}
 	}
-	if got := lifecycleRead(t, filepath.Join(f.Worktree("T-1"), ".env")); got != "TOKEN=1\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(f.Worktree("T-1"), ".env")); got != "TOKEN=1\n" {
 		t.Errorf(".env = %q, want it kept", got)
 	}
 	if ok, _ := gitops.RefExists(context.Background(), f.Repo, "refs/heads/"+lifecycleBranch); !ok {
@@ -480,7 +442,7 @@ func TestPauseCommitFailureKeepsWorktree(t *testing.T) {
 	if got := testkit.WorktreeGit(t, wt, "status", "--porcelain"); got != "M  README\n?? new.txt" {
 		t.Errorf("worktree status = %q, want README staged and new.txt untracked as before", got)
 	}
-	if got := lifecycleRead(t, filepath.Join(wt, "new.txt")); got != "new\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(wt, "new.txt")); got != "new\n" {
 		t.Errorf("new.txt = %q", got)
 	}
 
@@ -502,7 +464,7 @@ func TestPauseCommitFailureKeepsWorktree(t *testing.T) {
 func TestPauseNeverForcesRemoval(t *testing.T) {
 	f := lifecycleWithLead(t)
 	// A post-commit hook writes a file after the WIP commit.
-	lifecycleHooks(f, "post-commit", "#!/bin/sh\necho late > late.txt\n")
+	testkit.LifecycleHooks(f.SpawnFixture, "post-commit", "#!/bin/sh\necho late > late.txt\n")
 	wt := f.Worktree("T-1")
 	testkit.WorktreeWrite(t, filepath.Join(wt, "README"), "changed\n")
 
@@ -516,7 +478,7 @@ func TestPauseNeverForcesRemoval(t *testing.T) {
 		}
 	}
 	lifecycleWantKept(f)
-	if got := lifecycleRead(t, filepath.Join(wt, "late.txt")); got != "late\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(wt, "late.txt")); got != "late\n" {
 		t.Errorf("late.txt = %q, want kept", got)
 	}
 	if got, want := lifecycleCommits(f), []string{"curia: WIP T-1 (paused)"}; !slices.Equal(got, want) {
@@ -528,14 +490,14 @@ func TestPauseKeepsWorktreeWhenIgnoredFileAppearsAfterCommit(t *testing.T) {
 	f := lifecycleWithLead(t)
 	// A post-commit hook writes an ignored file after the WIP commit: the
 	// check after the commit sees it and keeps the worktree.
-	lifecycleHooks(f, "post-commit", "#!/bin/sh\necho late > .env\n")
+	testkit.LifecycleHooks(f.SpawnFixture, "post-commit", "#!/bin/sh\necho late > .env\n")
 	wt := f.Worktree("T-1")
 	testkit.WorktreeWrite(t, filepath.Join(wt, "README"), "changed\n")
 	out, err := lifecycleRun(t, "pause", "T-1")
 	if err != nil {
 		t.Fatalf("pause: %v\n%s", err, out)
 	}
-	if got := lifecycleRead(t, filepath.Join(wt, ".env")); got != "late\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(wt, ".env")); got != "late\n" {
 		t.Errorf(".env = %q, want kept", got)
 	}
 	if !strings.Contains(out, "Kept worktree") || f.Get("T-1").PausedAt.IsZero() {
@@ -640,7 +602,7 @@ func TestLifecycleRefusesMovedOrSymlinkedWorktree(t *testing.T) {
 	if _, err := lifecycleRun(t, "clean", "T-1", "--force"); err == nil || !strings.Contains(err.Error(), "leaves it alone") {
 		t.Errorf("clean over a foreign directory = %v, want a refusal", err)
 	}
-	if got := lifecycleRead(t, filepath.Join(wt, "mine.txt")); got != "mine\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(wt, "mine.txt")); got != "mine\n" {
 		t.Errorf("mine.txt = %q", got)
 	}
 }
@@ -690,7 +652,7 @@ func TestResumeRecreatesWorktreeAndResumes(t *testing.T) {
 	if got := testkit.WorktreeGit(t, wt, "log", "-1", "--format=%s"); got != "curia: WIP T-1 (paused)" {
 		t.Errorf("worktree tip = %q, want the WIP commit", got)
 	}
-	if got := lifecycleRead(t, filepath.Join(wt, "README")); got != "work in progress\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(wt, "README")); got != "work in progress\n" {
 		t.Errorf("README = %q", got)
 	}
 	w := f.Windows()
@@ -904,7 +866,7 @@ func TestCleanForceNeverForcesWorktreeRemoval(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "never forces") {
 		t.Fatalf("clean --force of a dirty worktree = %v, want git's refusal", err)
 	}
-	if got := lifecycleRead(t, filepath.Join(f.Worktree("T-1"), "draft.txt")); got != "draft\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(f.Worktree("T-1"), "draft.txt")); got != "draft\n" {
 		t.Errorf("draft.txt = %q", got)
 	}
 	if ok, _ := gitops.RefExists(context.Background(), f.Repo, "refs/heads/"+lifecycleBranch); !ok {

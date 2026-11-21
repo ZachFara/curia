@@ -9,6 +9,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/review"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/transcript"
@@ -116,7 +117,7 @@ func (d detailSource) Diff(ctx context.Context, id string) (ui.DetailDiff, error
 	if err != nil || !ok || t.Worktree == "" {
 		return ui.DetailDiff{}, err
 	}
-	stat, note, _ := reviewDiffStat(ctx, t, detailDiffWidth)
+	stat, note, _ := review.DiffStat(ctx, t, detailDiffWidth)
 	return ui.DetailDiff{Has: true, Stat: stat, Note: note}, nil
 }
 

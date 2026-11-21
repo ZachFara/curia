@@ -1,10 +1,11 @@
-package main
+package review
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,81 +26,17 @@ import (
 )
 
 // reviewBranch is task T-1's branch in the review fixture.
-const reviewBranch = lifecycleBranch
+const reviewBranch = testkit.ReviewBranch
 
-// reviewFixture is a spawn fixture with task T-1 "Fix auth" spawned (its
-// worktree on curia/T-1-fix-auth), one commit on the branch adding auth.go,
-// a local bare repository as origin, and review R-1 pending, opened by the
-// lead session (not linked yet).
-type reviewFixture struct {
-	*spawnFixture
-	wt, origin string
-}
+// reviewFixture is testkit's review fixture.
+type reviewFixture struct{ *testkit.ReviewFixture }
 
 func reviewNew(t *testing.T) *reviewFixture {
 	t.Helper()
-	f := &reviewFixture{spawnFixture: lifecycleSpawned(t, lifecycle.SpawnOptions{})}
-	f.wt = f.Worktree("T-1")
-	f.commitOnBranch("auth.go", "package auth\n", "fix auth")
-	f.origin = filepath.Join(filepath.Dir(f.Repo), "origin.git")
-	cmd := exec.Command("git", "init", "-q", "--bare", f.origin)
-	cmd.Env = gitops.Env()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init --bare: %v %s", err, out)
-	}
-	testkit.GitRun(t, f.Repo, "remote", "add", "origin", f.origin)
-	if _, _, err := f.St.CompleteTask(context.Background(), model.Review{
-		TaskID: "T-1", SessionID: testkit.LifecycleLead, Summary: "Fixed the auth refresh.", Tests: model.TestsPassed,
-		TestsDetail: "12 passed", CreatedAt: f.Now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return f
+	return &reviewFixture{testkit.NewReview(t, testkit.SpawnedFrom(testkit.NewSpawnFixture(t), lifecycle.SpawnOptions{}))}
 }
 
-// commitOnBranch commits file with content in the worktree.
-func (f *reviewFixture) commitOnBranch(file, content, subject string) {
-	f.T.Helper()
-	testkit.WorktreeWrite(f.T, filepath.Join(f.wt, file), content)
-	testkit.GitRun(f.T, f.wt, "add", "-A")
-	testkit.GitRun(f.T, f.wt, "commit", "-q", "-m", subject)
-}
-
-// commitOnMain commits file with content in the main checkout.
-func (f *reviewFixture) commitOnMain(file, content, subject string) {
-	f.T.Helper()
-	testkit.WorktreeWrite(f.T, filepath.Join(f.Repo, file), content)
-	testkit.GitRun(f.T, f.Repo, "add", "-A")
-	testkit.GitRun(f.T, f.Repo, "commit", "-q", "-m", subject)
-}
-
-func (f *reviewFixture) head(dir, rev string) string {
-	f.T.Helper()
-	return testkit.WorktreeGit(f.T, dir, "rev-parse", rev)
-}
-
-func (f *reviewFixture) status() string {
-	f.T.Helper()
-	return testkit.WorktreeGit(f.T, f.Repo, "status", "--porcelain", "--untracked-files=all")
-}
-
-func (f *reviewFixture) review() model.Review {
-	f.T.Helper()
-	r, found, err := f.St.GetReview(context.Background(), "R-1")
-	if err != nil || !found {
-		f.T.Fatalf("GetReview(R-1): found %v, err %v", found, err)
-	}
-	return r
-}
-
-func (f *reviewFixture) wantPending() {
-	f.T.Helper()
-	if r := f.review(); r.Status != model.ReviewPending {
-		f.T.Errorf("R-1 is %s, want pending", r.Status)
-	}
-}
-
-// approve runs reviewApprove on R-1 as the flag form does. seen "" is the
+// approve runs Approve on R-1 as the flag form does. seen "" is the
 // branch's head now, as for a user who has just looked at it (a branch that
 // does not resolve gives a commit id no branch is at).
 func (f *reviewFixture) approve(how model.ApproveHow, seen string) (string, error) {
@@ -110,16 +47,7 @@ func (f *reviewFixture) approve(how model.ApproveHow, seen string) (string, erro
 			seen = out
 		}
 	}
-	return reviewApprove(context.Background(), f.St, f.Cfg, "R-1", how, seen, model.AnsweredCLI, f.Now)
-}
-
-// hasMergeHead reports whether the main checkout has a merge under way.
-func (f *reviewFixture) hasMergeHead() bool {
-	ok, err := gitops.RefExists(context.Background(), f.Repo, "MERGE_HEAD")
-	if err != nil {
-		f.T.Fatal(err)
-	}
-	return ok
+	return Approve(context.Background(), Approval{Store: f.St, Config: f.Cfg, ReviewID: "R-1", How: how, Seen: seen, Via: model.AnsweredCLI, Now: f.Now})
 }
 
 // reviewNoControl fails when s holds a control rune other than a line break.
@@ -135,9 +63,9 @@ func reviewNoControl(t *testing.T, what, s string) {
 
 func TestDiffStatAgainstBase(t *testing.T) {
 	f := reviewNew(t)
-	f.commitOnBranch("README", "hello, auth\n", "readme")
-	f.commitOnMain("main.txt", "moved on\n", "main moves on")
-	stat, note, head := reviewDiffStat(context.Background(), f.Get("T-1"), 100)
+	f.CommitOnBranch("README", "hello, auth\n", "readme")
+	f.CommitOnMain("main.txt", "moved on\n", "main moves on")
+	stat, note, head := DiffStat(context.Background(), f.Get("T-1"), 100)
 	for _, want := range []string{"auth.go", "README", "2 files changed"} {
 		if !strings.Contains(stat, want) {
 			t.Errorf("stat lacks %q:\n%s", want, stat)
@@ -149,12 +77,12 @@ func TestDiffStatAgainstBase(t *testing.T) {
 	if note != "" {
 		t.Errorf("note = %q, want none", note)
 	}
-	if want := f.head(f.wt, "HEAD"); head != want {
+	if want := f.Head(f.Wt, "HEAD"); head != want {
 		t.Errorf("head = %q, want the branch's %q", head, want)
 	}
 	// The width is git's --stat width.
-	f.commitOnBranch(strings.Repeat("long-name-", 12)+".go", "x\n", "long")
-	narrow, _, _ := reviewDiffStat(context.Background(), f.Get("T-1"), 40)
+	f.CommitOnBranch(strings.Repeat("long-name-", 12)+".go", "x\n", "long")
+	narrow, _, _ := DiffStat(context.Background(), f.Get("T-1"), 40)
 	for l := range strings.SplitSeq(narrow, "\n") {
 		if n := len([]rune(l)); n > 40 && !strings.Contains(l, "changed") {
 			t.Errorf("at width 40 a line is %d wide: %q", n, l)
@@ -165,29 +93,29 @@ func TestDiffStatAgainstBase(t *testing.T) {
 func TestDiffStatNotes(t *testing.T) {
 	f := reviewNew(t)
 	ctx := context.Background()
-	testkit.WorktreeWrite(t, filepath.Join(f.wt, "scratch.txt"), "not committed\n")
-	if _, note, _ := reviewDiffStat(ctx, f.Get("T-1"), 100); note != "the worktree has uncommitted changes that are not in this diff" {
+	testkit.WorktreeWrite(t, filepath.Join(f.Wt, "scratch.txt"), "not committed\n")
+	if _, note, _ := DiffStat(ctx, f.Get("T-1"), 100); note != "the worktree has uncommitted changes that are not in this diff" {
 		t.Errorf("dirty worktree: note = %q", note)
 	}
 
 	gone := model.Task{ID: "T-7", Repo: f.Repo, BaseBranch: "main", Branch: "curia/T-7-gone"}
-	if stat, note, head := reviewDiffStat(ctx, gone, 100); note != "branch curia/T-7-gone does not exist" || stat != "" || head != "" {
+	if stat, note, head := DiffStat(ctx, gone, 100); note != "branch curia/T-7-gone does not exist" || stat != "" || head != "" {
 		t.Errorf("missing branch: stat %q, note %q, head %q", stat, note, head)
 	}
 
 	testkit.GitRun(t, f.Repo, "branch", "curia/T-8-same", "main")
 	same := model.Task{ID: "T-8", Repo: f.Repo, BaseBranch: "main", Branch: "curia/T-8-same"}
-	if _, note, _ := reviewDiffStat(ctx, same, 100); note != "the branch has no commits beyond main" {
+	if _, note, _ := DiffStat(ctx, same, 100); note != "the branch has no commits beyond main" {
 		t.Errorf("no commits beyond base: note = %q", note)
 	}
 
 	none := model.Task{ID: "T-9", Repo: f.Repo, BaseBranch: "main"}
-	if _, note, _ := reviewDiffStat(ctx, none, 100); !strings.Contains(note, "no branch") {
+	if _, note, _ := DiffStat(ctx, none, 100); !strings.Contains(note, "no branch") {
 		t.Errorf("no branch: note = %q", note)
 	}
 
 	hostile := model.Task{ID: "T-9", Repo: f.Repo, BaseBranch: "main", Branch: "--output=/tmp/x"}
-	if stat, note, _ := reviewDiffStat(ctx, hostile, 100); stat != "" || !strings.Contains(note, "not a valid branch name") {
+	if stat, note, _ := DiffStat(ctx, hostile, 100); stat != "" || !strings.Contains(note, "not a valid branch name") {
 		t.Errorf("hostile branch: stat %q, note %q", stat, note)
 	}
 }
@@ -195,12 +123,12 @@ func TestDiffStatNotes(t *testing.T) {
 func TestDiffStatIsCappedAndClean(t *testing.T) {
 	f := reviewNew(t)
 	for i := range 400 {
-		testkit.WorktreeWrite(t, filepath.Join(f.wt, "many", fmt.Sprintf("f%03d.txt", i)), "x\n")
+		testkit.WorktreeWrite(t, filepath.Join(f.Wt, "many", fmt.Sprintf("f%03d.txt", i)), "x\n")
 	}
-	testkit.WorktreeWrite(t, filepath.Join(f.wt, "esc\x1b[31mred.txt"), "x\n")
-	testkit.GitRun(t, f.wt, "add", "-A")
-	testkit.GitRun(t, f.wt, "commit", "-q", "-m", "many")
-	stat, _, _ := reviewDiffStat(context.Background(), f.Get("T-1"), 100)
+	testkit.WorktreeWrite(t, filepath.Join(f.Wt, "esc\x1b[31mred.txt"), "x\n")
+	testkit.GitRun(t, f.Wt, "add", "-A")
+	testkit.GitRun(t, f.Wt, "commit", "-q", "-m", "many")
+	stat, _, _ := DiffStat(context.Background(), f.Get("T-1"), 100)
 	lines := strings.Split(stat, "\n")
 	// 402 files (auth.go, the ESC file, 400 more) and the summary: 403 lines.
 	if len(lines) != 201 || lines[200] != "… 203 more lines" {
@@ -214,8 +142,8 @@ func TestDiffStatIsCappedAndClean(t *testing.T) {
 
 func TestDiffStatWorksWithoutWorktree(t *testing.T) {
 	f := reviewNew(t)
-	testkit.GitRun(t, f.Repo, "worktree", "remove", f.wt) // as a pause leaves it
-	stat, note, head := reviewDiffStat(context.Background(), f.Get("T-1"), 100)
+	testkit.GitRun(t, f.Repo, "worktree", "remove", f.Wt) // as a pause leaves it
+	stat, note, head := DiffStat(context.Background(), f.Get("T-1"), 100)
 	if !strings.Contains(stat, "auth.go") || note != "" || head == "" {
 		t.Errorf("without the worktree: stat %q, note %q, head %q; want the stat from the main repository", stat, note, head)
 	}
@@ -223,62 +151,62 @@ func TestDiffStatWorksWithoutWorktree(t *testing.T) {
 
 func TestMergeHappyPath(t *testing.T) {
 	f := reviewNew(t)
-	mainBefore, branchHead := f.head(f.Repo, "main"), f.head(f.wt, "HEAD")
-	stat, head, err := reviewCheck(context.Background(), f.St, f.Get("T-1"))
+	mainBefore, branchHead := f.Head(f.Repo, "main"), f.Head(f.Wt, "HEAD")
+	stat, head, err := Check(context.Background(), f.St, f.Get("T-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if head != branchHead || !strings.Contains(stat, "auth.go") {
-		t.Fatalf("reviewCheck = %q, %q; want the branch head %q and its stat", stat, head, branchHead)
+		t.Fatalf("Check = %q, %q; want the branch head %q and its stat", stat, head, branchHead)
 	}
 	if err = gitops.Merge(context.Background(), f.Get("T-1"), head); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.head(f.Repo, "main^1"); got != mainBefore {
+	if got := f.Head(f.Repo, "main^1"); got != mainBefore {
 		t.Errorf("first parent = %s, want main's old head %s", got, mainBefore)
 	}
-	if got := f.head(f.Repo, "main^2"); got != branchHead {
+	if got := f.Head(f.Repo, "main^2"); got != branchHead {
 		t.Errorf("second parent = %s, want the branch head %s", got, branchHead)
 	}
 	if got := testkit.WorktreeGit(t, f.Repo, "log", "-1", "--format=%s"); got != "Merge branch '"+reviewBranch+"' into main" {
 		t.Errorf("merge subject = %q", got)
 	}
-	if got := f.head(f.wt, "HEAD"); got != branchHead {
+	if got := f.Head(f.Wt, "HEAD"); got != branchHead {
 		t.Errorf("worktree HEAD = %s, want it untouched at %s", got, branchHead)
 	}
-	if got := testkit.WorktreeGit(t, f.wt, "symbolic-ref", "HEAD"); got != "refs/heads/"+reviewBranch {
+	if got := testkit.WorktreeGit(t, f.Wt, "symbolic-ref", "HEAD"); got != "refs/heads/"+reviewBranch {
 		t.Errorf("worktree is on %q", got)
 	}
-	if s := f.status(); s != "" {
+	if s := f.Status(); s != "" {
 		t.Errorf("main checkout status = %q, want clean", s)
 	}
 }
 
 func TestMergeRefusesMovedBranch(t *testing.T) {
 	f := reviewNew(t)
-	_, head, err := reviewCheck(context.Background(), f.St, f.Get("T-1"))
+	_, head, err := Check(context.Background(), f.St, f.Get("T-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.commitOnBranch("late.go", "package auth\n", "late") // after the checks, before the merge
-	before := f.head(f.Repo, "HEAD")
+	f.CommitOnBranch("late.go", "package auth\n", "late") // after the checks, before the merge
+	before := f.Head(f.Repo, "HEAD")
 	if err = gitops.Merge(context.Background(), f.Get("T-1"), head); !errors.Is(err, gitops.ErrBranchChanged) {
 		t.Fatalf("gitops.Merge = %v, want the changed-branch refusal", err)
 	}
-	if f.head(f.Repo, "HEAD") != before || f.status() != "" {
+	if f.Head(f.Repo, "HEAD") != before || f.Status() != "" {
 		t.Error("the repository changed")
 	}
 }
 
 func TestMergeIntoBaseThatMoved(t *testing.T) {
 	f := reviewNew(t)
-	f.commitOnMain("main.txt", "moved on\n", "main moves on")
-	moved, branchHead := f.head(f.Repo, "main"), f.head(f.wt, "HEAD")
+	f.CommitOnMain("main.txt", "moved on\n", "main moves on")
+	moved, branchHead := f.Head(f.Repo, "main"), f.Head(f.Wt, "HEAD")
 	if _, err := f.approve(model.ApproveMerge, ""); err != nil {
 		t.Fatal(err)
 	}
-	if f.head(f.Repo, "main^1") != moved || f.head(f.Repo, "main^2") != branchHead {
-		t.Errorf("parents = %s %s, want %s %s", f.head(f.Repo, "main^1"), f.head(f.Repo, "main^2"), moved, branchHead)
+	if f.Head(f.Repo, "main^1") != moved || f.Head(f.Repo, "main^2") != branchHead {
+		t.Errorf("parents = %s %s, want %s %s", f.Head(f.Repo, "main^1"), f.Head(f.Repo, "main^2"), moved, branchHead)
 	}
 }
 
@@ -297,7 +225,7 @@ func reviewRefusals() []reviewRefusal {
 	rows := []reviewRefusal{
 		{name: "no branch", want: "T-1 has no branch", setup: setBranch("")},
 		{name: "branch does not resolve", want: "branch " + reviewBranch + " does not exist", setup: func(f *reviewFixture) {
-			testkit.GitRun(f.T, f.Repo, "worktree", "remove", f.wt)
+			testkit.GitRun(f.T, f.Repo, "worktree", "remove", f.Wt)
 			testkit.GitRun(f.T, f.Repo, "branch", "-D", reviewBranch)
 		}},
 		{name: "base -x", want: `refusing base "-x"`, setup: func(f *reviewFixture) {
@@ -310,7 +238,7 @@ func reviewRefusals() []reviewRefusal {
 			testkit.LifecycleSession(f.SpawnFixture, testkit.LifecycleLead, "%100", model.StateWaiting, f.Now)
 		}},
 		{name: "dirty worktree", want: "uncommitted changes in ", setup: func(f *reviewFixture) {
-			testkit.WorktreeWrite(f.T, filepath.Join(f.wt, "auth.go"), "package auth // edited\n")
+			testkit.WorktreeWrite(f.T, filepath.Join(f.Wt, "auth.go"), "package auth // edited\n")
 		}},
 		{name: "no commits beyond base", want: "nothing to merge: " + reviewBranch + " has no commits beyond main", setup: func(f *reviewFixture) {
 			testkit.GitRun(f.T, f.Repo, "merge", "-q", "--ff-only", reviewBranch)
@@ -345,15 +273,15 @@ func TestMergeRefusals(t *testing.T) {
 			if row.setup != nil {
 				row.setup(f)
 			}
-			before := f.head(f.Repo, "HEAD")
+			before := f.Head(f.Repo, "HEAD")
 			line, err := f.approve(model.ApproveMerge, row.seen)
 			if err == nil || !strings.Contains(err.Error(), row.want) {
 				t.Fatalf("approve = %q, %v; want an error with %q", line, err, row.want)
 			}
-			if got := f.head(f.Repo, "HEAD"); got != before {
+			if got := f.Head(f.Repo, "HEAD"); got != before {
 				t.Errorf("HEAD moved from %s to %s", before, got)
 			}
-			f.wantPending()
+			f.WantPending()
 		})
 	}
 }
@@ -362,26 +290,26 @@ func TestMergeRefusesWhileUserMerges(t *testing.T) {
 	f := reviewNew(t)
 	// The user's own merge, stopped on a conflict.
 	testkit.GitRun(t, f.Repo, "switch", "-q", "-c", "mine")
-	f.commitOnMain("README", "mine\n", "mine")
+	f.CommitOnMain("README", "mine\n", "mine")
 	testkit.GitRun(t, f.Repo, "switch", "-q", "main")
-	f.commitOnMain("README", "theirs\n", "theirs")
+	f.CommitOnMain("README", "theirs\n", "theirs")
 	cmd := exec.Command("git", "-C", f.Repo, "merge", "mine")
 	cmd.Env = gitops.Env()
 	if err := cmd.Run(); err == nil {
 		t.Fatal("the user's merge did not stop on a conflict")
 	}
-	status := f.status()
+	status := f.Status()
 	_, err := f.approve(model.ApproveMerge, "")
 	if err == nil || !strings.Contains(err.Error(), "is in the middle of a merge") {
 		t.Fatalf("approve error = %v, want the refusal of a merge under way", err)
 	}
-	if !f.hasMergeHead() {
+	if !f.HasMergeHead() {
 		t.Error("the user's merge was aborted")
 	}
-	if got := f.status(); got != status {
+	if got := f.Status(); got != status {
 		t.Errorf("status changed from %q to %q", status, got)
 	}
-	f.wantPending()
+	f.WantPending()
 }
 
 // TestMergeRefusesConflictBeforeMerging: a merge that would conflict is
@@ -391,14 +319,14 @@ func TestMergeRefusesConflictBeforeMerging(t *testing.T) {
 	for _, dirty := range []bool{false, true} {
 		t.Run(fmt.Sprintf("unrelated local change %v", dirty), func(t *testing.T) {
 			f := reviewNew(t)
-			f.commitOnBranch("README", "branch side\n", "branch readme")
-			f.commitOnMain("README", "main side\n", "main readme")
+			f.CommitOnBranch("README", "branch side\n", "branch readme")
+			f.CommitOnMain("README", "main side\n", "main readme")
 			if dirty {
-				f.commitOnMain("notes.txt", "a\n", "notes")
+				f.CommitOnMain("notes.txt", "a\n", "notes")
 				testkit.WorktreeWrite(t, filepath.Join(f.Repo, "notes.txt"), "my edit\n")
 			}
-			before, status := f.head(f.Repo, "HEAD"), f.status()
-			calls := reviewRecordGit(t)
+			before, status := f.Head(f.Repo, "HEAD"), f.Status()
+			calls := testkit.RecordGit(t)
 			_, err := f.approve(model.ApproveMerge, "")
 			if err == nil || !strings.Contains(err.Error(), "merging "+reviewBranch+" into main would conflict in README") ||
 				!strings.HasSuffix(err.Error(), "Nothing was merged") {
@@ -408,7 +336,7 @@ func TestMergeRefusesConflictBeforeMerging(t *testing.T) {
 				t.Errorf("git merge ran: %q", m)
 			}
 			f.wantAsBefore(before, status)
-			f.wantPending()
+			f.WantPending()
 		})
 	}
 }
@@ -417,114 +345,58 @@ func TestMergeHookFailureAborts(t *testing.T) {
 	for _, hook := range []string{"commit-msg", "pre-merge-commit"} {
 		t.Run(hook, func(t *testing.T) {
 			f := reviewNew(t)
-			lifecycleHooks(f.spawnFixture, hook, "#!/bin/sh\necho \"refused by "+hook+"\" >&2\nexit 1\n")
-			before := f.head(f.Repo, "HEAD")
+			testkit.LifecycleHooks(f.SpawnFixture, hook, "#!/bin/sh\necho \"refused by "+hook+"\" >&2\nexit 1\n")
+			before := f.Head(f.Repo, "HEAD")
 			_, err := f.approve(model.ApproveMerge, "")
 			if err == nil || !strings.Contains(err.Error(), "refused by "+hook) || !strings.Contains(err.Error(), "; nothing was merged") {
 				t.Fatalf("approve error = %v, want the hook's message and \"; nothing was merged\"", err)
 			}
-			if f.hasMergeHead() {
+			if f.HasMergeHead() {
 				t.Error("MERGE_HEAD is left")
 			}
 			if !strings.Contains(err.Error(), "git may have left ORIG_HEAD") || !strings.HasSuffix(err.Error(), ": they are harmless and need nothing") {
 				t.Errorf("approve error = %v, want the note on git's leftover files", err)
 			}
-			if s := f.status(); s != "" {
+			if s := f.Status(); s != "" {
 				t.Errorf("status = %q, want clean", s)
 			}
-			if got := f.head(f.Repo, "HEAD"); got != before {
+			if got := f.Head(f.Repo, "HEAD"); got != before {
 				t.Errorf("HEAD moved to %s", got)
 			}
-			f.wantPending()
+			f.WantPending()
 		})
 	}
 }
 
 func TestMergeKeepsMyLocalChanges(t *testing.T) {
 	f := reviewNew(t)
-	f.commitOnMain("notes.txt", "a\n", "notes")
+	f.CommitOnMain("notes.txt", "a\n", "notes")
 	testkit.WorktreeWrite(t, filepath.Join(f.Repo, "notes.txt"), "my edit\n")
 	if _, err := f.approve(model.ApproveMerge, ""); err != nil {
 		t.Fatalf("unrelated change: %v", err)
 	}
-	if got := lifecycleRead(t, filepath.Join(f.Repo, "notes.txt")); got != "my edit\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(f.Repo, "notes.txt")); got != "my edit\n" {
 		t.Errorf("notes.txt = %q, want my edit kept", got)
 	}
-	if s := f.status(); s != "M notes.txt" { // trimmed: " M notes.txt"
+	if s := f.Status(); s != "M notes.txt" { // trimmed: " M notes.txt"
 		t.Errorf("status = %q, want notes.txt still modified", s)
 	}
 
 	g := reviewNew(t)
-	g.commitOnBranch("README", "branch side\n", "branch readme")
+	g.CommitOnBranch("README", "branch side\n", "branch readme")
 	testkit.WorktreeWrite(t, filepath.Join(g.Repo, "README"), "my edit\n")
-	before, status := g.head(g.Repo, "HEAD"), g.status()
+	before, status := g.Head(g.Repo, "HEAD"), g.Status()
 	_, err := g.approve(model.ApproveMerge, "")
 	if err == nil || !strings.Contains(err.Error(), "would be overwritten") || !strings.Contains(err.Error(), "; nothing was merged") {
 		t.Fatalf("overlapping change: error = %v, want git's refusal", err)
 	}
-	if got := lifecycleRead(t, filepath.Join(g.Repo, "README")); got != "my edit\n" {
+	if got := testkit.LifecycleRead(t, filepath.Join(g.Repo, "README")); got != "my edit\n" {
 		t.Errorf("README = %q, want my edit intact", got)
 	}
-	if g.head(g.Repo, "HEAD") != before || g.status() != status {
+	if g.Head(g.Repo, "HEAD") != before || g.Status() != status {
 		t.Error("HEAD or status changed")
 	}
-	g.wantPending()
-}
-
-// reviewExecutable makes dir/name an executable file holding content,
-// through the index and a checkout of a throwaway repository, so no test
-// writes a file with an execute bit.
-func reviewExecutable(t *testing.T, dir, name, content string) {
-	t.Helper()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
-		testkit.GitInit(t, dir, "main")
-	}
-	path := filepath.Join(dir, name)
-	testkit.WorktreeWrite(t, path, content)
-	testkit.GitRun(t, dir, "add", name)
-	testkit.GitRun(t, dir, "update-index", "--chmod=+x", name)
-	testkit.GitRun(t, dir, "commit", "-q", "-m", name)
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	testkit.GitRun(t, dir, "checkout", "--", name)
-}
-
-// reviewRecordGit puts a git on PATH that records each call's argv in a
-// file and runs the real git, and returns a func that reads and clears the
-// recorded calls.
-func reviewRecordGit(t *testing.T) func() [][]string {
-	t.Helper()
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(t.TempDir(), "bin")
-	calls := filepath.Join(filepath.Dir(dir), "calls")
-	reviewExecutable(t, dir, "git", "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\037' \"$a\"; done >> '"+calls+
-		"'\nprintf '\\036' >> '"+calls+"'\nexec '"+realGit+"' \"$@\"\n")
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return func() [][]string {
-		t.Helper()
-		b, err := os.ReadFile(filepath.Clean(calls))
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = os.WriteFile(calls, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		var out [][]string
-		for c := range strings.SplitSeq(strings.TrimSuffix(string(b), "\x1e"), "\x1e") {
-			out = append(out, strings.Split(strings.TrimSuffix(c, "\x1f"), "\x1f"))
-		}
-		return out
-	}
+	g.WantPending()
 }
 
 // reviewForbidden are the argv elements no approval may pass to git.
@@ -551,7 +423,7 @@ func reviewCheckArgv(t *testing.T, what string, calls [][]string, some bool) {
 
 func TestNeverForces(t *testing.T) {
 	f := reviewNew(t)
-	calls := reviewRecordGit(t)
+	calls := testkit.RecordGit(t)
 	if _, err := f.approve(model.ApproveMerge, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -570,8 +442,8 @@ func TestNeverForces(t *testing.T) {
 	}
 
 	c := reviewNew(t)
-	c.commitOnBranch("README", "branch side\n", "branch readme")
-	c.commitOnMain("README", "main side\n", "main readme")
+	c.CommitOnBranch("README", "branch side\n", "branch readme")
+	c.CommitOnMain("README", "main side\n", "main readme")
 	calls()
 	if _, err := c.approve(model.ApproveMerge, ""); err == nil {
 		t.Error("conflict: approved")
@@ -590,18 +462,18 @@ func TestNeverForces(t *testing.T) {
 func TestPRPushesAndCallsGh(t *testing.T) {
 	f := reviewNew(t)
 	gh := reviewUseGH(t, "Creating pull request\nhttps://github.com/o/r/pull/7\n")
-	head, mainBefore := f.head(f.wt, "HEAD"), f.head(f.Repo, "main")
+	head, mainBefore := f.Head(f.Wt, "HEAD"), f.Head(f.Repo, "main")
 	line, err := f.approve(model.ApprovePR, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := testkit.WorktreeGit(t, f.origin, "rev-parse", "refs/heads/"+reviewBranch); got != head {
+	if got := testkit.WorktreeGit(t, f.Origin, "rev-parse", "refs/heads/"+reviewBranch); got != head {
 		t.Errorf("origin has %s at %s, want %s", reviewBranch, got, head)
 	}
-	if _, err = gitops.Output(context.Background(), gitops.GitLimit, f.origin, "rev-parse", "--verify", "-q", "refs/heads/main"); err == nil {
+	if _, err = gitops.Output(context.Background(), gitops.GitLimit, f.Origin, "rev-parse", "--verify", "-q", "refs/heads/main"); err == nil {
 		t.Error("the base was pushed")
 	}
-	tk, r := f.Get("T-1"), f.review()
+	tk, r := f.Get("T-1"), f.Review()
 	want := []string{
 		"pr", "create", "--base", "main", "--head", reviewBranch,
 		"--title", task.PRTitle(tk), "--body", task.PRBody(tk, r, nil),
@@ -616,7 +488,7 @@ func TestPRPushesAndCallsGh(t *testing.T) {
 		r.ApprovedHow != model.ApprovePR || !strings.Contains(r.DiffStat, "auth.go") {
 		t.Errorf("review = %+v, want approved with the URL, head and stat", r)
 	}
-	if got := f.head(f.Repo, "main"); got != mainBefore {
+	if got := f.Head(f.Repo, "main"); got != mainBefore {
 		t.Errorf("main moved to %s in pull-request mode", got)
 	}
 }
@@ -636,7 +508,7 @@ func TestPRArgvIsDirect(t *testing.T) {
 		t.Fatal(err)
 	}
 	tk := f.Get("T-1")
-	r := f.review()
+	r := f.Review()
 	if len(gh.calls) != 1 || len(gh.calls[0].args) != 10 {
 		t.Fatalf("gh calls = %+v, want one with 10 arguments", gh.calls)
 	}
@@ -679,7 +551,7 @@ func TestPRRejectsOddURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := f.review(); r.PRURL != "" || r.Status != model.ReviewApproved {
+	if r := f.Review(); r.PRURL != "" || r.Status != model.ReviewApproved {
 		t.Errorf("review = %+v, want approved with no URL", r)
 	}
 	if !strings.Contains(line, "gh printed no URL") || strings.Contains(line, "javascript") {
@@ -687,29 +559,29 @@ func TestPRRejectsOddURL(t *testing.T) {
 	}
 }
 
-// reviewRealGH is reviewGH as the command ships it, kept before the test
+// reviewRealGH is GH as the command ships it, kept before the test
 // default replaces it.
-var reviewRealGH = reviewGH
+var reviewRealGH = GH
 
 func TestPRGhMissingOrFailing(t *testing.T) {
 	f := reviewNew(t)
 	reviewUseGH(t, "")
-	reviewGHLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	GHLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
 	_, err := f.approve(model.ApprovePR, "")
 	if err == nil || !strings.Contains(err.Error(), "gh is not on PATH") || !strings.Contains(err.Error(), "--merge") {
 		t.Fatalf("gh missing: error = %v", err)
 	}
-	if _, err = gitops.Output(context.Background(), gitops.GitLimit, f.origin, "rev-parse", "--verify", "-q", "refs/heads/"+reviewBranch); err == nil {
+	if _, err = gitops.Output(context.Background(), gitops.GitLimit, f.Origin, "rev-parse", "--verify", "-q", "refs/heads/"+reviewBranch); err == nil {
 		t.Error("gh missing: the branch was pushed")
 	}
-	f.wantPending()
+	f.WantPending()
 
-	// The real reviewGH, with a stand-in gh on PATH that fails after the push.
+	// The real GH, with a stand-in gh on PATH that fails after the push.
 	g := reviewNew(t)
 	bin := filepath.Join(t.TempDir(), "bin")
-	reviewExecutable(t, bin, "gh", "#!/bin/sh\nprintf 'GraphQL: \\033[31mno\\033[0m permission\\nsecond line\\n' >&2\nexit 1\n")
+	testkit.Executable(t, bin, "gh", "#!/bin/sh\nprintf 'GraphQL: \\033[31mno\\033[0m permission\\nsecond line\\n' >&2\nexit 1\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	reviewGH, reviewGHLookPath = reviewRealGH, exec.LookPath
+	GH, GHLookPath = reviewRealGH, exec.LookPath
 	_, err = g.approve(model.ApprovePR, "")
 	if err == nil || !strings.Contains(err.Error(), "gh pr create failed") || !strings.Contains(err.Error(), "GraphQL: no permission") {
 		t.Fatalf("gh failing: error = %v, want its first stderr line", err)
@@ -720,30 +592,30 @@ func TestPRGhMissingOrFailing(t *testing.T) {
 	if !strings.Contains(err.Error(), reviewBranch+" is pushed to origin") {
 		t.Errorf("gh failing: error = %q, want it to say the branch is pushed", err)
 	}
-	if got := testkit.WorktreeGit(t, g.origin, "rev-parse", "refs/heads/"+reviewBranch); got != g.head(g.wt, "HEAD") {
+	if got := testkit.WorktreeGit(t, g.Origin, "rev-parse", "refs/heads/"+reviewBranch); got != g.Head(g.Wt, "HEAD") {
 		t.Errorf("origin has %s, want the branch pushed", got)
 	}
-	g.wantPending()
+	g.WantPending()
 }
 
 func TestPRRealGhRunsInRepoWithArgv(t *testing.T) {
 	f := reviewNew(t)
 	bin := filepath.Join(t.TempDir(), "bin")
 	argv := filepath.Join(filepath.Dir(bin), "argv")
-	reviewExecutable(t, bin, "gh", "#!/bin/sh\npwd > '"+argv+"'\nfor a in \"$@\"; do printf '%s\\037' \"$a\"; done >> '"+argv+
+	testkit.Executable(t, bin, "gh", "#!/bin/sh\npwd > '"+argv+"'\nfor a in \"$@\"; do printf '%s\\037' \"$a\"; done >> '"+argv+
 		"'\necho https://github.com/o/r/pull/9\n")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	prevGH, prevLook := reviewGH, reviewGHLookPath
-	reviewGH, reviewGHLookPath = reviewRealGH, exec.LookPath
-	t.Cleanup(func() { reviewGH, reviewGHLookPath = prevGH, prevLook })
+	prevGH, prevLook := GH, GHLookPath
+	GH, GHLookPath = reviewRealGH, exec.LookPath
+	t.Cleanup(func() { GH, GHLookPath = prevGH, prevLook })
 	if _, err := f.approve(model.ApprovePR, ""); err != nil {
 		t.Fatal(err)
 	}
-	dir, args, _ := strings.Cut(lifecycleRead(t, argv), "\n")
+	dir, args, _ := strings.Cut(testkit.LifecycleRead(t, argv), "\n")
 	if dir != f.Repo {
 		t.Errorf("gh ran in %q, want %q", dir, f.Repo)
 	}
-	tk, r := f.Get("T-1"), f.review()
+	tk, r := f.Get("T-1"), f.Review()
 	want := strings.Join([]string{
 		"pr", "create", "--base", "main", "--head", reviewBranch,
 		"--title", task.PRTitle(tk), "--body", task.PRBody(tk, r, nil),
@@ -758,11 +630,11 @@ func TestPRRealGhRunsInRepoWithArgv(t *testing.T) {
 
 func TestPRRefusedWhenBranchMovesAfterPush(t *testing.T) {
 	f := reviewNew(t)
-	head := f.head(f.wt, "HEAD")
+	head := f.Head(f.Wt, "HEAD")
 	gh := reviewUseGH(t, "https://github.com/o/r/pull/7\n")
 	// A commit lands on the branch while the push runs: the pre-push hook
 	// stands in for the agent.
-	lifecycleHooks(f.spawnFixture, "pre-push", "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\ncd '"+f.wt+"' && echo late > late.txt && git add late.txt && "+
+	testkit.LifecycleHooks(f.SpawnFixture, "pre-push", "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\ncd '"+f.Wt+"' && echo late > late.txt && git add late.txt && "+
 		"git -c user.name=t -c user.email=t@example.com commit -q -m late --no-verify\n")
 	_, err := f.approve(model.ApprovePR, "")
 	if err == nil || !strings.Contains(err.Error(), "is pushed to origin at "+head[:7]+", but "+gitops.ErrBranchChanged.Error()) {
@@ -771,10 +643,10 @@ func TestPRRefusedWhenBranchMovesAfterPush(t *testing.T) {
 	if len(gh.calls) != 0 {
 		t.Errorf("gh ran: %+v", gh.calls)
 	}
-	if got := testkit.WorktreeGit(t, f.origin, "rev-parse", "refs/heads/"+reviewBranch); got != head {
+	if got := testkit.WorktreeGit(t, f.Origin, "rev-parse", "refs/heads/"+reviewBranch); got != head {
 		t.Errorf("origin has %s, want exactly the approved %s", got, head)
 	}
-	f.wantPending()
+	f.WantPending()
 }
 
 func TestDiffCmdTable(t *testing.T) {
@@ -795,10 +667,10 @@ func TestDiffCmdTable(t *testing.T) {
 	}{
 		{"git", []string{"/opt/bin/git", "-C", f.Repo, "diff", rng}},
 		{"delta", []string{"/opt/bin/git", "-C", f.Repo, "-c", "core.pager=delta --paging=always", "diff", rng}},
-		{"lazygit", []string{"/opt/bin/lazygit", "-p", f.wt}},
+		{"lazygit", []string{"/opt/bin/lazygit", "-p", f.Wt}},
 		{"nvim", []string{"/opt/bin/git", "-C", f.Repo, "difftool", "--no-prompt", "--tool=nvimdiff", rng}},
 	} {
-		cmd, err := reviewDiffCmd(tk, tc.tool)
+		cmd, err := DiffCmd(tk, tc.tool)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.tool, err)
 		}
@@ -812,8 +684,8 @@ func TestDiffCmdTable(t *testing.T) {
 	if !slices.Contains(looked, "delta") || !slices.Contains(looked, "nvim") {
 		t.Errorf("looked up %q, want delta and nvim checked", looked)
 	}
-	testkit.GitRun(t, f.Repo, "worktree", "remove", f.wt)
-	if cmd, err := reviewDiffCmd(tk, "lazygit"); err != nil || !slices.Equal(cmd.Args[1:], []string{"-p", f.Repo}) {
+	testkit.GitRun(t, f.Repo, "worktree", "remove", f.Wt)
+	if cmd, err := DiffCmd(tk, "lazygit"); err != nil || !slices.Equal(cmd.Args[1:], []string{"-p", f.Repo}) {
 		t.Errorf("lazygit without worktree: %v, %v; want -p the repository", cmd, err)
 	}
 }
@@ -823,16 +695,16 @@ func TestDiffCmdRefusals(t *testing.T) {
 	tk := f.Get("T-1")
 	reviewUseDiffTools(t, func(string) (string, error) { return "", exec.ErrNotFound })
 	for tool, name := range map[string]string{"git": "git", "lazygit": "lazygit", "delta": "delta", "nvim": "nvim"} {
-		if _, err := reviewDiffCmd(tk, tool); err == nil || !strings.Contains(err.Error(), "the diff tool "+name+" is not on PATH") {
+		if _, err := DiffCmd(tk, tool); err == nil || !strings.Contains(err.Error(), "the diff tool "+name+" is not on PATH") {
 			t.Errorf("%s not found: error = %v, want one naming %s", tool, err, name)
 		}
 	}
-	reviewDiffLookPath = func(name string) (string, error) { return "/opt/bin/" + name, nil }
-	if _, err := reviewDiffCmd(tk, "vimdiff; rm"); err == nil || !strings.Contains(err.Error(), "unknown diff tool") {
+	DiffLookPath = func(name string) (string, error) { return "/opt/bin/" + name, nil }
+	if _, err := DiffCmd(tk, "vimdiff; rm"); err == nil || !strings.Contains(err.Error(), "unknown diff tool") {
 		t.Errorf("unknown tool: error = %v", err)
 	}
 	tk.Branch = "-x"
-	if _, err := reviewDiffCmd(tk, "git"); err == nil {
+	if _, err := DiffCmd(tk, "git"); err == nil {
 		t.Error("hostile branch: no error")
 	}
 }
@@ -846,40 +718,40 @@ type reviewGHCall struct {
 // reviewGHRecorder records gh calls and answers with out and err.
 type reviewGHRecorder struct{ calls []reviewGHCall }
 
-// reviewUseGH makes reviewGH a recorder answering out, and finds gh.
+// reviewUseGH makes GH a recorder answering out, and finds gh.
 func reviewUseGH(t *testing.T, out string) *reviewGHRecorder {
 	t.Helper()
 	rec := &reviewGHRecorder{}
-	prevGH, prevLook := reviewGH, reviewGHLookPath
-	reviewGH = func(_ context.Context, dir string, args ...string) ([]byte, error) {
+	prevGH, prevLook := GH, GHLookPath
+	GH = func(_ context.Context, dir string, args ...string) ([]byte, error) {
 		rec.calls = append(rec.calls, reviewGHCall{dir: dir, args: slices.Clone(args)})
 		return []byte(out), nil
 	}
-	reviewGHLookPath = func(string) (string, error) { return "/opt/bin/gh", nil }
-	t.Cleanup(func() { reviewGH, reviewGHLookPath = prevGH, prevLook })
+	GHLookPath = func(string) (string, error) { return "/opt/bin/gh", nil }
+	t.Cleanup(func() { GH, GHLookPath = prevGH, prevLook })
 	return rec
 }
 
-// reviewUseDiffTools makes reviewDiffLookPath look.
+// reviewUseDiffTools makes DiffLookPath look.
 func reviewUseDiffTools(t *testing.T, look func(string) (string, error)) {
 	t.Helper()
-	prev := reviewDiffLookPath
-	reviewDiffLookPath = look
-	t.Cleanup(func() { reviewDiffLookPath = prev })
+	prev := DiffLookPath
+	DiffLookPath = look
+	t.Cleanup(func() { DiffLookPath = prev })
 }
 
 // The test defaults: no test runs the real gh or a diff tool unless it sets
-// its own (TestPRGhMissingOrFailing runs the real reviewGH against a
+// its own (TestPRGhMissingOrFailing runs the real GH against a
 // stand-in gh).
 func init() {
-	reviewGH = func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		panic("reviewGH called without a recorder: gh " + strings.Join(args, " "))
+	GH = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		panic("GH called without a recorder: gh " + strings.Join(args, " "))
 	}
-	reviewGHLookPath = func(name string) (string, error) {
-		panic("reviewGHLookPath called without a stub: " + name)
+	GHLookPath = func(name string) (string, error) {
+		panic("GHLookPath called without a stub: " + name)
 	}
-	reviewDiffLookPath = func(name string) (string, error) {
-		panic("reviewDiffLookPath called without a stub: " + name)
+	DiffLookPath = func(name string) (string, error) {
+		panic("DiffLookPath called without a stub: " + name)
 	}
 }
 
@@ -911,15 +783,15 @@ func TestMergeCutShortRestoresCheckout(t *testing.T) {
 // hook as the pre-merge-commit hook.
 func reviewCutShortCase(t *testing.T, hook string) {
 	f := reviewNew(t)
-	f.commitOnMain("notes.txt", "a\n", "notes")
+	f.CommitOnMain("notes.txt", "a\n", "notes")
 	testkit.WorktreeWrite(t, filepath.Join(f.Repo, "notes.txt"), "my edit\n")
 	testkit.WorktreeWrite(t, filepath.Join(f.Repo, "mine.txt"), "my own uncommitted work\n")
-	lifecycleHooks(f.spawnFixture, "pre-merge-commit", hook)
-	before, status, head := f.head(f.Repo, "HEAD"), f.status(), f.head(f.wt, "HEAD")
-	calls := reviewRecordGit(t)
+	testkit.LifecycleHooks(f.SpawnFixture, "pre-merge-commit", hook)
+	before, status, head := f.Head(f.Repo, "HEAD"), f.Status(), f.Head(f.Wt, "HEAD")
+	calls := testkit.RecordGit(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	_, err := reviewApprove(ctx, f.St, f.Cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.Now)
+	_, err := Approve(ctx, Approval{Store: f.St, Config: f.Cfg, ReviewID: "R-1", How: model.ApproveMerge, Seen: head, Via: model.AnsweredCLI, Now: f.Now})
 	if err == nil || !strings.Contains(err.Error(), "cut short before it recorded the merge") ||
 		!strings.Contains(err.Error(), "Curia undid what it had staged (git reset --merge)") ||
 		!strings.Contains(err.Error(), "Nothing was merged") {
@@ -930,11 +802,11 @@ func reviewCutShortCase(t *testing.T, hook string) {
 		t.Error("auth.go, which the merge brought, is left")
 	}
 	for file, want := range map[string]string{"notes.txt": "my edit\n", "mine.txt": "my own uncommitted work\n"} {
-		if got := lifecycleRead(t, filepath.Join(f.Repo, file)); got != want {
+		if got := testkit.LifecycleRead(t, filepath.Join(f.Repo, file)); got != want {
 			t.Errorf("%s = %q, want %q kept", file, got, want)
 		}
 	}
-	f.wantPending()
+	f.WantPending()
 	recorded := calls()
 	if resets := reviewGitCalls(recorded, "reset"); len(resets) != 1 || !slices.Equal(resets[0], []string{"reset", "--merge"}) {
 		t.Errorf("reset calls = %q, want exactly one git reset --merge", resets)
@@ -948,13 +820,13 @@ func reviewCutShortCase(t *testing.T, hook string) {
 // status status, no merge under way and no index.lock.
 func (f *reviewFixture) wantAsBefore(before, status string) {
 	f.T.Helper()
-	if got := f.head(f.Repo, "HEAD"); got != before {
+	if got := f.Head(f.Repo, "HEAD"); got != before {
 		f.T.Errorf("HEAD moved to %s", got)
 	}
-	if got := f.status(); got != status {
+	if got := f.Status(); got != status {
 		f.T.Errorf("status = %q, want %q as before", got, status)
 	}
-	if f.hasMergeHead() {
+	if f.HasMergeHead() {
 		f.T.Error("MERGE_HEAD is left")
 	}
 	if _, err := os.Stat(filepath.Join(f.Repo, ".git", "index.lock")); err == nil {
@@ -966,16 +838,16 @@ func (f *reviewFixture) wantAsBefore(before, status string) {
 // nothing is merged and nothing is touched.
 func TestMergeRefusesStagedIndex(t *testing.T) {
 	f := reviewNew(t)
-	f.commitOnMain("notes.txt", "a\n", "notes")
+	f.CommitOnMain("notes.txt", "a\n", "notes")
 	testkit.WorktreeWrite(t, filepath.Join(f.Repo, "notes.txt"), "staged edit\n")
 	testkit.GitRun(t, f.Repo, "add", "notes.txt")
-	before, status := f.head(f.Repo, "HEAD"), f.status()
-	calls := reviewRecordGit(t)
+	before, status := f.Head(f.Repo, "HEAD"), f.Status()
+	calls := testkit.RecordGit(t)
 	_, err := f.approve(model.ApproveMerge, "")
 	if err == nil || !strings.Contains(err.Error(), "staged changes in "+f.Repo+": commit or unstage them first. Nothing was merged") {
 		t.Fatalf("approve error = %v, want the staged-index refusal", err)
 	}
-	if f.head(f.Repo, "HEAD") != before || f.status() != status {
+	if f.Head(f.Repo, "HEAD") != before || f.Status() != status {
 		t.Error("HEAD or status changed")
 	}
 	recorded := calls()
@@ -985,20 +857,20 @@ func TestMergeRefusesStagedIndex(t *testing.T) {
 	if r := reviewGitCalls(recorded, "reset"); len(r) != 0 {
 		t.Errorf("git reset ran: %q", r)
 	}
-	f.wantPending()
+	f.WantPending()
 }
 
-// reviewUseGHFunc makes reviewGH answer with answer, and finds gh.
+// reviewUseGHFunc makes GH answer with answer, and finds gh.
 func reviewUseGHFunc(t *testing.T, answer func(args []string) ([]byte, error)) *reviewGHRecorder {
 	t.Helper()
 	rec := &reviewGHRecorder{}
-	prevGH, prevLook := reviewGH, reviewGHLookPath
-	reviewGH = func(_ context.Context, dir string, args ...string) ([]byte, error) {
+	prevGH, prevLook := GH, GHLookPath
+	GH = func(_ context.Context, dir string, args ...string) ([]byte, error) {
 		rec.calls = append(rec.calls, reviewGHCall{dir: dir, args: slices.Clone(args)})
 		return answer(args)
 	}
-	reviewGHLookPath = func(string) (string, error) { return "/opt/bin/gh", nil }
-	t.Cleanup(func() { reviewGH, reviewGHLookPath = prevGH, prevLook })
+	GHLookPath = func(string) (string, error) { return "/opt/bin/gh", nil }
+	t.Cleanup(func() { GH, GHLookPath = prevGH, prevLook })
 	return rec
 }
 
@@ -1037,7 +909,7 @@ func TestPRApproveAgainRecordsExistingPR(t *testing.T) {
 		{"another repository", func(pr map[string]any, _ *reviewFixture) { pr["url"] = "https://github.com/x/r/pull/5" }, generic},
 		{"not a pull request URL", func(pr map[string]any, _ *reviewFixture) { pr["url"] = "https://github.com/o/r/issues/5" }, generic},
 		{"a local remote", func(_ map[string]any, f *reviewFixture) {
-			testkit.GitRun(f.T, f.Repo, "remote", "set-url", "origin", f.origin)
+			testkit.GitRun(f.T, f.Repo, "remote", "set-url", "origin", f.Origin)
 		}, generic},
 	} {
 		t.Run(c.name, func(t *testing.T) { reviewExistingPRCase(t, c) })
@@ -1050,7 +922,7 @@ func (f *reviewFixture) wantAdopted(line string, err error, gh *reviewGHRecorder
 	if err != nil {
 		f.T.Fatal(err)
 	}
-	if got := f.review(); got.Status != model.ReviewApproved || got.PRURL != "https://github.com/o/r/pull/5" || !strings.Contains(line, got.PRURL) {
+	if got := f.Review(); got.Status != model.ReviewApproved || got.PRURL != "https://github.com/o/r/pull/5" || !strings.Contains(line, got.PRURL) {
 		f.T.Errorf("R-1 = %+v, line %q; want approved with the existing pull request", got, line)
 	}
 	if len(gh.calls) != 2 || !slices.Equal(gh.calls[1].args, []string{"pr", "view", reviewBranch, "--json", reviewPRFields}) {
@@ -1062,11 +934,11 @@ func (f *reviewFixture) wantAdopted(line string, err error, gh *reviewGHRecorder
 func reviewExistingPRCase(t *testing.T, c reviewPRCase) {
 	f := reviewNew(t)
 	testkit.GitRun(t, f.Repo, "remote", "set-url", "origin", "https://github.com/o/r.git")
-	testkit.GitRun(t, f.Repo, "remote", "set-url", "--push", "origin", f.origin) // pushes still reach the local bare repository
-	tk, r := f.Get("T-1"), f.review()
+	testkit.GitRun(t, f.Repo, "remote", "set-url", "--push", "origin", f.Origin) // pushes still reach the local bare repository
+	tk, r := f.Get("T-1"), f.Review()
 	pr := map[string]any{
 		"url": "https://github.com/o/r/pull/5", "state": "OPEN", "baseRefName": "main", "headRefName": reviewBranch,
-		"headRefOid": f.head(f.wt, "HEAD"), "isCrossRepository": false, "title": task.PRTitle(tk), "body": task.PRBody(tk, r, nil),
+		"headRefOid": f.Head(f.Wt, "HEAD"), "isCrossRepository": false, "title": task.PRTitle(tk), "body": task.PRBody(tk, r, nil),
 	}
 	if c.edit != nil {
 		c.edit(pr, f)
@@ -1097,7 +969,7 @@ func reviewExistingPRCase(t *testing.T, c reviewPRCase) {
 			t.Errorf("gh %q ran", call.args)
 		}
 	}
-	f.wantPending()
+	f.WantPending()
 }
 
 // TestDiffCmdFixedPager: the git and delta tools page through a fixed less
@@ -1113,7 +985,7 @@ func TestDiffCmdFixedPager(t *testing.T) {
 		"git":   {"LESS=-R -X", "GIT_PAGER=less"},
 		"delta": {"LESS=-R -X", "DELTA_PAGER=less -R -X"},
 	} {
-		cmd, err := reviewDiffCmd(f.Get("T-1"), tool)
+		cmd, err := DiffCmd(f.Get("T-1"), tool)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1150,9 +1022,9 @@ func TestDiffToolStaysOnScreen(t *testing.T) {
 // lines added lines, in a 100 x 30 pane.
 func reviewDiffInTmux(t *testing.T, lines int) {
 	f := reviewNew(t)
-	f.commitOnBranch("long.txt", strings.Repeat("a line of the diff\n", lines), "long")
+	f.CommitOnBranch("long.txt", strings.Repeat("a line of the diff\n", lines), "long")
 	reviewUseDiffTools(t, exec.LookPath) // the real git
-	cmd, err := reviewDiffCmd(f.Get("T-1"), "git")
+	cmd, err := DiffCmd(f.Get("T-1"), "git")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1197,8 +1069,8 @@ func reviewDiffInTmux(t *testing.T, lines int) {
 // puts before a file name shorter than the others, so its columns line up.
 func TestDiffStatKeepsLeadingSpace(t *testing.T) {
 	f := reviewNew(t)
-	f.commitOnBranch("a_much_longer_file_name.go", "package auth\n", "long name")
-	stat, _, _ := reviewDiffStat(context.Background(), f.Get("T-1"), 100)
+	f.CommitOnBranch("a_much_longer_file_name.go", "package auth\n", "long name")
+	stat, _, _ := DiffStat(context.Background(), f.Get("T-1"), 100)
 	lines := strings.Split(stat, "\n")
 	if len(lines) < 3 || !strings.HasPrefix(lines[0], " ") || strings.Index(lines[0], "|") != strings.Index(lines[1], "|") {
 		t.Errorf("stat lines are not aligned:\n%s", stat)
@@ -1212,7 +1084,7 @@ func reviewHookAt(f *reviewFixture, name string, code int) (in, release string) 
 	f.T.Helper()
 	dir := f.T.TempDir()
 	in, release = filepath.Join(dir, "in"), filepath.Join(dir, "go")
-	lifecycleHooks(f.spawnFixture, name, fmt.Sprintf("#!/bin/sh\ntouch '%s'\ni=0\nwhile [ ! -e '%s' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\nexit %d\n",
+	testkit.LifecycleHooks(f.SpawnFixture, name, fmt.Sprintf("#!/bin/sh\ntouch '%s'\ni=0\nwhile [ ! -e '%s' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\nexit %d\n",
 		in, release, code))
 	return in, release
 }
@@ -1255,13 +1127,13 @@ func (f *reviewFixture) wantLeftAsIs(err error, recorded [][]string, content str
 			f.T.Errorf("git merge --abort ran: %q", c)
 		}
 	}
-	if got := lifecycleRead(f.T, filepath.Join(f.Repo, "notes.txt")); got != content {
+	if got := testkit.LifecycleRead(f.T, filepath.Join(f.Repo, "notes.txt")); got != content {
 		f.T.Errorf("notes.txt = %q, want the developer's %q kept", got, content)
 	}
 	if staged := testkit.WorktreeGit(f.T, f.Repo, "show", ":notes.txt"); staged+"\n" != content {
 		f.T.Errorf("staged notes.txt = %q, want the developer's %q", staged, content)
 	}
-	if r := f.review(); r.Status != model.ReviewPending || r.IntentAt.IsZero() {
+	if r := f.Review(); r.Status != model.ReviewPending || r.IntentAt.IsZero() {
 		f.T.Errorf("R-1 = %+v, want pending with its intent kept", r)
 	}
 }
@@ -1273,14 +1145,14 @@ func (f *reviewFixture) wantLeftAsIs(err error, recorded [][]string, content str
 // to run, and the review stays pending with its intent.
 func TestMergeCutShortKeepsWorkStagedDuringHook(t *testing.T) {
 	f := reviewNew(t)
-	f.commitOnMain("notes.txt", "a\n", "notes")
+	f.CommitOnMain("notes.txt", "a\n", "notes")
 	in, _ := reviewHookAt(f, "pre-merge-commit", 0)
 	const work = "the developer's staged work\n"
 	done := f.reviewStageDuring(in, "", work)
-	calls := reviewRecordGit(t)
+	calls := testkit.RecordGit(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, err := reviewApprove(ctx, f.St, f.Cfg, "R-1", model.ApproveMerge, f.head(f.wt, "HEAD"), model.AnsweredCLI, f.Now)
+	_, err := Approve(ctx, Approval{Store: f.St, Config: f.Cfg, ReviewID: "R-1", How: model.ApproveMerge, Seen: f.Head(f.Wt, "HEAD"), Via: model.AnsweredCLI, Now: f.Now})
 	<-done
 	f.wantLeftAsIs(err, calls(), work)
 	if !strings.Contains(err.Error(), "the index holds changes that are not the merge's") {
@@ -1293,15 +1165,15 @@ func TestMergeCutShortKeepsWorkStagedDuringHook(t *testing.T) {
 // over the staged edit; the merge stays under way for the developer to end.
 func TestHookRefusalKeepsWorkStagedDuringHook(t *testing.T) {
 	f := reviewNew(t)
-	f.commitOnMain("notes.txt", "a\n", "notes")
+	f.CommitOnMain("notes.txt", "a\n", "notes")
 	in, release := reviewHookAt(f, "pre-merge-commit", 1)
 	const work = "staged while the hook ran\n"
 	done := f.reviewStageDuring(in, release, work)
-	calls := reviewRecordGit(t)
+	calls := testkit.RecordGit(t)
 	_, err := f.approve(model.ApproveMerge, "")
 	<-done
 	f.wantLeftAsIs(err, calls(), work)
-	if !f.hasMergeHead() {
+	if !f.HasMergeHead() {
 		t.Error("MERGE_HEAD is gone: the merge was ended over the developer's change")
 	}
 }
@@ -1320,33 +1192,33 @@ func TestLimitDuringPostMerge(t *testing.T) {
 // reviewPostMergeCase is one case of TestLimitDuringPostMerge.
 func reviewPostMergeCase(t *testing.T, staged bool) {
 	f := reviewNew(t)
-	f.commitOnMain("notes.txt", "a\n", "notes")
+	f.CommitOnMain("notes.txt", "a\n", "notes")
 	in, _ := reviewHookAt(f, "post-merge", 0)
-	head := f.head(f.wt, "HEAD")
+	head := f.Head(f.Wt, "HEAD")
 	const work = "staged during post-merge\n"
 	done := make(<-chan struct{})
 	if staged {
 		done = f.reviewStageDuring(in, "", work)
 	}
-	calls := reviewRecordGit(t)
+	calls := testkit.RecordGit(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	line, err := reviewApprove(ctx, f.St, f.Cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.Now)
+	line, err := Approve(ctx, Approval{Store: f.St, Config: f.Cfg, ReviewID: "R-1", How: model.ApproveMerge, Seen: head, Via: model.AnsweredCLI, Now: f.Now})
 	if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main ("+head[:7]+"), though git was stopped after the merge commit") {
 		t.Fatalf("approve = %q, %v; want it recorded merged at once", line, err)
 	}
-	if r := f.review(); r.Status != model.ReviewMerged || r.Head != head || f.head(f.Repo, "main^2") != head {
-		t.Errorf("R-1 = %+v, main^2 %s; want merged at %s", r, f.head(f.Repo, "main^2"), head)
+	if r := f.Review(); r.Status != model.ReviewMerged || r.Head != head || f.Head(f.Repo, "main^2") != head {
+		t.Errorf("R-1 = %+v, main^2 %s; want merged at %s", r, f.Head(f.Repo, "main^2"), head)
 	}
 	if !staged {
-		if f.hasMergeHead() || f.status() != "" {
-			t.Errorf("after the abort: MERGE_HEAD %v, status %q; want neither", f.hasMergeHead(), f.status())
+		if f.HasMergeHead() || f.Status() != "" {
+			t.Errorf("after the abort: MERGE_HEAD %v, status %q; want neither", f.HasMergeHead(), f.Status())
 		}
 		return
 	}
 	<-done
-	if !strings.Contains(line, "cannot attribute to its own merge") || !f.hasMergeHead() {
-		t.Errorf("line %q, MERGE_HEAD %v; want the checkout left as it is", line, f.hasMergeHead())
+	if !strings.Contains(line, "cannot attribute to its own merge") || !f.HasMergeHead() {
+		t.Errorf("line %q, MERGE_HEAD %v; want the checkout left as it is", line, f.HasMergeHead())
 	}
 	for _, c := range reviewGitCalls(calls(), "merge") {
 		if slices.Contains(c, "--abort") {
@@ -1365,8 +1237,8 @@ func TestMergeCutShortByKilledGit(t *testing.T) {
 	f := reviewNew(t)
 	testkit.WorktreeWrite(t, filepath.Join(f.Repo, "mine.txt"), "untracked\n")
 	pidFile := filepath.Join(t.TempDir(), "gitpid")
-	lifecycleHooks(f.spawnFixture, "pre-merge-commit", "#!/bin/sh\necho $PPID > '"+pidFile+".tmp'\nmv '"+pidFile+".tmp' '"+pidFile+"'\nsleep 2\nexit 0\n")
-	before, status := f.head(f.Repo, "HEAD"), f.status()
+	testkit.LifecycleHooks(f.SpawnFixture, "pre-merge-commit", "#!/bin/sh\necho $PPID > '"+pidFile+".tmp'\nmv '"+pidFile+".tmp' '"+pidFile+"'\nsleep 2\nexit 0\n")
+	before, status := f.Head(f.Repo, "HEAD"), f.Status()
 	killed := make(chan bool, 1)
 	go func() {
 		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
@@ -1387,7 +1259,7 @@ func TestMergeCutShortByKilledGit(t *testing.T) {
 		t.Fatalf("approve error = %v, want the killed merge undone", err)
 	}
 	f.wantAsBefore(before, status)
-	f.wantPending()
+	f.WantPending()
 }
 
 // TestOrphanMergeKeepsIntent: an approval recorded its intent and started
@@ -1399,34 +1271,34 @@ func TestMergeCutShortByKilledGit(t *testing.T) {
 func TestOrphanMergeKeepsIntent(t *testing.T) {
 	f := reviewNew(t)
 	in, release := reviewHookAt(f, "pre-merge-commit", 0)
-	head := f.head(f.wt, "HEAD")
+	head := f.Head(f.Wt, "HEAD")
 	ctx := context.Background()
 	if _, err := f.St.ClaimReviewIntent(ctx, "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head, DiffStat: " auth.go | 1 +"},
-		f.Now, reviewIntentHold); err != nil {
+		f.Now, IntentHold); err != nil {
 		t.Fatal(err)
 	}
 	orphan := make(chan gitops.Result, 1)
 	go func() {
 		orphan <- gitops.RunGroup(ctx, f.Repo, "merge", "--no-ff", "--no-edit", "--no-autostash", "-m", "Merge", head)
 	}()
-	reviewWaitFile(t, in)
-	_, err := reviewApprove(ctx, f.St, f.Cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.Now.Add(11*time.Minute))
+	testkit.WaitFile(t, in)
+	_, err := Approve(ctx, Approval{Store: f.St, Config: f.Cfg, ReviewID: "R-1", How: model.ApproveMerge, Seen: head, Via: model.AnsweredCLI, Now: f.Now.Add(11 * time.Minute)})
 	if err == nil || !strings.Contains(err.Error(), "an earlier approval of R-1 (merge at "+head[:7]+", since ") ||
 		!strings.Contains(err.Error(), "may still be running git there") {
 		t.Errorf("approve during the orphan's hook: %v, want the refusal naming the earlier approval", err)
 	}
-	if r := f.review(); !r.IntentAt.Equal(f.Now) || r.Head != head || r.ApprovedHow != model.ApproveMerge || r.DiffStat != " auth.go | 1 +" {
+	if r := f.Review(); !r.IntentAt.Equal(f.Now) || r.Head != head || r.ApprovedHow != model.ApproveMerge || r.DiffStat != " auth.go | 1 +" {
 		t.Errorf("intent after the refusal = %+v, want the earlier one, untouched", r)
 	}
 	testkit.WorktreeWrite(t, release, "")
 	if res := <-orphan; res.Err() != nil {
 		t.Fatalf("the orphaned merge: %v %s", res.Err(), res.Stderr())
 	}
-	line, err := reviewApprove(ctx, f.St, f.Cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.Now.Add(12*time.Minute))
+	line, err := Approve(ctx, Approval{Store: f.St, Config: f.Cfg, ReviewID: "R-1", How: model.ApproveMerge, Seen: head, Via: model.AnsweredCLI, Now: f.Now.Add(12 * time.Minute)})
 	if err != nil || !strings.Contains(line, "is already merged into main; recorded") {
 		t.Fatalf("approve after the orphan merged = %q, %v; want it recorded", line, err)
 	}
-	f.wantMerged(head)
+	f.WantMerged(head)
 }
 
 // TestRefusalAfterClaimRestoresEarlierIntent: an approval that takes over a
@@ -1434,17 +1306,17 @@ func TestOrphanMergeKeepsIntent(t *testing.T) {
 // earlier intent back exactly, rather than clearing it.
 func TestRefusalAfterClaimRestoresEarlierIntent(t *testing.T) {
 	f := reviewNew(t)
-	head := f.head(f.wt, "HEAD")
+	head := f.Head(f.Wt, "HEAD")
 	old := f.Now.Add(-time.Hour)
 	if _, err := f.St.ClaimReviewIntent(context.Background(), "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head, DiffStat: "earlier"},
-		old, reviewIntentHold); err != nil {
+		old, IntentHold); err != nil {
 		t.Fatal(err)
 	}
-	f.commitOnMain("auth.go", "package auth // main's own\n", "main side")
+	f.CommitOnMain("auth.go", "package auth // main's own\n", "main side")
 	if _, err := f.approve(model.ApproveMerge, head); err == nil || !strings.Contains(err.Error(), "would conflict") {
 		t.Fatalf("approve = %v, want the conflict refusal", err)
 	}
-	if r := f.review(); !r.IntentAt.Equal(old) || r.Head != head || r.DiffStat != "earlier" {
+	if r := f.Review(); !r.IntentAt.Equal(old) || r.Head != head || r.DiffStat != "earlier" {
 		t.Errorf("intent after the refusal = %+v, want the earlier one back", r)
 	}
 }
@@ -1454,9 +1326,9 @@ func TestRefusalAfterClaimRestoresEarlierIntent(t *testing.T) {
 // refs/heads/<base> (M-4), so the approval merges and records the real stat.
 func TestBaseTagDoesNotShadowBranch(t *testing.T) {
 	f := reviewNew(t)
-	head := f.head(f.wt, "HEAD")
+	head := f.Head(f.Wt, "HEAD")
 	testkit.GitRun(t, f.Repo, "tag", "main", head)
-	stat, _, _ := reviewDiffStat(context.Background(), f.Get("T-1"), 100)
+	stat, _, _ := DiffStat(context.Background(), f.Get("T-1"), 100)
 	if !strings.Contains(stat, "auth.go") {
 		t.Errorf("stat = %q, want the branch's change against the branch main", stat)
 	}
@@ -1464,10 +1336,10 @@ func TestBaseTagDoesNotShadowBranch(t *testing.T) {
 	if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main") {
 		t.Fatalf("approve = %q, %v; want the merge", line, err)
 	}
-	if got := f.head(f.Repo, "refs/heads/main^2"); got != head {
+	if got := f.Head(f.Repo, "refs/heads/main^2"); got != head {
 		t.Errorf("the branch main's second parent = %s, want %s", got, head)
 	}
-	if r := f.review(); r.Status != model.ReviewMerged || !strings.Contains(r.DiffStat, "auth.go") {
+	if r := f.Review(); r.Status != model.ReviewMerged || !strings.Contains(r.DiffStat, "auth.go") {
 		t.Errorf("R-1 = %+v, want merged with the real stat", r)
 	}
 }
@@ -1489,12 +1361,12 @@ func TestMergeIgnoresMergeOptions(t *testing.T) {
 		t.Run(c.key+"="+c.value, func(t *testing.T) {
 			f := reviewNew(t)
 			testkit.GitRun(t, f.Repo, "config", c.key, c.value)
-			head := f.head(f.wt, "HEAD")
+			head := f.Head(f.Wt, "HEAD")
 			line, err := f.approve(model.ApproveMerge, "")
 			if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main") {
 				t.Fatalf("approve = %q, %v; want the merge", line, err)
 			}
-			f.wantMerged(head)
+			f.WantMerged(head)
 			if got := testkit.WorktreeGit(t, f.Repo, "show", "main:auth.go"); got != "package auth" {
 				t.Errorf("main:auth.go = %q, want the branch's change merged", got)
 			}
@@ -1508,17 +1380,17 @@ func TestMergeIgnoresMergeOptions(t *testing.T) {
 // review pending with its intent.
 func TestMergeReportedDoneButNotInBase(t *testing.T) {
 	f := reviewNew(t)
-	lifecycleHooks(f.spawnFixture, "post-merge", "#!/bin/sh\ngit reset -q --hard HEAD^\n")
-	before := f.head(f.Repo, "HEAD")
+	testkit.LifecycleHooks(f.SpawnFixture, "post-merge", "#!/bin/sh\ngit reset -q --hard HEAD^\n")
+	before := f.Head(f.Repo, "HEAD")
 	line, err := f.approve(model.ApproveMerge, "")
-	if err == nil || !strings.Contains(err.Error(), "git merge reported success, but main does not contain "+gitops.Short(f.head(f.wt, "HEAD"))) ||
+	if err == nil || !strings.Contains(err.Error(), "git merge reported success, but main does not contain "+gitops.Short(f.Head(f.Wt, "HEAD"))) ||
 		!strings.Contains(err.Error(), "git -C "+f.Repo+" log") || !strings.Contains(err.Error(), "The review stays pending") {
 		t.Fatalf("approve = %q, %v; want the missing merge reported", line, err)
 	}
-	if r := f.review(); r.Status != model.ReviewPending || r.IntentAt.IsZero() {
+	if r := f.Review(); r.Status != model.ReviewPending || r.IntentAt.IsZero() {
 		t.Errorf("R-1 = %+v, want pending with its intent kept", r)
 	}
-	if got := f.head(f.Repo, "HEAD"); got != before {
+	if got := f.Head(f.Repo, "HEAD"); got != before {
 		t.Errorf("HEAD = %s, want the hook's reset to %s", got, before)
 	}
 }
@@ -1534,31 +1406,31 @@ func TestOrphanMergeRefusesEveryClaim(t *testing.T) {
 	f := reviewNew(t)
 	gh := reviewUseGH(t, "https://github.com/o/r/pull/7\n")
 	in, release := reviewHookAt(f, "pre-merge-commit", 0)
-	head := f.head(f.wt, "HEAD")
+	head := f.Head(f.Wt, "HEAD")
 	ctx := context.Background()
 	if _, err := f.St.ClaimReviewIntent(ctx, "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head, DiffStat: " auth.go | 1 +"},
-		f.Now, reviewIntentHold); err != nil {
+		f.Now, IntentHold); err != nil {
 		t.Fatal(err)
 	}
 	orphan := make(chan gitops.Result, 1)
 	go func() {
 		orphan <- gitops.RunGroup(ctx, f.Repo, "merge", "--no-ff", "--no-edit", "--no-autostash", "-m", "Merge", head)
 	}()
-	reviewWaitFile(t, in)
+	testkit.WaitFile(t, in)
 	later := f.Now.Add(11 * time.Minute)
 	for _, c := range []struct {
 		name, again string
 		act         func() (string, error)
 	}{
 		{"merge approval", "approve again", func() (string, error) {
-			return reviewApprove(ctx, f.St, f.Cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, later)
+			return Approve(ctx, Approval{Store: f.St, Config: f.Cfg, ReviewID: "R-1", How: model.ApproveMerge, Seen: head, Via: model.AnsweredCLI, Now: later})
 		}},
 		{"pull request approval", "approve again", func() (string, error) {
-			return reviewApprove(ctx, f.St, f.Cfg, "R-1", model.ApprovePR, head, model.AnsweredCLI, later)
+			return Approve(ctx, Approval{Store: f.St, Config: f.Cfg, ReviewID: "R-1", How: model.ApprovePR, Seen: head, Via: model.AnsweredCLI, Now: later})
 		}},
-		{"drop", "drop again", func() (string, error) { return reviewDrop(ctx, f.St, "R-1", model.AnsweredCLI, later) }},
+		{"drop", "drop again", func() (string, error) { return Drop(ctx, f.St, "R-1", model.AnsweredCLI, later) }},
 		{"change request", "request changes again", func() (string, error) {
-			return reviewRequestChanges(ctx, f.St, f.Fake, testLoggerOnly(), "R-1", "more", model.AnsweredCLI, later)
+			return RequestChanges(ctx, f.St, f.Fake, testLoggerOnly(), "R-1", "more", model.AnsweredCLI, later)
 		}},
 	} {
 		line, err := c.act()
@@ -1571,11 +1443,11 @@ func TestOrphanMergeRefusesEveryClaim(t *testing.T) {
 	if res := <-orphan; res.Err() != nil {
 		t.Fatalf("the orphaned merge: %v %s", res.Err(), res.Stderr())
 	}
-	line, err := reviewApprove(ctx, f.St, f.Cfg, "R-1", model.ApprovePR, head, model.AnsweredCLI, later.Add(time.Minute))
+	line, err := Approve(ctx, Approval{Store: f.St, Config: f.Cfg, ReviewID: "R-1", How: model.ApprovePR, Seen: head, Via: model.AnsweredCLI, Now: later.Add(time.Minute)})
 	if err != nil || !strings.Contains(line, "is already merged into main; recorded") {
 		t.Fatalf("approve after the orphan merged = %q, %v; want it recorded", line, err)
 	}
-	f.wantMerged(head)
+	f.WantMerged(head)
 }
 
 // reviewOddKinds are working-tree states git hash-object cannot read (I-1),
@@ -1587,7 +1459,7 @@ var reviewOddKinds = []struct {
 	setup func(f *reviewFixture)
 }{
 	{"deleted file", func(f *reviewFixture) {
-		f.commitOnMain("notes.txt", "a\n", "notes")
+		f.CommitOnMain("notes.txt", "a\n", "notes")
 		if err := os.Remove(filepath.Join(f.Repo, "notes.txt")); err != nil {
 			f.T.Fatal(err)
 		}
@@ -1649,13 +1521,13 @@ func TestMergeWithOddWorkingTree(t *testing.T) {
 		t.Run(k.name, func(t *testing.T) {
 			f := reviewNew(t)
 			k.setup(f)
-			head := f.head(f.wt, "HEAD")
+			head := f.Head(f.Wt, "HEAD")
 			line, err := f.approve(model.ApproveMerge, "")
 			if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main") {
 				t.Fatalf("approve = %q, %v; want the merge", line, err)
 			}
-			if r := f.review(); r.Status != model.ReviewMerged || f.head(f.Repo, "main^2") != head {
-				t.Errorf("R-1 = %+v, main^2 %s; want merged at %s", r, f.head(f.Repo, "main^2"), head)
+			if r := f.Review(); r.Status != model.ReviewMerged || f.Head(f.Repo, "main^2") != head {
+				t.Errorf("R-1 = %+v, main^2 %s; want merged at %s", r, f.Head(f.Repo, "main^2"), head)
 			}
 		})
 	}
@@ -1670,11 +1542,11 @@ func TestMergeCutShortWithOddWorkingTree(t *testing.T) {
 	for _, k := range reviewOddKinds {
 		k.setup(f)
 	}
-	lifecycleHooks(f.spawnFixture, "pre-merge-commit", "#!/bin/sh\nsleep 4\nexit 0\n")
-	before, status := f.head(f.Repo, "HEAD"), f.status()
+	testkit.LifecycleHooks(f.SpawnFixture, "pre-merge-commit", "#!/bin/sh\nsleep 4\nexit 0\n")
+	before, status := f.Head(f.Repo, "HEAD"), f.Status()
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	_, err := reviewApprove(ctx, f.St, f.Cfg, "R-1", model.ApproveMerge, f.head(f.wt, "HEAD"), model.AnsweredCLI, f.Now)
+	_, err := Approve(ctx, Approval{Store: f.St, Config: f.Cfg, ReviewID: "R-1", How: model.ApproveMerge, Seen: f.Head(f.Wt, "HEAD"), Via: model.AnsweredCLI, Now: f.Now})
 	if err == nil || !strings.Contains(err.Error(), "Curia undid what it had staged (git reset --merge)") {
 		t.Fatalf("approve error = %v, want the cut-short merge undone", err)
 	}
@@ -1682,7 +1554,7 @@ func TestMergeCutShortWithOddWorkingTree(t *testing.T) {
 	if target, err := os.Readlink(filepath.Join(f.Repo, "lnk")); err != nil || target != "nowhere" {
 		t.Errorf("lnk -> %q (%v), want the developer's nowhere kept", target, err)
 	}
-	f.wantPending()
+	f.WantPending()
 }
 
 // TestMergeCutShortWithTooManyModified: with more modified files than Curia
@@ -1691,11 +1563,11 @@ func TestMergeCutShortWithOddWorkingTree(t *testing.T) {
 func TestMergeCutShortWithTooManyModified(t *testing.T) {
 	f := reviewNew(t)
 	f.reviewManyModified()
-	lifecycleHooks(f.spawnFixture, "pre-merge-commit", "#!/bin/sh\nsleep 4\nexit 0\n")
-	calls := reviewRecordGit(t)
+	testkit.LifecycleHooks(f.SpawnFixture, "pre-merge-commit", "#!/bin/sh\nsleep 4\nexit 0\n")
+	calls := testkit.RecordGit(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, err := reviewApprove(ctx, f.St, f.Cfg, "R-1", model.ApproveMerge, f.head(f.wt, "HEAD"), model.AnsweredCLI, f.Now)
+	_, err := Approve(ctx, Approval{Store: f.St, Config: f.Cfg, ReviewID: "R-1", How: model.ApproveMerge, Seen: f.Head(f.Wt, "HEAD"), Via: model.AnsweredCLI, Now: f.Now})
 	if err == nil || !strings.Contains(err.Error(), "has more than 500 modified files, too many for Curia to prove that undoing the merge "+
 		"touches nothing else") || !strings.Contains(err.Error(), "The review stays pending") {
 		t.Fatalf("approve error = %v, want the undo refused, saying why", err)
@@ -1703,7 +1575,7 @@ func TestMergeCutShortWithTooManyModified(t *testing.T) {
 	if r := reviewGitCalls(calls(), "reset"); len(r) != 0 {
 		t.Errorf("git reset ran: %q", r)
 	}
-	if r := f.review(); r.Status != model.ReviewPending || r.IntentAt.IsZero() {
+	if r := f.Review(); r.Status != model.ReviewPending || r.IntentAt.IsZero() {
 		t.Errorf("R-1 = %+v, want pending with its intent kept", r)
 	}
 }
@@ -1717,7 +1589,7 @@ func (f *reviewFixture) wantOrphanRefusal(name, again, head, line string, err er
 		!strings.Contains(err.Error(), "may still be running git there") || !strings.Contains(err.Error(), "then "+again) {
 		f.T.Errorf("%s during the orphan's hook = %q, %v; want the refusal naming the earlier approval", name, line, err)
 	}
-	if r := f.review(); r.Status != model.ReviewPending || !r.IntentAt.Equal(f.Now) || r.Head != head ||
+	if r := f.Review(); r.Status != model.ReviewPending || !r.IntentAt.Equal(f.Now) || r.Head != head ||
 		r.ApprovedHow != model.ApproveMerge || r.DiffStat != " auth.go | 1 +" {
 		f.T.Errorf("after the %s: R-1 = %+v, want the earlier intent, untouched", name, r)
 	}
@@ -1742,13 +1614,13 @@ func TestMergeRefusesToReplaceFilesOnDisk(t *testing.T) {
 			if c.ignore != "" {
 				testkit.WorktreeWrite(t, filepath.Join(f.Repo, ".git", "info", "exclude"), c.ignore+"\n")
 			}
-			testkit.WorktreeWrite(t, filepath.Join(f.wt, c.adds), "branch version\n")
-			testkit.GitRun(t, f.wt, "add", "-f", c.adds)
-			testkit.GitRun(t, f.wt, "commit", "-q", "-m", "add "+c.adds)
+			testkit.WorktreeWrite(t, filepath.Join(f.Wt, c.adds), "branch version\n")
+			testkit.GitRun(t, f.Wt, "add", "-f", c.adds)
+			testkit.GitRun(t, f.Wt, "commit", "-q", "-m", "add "+c.adds)
 			mine := filepath.Join(f.Repo, c.onDisk)
 			testkit.WorktreeWrite(t, mine, "developer secret\n")
-			before, status := f.head(f.Repo, "HEAD"), f.status()
-			calls := reviewRecordGit(t)
+			before, status := f.Head(f.Repo, "HEAD"), f.Status()
+			calls := testkit.RecordGit(t)
 			_, err := f.approve(model.ApproveMerge, "")
 			if err == nil || !strings.Contains(err.Error(), "would add "+c.named+", which already exists in "+f.Repo) ||
 				!strings.Contains(err.Error(), "git would replace it") || !strings.HasSuffix(err.Error(), "Nothing was merged") {
@@ -1757,11 +1629,11 @@ func TestMergeRefusesToReplaceFilesOnDisk(t *testing.T) {
 			if m := reviewGitCalls(calls(), "merge"); len(m) != 0 {
 				t.Errorf("git merge ran: %q", m)
 			}
-			if got := lifecycleRead(t, mine); got != "developer secret\n" {
+			if got := testkit.LifecycleRead(t, mine); got != "developer secret\n" {
 				t.Errorf("%s = %q, want the developer's kept", c.onDisk, got)
 			}
 			f.wantAsBefore(before, status)
-			if r := f.review(); r.Status != model.ReviewPending || !r.IntentAt.IsZero() {
+			if r := f.Review(); r.Status != model.ReviewPending || !r.IntentAt.IsZero() {
 				t.Errorf("R-1 = %+v, want pending with no intent", r)
 			}
 		})
@@ -1773,10 +1645,10 @@ func TestMergeRefusesToReplaceFilesOnDisk(t *testing.T) {
 // tracked file answers for the new name, and it is not in the way (I-2).
 func TestMergeCaseRenameIsNotInTheWay(t *testing.T) {
 	f := reviewNew(t)
-	f.commitOnMain("Notes.txt", "a\n", "notes")
-	testkit.GitRun(t, f.wt, "merge", "-q", "main")
-	testkit.GitRun(t, f.wt, "mv", "-f", "Notes.txt", "notes.txt")
-	testkit.GitRun(t, f.wt, "commit", "-q", "-m", "rename")
+	f.CommitOnMain("Notes.txt", "a\n", "notes")
+	testkit.GitRun(t, f.Wt, "merge", "-q", "main")
+	testkit.GitRun(t, f.Wt, "mv", "-f", "Notes.txt", "notes.txt")
+	testkit.GitRun(t, f.Wt, "commit", "-q", "-m", "rename")
 	line, err := f.approve(model.ApproveMerge, "")
 	if err != nil || !strings.HasPrefix(line, "R-1 approved: merged "+reviewBranch+" into main") {
 		t.Fatalf("approve = %q, %v; want the merge", line, err)
@@ -1789,9 +1661,9 @@ func TestMergeCaseRenameIsNotInTheWay(t *testing.T) {
 // adds a sentence on the earlier approval (M-a).
 func TestStaleIntentKeepsCheckoutReason(t *testing.T) {
 	f := reviewNew(t)
-	head := f.head(f.wt, "HEAD")
+	head := f.Head(f.Wt, "HEAD")
 	if _, err := f.St.ClaimReviewIntent(context.Background(), "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head},
-		f.Now.Add(-time.Hour), reviewIntentHold); err != nil {
+		f.Now.Add(-time.Hour), IntentHold); err != nil {
 		t.Fatal(err)
 	}
 	testkit.GitRun(t, f.Repo, "checkout", "-q", "-b", "other")
@@ -1808,7 +1680,7 @@ func TestStaleIntentKeepsCheckoutReason(t *testing.T) {
 // refuses, and says that its merge does not use such options (M-b).
 func TestConflictRefusalNamesMergeOptions(t *testing.T) {
 	f := reviewNew(t)
-	f.commitOnMain("auth.go", "package auth // main's own\n", "main side")
+	f.CommitOnMain("auth.go", "package auth // main's own\n", "main side")
 	testkit.GitRun(t, f.Repo, "config", "branch.main.mergeOptions", "-Xtheirs")
 	_, err := f.approve(model.ApproveMerge, "")
 	if err == nil || !strings.Contains(err.Error(), "would conflict in auth.go") ||
@@ -1844,9 +1716,9 @@ func TestMergeRefusesOtherCaseFileOnDisk(t *testing.T) {
 		t.Run(c.adds, func(t *testing.T) {
 			f := reviewNew(t)
 			testkit.WorktreeWrite(t, filepath.Join(f.Repo, ".git", "info", "exclude"), c.ignore+"\n")
-			testkit.WorktreeWrite(t, filepath.Join(f.wt, c.adds), "branch version\n")
-			testkit.GitRun(t, f.wt, "add", "-f", c.adds)
-			testkit.GitRun(t, f.wt, "commit", "-q", "-m", "add "+c.adds)
+			testkit.WorktreeWrite(t, filepath.Join(f.Wt, c.adds), "branch version\n")
+			testkit.GitRun(t, f.Wt, "add", "-f", c.adds)
+			testkit.GitRun(t, f.Wt, "commit", "-q", "-m", "add "+c.adds)
 			mine := filepath.Join(f.Repo, c.onDisk)
 			testkit.WorktreeWrite(t, mine, "developer secret\n")
 			line, err := f.approve(model.ApproveMerge, "")
@@ -1856,9 +1728,44 @@ func TestMergeRefusesOtherCaseFileOnDisk(t *testing.T) {
 			case !insensitive && err != nil:
 				t.Errorf("approve = %v; want the merge, %s being another file here", err, c.onDisk)
 			}
-			if got := lifecycleRead(t, mine); got != "developer secret\n" {
+			if got := testkit.LifecycleRead(t, mine); got != "developer secret\n" {
 				t.Errorf("%s = %q, want the developer's kept", c.onDisk, got)
 			}
 		})
+	}
+}
+
+func testLoggerOnly() *slog.Logger {
+	l, _ := testkit.TestLogger()
+	return l
+}
+
+// TestRecordErrorNeverAdvisesDrop: when the work is done but its record
+// fails, the message says to approve again, never to drop the task.
+func TestRecordErrorNeverAdvisesDrop(t *testing.T) {
+	f := reviewNew(t)
+	head := strings.Repeat("c", 40)
+	r := f.Review()
+	for _, err := range []error{errors.New("database is locked"), store.ErrReviewClosed} {
+		msg := reviewRecordError(context.Background(), f.St, r, "merged x into main (ccccccc)", head, err).Error()
+		if strings.Contains(msg, "--drop") || strings.Contains(msg, "drop it") {
+			t.Errorf("%v: %q advises dropping", err, msg)
+		}
+		if errors.Is(err, store.ErrReviewClosed) {
+			continue
+		}
+		if !strings.Contains(msg, "the review stays pending; run curia review R-1 --approve --head "+head+" again to record it") {
+			t.Errorf("%q does not say how to record it", msg)
+		}
+	}
+	// A record that another curia made meanwhile is said so.
+	if _, _, err := f.St.CloseReview(context.Background(), "R-1", store.ReviewClose{
+		Status: model.ReviewMerged, How: model.ApproveMerge,
+		Head: head, Via: model.AnsweredCLI,
+	}, f.Now); err != nil {
+		t.Fatal(err)
+	}
+	if msg := reviewRecordError(context.Background(), f.St, r, "merged", head, store.ErrReviewClosed).Error(); !strings.Contains(msg, "another curia recorded it meanwhile (merged)") {
+		t.Errorf("closed by another: %q", msg)
 	}
 }

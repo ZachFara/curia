@@ -1,4 +1,4 @@
-package main
+package review
 
 import (
 	"context"
@@ -33,9 +33,9 @@ var (
 	reviewURLPattern = regexp.MustCompile(`^https://[A-Za-z0-9._/-]{1,200}$`)
 )
 
-// reviewGH runs gh in dir, in a process group of its own (gitops.RunProcessGroup), and
+// GH runs gh in dir, in a process group of its own (gitops.RunProcessGroup), and
 // returns its stdout (at most 64 KiB). Tests replace it.
-var reviewGH = func(ctx context.Context, dir string, args ...string) (stdout []byte, err error) {
+var GH = func(ctx context.Context, dir string, args ...string) (stdout []byte, err error) {
 	path, err := exec.LookPath("gh")
 	if err != nil {
 		return nil, err
@@ -51,16 +51,16 @@ var reviewGH = func(ctx context.Context, dir string, args ...string) (stdout []b
 	return []byte(out), nil
 }
 
-// reviewGHLookPath finds gh before anything is pushed. Tests replace it.
-var reviewGHLookPath = exec.LookPath
+// GHLookPath finds gh before anything is pushed. Tests replace it.
+var GHLookPath = exec.LookPath
 
-// reviewDiffLookPath finds a diff tool. Tests replace it.
-var reviewDiffLookPath = exec.LookPath
+// DiffLookPath finds a diff tool. Tests replace it.
+var DiffLookPath = exec.LookPath
 
-// reviewDiffStat is section 4.5's diff stat for t, cleaned and capped, and the warning line that goes with it ("" when none).
+// DiffStat is section 4.5's diff stat for t, cleaned and capped, and the warning line that goes with it ("" when none).
 // It also returns the full commit id of the branch the stat was taken at ("" when there is none), which the
 // view shows and passes back on approval.
-func reviewDiffStat(ctx context.Context, t model.Task, width int) (stat, note, head string) {
+func DiffStat(ctx context.Context, t model.Task, width int) (stat, note, head string) {
 	if t.Branch == "" {
 		return "", "the task has no branch (never spawned, or cleaned)", ""
 	}
@@ -102,9 +102,9 @@ func reviewDiffNote(ctx context.Context, t model.Task, head, path string, onDisk
 	return ""
 }
 
-// reviewCheck runs steps 1 to 5 of section 4.6's approve order and returns the diff stat and the branch's commit.
+// Check runs steps 1 to 5 of section 4.6's approve order and returns the diff stat and the branch's commit.
 // The stat is taken at that commit, so it is the record of what was approved.
-func reviewCheck(ctx context.Context, st *store.Store, t model.Task) (stat, head string, err error) {
+func Check(ctx context.Context, st *store.Store, t model.Task) (stat, head string, err error) {
 	if t.Branch == "" {
 		return "", "", fmt.Errorf("%s has no branch: nothing to approve (never spawned, or cleaned)", t.ID)
 	}
@@ -187,23 +187,23 @@ func reviewOpenPR(ctx context.Context, t model.Task, r model.Review, decided []m
 	if err = gitops.CheckNames(t); err != nil {
 		return "", err
 	}
-	if _, err = reviewGHLookPath("gh"); err != nil {
+	if _, err = GHLookPath("gh"); err != nil {
 		return "", errors.New("gh is not on PATH: install the GitHub CLI and log in, or approve with --merge. Nothing was pushed")
 	}
-	if err = reviewSameHead(ctx, t, head); err != nil {
+	if err = requireBranchAtHead(ctx, t, head); err != nil {
 		return "", err
 	}
 	if err = gitops.Change(ctx, reviewPushLimit, t.Repo, "push", remote, head+":refs/heads/"+t.Branch); err != nil {
 		return "", fmt.Errorf("%w; %s was not pushed and no pull request was opened", err, t.Branch)
 	}
 	pushed := fmt.Sprintf("%s is pushed to %s at %s", t.Branch, remote, gitops.Short(head))
-	if err = reviewSameHead(ctx, t, head); err != nil {
+	if err = requireBranchAtHead(ctx, t, head); err != nil {
 		return "", fmt.Errorf("%s, but %w", pushed, err)
 	}
 	title, body := task.PRTitle(t), task.PRBody(t, r, decided)
 	gctx, cancel := context.WithTimeout(ctx, reviewGHLimit)
 	defer cancel()
-	out, err := reviewGH(gctx, t.Repo, "pr", "create", "--base", t.BaseBranch, "--head", t.Branch, "--title", title, "--body", body)
+	out, err := GH(gctx, t.Repo, "pr", "create", "--base", t.BaseBranch, "--head", t.Branch, "--title", title, "--body", body)
 	if err == nil {
 		return reviewPRURL(out), nil
 	}
@@ -261,7 +261,7 @@ func reviewExistingPR(ctx context.Context, t model.Task, remote, head, title, bo
 func reviewViewPR(ctx context.Context, t model.Task) (reviewPRView, bool) {
 	gctx, cancel := context.WithTimeout(ctx, reviewGHLimit)
 	defer cancel()
-	out, err := reviewGH(gctx, t.Repo, "pr", "view", t.Branch, "--json", reviewPRFields)
+	out, err := GH(gctx, t.Repo, "pr", "view", t.Branch, "--json", reviewPRFields)
 	var pr reviewPRView
 	if err != nil || json.Unmarshal(out, &pr) != nil {
 		return reviewPRView{}, false
@@ -290,8 +290,8 @@ func reviewRepoPRURL(ctx context.Context, t model.Task, remote, url string) bool
 	return want.MatchString(url)
 }
 
-// reviewSameHead refuses when t's branch is no longer at head.
-func reviewSameHead(ctx context.Context, t model.Task, head string) error {
+// requireBranchAtHead refuses when t's branch is no longer at head.
+func requireBranchAtHead(ctx context.Context, t model.Task, head string) error {
 	now, err := gitops.BranchHead(ctx, t)
 	if err != nil {
 		return err
@@ -346,10 +346,10 @@ func reviewDiffEnv(tool string) []string {
 	return env
 }
 
-// reviewDiffCmd is the command of section 4.6's diff table for tool.
+// DiffCmd is the command of section 4.6's diff table for tool.
 // It is not bound to a context: it runs as long as the user keeps the tool open; the git and delta tools
 // page through a less that stays until the user leaves it, whatever the diff's length (reviewDiffEnv).
-func reviewDiffCmd(t model.Task, tool string) (*exec.Cmd, error) {
+func DiffCmd(t model.Task, tool string) (*exec.Cmd, error) {
 	if err := gitops.CheckNames(t); err != nil {
 		return nil, err
 	}
@@ -369,11 +369,11 @@ func reviewDiffCmd(t model.Task, tool string) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("unknown diff tool %q: review.diff_tool is git, delta, lazygit or nvim", sanitize.Line(tool, 40))
 	}
 	for _, n := range needs {
-		if _, err := reviewDiffLookPath(n); err != nil {
+		if _, err := DiffLookPath(n); err != nil {
 			return nil, fmt.Errorf("the diff tool %s is not on PATH: install it, or set review.diff_tool", n)
 		}
 	}
-	path, err := reviewDiffLookPath(bin)
+	path, err := DiffLookPath(bin)
 	if err != nil {
 		return nil, fmt.Errorf("the diff tool %s is not on PATH: install it, or set review.diff_tool", bin)
 	}
