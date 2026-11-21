@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,5 +97,44 @@ func TestDecisionLogFilters(t *testing.T) {
 	}
 	if got := ids(store.DecisionLogQuery{Repo: "/src/curia", Limit: 1}); len(got) != 1 || got[0] != "D-6" {
 		t.Errorf("repo+limit = %v", got)
+	}
+}
+
+// The reuse subqueries must use the partial index decisions_precedent_of,
+// else the log is quadratic (C2-1).
+func TestDecisionLogReuseUsesPartialIndex(t *testing.T) {
+	path := dbPath(t)
+	open(t, path)
+	db := rawDB(t, path)
+	rows, sum := store.DecisionLogStatements()
+	for name, q := range map[string]string{"rows": rows, "summary": sum} {
+		args := []any{"", "", "", "", "", "", "", "", "", ""}
+		if name == "rows" {
+			args = append(args, 50)
+		}
+		plan := queryPlan(t, db, q, args...)
+		if !strings.Contains(plan, "USING COVERING INDEX decisions_precedent_of") || strings.Contains(plan, "SCAN r") {
+			t.Errorf("%s does not search decisions_precedent_of:\n%s", name, plan)
+		}
+	}
+}
+
+// 8000 answered decisions with a log read well inside a generous bound
+// (the quadratic query took about 5 s at 4000).
+func TestDecisionLogSizeStaysFast(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	db := rawDB(t, path)
+	tlExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 8000)
+INSERT INTO decisions (id, question, options, recommendation, rationale, reversibility, mode, scope, status, args_hash, created_at, answered_at, answer)
+SELECT 'D-x' || i, 'q', '[]', 'a', 'r', 'cheap', 'blocking', 'repo', 'answered', i, '2026-12-01T00:00:00.000000000Z', '2026-12-01T00:00:00.000000000Z', 'x' FROM c`)
+	tlExec(t, db, `UPDATE decisions SET precedent_of = 'D-x1' WHERE id IN ('D-x2','D-x3')`)
+	start := time.Now()
+	rows, sum, err := s.DecisionLog(context.Background(), store.DecisionLogQuery{})
+	if err != nil || len(rows) != 50 || sum.Answered != 8000 {
+		t.Fatalf("DecisionLog = %d rows, %+v, %v", len(rows), sum, err)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("DecisionLog over 8000 decisions took %v, want under 3s", d)
 	}
 }

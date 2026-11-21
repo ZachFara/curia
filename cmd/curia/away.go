@@ -455,7 +455,7 @@ func awaySummary(ctx context.Context, st *store.Store, run store.AwayRun) (strin
 
 // awayDid is "what each agent did" from the timeline of the window.
 func awayDid(ctx context.Context, st *store.Store, from, to time.Time) (string, error) {
-	events, err := st.TimelineBetween(ctx, from, to.Add(time.Nanosecond))
+	counts, err := st.TimelineCounts(ctx, from, to.Add(time.Nanosecond), "turn_end", "ticket_raised", "review_opened", "message_delivered")
 	if err != nil {
 		return "", err
 	}
@@ -466,15 +466,6 @@ func awayDid(ctx context.Context, st *store.Store, from, to time.Time) (string, 
 	repo := map[string]string{}
 	for _, s := range sessions {
 		repo[s.ID] = filepath.Base(s.Repo)
-	}
-	counts := map[string]map[string]int{}
-	for _, kind := range []string{"turn_end", "ticket_raised", "review_opened", "message_delivered"} {
-		for _, e := range events[kind] {
-			if counts[e.SessionID] == nil {
-				counts[e.SessionID] = map[string]int{}
-			}
-			counts[e.SessionID][kind]++
-		}
 	}
 	ids := make([]string, 0, len(counts))
 	for id := range counts {

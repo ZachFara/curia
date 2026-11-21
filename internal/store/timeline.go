@@ -20,7 +20,7 @@ const (
 // timelineSource is one source of the union, as SQL expressions over its
 // FROM. at must be a plain indexed column, so each source is a bounded read
 // of an index (TestTimelineQueryUsesIndexes). A source of a feature built
-// later (modes, permission events, schedule runs) is one more entry here.
+// later is one more entry here. Mode changes are recorded nowhere, so they have no source.
 type timelineSource struct {
 	from, where                        string
 	at, ref, session, task, repo, kind string
@@ -101,6 +101,22 @@ var timelineSources = []timelineSource{
 		repo: "COALESCE((SELECT t.repo FROM tasks t WHERE t.id = a.task_id), '')",
 		kind: "'auto_spawn'", line: "'auto-spawn ' || a.outcome || CASE WHEN a.check_ = '' THEN '' ELSE ' (' || a.check_ || ')' END || ': ' || a.task_id || ' ' || a.detail",
 	},
+	{
+		from: "away_runs a", where: "1", // F20: an away period's start and end
+		ref: "CAST(a.id AS TEXT)", at: "a.started_at", session: "''", task: "''", repo: "''",
+		kind: "'away_start'", line: "'away started' || CASE WHEN a.scope = '' THEN '' ELSE ' (' || a.scope || ')' END",
+	},
+	{
+		from: "away_runs a", where: "1", // a NULL ended_at never lies in a window
+		ref: "CAST(a.id AS TEXT)", at: "a.ended_at", session: "''", task: "''", repo: "''",
+		kind: "'away_end'", line: "'away ended'",
+	},
+	{
+		// One line per stored counted row (a distinct tool and command) with its count, at its latest time.
+		from: "permission_events p", where: "p.verdict = 'deny'",
+		ref: "CAST(p.id AS TEXT)", at: "p.last_at", session: "p.session_id", task: "''", repo: "''",
+		kind: "'action_denied'", line: "'denied ' || p.tool || ' x' || p.n || ': ' || substr(p.summary, 1, 100)",
+	},
 }
 
 // timelineSQL is the union: per source the newest ?5 rows in [?1, ?2] that
@@ -122,6 +138,16 @@ ORDER BY `+s.at+` DESC, `+s.kind+`, `+s.ref+` LIMIT ?5)`)
 ORDER BY at DESC, kind, ref LIMIT ?5`
 }()
 
+// timelineCountSQL is, per source (kind and from), its count per session in [?1, ?2).
+var timelineCountSQL = func() map[string]string {
+	m := map[string]string{}
+	for _, src := range timelineSources {
+		m[src.kind+src.from] = `SELECT ` + src.session + `, count(*) FROM ` + src.from +
+			` WHERE ` + src.at + ` >= ?1 AND ` + src.at + ` < ?2 AND ` + src.where + ` GROUP BY 1`
+	}
+	return m
+}()
+
 // TimelineQuery selects timeline events.
 type TimelineQuery struct {
 	Since, Before time.Time           // [Since, Before); a zero one is open
@@ -130,10 +156,26 @@ type TimelineQuery struct {
 	Limit         int                 // default 100, at most 1000
 }
 
+// TimelineResult is a read of the timeline: the events and how many rows
+// were left out because their time could not be read.
+type TimelineResult struct {
+	Events  []model.TimelineEvent
+	Skipped int
+}
+
 // Timeline returns the newest events of the union over existing rows (F25,
 // Ruling 160; no table of its own), newest first. Page backwards by
-// passing the last event as Cursor.
+// passing the last event as Cursor. Unreadable rows are skipped (TimelineRead).
 func (s *Store) Timeline(ctx context.Context, q TimelineQuery) ([]model.TimelineEvent, error) {
+	r, err := s.TimelineRead(ctx, q)
+	return r.Events, err
+}
+
+// TimelineRead is Timeline that also counts the rows it skipped because
+// their time is not in the stored layout (a hand edit): one such row never
+// fails the whole read.
+func (s *Store) TimelineRead(ctx context.Context, q TimelineQuery) (TimelineResult, error) {
+	var out TimelineResult
 	limit := q.Limit
 	if limit <= 0 {
 		limit = defaultTimelineLimit
@@ -151,40 +193,66 @@ func (s *Store) Timeline(ctx context.Context, q TimelineQuery) ([]model.Timeline
 	}
 	rows, err := s.db.QueryContext(ctx, timelineSQL, since, before, q.Repo, q.TaskID, min(limit, maxTimelineLimit), q.Cursor.Kind, q.Cursor.Ref, tie)
 	if err != nil {
-		return nil, fail("timeline", "", err)
+		return out, fail("timeline", "", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var out []model.TimelineEvent
 	for rows.Next() {
 		var e model.TimelineEvent
 		var at string
 		if err = rows.Scan(&at, &e.Ref, &e.SessionID, &e.TaskID, &e.Kind, &e.Line); err != nil {
-			return nil, fail("timeline", "", err)
+			return out, fail("timeline", "", err)
 		}
 		if e.At, err = time.Parse(timeLayout, at); err != nil {
-			return nil, fail("timeline", "", err)
+			out.Skipped++
+			continue
 		}
-		out = append(out, e)
+		out.Events = append(out.Events, e)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fail("timeline", "", err)
+		return out, fail("timeline", "", err)
 	}
 	return out, nil
 }
 
-// TimelineBetween is what `curia back`'s summary (F20) calls: the events in
-// [from, to), grouped by kind, each group oldest first. shortcut: at most
-// the newest maxTimelineLimit events, which is far above one away window's.
-func (s *Store) TimelineBetween(ctx context.Context, from, to time.Time) (map[string][]model.TimelineEvent, error) {
-	evs, err := s.Timeline(ctx, TimelineQuery{Since: from, Before: to, Limit: maxTimelineLimit})
-	if err != nil {
-		return nil, err
-	}
-	out := map[string][]model.TimelineEvent{}
-	for i := len(evs) - 1; i >= 0; i-- {
-		out[evs[i].Kind] = append(out[evs[i].Kind], evs[i])
+// TimelineCounts is what `curia back`'s summary (F20) reads: for the events
+// in [from, to) of the given kinds, the count per session and kind, from
+// COUNT queries over the window (never a capped list).
+func (s *Store) TimelineCounts(ctx context.Context, from, to time.Time, kinds ...string) (map[string]map[string]int, error) {
+	out := map[string]map[string]int{}
+	for _, kind := range kinds {
+		for _, src := range timelineSources {
+			if src.kind == "'"+kind+"'" {
+				if err := s.countSource(ctx, src, kind, formatTime(from), formatTime(to), out); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 	return out, nil
+}
+
+// countSource adds src's per-session counts in [from, to) to out[session][kind].
+func (s *Store) countSource(ctx context.Context, src timelineSource, kind string, from, to any, out map[string]map[string]int) error {
+	rows, err := s.db.QueryContext(ctx, timelineCountSQL[src.kind+src.from], from, to)
+	if err != nil {
+		return fail("timeline counts", kind, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id string
+		var n int
+		if err = rows.Scan(&id, &n); err != nil {
+			return fail("timeline counts", kind, err)
+		}
+		if out[id] == nil {
+			out[id] = map[string]int{}
+		}
+		out[id][kind] += n
+	}
+	if err = rows.Err(); err != nil {
+		return fail("timeline counts", kind, err)
+	}
+	return nil
 }
 
 // maxTimelineText bounds TimelineText.
