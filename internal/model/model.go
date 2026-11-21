@@ -66,6 +66,10 @@ type Session struct {
 	// (zero: never).
 	Mode      string
 	ModeUntil time.Time
+	// RC, RCHow and RCCheckedAt are F21's Remote Control belief (off, pending,
+	// on or unknown; "" reads as off), how Curia knows it and when it looked.
+	RC, RCHow   string
+	RCCheckedAt time.Time
 }
 
 // F20 permission modes.

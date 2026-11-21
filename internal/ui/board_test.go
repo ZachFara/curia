@@ -547,6 +547,21 @@ func TestBoardPasteIsNotACommand(t *testing.T) {
 	_ = m
 }
 
+// A y that arrives in one read with other keys, typed text the terminal did
+// not bracket, never confirms a spawn, as in the review and decide views.
+func TestBoardSpawnPromptRefusesABurstOfKeys(t *testing.T) {
+	src := &fakeBoardSource{line: "spawned T-1"}
+	src.set(card(1, model.TaskBacklog, ""))
+	m := newBoard(t, src, &tmux.Fake{}, 120, false)
+	m = bpress(t, m, "n")
+	boardClock.advance(time.Second)
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("yy")})
+	wantBoardCalls(t, src)
+	if s := lastLine(m); s != "spawn canceled" {
+		t.Errorf("status line = %q, want the cancel", s)
+	}
+}
+
 func TestBoardTypedTextIsNotACommand(t *testing.T) {
 	src := &fakeBoardSource{}
 	src.set(card(1, model.TaskBacklog, ""))

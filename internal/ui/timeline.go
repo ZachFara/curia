@@ -55,18 +55,18 @@ func timelineTarget(e model.TimelineEvent) string {
 func (m Model) openFromTimeline(e model.TimelineEvent) (Model, tea.Cmd) {
 	switch timelineTarget(e) {
 	case "detail":
-		if m.detail != nil {
-			return m.showChild(m.detail(e.SessionID))
+		if m.views["detail"] != nil {
+			return m.showChild(m.views["detail"](e.SessionID))
 		}
 		return m.tellTimeline("the agent detail opens in the popup (curia ui)")
 	case "decide":
-		if m.open != nil {
-			return m.showChild(m.open(e.SessionID))
+		if m.views["decide"] != nil {
+			return m.showChild(m.views["decide"](e.SessionID))
 		}
 		return m.tellTimeline(cmp.Or(m.noAnswer, noticeNoAnswer))
 	case "review":
-		if m.review != nil {
-			return m.showChild(m.review(e.TaskID))
+		if m.views["review"] != nil {
+			return m.showChild(m.views["review"](e.TaskID))
 		}
 		return m.tellTimeline(cmp.Or(m.noReview, noticeNoReview))
 	}
@@ -309,4 +309,26 @@ func (m TimelineModel) fullKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.bodyAt = max(m.bodyAt-1, 0)
 	}
 	return m, nil
+}
+
+// WithTimeline returns m with the T key enabled in the popup: T shows the
+// model open builds until it sends TimelineClosedMsg.
+func (m Model) WithTimeline(open func() tea.Model) Model {
+	return m.withView("timeline", func(string) tea.Model { return open() })
+}
+
+// openTimeline shows the timeline view, or says it opens in the popup.
+func (m Model) openTimeline() (Model, tea.Cmd) {
+	open := m.views["timeline"]
+	if open == nil {
+		m.notice = "the timeline opens in the popup (curia ui)"
+		return m, nil
+	}
+	return m.showChild(open(""))
+}
+
+func (TimelineClosedMsg) closedChild() {}
+
+func init() {
+	registerCommand(command{keys: []string{"T"}, help: "T timeline", order: 150, run: Model.openTimeline})
 }

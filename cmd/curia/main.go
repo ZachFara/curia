@@ -8,6 +8,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
@@ -22,6 +23,9 @@ var rootCmd = &cobra.Command{
 }
 
 func main() {
+	if filepath.Base(os.Args[0]) == "docker" { // the docker wrapper symlink (docker.go)
+		dockerWrapperMain(os.Args[1:])
+	}
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}

@@ -102,9 +102,15 @@ func (s *Store) enableWAL(ctx context.Context) error {
 	deadline := time.Now().Add(busyTimeout)
 	for {
 		var mode string
-		err := s.db.QueryRowContext(ctx, `PRAGMA journal_mode = WAL`).Scan(&mode)
+		// A SELECT first: an already-WAL file needs no write, so Open must
+		// not wait in the writer queue (the status line and the badge open
+		// the store under a tight budget).
+		err := s.db.QueryRowContext(ctx, `SELECT journal_mode FROM pragma_journal_mode`).Scan(&mode)
 		if err == nil && mode != "wal" {
-			return fmt.Errorf("journal_mode is %q, want wal", mode)
+			err = s.db.QueryRowContext(ctx, `PRAGMA journal_mode = WAL`).Scan(&mode)
+			if err == nil && mode != "wal" {
+				return fmt.Errorf("journal_mode is %q, want wal", mode)
+			}
 		}
 		if !isBusy(err) || time.Now().After(deadline) {
 			return err
@@ -306,7 +312,7 @@ SELECT COALESCE(id, ''), COALESCE(agent, ''), COALESCE(tmux_pane, ''), COALESCE(
   started_at, updated_at, transcript_offset, COALESCE(task_id, ''), COALESCE(worktree, ''),
   COALESCE(team_id, ''), COALESCE(team_role, ''), COALESCE(team_member, ''), COALESCE(tmux_socket, ''),
   COALESCE(end_reason, ''), cost_usd, cache_expires_at, COALESCE(cache_rebuild_usd, 0),
-  COALESCE(recache_tokens, 0), COALESCE(checked_cwd, ''), COALESCE(mode, ''), mode_until
+  COALESCE(recache_tokens, 0), COALESCE(checked_cwd, ''), COALESCE(mode, ''), mode_until, COALESCE(rc, ''), COALESCE(rc_how, ''), rc_checked_at
 FROM sessions`
 
 // GetSession returns the session with the given id, and false if there is none.
@@ -362,18 +368,21 @@ type scanner interface {
 
 func scanSession(sc scanner) (model.Session, error) {
 	var sess model.Session
-	var seen, started, updated, cache, modeUntil sql.NullString
+	var seen, started, updated, cache, modeUntil, rcAt sql.NullString
 	var cost sql.NullFloat64
 	err := sc.Scan(&sess.ID, &sess.Agent, &sess.Pane, &sess.TmuxSession, &sess.TmuxWindow, &sess.Cwd,
 		&sess.Repo, &sess.Branch, &sess.State, &sess.Model, &sess.ContextUsed, &sess.ContextMax,
 		&sess.SubagentsActive, &sess.LastUpdate, &seen, &sess.TranscriptPath, &started, &updated,
 		&sess.TranscriptOffset, &sess.TaskID, &sess.Worktree, &sess.TeamID, &sess.TeamRole, &sess.TeamMember,
-		&sess.Socket, &sess.EndReason, &cost, &cache, &sess.CacheRebuildUSD, &sess.CacheRecacheTokens, &sess.CheckedCwd, &sess.Mode, &modeUntil)
+		&sess.Socket, &sess.EndReason, &cost, &cache, &sess.CacheRebuildUSD, &sess.CacheRecacheTokens, &sess.CheckedCwd, &sess.Mode, &modeUntil, &sess.RC, &sess.RCHow, &rcAt)
 	if err != nil {
 		return model.Session{}, err
 	}
 	sess.CostUSD, sess.CostKnown = cost.Float64, cost.Valid
 	if sess.CacheExpiresAt, err = parseTime(cache); err != nil {
+		return model.Session{}, err
+	}
+	if sess.RCCheckedAt, err = parseTime(rcAt); err != nil {
 		return model.Session{}, err
 	}
 	if sess.SeenAt, err = parseTime(seen); err != nil {

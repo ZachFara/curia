@@ -558,6 +558,8 @@ func TestSuggestPause(t *testing.T) {
 		{"then newest", []Running{{TaskID: "T-7", N: 7, Priority: 2, BurnUSD: 2}, {TaskID: "T-9", N: 9, Priority: 2, BurnUSD: 2}, {TaskID: "T-8", N: 8, Priority: 2, BurnUSD: 2}}, "T-9"},
 		{"priority 0 ranks as P2", []Running{{TaskID: "T-1", N: 1, Priority: 0, BurnUSD: 3}, {TaskID: "T-2", N: 2, Priority: 2, BurnUSD: 1}, {TaskID: "T-3", N: 3, Priority: 1, BurnUSD: 9}}, "T-1"},
 		{"priority 0 below P3", []Running{{TaskID: "T-1", N: 1, Priority: 0, BurnUSD: 3}, {TaskID: "T-2", N: 2, Priority: 3}}, "T-2"},
+		{"idle before busy in the lowest tier", []Running{{TaskID: "T-1", N: 1, Priority: 3, BurnUSD: 9, Busy: true}, {TaskID: "T-2", N: 2, Priority: 3, BurnUSD: 1}, {TaskID: "T-3", N: 3, Priority: 2, BurnUSD: 9}}, "T-2"},
+		{"all busy: the one it would suggest", []Running{{TaskID: "T-1", N: 1, Priority: 3, BurnUSD: 1, Busy: true}, {TaskID: "T-2", N: 2, Priority: 3, BurnUSD: 9, Busy: true}, {TaskID: "T-3", N: 3, Priority: 2}}, "T-2"},
 		{"a NaN burn counts as none", []Running{{TaskID: "T-1", N: 2, Priority: 3, BurnUSD: math.NaN()}, {TaskID: "T-2", N: 1, Priority: 3, BurnUSD: 0.5}}, "T-2"},
 	}
 	for _, c := range cases {

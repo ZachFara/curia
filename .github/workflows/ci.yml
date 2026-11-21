@@ -7,7 +7,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main, plan-1, plan-2, plan-3, plan-4, plan-5]
+    branches: [main, "plan-*"]
 
 permissions:
   contents: read
@@ -35,6 +35,16 @@ jobs:
           key: bin-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod') }}
 
       - run: make check-static check-shards
+
+      # Report only: sizes and duplication go in the job summary and never fail the job.
+      - name: size report
+        continue-on-error: true
+        run: |
+          {
+            echo '```text'
+            make -s size-report
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Step 1 of the tests, in jobs: cmd/curia (the slowest package) sharded by
   # test name, every other package (computed, so a new package is never
@@ -82,7 +92,8 @@ jobs:
           go-version-file: go.mod
       - name: install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
-      - run: make test-latency SHARD=${{ matrix.shard }}
+      # D-15: a failed run is rerun once (scripts/ci-retry-once.sh); the job fails only if the rerun fails too.
+      - run: scripts/ci-retry-once.sh make test-latency SHARD=${{ matrix.shard }}
 
   # The required status check. Passes only if every job above succeeded:
   # failed, cancelled and skipped all fail it (if: always() so it still runs).

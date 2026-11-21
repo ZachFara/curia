@@ -244,6 +244,18 @@ func TestFromStatusLineBuilt(t *testing.T) {
 	assert.False(t, d.HasCacheRebuild, "no price table: tokens never become money")
 }
 
+// Right after a start or a compaction Claude Code sends used_percentage
+// null: no context reading then. The session keeps its last known value
+// (no number is invented); the next payload with a percentage replaces it.
+func TestFromStatusLineNullContextPercentageIsNoReading(t *testing.T) {
+	d, err := FromStatusLine([]byte(`{"session_id":"s1","context_window":{"used_percentage":null,"context_window_size":200000}}`), testNow)
+	require.NoError(t, err)
+	assert.False(t, d.HasContext)
+	assert.Equal(t, 0, d.ContextPct)
+	assert.Equal(t, 0, d.ContextSize, "a size without a percentage must not reach the store")
+	assert.Empty(t, d.Dropped)
+}
+
 func TestFromStatusLineCaptured(t *testing.T) {
 	d, err := FromStatusLine(fixture(t, "statusline-captured.json"), testNow)
 	require.NoError(t, err)

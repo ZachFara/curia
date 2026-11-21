@@ -232,3 +232,23 @@ func detailAsModel(t *testing.T, m tea.Model) Model {
 	}
 	return d
 }
+
+func TestDetailShowsRemoteControlOnlyWhenRecorded(t *testing.T) {
+	at := time.Date(2026, 11, 20, 12, 5, 0, 0, time.UTC)
+	f := &fakeDetail{data: DetailData{Session: model.Session{ID: "s1", State: model.StateIdle, RC: "on", RCHow: "indicator", RCCheckedAt: at}}}
+	v := newDetailTest(f, 80).View()
+	for _, want := range []string{"RC on", "Remote Control", "on via indicator, checked 2026-11-20 12:05"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("missing %q in\n%s", want, v)
+		}
+	}
+	f = &fakeDetail{data: DetailData{Session: model.Session{ID: "s1", State: model.StateIdle, RC: "unknown", RCHow: "typed\x1b[31m"}}}
+	v = newDetailTest(f, 80).View()
+	if strings.Contains(v, "RC on") || strings.Contains(v, "\x1b[31m") || !strings.Contains(v, "unknown via typed") {
+		t.Errorf("an unknown session reads wrongly, or control text reached the screen:\n%q", v)
+	}
+	f = &fakeDetail{data: DetailData{Session: model.Session{ID: "s1", State: model.StateIdle}}}
+	if v = newDetailTest(f, 80).View(); strings.Contains(v, "Remote Control") {
+		t.Errorf("a session with no Remote Control record shows a panel:\n%s", v)
+	}
+}
