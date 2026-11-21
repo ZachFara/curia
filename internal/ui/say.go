@@ -39,6 +39,7 @@ type Proposal struct {
 	Confidence float64           // 0 when no model was asked
 	Routed     model.RoutedBy    // RoutedAddress, RoutedManual, or RoutedConfirmed for a model suggestion
 	Auto       bool              // passed every auto-send guard: send held, with the undo window
+	Targets    []route.Candidate // a broadcast: the live sessions it reaches, shown by count and a bounded list; its one candidate is route.TargetBroadcast and Auto is never set
 	Note       string            // why the model was not used or auto-send did not apply; shown dim
 }
 

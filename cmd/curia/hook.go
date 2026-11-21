@@ -19,6 +19,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/attention"
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/hook"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
@@ -353,8 +354,9 @@ func snapshotBefore(ctx context.Context, st *store.Store, kind model.EventKind, 
 		logger.Error("hook list sessions before event", "err", err.Error())
 		return beforeEvent{}
 	}
+	socket := seenSocket(os.Getenv("TMUX"))
 	for _, p := range live {
-		if p.Pane == pane && p.ID != ev.SessionID && p.State != model.StateStale && attention.Marker(p) != "" {
+		if p.Pane == pane && !fleet.OtherSocket(socket, p) && p.ID != ev.SessionID && p.State != model.StateStale && attention.Marker(p) != "" {
 			b.peers = append(b.peers, p)
 		}
 	}

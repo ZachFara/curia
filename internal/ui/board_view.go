@@ -175,7 +175,7 @@ func (m BoardModel) listView(w int) []string {
 			if selected {
 				sel = len(lines)
 			}
-			text := cardMark(selected) + fit(cardID(c), idW, false) + "  " + fit(cardRepo(c), repoW, false) + "  " + cardBudget(c) + cardTitle(c)
+			text := cardMark(selected) + fit(cardID(c), idW, false) + "  " + fit(cardRepo(c), repoW, false) + "  " + cardBudget(c) + cardTitle(c) + cardFiledWhy(c)
 			lines = append(lines, markCard(truncate(text, w), selected))
 		}
 	}
@@ -204,7 +204,7 @@ func markCard(s string, selected bool) string {
 
 // cardTitle is c's title as drawn.
 func cardTitle(c task.Card) string {
-	return sanitize.Line(c.Task.Title, task.MaxTitle)
+	return cardFiledTag(c) + sanitize.Line(c.Task.Title, task.MaxTitle)
 }
 
 // cardBudget is c's budget mark and a space, or "" with no budget (F16).

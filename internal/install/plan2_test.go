@@ -550,11 +550,11 @@ func TestMCPAddCommandQuotesBin(t *testing.T) {
 	}
 }
 
-// wantToolRules are the six permission rules AllowTools adds.
+// wantToolRules are the seven permission rules AllowTools adds.
 var wantToolRules = []string{
 	"mcp__curia__search_decisions", "mcp__curia__request_decision",
 	"mcp__curia__check_decision", "mcp__curia__withdraw_decision",
-	"mcp__curia__check_messages", "mcp__curia__complete_task",
+	"mcp__curia__check_messages", "mcp__curia__complete_task", "mcp__curia__file_task",
 }
 
 // readAllow returns settings["permissions"]["allow"] as strings.
@@ -588,7 +588,7 @@ func TestAllowToolsAddsMissingToAPlan2Install(t *testing.T) {
 	want := []string{
 		"Bash(ls:*)", "mcp__curia__check_decision",
 		"mcp__curia__search_decisions", "mcp__curia__request_decision", "mcp__curia__withdraw_decision",
-		"mcp__curia__check_messages", "mcp__curia__complete_task",
+		"mcp__curia__check_messages", "mcp__curia__complete_task", "mcp__curia__file_task",
 	}
 	if got := readAllow(t, path); !slices.Equal(got, want) {
 		t.Errorf("allow = %q, want %q", got, want)

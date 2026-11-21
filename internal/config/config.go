@@ -60,6 +60,7 @@ type Config struct {
 
 	// Plan 6 additions.
 	Activity  Activity  `toml:"activity"`
+	Tasks     Tasks     `toml:"tasks"`
 	Resources Resources `toml:"resources"`
 	Monitor   Monitor   `toml:"monitor"`
 	Cost      Cost      `toml:"cost"`
@@ -127,6 +128,7 @@ func Default() Config {
 		Review:  Review{Approve: "merge", Remote: "origin", DiffTool: "git"},
 		Ntfy:    Ntfy{Devices: map[string]string{}},
 		Restore: Restore{MaxAge: 24 * time.Hour},
+		Serve:   Serve{WebSession: 12 * time.Hour},
 
 		// Plan 5 additions.
 		Usage:  Usage{CheaperModel: "sonnet"},
@@ -136,6 +138,7 @@ func Default() Config {
 		Activity:  defaultActivity(),
 		Resources: defaultResources(),
 		Monitor:   Monitor{Autostart: true},
+		Tasks:     defaultTasks(),
 	}
 }
 
@@ -162,6 +165,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.validatePlan4(); err != nil {
+		return err
+	}
+	if err := c.Tasks.validate(); err != nil {
 		return err
 	}
 	if err := c.Resources.validate(); err != nil {
@@ -204,6 +210,10 @@ type Ntfy struct {
 type Serve struct {
 	Listen    string `toml:"listen"`
 	PublicURL string `toml:"public_url"`
+	// Web turns on the read-only web pages (F26); WebSession is how long a
+	// login cookie lasts.
+	Web        bool          `toml:"web"`
+	WebSession time.Duration `toml:"web_session"`
 }
 
 // Restore configures `curia restore`.
@@ -346,6 +356,9 @@ func (n Ntfy) validate() error {
 }
 
 func (s Serve) validate() error {
+	if s.WebSession < time.Minute || s.WebSession > 30*24*time.Hour {
+		return fmt.Errorf("serve.web_session must be between 1m and 720h, got %v", s.WebSession)
+	}
 	if err := validateURL("serve.public_url", s.PublicURL); err != nil {
 		return err
 	}

@@ -58,6 +58,8 @@ func Auto(in AutoInput) (send, eligible bool, why string) {
 		return false, false, "auto-send is tripped"
 	case !in.Gate.Earned:
 		return false, false, "auto-send is not earned"
+	case s.Scope == ScopeAll || s.Scope == ScopeRepo:
+		return false, false, "a broadcast is always confirmed"
 	case s.Confidence < in.Threshold:
 		return false, false, "confidence is below the threshold"
 	case s.RunnerUp.Key != "" && (!s.HasRunnerUpConfidence || s.Confidence-s.RunnerUpConfidence <= CloseCall):

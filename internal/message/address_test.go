@@ -143,3 +143,28 @@ func TestNames(t *testing.T) {
 		}
 	}
 }
+
+func TestParseAddressBroadcast(t *testing.T) {
+	for _, c := range []struct {
+		in, name, rest string
+	}{
+		{"@all do it", "", "do it"},
+		{"@ALL: do it", "", "do it"},
+		{"@api-server/* do it", "api-server", "do it"},
+		{"@my.repo_1/*: go", "my.repo_1", "go"},
+	} {
+		a, rest := ParseAddress(c.in)
+		if !a.Broadcast || a.Name != c.name || rest != c.rest {
+			t.Errorf("ParseAddress(%q) = %+v, %q; want a broadcast to %q, rest %q", c.in, a, rest, c.name, c.rest)
+		}
+	}
+	// Not broadcasts: a glob in the middle, an empty repo, an odd character, a second address part.
+	for _, in := range []string{"@a*b/* x", "@/* x", "@all2 x", "@api/** x", "@a b/* x", "@api-server x"} {
+		if a, _ := ParseAddress(in); a.Broadcast {
+			t.Errorf("ParseAddress(%q) = %+v, want no broadcast", in, a)
+		}
+	}
+	if a, rest := ParseAddress("@all @api-server x"); !a.Broadcast || rest != "@api-server x" {
+		t.Errorf("a second @name after @all = %+v, %q; want it left in the text", a, rest)
+	}
+}

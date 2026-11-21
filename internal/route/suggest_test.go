@@ -107,3 +107,54 @@ func TestParseSuggestionFindsObjectInFence(t *testing.T) {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
+
+func TestParseSuggestionScope(t *testing.T) {
+	cands := capturedCands()
+	answer := func(scope string) []byte {
+		extra := ""
+		if scope != "" {
+			extra = `,"scope":` + scope
+		}
+		return wrap(t, `{"target":"r1","kind":"instruction","confidence":0.9,"runner_up":""`+extra+`}`, false)
+	}
+	for _, c := range []struct {
+		scope string
+		want  Scope
+	}{{"", ScopeOne}, {`"one"`, ScopeOne}, {`"all"`, ScopeAll}, {`"repo"`, ScopeRepo}} {
+		s, err := ParseSuggestion(answer(c.scope), cands)
+		if err != nil || s.Scope != c.want {
+			t.Errorf("scope %s: %+v, %v; want %q", c.scope, s, err, c.want)
+		}
+	}
+	// An unknown, malformed, empty or oddly cased scope is no suggestion: the user is asked.
+	for _, bad := range []string{`"everyone"`, `"ALL"`, `""`, `"all "`, `1`, `["all"]`, `"session"`} {
+		if s, err := ParseSuggestion(answer(bad), cands); !errors.Is(err, ErrNoSuggestion) {
+			t.Errorf("scope %s accepted as %+v, %v; want ErrNoSuggestion", bad, s, err)
+		}
+	}
+	// A broadcast is an instruction; a repo scope needs a target with a repository.
+	rule := wrap(t, `{"target":"r1","kind":"rule","confidence":0.9,"runner_up":"","scope":"all"}`, false)
+	global := wrap(t, `{"target":"global","kind":"instruction","confidence":0.9,"runner_up":"","scope":"repo"}`, false)
+	for name, b := range map[string][]byte{"rule to all": rule, "repo scope on global": global} {
+		if _, err := ParseSuggestion(b, cands); !errors.Is(err, ErrNoSuggestion) {
+			t.Errorf("%s: err = %v, want ErrNoSuggestion", name, err)
+		}
+	}
+}
+
+func TestAutoNeverSendsABroadcast(t *testing.T) {
+	g := GateResult{Labeled: Window, Accepted: Window, Earned: true}
+	in := AutoInput{
+		Configured: true, Threshold: 0.9, Gate: g, TargetAlive: true, EligibleSoFar: 1,
+		Suggestion: Suggestion{Kind: model.KindInstruction, Confidence: 0.99, Scope: ScopeOne},
+	}
+	if send, _, why := Auto(in); !send {
+		t.Fatalf("control: Auto = %v, %q; want it to send", send, why)
+	}
+	for _, sc := range []Scope{ScopeAll, ScopeRepo} {
+		in.Suggestion.Scope = sc
+		if send, eligible, why := Auto(in); send || eligible || why == "" {
+			t.Errorf("scope %s: Auto = %v, %v, %q; want never, with a reason", sc, send, eligible, why)
+		}
+	}
+}

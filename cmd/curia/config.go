@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/install"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
 )
@@ -178,18 +179,7 @@ func configWrite(ctx context.Context, st *store.Store, path string, data []byte,
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return 0, err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.toml")
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err = tmp.Write(data); err == nil {
-		err = tmp.Close()
-	}
-	if err != nil {
-		return 0, err
-	}
-	if err = os.Rename(tmp.Name(), path); err != nil {
+	if err := install.WriteAtomic(path, data); err != nil {
 		return 0, err
 	}
 	rev.At, rev.File = time.Now(), string(data)
