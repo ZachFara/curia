@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -9,14 +10,14 @@ import (
 	"unicode"
 
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/store"
 	"github.com/spf13/cobra"
 )
 
 // jsonOwnEncoder lists the files that may call json.NewEncoder themselves:
 // the helper, and files other work is editing that already escape by hand.
 var jsonOwnEncoder = map[string]string{
-	"jsonout.go":  "the helper",
-	"schedule.go": "calls escapeUnprintable itself; route through writeJSON when that file is next touched",
+	"jsonout.go": "the helper",
 }
 
 // Every command prints JSON through writeJSON (D-4): no source file but the
@@ -56,6 +57,16 @@ var jsonFixtures = map[string]func(t *testing.T) []string{
 		taskFiledOne(t, db, taskRepo(t, "main"))
 		return []string{"task", "ls", "--json"}
 	},
+	"curia schedule ls": func(t *testing.T) []string {
+		db := schedHome(t)
+		st, _ := store.Open(db)
+		defer func() { _ = st.Close() }()
+		sc := store.Schedule{Text: "go\x1b]0;owned\x07 \u202eevil\u2066x", Kind: "at", CreatedVia: "cli\u202e\x1b[2J", Spec: "2026-11-12T02:00:00Z", Target: "all", NextRun: at(12, 0), CreatedAt: at(9, 0)}
+		if _, err := st.CreateSchedule(context.Background(), sc, 50); err != nil {
+			t.Fatal(err)
+		}
+		return []string{"schedule", "ls", "--json"}
+	},
 }
 
 // jsonNoFixture are the --json commands whose hostile fixture needs a store
@@ -70,7 +81,6 @@ var jsonNoFixture = map[string]string{
 	"curia review":        "needs a git repository with a branch under review",
 	"curia reviews ls":    "own test: reviews_test.go hostile fixture",
 	"curia routing stats": "numbers only",
-	"curia schedule ls":   "own test: schedule_test.go hostile fixture",
 	"curia show":          "needs a transcript file",
 	"curia timeline":      "needs hook events",
 	"curia usage":         "numbers and cleaned ids only",

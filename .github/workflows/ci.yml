@@ -37,10 +37,17 @@ jobs:
       - id: docs
         env:
           EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           docs_only=false
-          if [ "$EVENT" = pull_request ] && files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD); then
+          # The files the PR changes: its head against the MERGE BASE with the
+          # base branch's current tip (fetch-depth 0 gives the history), not
+          # against the tip, which would count the base's own newer changes.
+          # No merge base found: not docs-only.
+          if [ "$EVENT" = pull_request ] &&
+            mb=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA") &&
+            files=$(git diff --name-only --no-renames "$mb" "$HEAD_SHA"); then
             docs_only=$(printf '%s\n' "$files" | scripts/ci-docs-only.sh)
           fi
           echo "docs_only=$docs_only" | tee -a "$GITHUB_OUTPUT"
