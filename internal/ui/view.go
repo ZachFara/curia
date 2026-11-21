@@ -585,7 +585,7 @@ func (m Model) renderStatus() string {
 	switch {
 	case m.killPane != "":
 		style, text = lipgloss.NewStyle(), "kill pane "+m.killPane+"? y kills, any other key cancels"
-	case m.pauseAsk != (pauseSuggestion{}):
+	case m.pause.ask != (pauseSuggestion{}):
 		style, text = lipgloss.NewStyle(), m.pausePrompt()
 	case m.filtering:
 		style, text = lipgloss.NewStyle(), "/"+m.filter
@@ -613,7 +613,7 @@ func (m Model) fitLine(text string) string {
 // task and P can pause it; "" otherwise. Its parts come from the Source and
 // are cleaned when drawn.
 func (m Model) pauseNotice() string {
-	if m.mode != ModePopup || !m.pauseOn || m.budget.PauseTask == "" {
+	if m.mode != ModePopup || !m.pause.on || m.budget.PauseTask == "" {
 		return ""
 	}
 	if m.budget.PauseBusy {
@@ -626,9 +626,9 @@ func (m Model) pauseNotice() string {
 // first, and under 80 cells the tail is shortened, so the question, what it
 // does and y/N fit from 40 cells.
 func (m Model) pausePrompt() string {
-	head := "pause " + clean(m.pauseAsk.task) + ` "`
+	head := "pause " + clean(m.pause.ask.task) + ` "`
 	tail := `"? it commits work in progress and closes its pane  y/N`
-	title := clean(m.pauseAsk.title)
+	title := clean(m.pause.ask.title)
 	if m.width > 0 && m.width < 80 { // narrow: keep the consequence, shortened, rather than cut it
 		tail = `"? closes its pane  y/N`
 	}

@@ -1,6 +1,9 @@
 // Package hook turns one Claude Code hook event into a session update: it
 // parses the payload, folds in what the transcript says, applies the state
-// machine and writes the result to the store.
+// machine and writes the result to the store. Two events also answer
+// Claude Code: a Stop hands back the answers and instructions queued for the
+// session (run.go), and a PreToolUse may deny or ask for a tool call
+// (decide.go, mode.go).
 //
 // Payloads are untrusted. Parse tolerates missing and wrongly typed fields
 // and rejects only what it cannot attribute to a session.
