@@ -16,6 +16,9 @@ type ModeScope struct {
 	Repo string
 }
 
+// modeRootSQL is the one rule for the folder a mode freezes: the session's worktree, else its repository, else NULL.
+const modeRootSQL = `COALESCE(NULLIF(worktree, ''), NULLIF(repo, ''))`
+
 // SetModes sets the mode of every session in scope that has not ended and
 // returns how many it changed. until is when the mode lapses (zero: never).
 // It also freezes sessions.mode_root from the worktree, else the repository, as
@@ -32,7 +35,7 @@ func (s *Store) SetModes(ctx context.Context, scope ModeScope, mode string, unti
 	if !until.IsZero() {
 		u = formatTime(until)
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE sessions SET mode = ?, mode_until = ?, mode_root = COALESCE(NULLIF(worktree, ''), NULLIF(repo, '')) WHERE state != ? AND (? OR repo = ?)`,
+	res, err := s.db.ExecContext(ctx, `UPDATE sessions SET mode = ?, mode_until = ?, mode_root = `+modeRootSQL+` WHERE state != ? AND (? OR repo = ?)`,
 		mode, u, model.StateEnded, scope.All, scope.Repo)
 	if err != nil {
 		return 0, fmt.Errorf("store: set modes: %w", err)

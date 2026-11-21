@@ -131,12 +131,33 @@ func runAway(cmd *cobra.Command, args []string) error {
 	}
 	notReady = append(notReady, waiting...)
 	now := clock()
-	run, err := st.StartAway(ctx, scope, now, now.Add(dur), notReady)
+	run, noRoot, err := awayStart(ctx, st, scope, now, now.Add(dur), notReady)
 	if err != nil {
 		return err
 	}
-	awayPrint(out, cfg, run, len(sent), notReady)
+	awayPrint(out, cfg, run, len(sent), notReady, noRoot)
 	return nil
+}
+
+// awayStart starts the period and names who got no root.
+func awayStart(ctx context.Context, st *store.Store, scope store.ModeScope, now, ends time.Time, notReady []string) (store.AwayRun, []string, error) {
+	run, err := st.StartAway(ctx, scope, now, ends, notReady)
+	if err != nil {
+		return run, nil, err
+	}
+	noRoot, err := awayNoRoot(ctx, st, scope)
+	return run, noRoot, err
+}
+
+// awayNoRoot names the live sessions in scope with no worktree and no repository: away froze no root for them, so they may edit nothing.
+func awayNoRoot(ctx context.Context, st *store.Store, scope store.ModeScope) (names []string, err error) {
+	live, err := modeLive(ctx, st, scope)
+	for _, s := range live {
+		if s.State != model.StateEnded && s.Repo == "" && s.Worktree == "" {
+			names = append(names, spawnShortID(s.ID))
+		}
+	}
+	return names, err
 }
 
 // awayCheck refuses a second period and resolves --repo (default: everyone).
@@ -249,7 +270,7 @@ func awayWhy(s model.Session, got time.Time) string {
 }
 
 // awayPrint says what agents may and may not do without asking, and when it ends.
-func awayPrint(out io.Writer, cfg config.Config, run store.AwayRun, asked int, notReady []string) {
+func awayPrint(out io.Writer, cfg config.Config, run store.AwayRun, asked int, notReady, noRoot []string) {
 	w := func(f string, a ...any) { _, _ = fmt.Fprintf(out, f+"\n", a...) }
 	label := "everyone"
 	if run.Scope != "" {
@@ -260,6 +281,9 @@ func awayPrint(out io.Writer, cfg config.Config, run store.AwayRun, asked int, n
 		w("Not ready when you left: %s.", sanitize.Line(strings.Join(notReady, ", "), 400))
 	} else if asked > 0 {
 		w("Every agent had ended its turn.")
+	}
+	if len(noRoot) > 0 {
+		w("No folder to allow edits in: %s (no worktree or repository known), so away allows them no edits.", sanitize.Line(strings.Join(noRoot, ", "), 400))
 	}
 	w("Without asking, an agent MAY: edit and write files inside its own worktree, run Bash commands that start with one of [%s] and have plain arguments (mode.away_allow), raise decision tickets.",
 		sanitize.Line(strings.Join(cfg.Mode.AwayAllow, ", "), 200))
