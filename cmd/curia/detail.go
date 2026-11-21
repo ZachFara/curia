@@ -166,5 +166,9 @@ func (d detailSource) resources(ctx context.Context, s model.Session) string {
 	if err != nil || !usage.ResourceFresh(r.At, clock(), d.cfg.Resources.Interval) {
 		return "? (the monitor is not running, or has no current sample of this session)"
 	}
-	return "CPU " + usage.ResourceCell(r.CPU, r.RSSMB*1024, r.At, clock(), d.cfg.Resources.Interval)
+	line := "CPU " + usage.ResourceCell(r.CPU, r.RSSMB*1024, r.At, clock(), d.cfg.Resources.Interval)
+	if n, mem := readContainerView(ctx, d.st, d.cfg, clock()).bySession(); n[s.ID] > 0 {
+		line += fmt.Sprintf(" · containers %d (%dM)", n[s.ID], mem[s.ID])
+	}
+	return line
 }

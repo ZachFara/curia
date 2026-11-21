@@ -211,6 +211,11 @@ func loosens(p Policy, l leaf, old, next Config) bool {
 		o, n := number(old, l), number(next, l)
 		return (o == 0) != (n == 0) || n > o
 	}
+	if l.key == "resources.container_memory_mb" || l.key == "resources.container_cpus" {
+		// 0 means no limit, the loosest: a repository may add one or lower one.
+		o, n := number(old, l), number(next, l)
+		return n == 0 && o != 0 || n > o && o != 0
+	}
 	switch p {
 	case PolicyLower:
 		return number(next, l) > number(old, l)
