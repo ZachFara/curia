@@ -129,6 +129,7 @@ func Default() Config {
 		Review:  Review{Approve: "merge", Remote: "origin", DiffTool: "git"},
 		Ntfy:    Ntfy{Devices: map[string]string{}},
 		Restore: Restore{MaxAge: 24 * time.Hour},
+		Serve:   Serve{WebSession: 12 * time.Hour},
 
 		// Plan 5 additions.
 		Usage:  Usage{CheaperModel: "sonnet"},
@@ -214,6 +215,10 @@ type Ntfy struct {
 type Serve struct {
 	Listen    string `toml:"listen"`
 	PublicURL string `toml:"public_url"`
+	// Web turns on the read-only web pages (F26); WebSession is how long a
+	// login cookie lasts.
+	Web        bool          `toml:"web"`
+	WebSession time.Duration `toml:"web_session"`
 }
 
 // Restore configures `curia restore`.
@@ -356,6 +361,9 @@ func (n Ntfy) validate() error {
 }
 
 func (s Serve) validate() error {
+	if s.WebSession < time.Minute || s.WebSession > 30*24*time.Hour {
+		return fmt.Errorf("serve.web_session must be between 1m and 720h, got %v", s.WebSession)
+	}
 	if err := validateURL("serve.public_url", s.PublicURL); err != nil {
 		return err
 	}
