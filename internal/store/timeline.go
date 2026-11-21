@@ -84,6 +84,12 @@ var timelineSources = []timelineSource{
 		repo: "COALESCE((SELECT d.repo FROM decisions d WHERE d.id = p.ref), (SELECT t.repo FROM reviews r JOIN tasks t ON t.id = r.task_id WHERE r.id = p.ref), '')",
 		kind: "'push_sent'", line: "p.ref || ' sent to ' || p.device",
 	},
+	{
+		// F26 part 2: what a web device did, recorded as a WebAction event.
+		from: "events e", where: "e.kind = 'WebAction' AND json_valid(e.payload)",
+		ref: "CAST(e.id AS TEXT)", at: "e.at", session: "''", task: "COALESCE(json_extract(e.payload, '$.task'), '')", repo: "''",
+		kind: "'web_action'", line: "COALESCE(json_extract(e.payload, '$.device'), '') || ': ' || COALESCE(json_extract(e.payload, '$.action'), '')",
+	},
 }
 
 // timelineSQL is the union: per source the newest ?5 rows in [?1, ?2] that
