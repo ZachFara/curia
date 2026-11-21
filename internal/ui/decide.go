@@ -816,7 +816,7 @@ func (m Model) WithDecide(open func(sessionID string) tea.Model) Model {
 
 // WithoutDecide returns m with the d key disabled, saying why when pressed.
 func (m Model) WithoutDecide(why string) Model {
-	m.noAnswer = why
+	m.noDecide = why
 	return m.withView("decide", nil)
 }
 
@@ -836,8 +836,8 @@ func (m Model) openDecide() (Model, tea.Cmd) {
 	open := m.views["decide"]
 	if open == nil {
 		m.notice = noticeNoAnswer
-		if m.noAnswer != "" {
-			m.notice = m.noAnswer
+		if m.noDecide != "" {
+			m.notice = m.noDecide
 		}
 		return m, nil
 	}

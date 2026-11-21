@@ -63,7 +63,7 @@ func (m Model) openFromTimeline(e model.TimelineEvent) (Model, tea.Cmd) {
 		if m.views["decide"] != nil {
 			return m.showChild(m.views["decide"](e.SessionID))
 		}
-		return m.tellTimeline(cmp.Or(m.noAnswer, noticeNoAnswer))
+		return m.tellTimeline(cmp.Or(m.noDecide, noticeNoAnswer))
 	case "review":
 		if m.views["review"] != nil {
 			return m.showChild(m.views["review"](e.TaskID))
