@@ -886,4 +886,4 @@ Still open (owner-run, or not yet run):
 - The `updatedInput` and `defer` hook decisions.
 - Paperclip needs none.
 
-All of this is specific to Claude Code 2.1.329 and Docker Desktop engine 29.2.1 with Compose 5.1.0. To re-run it, use the fixtures in `.superpowers/sdd/2026-11-19-spec-additions/probe-fixtures/` (captured payloads) and the steps in `plan6-live-probes.md` beside them.
+All of this is specific to Claude Code 2.1.329 and Docker Desktop engine 29.2.1 with Compose 5.1.0. The captured payloads were kept outside the repository by the probe run; the redacted copies used as test data live beside the tests that use them (`testdata/` directories). These observations must be re-probed on a new Claude Code version.
