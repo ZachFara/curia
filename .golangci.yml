@@ -445,6 +445,32 @@ linters:
             - pkg: github.com/ZachFara/curia
               desc: "internal/lifecycle may import only config, fleet, gitops, model, sanitize, store, task, tmux and usage: no ui, hook, mcp or cmd"
 
+        # Review logic moved out of cmd/curia: the checks before an approval, the
+        # merge or pull request, request changes and drop. It prints nothing
+        # and never checks who the user is: the commands that call it do. It
+        # sends the change-request note through deliver and tmux, so those two
+        # join the packages it may use. No ui, hook, mcp or cmd.
+        review:
+          list-mode: strict
+          files:
+            - "**/internal/review/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/deliver$
+            - github.com/ZachFara/curia/internal/gitops$
+            - github.com/ZachFara/curia/internal/lifecycle$
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/tmux$
+            - github.com/ZachFara/curia/internal/review$
+            - github.com/ZachFara/curia/internal/testkit$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/review may import only config, deliver, gitops, lifecycle, model, sanitize, store, task and tmux: no ui, hook, mcp or cmd"
+
         # Test support shared by several packages' tests (git repository,
         # temp HOME and store, spawn fixture). Test files only import it: the
         # rule below denies it everywhere else.
@@ -760,6 +786,7 @@ linters:
             - github.com/ZachFara/curia/internal/latency$
             - github.com/ZachFara/curia/internal/gitops$
             - github.com/ZachFara/curia/internal/lifecycle$
+            - github.com/ZachFara/curia/internal/review$
             - github.com/ZachFara/curia/internal/testkit$
           deny:
             - pkg: github.com/ZachFara/curia
@@ -788,6 +815,7 @@ linters:
             - "!**/internal/latency/**"
             - "!**/internal/gitops/**"
             - "!**/internal/lifecycle/**"
+            - "!**/internal/review/**"
             - "!**/internal/testkit/**"
             - "!**/internal/decision/**"
             - "!**/internal/precedent/**"

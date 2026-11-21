@@ -654,7 +654,7 @@ func uiPauseWorld(t *testing.T) *spawnFixture {
 // session.
 func uiReviewWorld(t *testing.T) *spawnFixture {
 	t.Helper()
-	return reviewWithLead(t, model.StateIdle).spawnFixture
+	return &spawnFixture{reviewWithLead(t, model.StateIdle).SpawnFixture}
 }
 
 // uiReviewClosed reports whether review R-1 is no longer pending.
