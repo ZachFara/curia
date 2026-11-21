@@ -657,9 +657,18 @@ func (r *costRun) pauseSuggestion(t *testing.T) {
 	}
 	r.keys(t, pane, "P")
 	r.screen(t, pane, `pause T-2 "Tidy the docs"?`)
-	time.Sleep(400 * time.Millisecond) // the prompt's dwell (250 ms) must pass before a y counts
-	r.keys(t, pane, "y")
-	r.screen(t, pane, "Paused T-2: curia resume T-2 brings it back (")
+	// A y before the prompt's dwell is ignored and restarts a longer wait (750 ms): send it again, spaced past that, until the result shows.
+	paused := false
+	for deadline := time.Now().Add(terminalDeadline); !paused; {
+		r.keys(t, pane, "y")
+		for until := time.Now().Add(time.Second); time.Now().Before(until) && !paused; time.Sleep(20 * time.Millisecond) {
+			got, _ := r.term.srv.run("capture-pane", "-p", "-J", "-t", pane)
+			paused = strings.Contains(got, "Paused T-2: curia resume T-2 brings it back (")
+		}
+		if !paused && time.Now().After(deadline) {
+			t.Fatalf("pane %s never confirmed the pause of T-2", pane)
+		}
+	}
 	// A paused task goes back to ready: curia resume T-2 starts it again.
 	r.wantTasks(t, map[string]string{"T-2": "ready"})
 }

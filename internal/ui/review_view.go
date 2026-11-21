@@ -77,6 +77,29 @@ func kindLines(k lineKind, s string, w, n int) []bodyLine {
 	return out
 }
 
+// rowLines is kindLines with every wrapped continuation inside the gutter, so
+// text an agent wrote cannot start a line where a row or a prompt would.
+func rowLines(k lineKind, s string, w, n int) []bodyLine {
+	var out []bodyLine
+	for i, l := range capLines(wrap(s, max(w-len(gutter), 1)), n, w) {
+		if i > 0 {
+			l = gutter + l
+		}
+		out = append(out, bodyLine{text: l, kind: k})
+	}
+	return out
+}
+
+// blockLines is multi-line text an agent wrote: every line, the first too,
+// sits inside the gutter, and so does every wrapped continuation.
+func blockLines(k lineKind, s string, w int) []bodyLine {
+	var out []bodyLine
+	for _, l := range wrap(s, max(w-len(gutter), 1)) {
+		out = append(out, bodyLine{text: gutter + l, kind: k})
+	}
+	return out
+}
+
 // View draws the head line pinned at the top, the body from the scroll
 // offset, and the outcome and status lines pinned at the bottom: every
 // line at most the window width and the whole exactly its height.
@@ -156,11 +179,11 @@ func (m ReviewModel) top(w int) []bodyLine {
 	}
 	r, ok := m.current()
 	if !ok {
-		return kindLines(linePlain, m.emptyText(), w, 0)
+		return rowLines(linePlain, m.emptyText(), w, 0)
 	}
 	out := headLines(m.headText(r), fmt.Sprintf("review %d of %d", m.cursor+1, len(m.rows)), w)
 	if d, ok := m.shownDetail(); ok && m.alerts > 0 && m.offset > 0 {
-		out = append(out, kindLines(lineAlert, ticketCounts(d)+" above (k scrolls up)", w, 0)...)
+		out = append(out, rowLines(lineAlert, ticketCounts(d)+" above (k scrolls up)", w, 0)...)
 	}
 	return out
 }
@@ -169,9 +192,9 @@ func (m ReviewModel) top(w int) []bodyLine {
 func headLines(head, pos string, w int) []bodyLine {
 	hw := w - lipgloss.Width(pos) - 1
 	if hw < minHeadCells {
-		return append([]bodyLine{{text: fit(pos, w, true), kind: lineHead}}, kindLines(lineHead, head, w, 0)...)
+		return append([]bodyLine{{text: fit(pos, w, true), kind: lineHead}}, rowLines(lineHead, head, w, 0)...)
 	}
-	out := kindLines(lineHead, head, hw, 0)
+	out := rowLines(lineHead, head, hw, 0)
 	out[0].text = fit(out[0].text, hw, false) + " " + pos
 	return out
 }
@@ -249,11 +272,11 @@ func (m ReviewModel) buildBody(w int) (body []bodyLine, alerts int) {
 		return []bodyLine{{text: "reading the review…", kind: lineFaint}}, 0
 	}
 	for _, a := range d.Assumptions {
-		body = append(body, kindLines(lineAlert, assumptionText(a), w, 0)...)
+		body = append(body, rowLines(lineAlert, assumptionText(a), w, 0)...)
 	}
 	for _, b := range d.Blocking {
 		text := sanitize.Line(b.ID, maxIDCells) + " open blocking ticket: " + sanitize.Line(b.Question, maxTicketQuestion)
-		body = append(body, kindLines(lineAlert, text, w, 0)...)
+		body = append(body, rowLines(lineAlert, text, w, 0)...)
 	}
 	alerts = len(body)
 	if alerts > 0 {
@@ -262,7 +285,7 @@ func (m ReviewModel) buildBody(w int) (body []bodyLine, alerts int) {
 	body = append(body, summaryLines(d.Review, w)...)
 	body = append(body, diffLines(d, w)...)
 	body = append(body, decidedLines(d.Decided, w)...)
-	return append(body, kindLines(linePlain, sessionsText(d), w, 0)...), alerts
+	return append(body, rowLines(linePlain, sessionsText(d), w, 0)...), alerts
 }
 
 func assumptionText(a model.Decision) string {
@@ -277,11 +300,11 @@ func summaryLines(r model.Review, w int) []bodyLine {
 	if summary == "" {
 		summary = "(none)"
 	}
-	out = append(out, kindLines(linePlain, summary, w, 0)...)
+	out = append(out, blockLines(linePlain, summary, w)...)
 	out = append(out, bodyLine{})
 	word, kind := testsWord(r.Tests)
-	out = append(out, kindLines(kind, "Tests (the agent's report): "+word, w, 0)...)
-	out = append(out, kindLines(linePlain, sanitize.Line(r.TestsDetail, task.MaxTestsDetail), w, 0)...)
+	out = append(out, rowLines(kind, "Tests (the agent's report): "+word, w, 0)...)
+	out = append(out, blockLines(linePlain, sanitize.Line(r.TestsDetail, task.MaxTestsDetail), w)...)
 	return append(out, bodyLine{})
 }
 
@@ -305,7 +328,7 @@ func diffLines(d ReviewDetail, w int) []bodyLine {
 	if len(d.Head) >= 7 && strings.Trim(d.Head[:7], "0123456789abcdef") == "" { // a commit id, nothing else
 		head += ", branch at " + d.Head[:7]
 	}
-	out := kindLines(lineHead, head+":", w, 0)
+	out := rowLines(lineHead, head+":", w, 0)
 	stat := sanitize.Block(d.DiffStat, maxDiffBytes)
 	if stat != "" {
 		ls := strings.Split(stat, "\n")
@@ -313,12 +336,12 @@ func diffLines(d ReviewDetail, w int) []bodyLine {
 			ls = append(ls[:maxDiffLines:maxDiffLines], fmt.Sprintf("… %d more lines", n))
 		}
 		for _, l := range ls {
-			out = append(out, bodyLine{text: truncate(strings.ReplaceAll(l, "\t", "    "), w)})
+			out = append(out, bodyLine{text: gutter + truncate(strings.ReplaceAll(l, "\t", "    "), w-len(gutter))})
 		}
 	}
 	note := sanitize.Line(d.DiffNote, maxNote)
 	if note != "" {
-		out = append(out, kindLines(lineWarn, note, w, 0)...)
+		out = append(out, blockLines(lineWarn, note, w)...)
 	}
 	if stat == "" && note == "" {
 		out = append(out, bodyLine{text: "nothing to show", kind: lineFaint})
@@ -342,7 +365,7 @@ func decidedLines(ds []model.Decision, w int) []bodyLine {
 		}
 		text := sanitize.Line(d.ID, maxIDCells) + " " + word + ": " + sanitize.Line(d.Question, maxDecidedQuestion) +
 			" → " + sanitize.Line(answerOf(d), maxDecidedAnswer)
-		out = append(out, kindLines(linePlain, text, w, 0)...)
+		out = append(out, rowLines(linePlain, text, w, 0)...)
 	}
 	return append(out, bodyLine{})
 }
@@ -403,7 +426,7 @@ func (m ReviewModel) bottom(w int) []bodyLine {
 		if m.resultErr {
 			kind = lineAlert
 		}
-		out = kindLines(kind, sanitize.Line(m.result, maxNote), w, maxResultLines)
+		out = rowLines(kind, sanitize.Line(m.result, maxNote), w, maxResultLines)
 	}
 	return append(out, m.status(w)...)
 }
@@ -415,9 +438,9 @@ func (m ReviewModel) status(w int) []bodyLine {
 		if m.closeAsked {
 			s += "; the view cannot close until it returns"
 		}
-		return kindLines(linePlain, s, w, 0)
+		return rowLines(linePlain, s, w, 0)
 	case m.diffing:
-		return kindLines(linePlain, "opening the diff…", w, 0)
+		return kindLines(linePlain, "opening the diff…", w, 0) // Curia's own words: nothing to hang
 	case m.mode == reviewConfirmApprove || m.mode == reviewConfirmDrop:
 		return append(m.noticeLines(w), m.promptLines(w)...)
 	case m.mode == reviewNote:
@@ -425,10 +448,10 @@ func (m ReviewModel) status(w int) []bodyLine {
 	case m.notice != "":
 		return m.noticeLines(w)
 	case m.err != nil:
-		return kindLines(lineAlert, "refresh failed: "+sanitize.Line(m.err.Error(), maxNote), w, 2)
+		return rowLines(lineAlert, "refresh failed: "+sanitize.Line(m.err.Error(), maxNote), w, 2)
 	case m.detailErr != nil:
 		text := "reading " + sanitize.Line(m.selectedID(), maxIDCells) + " failed: " + sanitize.Line(m.detailErr.Error(), maxNote)
-		return kindLines(lineAlert, text, w, 2)
+		return rowLines(lineAlert, text, w, 2)
 	}
 	return m.helpLines(w)
 }
@@ -439,7 +462,7 @@ func (m ReviewModel) noticeLines(w int) []bodyLine {
 	if m.noticeErr {
 		kind = lineAlert
 	}
-	return kindLines(kind, sanitize.Line(m.notice, maxNote), w, maxNoticeLines)
+	return rowLines(kind, sanitize.Line(m.notice, maxNote), w, maxNoticeLines)
 }
 
 // promptLines ask to confirm the pending action; an approval that expires
@@ -452,7 +475,7 @@ func (m ReviewModel) promptLines(w int) []bodyLine {
 		if taskID == "" {
 			taskID = d.Review.TaskID
 		}
-		return kindLines(linePlain, "drop "+sanitize.Line(taskID, maxIDCells)+"? its agent is not stopped. y confirms, any other key cancels", w, 0)
+		return rowLines(linePlain, "drop "+sanitize.Line(taskID, maxIDCells)+"? its agent is not stopped. y confirms, any other key cancels", w, 0)
 	}
 	var out []bodyLine
 	if n := len(d.Assumptions); n > 0 {
@@ -460,13 +483,13 @@ func (m ReviewModel) promptLines(w int) []bodyLine {
 		for i, a := range d.Assumptions {
 			ids[i] = sanitize.Line(a.ID, maxIDCells)
 		}
-		out = kindLines(lineAlert, fmt.Sprintf("%s (%s) will expire.", plural(n, "unconfirmed assumption"), strings.Join(ids, ", ")), w, 0)
+		out = rowLines(lineAlert, fmt.Sprintf("%s (%s) will expire.", plural(n, "unconfirmed assumption"), strings.Join(ids, ", ")), w, 0)
 	}
 	text := "merge " + branch + " into " + base + "? y confirms, any other key cancels"
 	if d.Approve == model.ApprovePR {
 		text = "push " + branch + " and open a pull request? y confirms, any other key cancels"
 	}
-	return append(out, kindLines(linePlain, text, w, 0)...)
+	return append(out, rowLines(linePlain, text, w, 0)...)
 }
 
 // noteLines are the note input: what it is for and how to send it, a
@@ -474,7 +497,7 @@ func (m ReviewModel) promptLines(w int) []bodyLine {
 func (m ReviewModel) noteLines(w int) []bodyLine {
 	head := fmt.Sprintf("request changes on %s · enter sends · esc cancels · %d/%d",
 		sanitize.Line(m.pendingID, maxIDCells), len(m.buf), model.MaxReviewNote)
-	out := kindLines(lineFaint, head, w, 0)
+	out := rowLines(lineFaint, head, w, 0)
 	if m.notice != "" {
 		out = append(out, m.noticeLines(w)...)
 	}
@@ -499,5 +522,5 @@ func (m ReviewModel) helpLines(w int) []bodyLine {
 			a = "a push and open a pull request"
 		}
 	}
-	return kindLines(lineFaint, a+" · c request changes · x drop · o diff · ]/[ next/prev · j/k scroll · "+q, w, maxHelpLines)
+	return rowLines(lineFaint, a+" · c request changes · x drop · o diff · ]/[ next/prev · j/k scroll · "+q, w, maxHelpLines)
 }
