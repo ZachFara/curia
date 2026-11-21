@@ -18,8 +18,9 @@ import (
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
-// loadConfig loads ~/.config/curia/config.toml over the defaults (a missing
-// file yields the defaults; CURIA_DB overrides the database path).
+// loadConfig loads $XDG_CONFIG_HOME/curia/config.toml (default
+// ~/.config/curia/config.toml) over the defaults (a missing file yields the
+// defaults; CURIA_DB overrides the database path).
 func loadConfig() (config.Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -30,7 +31,7 @@ func loadConfig() (config.Config, error) {
 
 // configFile is the path of Curia's configuration under home.
 func configFile(home string) string {
-	return filepath.Join(home, ".config", "curia", "config.toml")
+	return filepath.Join(config.XDGDir("XDG_CONFIG_HOME", home, ".config"), "config.toml")
 }
 
 // openStore opens the store at cfg.DBPath, creating it if needed.

@@ -540,3 +540,26 @@ func TestCostlensKeepExpires(t *testing.T) {
 		t.Errorf("Get after the new run = %v %v", usd, ok)
 	}
 }
+
+// The analyzer is started without Curia's keys and tokens, and with the rest
+// of the environment (a node program needs PATH and HOME).
+func TestCostlensEnvDropsSecrets(t *testing.T) {
+	t.Setenv("CURIA_LINEAR_API_KEY", "lin_secret")
+	t.Setenv("CURIA_NTFY_TOKEN", "tk_secret")
+	t.Setenv("CURIA_OTHER_SECRET", "x")
+	t.Setenv("CURIA_KEEP_ME", "kept")
+	dir := t.TempDir()
+	stub := costlensFile(t, filepath.Join(dir, "analyzer.js"), "env\necho '{\"currentProject\":{\"branches\":[]}}'\n")
+	out, err := costlensRealRun(context.Background(), "/bin/sh", stub, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"CURIA_LINEAR_API_KEY", "CURIA_NTFY_TOKEN", "CURIA_OTHER_SECRET", "lin_secret"} {
+		if strings.Contains(string(out), bad) {
+			t.Errorf("analyzer environment holds %s", bad)
+		}
+	}
+	if !strings.Contains(string(out), "CURIA_KEEP_ME=kept") || !strings.Contains(string(out), "PATH=") {
+		t.Errorf("analyzer environment lost the rest:\n%s", out)
+	}
+}

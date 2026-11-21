@@ -127,7 +127,7 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 		starting = !found || (kind == model.SessionStart && !state.Continues(prev, ev))
 		// Ticket D-2: a session with no repository looks again once per new cwd.
 		if !starting {
-			start = recheck(prev, ev.Cwd, env)
+			start = recheck(prev, ev, env)
 		}
 	}
 	if starting {
@@ -153,10 +153,13 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 	return Result{Session: out}, readErr
 }
 
-// recheck asks git about cwd for a stored session with no repository, when
-// cwd is not the directory last asked about and is usable; else nil.
-func recheck(prev model.Session, cwd string, env Env) *startInfo {
-	if prev.Repo != "" || prev.CheckedCwd == cwd || !usableDir(cwd) {
+// recheck asks git about ev's cwd for a stored session with no repository,
+// when cwd is not the directory last asked about and is usable; else nil.
+// An event the state machine ignores never reaches enrich, which would store
+// the answer, so it asks nothing.
+func recheck(prev model.Session, ev model.Event, env Env) *startInfo {
+	cwd := ev.Cwd
+	if prev.Repo != "" || prev.CheckedCwd == cwd || !usableDir(cwd) || state.Ignores(prev, ev) {
 		return nil
 	}
 	start := &startInfo{}

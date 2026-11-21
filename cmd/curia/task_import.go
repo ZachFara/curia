@@ -240,7 +240,10 @@ var linearClientFor = func(url, key string) linear.Client { return linear.Client
 
 // linearRow is one printed line of an import: the issue, what happened,
 // and the task's id and title or why the issue was skipped.
-type linearRow struct{ ref, outcome, note string }
+type linearRow struct {
+	ref, outcome, note string
+	replaced           string // the id of a task whose differing local text the import replaced
+}
 
 // linearResult is what one Linear import did.
 type linearResult struct {
@@ -414,6 +417,10 @@ func linearStore(ctx context.Context, st *store.Store, f linear.Fields, prior ma
 		row.outcome = linearUnchanged
 	default:
 		row.outcome = linearUpdated
+		if seen && !created && (before.Title != stored.Title || before.Body != stored.Body || !slices.Equal(before.Tags, stored.Tags)) {
+			// shortcut: a local edit cannot be told from a change in Linear (no copy of the last import is stored); a migration for one is not worth it.
+			row.replaced = stored.ID
+		}
 	}
 	row.note = stored.ID + " " + stored.Title
 	return row, nil
@@ -451,6 +458,11 @@ func linearPrint(w io.Writer, res linearResult) error {
 	}
 	if err := tw.Flush(); err != nil {
 		return err
+	}
+	for _, r := range res.rows {
+		if r.replaced != "" {
+			_, _ = fmt.Fprintf(w, "%s: the local title, body or tags differ from Linear's and were replaced by Linear's\n", sanitize.Line(r.replaced, 24))
+		}
 	}
 	if res.capped {
 		_, _ = fmt.Fprintf(w, "imported the first %d of your assigned issues, the most one import reads: there may be more; narrow with --team <KEY>\n", linearMostRead)

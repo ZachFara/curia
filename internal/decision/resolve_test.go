@@ -49,9 +49,9 @@ func TestResolveTable(t *testing.T) {
 			model.StatusAnswered, model.DeliveryQueued, "", "use the existing queue", model.ScopeRepo,
 		},
 		{
-			"assume recommended key", model.ModeAssume,
+			"assume recommended key (the table gives every answer reasoning)", model.ModeAssume,
 			model.Answer{Key: "A"},
-			model.StatusConfirmed, model.DeliveryNone, "A", "A: Postgres table", model.ScopeRepo,
+			model.StatusConfirmed, model.DeliveryQueued, "A", "A: Postgres table", model.ScopeRepo,
 		},
 		{
 			"assume other key", model.ModeAssume,
