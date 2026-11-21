@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ZachFara/curia/internal/store"
 )
 
 // settingsBadge is `curia status` after the config commands ran.
@@ -83,5 +85,32 @@ func TestSettingsRowsMatchConfigList(t *testing.T) {
 	}
 	if !strings.Contains(got, "routing.aliases = (0 entries)") {
 		t.Errorf("a table is not shown as a count:\n%s", got)
+	}
+}
+
+// D-11: the settings view's source refuses a change under an agent marker
+// by itself (the second layer under the view's read-only mode): the user
+// file is not written and the store is not touched.
+func TestSettingsSourceSetRefusesAnAgent(t *testing.T) {
+	db := hookHome(t)
+	useFakeTmux(t)
+	userTerminalAs(t, true)
+	t.Setenv("CLAUDECODE", "1")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	refused := userOnly("ui", "change settings from the dashboard")
+	if refused == nil {
+		t.Fatal("the guard accepted an agent context")
+	}
+	_, err = settingsSource{st: st, refused: refused}.Set(context.Background(), "notify_bell", "true")
+	if err == nil || !strings.Contains(err.Error(), "CLAUDECODE is set") {
+		t.Errorf("Set under an agent marker = %v, want the guard's refusal", err)
+	}
+	home, _ := os.UserHomeDir()
+	if _, serr := os.Stat(configFile(home)); !os.IsNotExist(serr) {
+		t.Errorf("the user config file was written for an agent: %v", serr)
 	}
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -223,9 +222,7 @@ func runActivity(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if activityJSON {
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		return enc.Encode(rep)
+		return writeJSON(cmd.OutOrStdout(), rep, "  ")
 	}
 	return activityPrint(cmd.OutOrStdout(), rep)
 }

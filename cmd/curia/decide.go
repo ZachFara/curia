@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -334,12 +332,5 @@ func decidePrintJSON(w io.Writer, out model.Outcome) error {
 		Delivery: sanitize.Line(string(d.Delivery), 20), DeliveredVia: sanitize.Line(string(d.DeliveredVia), 20),
 		Note: sanitize.Line(out.Note, decideNoteLimit),
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(r); err != nil {
-		return err
-	}
-	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
-	return err
+	return writeJSON(w, r, "")
 }

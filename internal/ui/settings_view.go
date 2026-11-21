@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -73,9 +74,19 @@ func (m SettingsModel) status() string {
 	case m.typing:
 		return cleanLine(r.Key, 40) + " = " + cleanLine(m.input, 120) + "_"
 	case m.asking:
-		return "y sets " + cleanLine(r.Key, 30) + " = " + cleanLine(m.input, 30) + ", any key cancels. " + cleanLine(m.notice, 80)
+		return "y sets " + cleanLine(r.Key, 30) + " = " + cutValue(m.input) + ", any key cancels. " + cleanLine(m.notice, 80)
 	case m.notice != "":
 		return cleanLine(m.notice, 200)
 	}
 	return settingsHelp
+}
+
+// cutValue is the input as the confirmation shows it: cut at 30 runes with an
+// ellipsis and the full length, since the whole input is what gets set.
+func cutValue(in string) string {
+	v := cleanLine(in, 30)
+	if n := len([]rune(strings.TrimSpace(clean(in)))); n > 30 {
+		return v + "… (" + strconv.Itoa(n) + " chars)"
+	}
+	return v
 }

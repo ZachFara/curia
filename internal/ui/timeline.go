@@ -292,7 +292,7 @@ func (m TimelineModel) bodyLines(text string, err error) []string {
 	if err != nil {
 		return []string{"read failed: " + sanitize.Line(err.Error(), 120)}
 	}
-	return wrap(sanitize.Text(text, timelineTextLimit), m.textWidth())
+	return indent(wrap(sanitize.Text(text, timelineTextLimit), m.textWidth()-len(gutter)))
 }
 
 func (m TimelineModel) fullKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
