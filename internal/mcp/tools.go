@@ -44,6 +44,7 @@ type Deps struct {
 
 // The tools' fixed texts.
 const (
+	instrAway          = "The owner is away, so this ticket was stored as an assumption that waits for them: it is not answered. Do not take the action it covers (and nothing irreversible); continue with other safe work, or end your turn. The owner confirms or overrides it when back."
 	instrBlocking      = "Finish any safe work, then end your turn. The answer will arrive as a message; if it has not when you are next active, call check_decision."
 	instrAssume        = "Proceed with your assumption. You may be overridden later; if so, revert the work built on it."
 	instrPrecedent     = "A past decision looks like this one. If it settles your question, call withdraw_decision with precedent_id. If your case differs, call request_decision again with the same ticket plus differs_from and differs_why. Until then the ticket stays open."
@@ -338,6 +339,13 @@ func (t *tools) request(ctx context.Context, args json.RawMessage, now time.Time
 	if terr := t.checkDiffersFrom(ctx, d); terr != nil {
 		return nil, terr
 	}
+	coerced := false
+	if d.Mode == model.ModeBlocking {
+		// F20: while the owner is away a blocking ticket would stall the agent with nobody to answer.
+		if away, aerr := t.Store.SessionAway(ctx, c.SessionID, now); aerr == nil && away {
+			d.Mode, d.CoercedFrom, d.Assumption, d.ExpiresAt, coerced = model.ModeAssume, string(model.ModeBlocking), "proceed with option "+d.Recommendation, time.Time{}, true
+		}
+	}
 	stored, dup, err := t.Store.CreateDecision(ctx, d)
 	if err != nil {
 		return nil, t.internal("request_decision", err)
@@ -358,6 +366,8 @@ func (t *tools) request(ctx context.Context, args json.RawMessage, now time.Time
 	switch {
 	case len(strong) > 0:
 		res.Instruction = instrPrecedent
+	case coerced:
+		res.Instruction = instrAway
 	case stored.Mode == model.ModeAssume:
 		res.Instruction = instrAssume
 	}

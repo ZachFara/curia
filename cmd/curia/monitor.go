@@ -44,6 +44,7 @@ type monitorJob struct {
 var monitorJobs = []monitorJob{
 	{"sample resources", (*monitorEnv).sampleResources},
 	{"prune resources", (*monitorEnv).pruneResources},
+	{"end away", (*monitorEnv).expireAway},
 }
 
 // monitorEnv is what a job may use.

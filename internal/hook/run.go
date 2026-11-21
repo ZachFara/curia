@@ -134,6 +134,8 @@ func Run(ctx context.Context, kind model.EventKind, payload []byte, env Env, st 
 		if start, err = sessionStart(ctx, ev, env, st); err != nil {
 			return Result{}, err
 		}
+		// F20: a session that starts during an away period is away too. Runs after the row exists; best effort (one write per start).
+		defer func() { _ = st.InheritAway(ctx, ev.SessionID) }()
 	}
 	if kind == model.Stop {
 		return runStop(ctx, ev, start, st, cfg)

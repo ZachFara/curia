@@ -1064,6 +1064,8 @@ var userOnlyCommands = map[string][]string{
 	"curia mode edits":      {},
 	"curia mode away":       {"--all"},
 	"curia mode bypass":     {"--all", "--for", "1h"},
+	"curia away":            {"6h"},
+	"curia back":            {},
 	"curia config edit":     {},
 	"curia config rollback": {"1"},
 	"curia clean":           {"T-1"},
