@@ -66,6 +66,7 @@ type Config struct {
 	Schedule  Schedule  `toml:"schedule"`
 	Cost      Cost      `toml:"cost"`
 	Mode      Mode      `toml:"mode"`
+	Away      Away      `toml:"away"`
 	RC        RC        `toml:"rc"`
 }
 
@@ -154,6 +155,7 @@ func Default() Config {
 		Schedule:  defaultSchedule(),
 		Tasks:     defaultTasks(),
 		Mode:      defaultMode(),
+		Away:      defaultAway(),
 	}
 }
 
@@ -189,6 +191,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.Mode.validate(); err != nil {
+		return err
+	}
+	if err := c.Away.validate(); err != nil {
 		return err
 	}
 	if err := c.Schedule.validate(); err != nil {

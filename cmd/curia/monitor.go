@@ -46,6 +46,8 @@ var monitorJobs = []monitorJob{
 	{"prune resources", (*monitorEnv).pruneResources},
 	{"fire schedules", (*monitorEnv).fireSchedules},
 	{"sample containers", (*monitorEnv).sampleContainers},
+	{"end away", (*monitorEnv).expireAway},
+	{"auto-spawn", (*monitorEnv).autoSpawn},
 }
 
 // monitorEnv is what a job may use.
@@ -62,6 +64,7 @@ type monitorEnv struct {
 	tmuxFor func(socket string) tmux.Client
 
 	lastPrune time.Time
+	lastAuto  time.Time
 }
 
 const (

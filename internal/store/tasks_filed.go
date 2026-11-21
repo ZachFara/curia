@@ -52,8 +52,8 @@ func (s *Store) FileTask(ctx context.Context, t model.Task, perDay int) (model.T
 	if err != nil {
 		return model.Task{}, fail("file task", id, err)
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE tasks SET filed_by = ?, filed_reason = ?, filer_lineage = ? WHERE id = ?`,
-		t.FiledBy, t.FiledReason, lineage, id); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE tasks SET filed_by = ?, filed_reason = ?, filer_lineage = ?, ready_hash = ? WHERE id = ?`,
+		t.FiledBy, t.FiledReason, lineage, readyHashFor(t), id); err != nil {
 		return model.Task{}, fail("file task", id, err)
 	}
 	stored, err := commitTask(ctx, tx, id)
@@ -86,4 +86,13 @@ func filerLineage(ctx context.Context, tx *sql.Tx, session string) (string, erro
 	}
 	b, err := json.Marshal(l)
 	return string(b), err
+}
+
+// readyHashFor is the F29 hash of a task filed ready by the user's own
+// level = ready setting; any other task has none (NULL).
+func readyHashFor(t model.Task) any {
+	if t.Status != model.TaskReady {
+		return nil
+	}
+	return model.ReadyHash(t.Title, t.Body)
 }

@@ -236,14 +236,14 @@ func insertDecision(ctx context.Context, tx *sql.Tx, d model.Decision, options s
 INSERT INTO decisions (
   id, session_id, task_id, repo, question, context, options, recommendation, rationale,
   reversibility, mode, assumption, scope, tags, status, differs_from, differs_why, args_hash,
-  delivery, created_at, expires_at
+  delivery, created_at, expires_at, coerced_from
 ) VALUES (
   'D-' || (SELECT COALESCE(MAX(n), 0) + 1 FROM decisions), ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?, 'open', ?, ?, ?, 'none', ?, ?
+  ?, ?, ?, ?, ?, 'open', ?, ?, ?, 'none', ?, ?, NULLIF(?, '')
 ) RETURNING id`,
 		d.SessionID, d.TaskID, d.Repo, d.Question, d.Context, options, d.Recommendation, d.Rationale,
 		d.Reversibility, d.Mode, d.Assumption, d.Scope, strings.Join(d.Tags, " "), d.DiffersFrom, d.DiffersWhy,
-		d.ArgsHash, formatTime(d.CreatedAt), formatTime(d.ExpiresAt)).Scan(&id)
+		d.ArgsHash, formatTime(d.CreatedAt), formatTime(d.ExpiresAt), d.CoercedFrom).Scan(&id)
 	return id, err
 }
 

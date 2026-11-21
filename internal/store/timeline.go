@@ -95,6 +95,12 @@ var timelineSources = []timelineSource{
 		ref: "CAST(r.id AS TEXT)", at: "r.ran_at", session: "''", task: "''", repo: "''",
 		kind: "'schedule_run'", line: "r.schedule_id || ' ' || r.outcome",
 	},
+	{
+		from: "auto_spawn_runs a", where: "1",
+		ref: "CAST(a.id AS TEXT)", at: "a.at", session: "a.session_id", task: "a.task_id",
+		repo: "COALESCE((SELECT t.repo FROM tasks t WHERE t.id = a.task_id), '')",
+		kind: "'auto_spawn'", line: "'auto-spawn ' || a.outcome || CASE WHEN a.check_ = '' THEN '' ELSE ' (' || a.check_ || ')' END || ': ' || a.task_id || ' ' || a.detail",
+	},
 }
 
 // timelineSQL is the union: per source the newest ?5 rows in [?1, ?2] that
