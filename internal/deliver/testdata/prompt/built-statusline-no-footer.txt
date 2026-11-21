@@ -1,0 +1,22 @@
+  rationale. Keep working with your assumption, then reply only: raised.
+
+  Called curia (ctrl+o to expand)
+
+⏺ raised
+
+✻ Baked for 4s · done 6:38 PM
+
+❯ Call the curia request_decision MCP tool in mode blocking: question "Ship the
+  badge now or wait?", options ship and wait, recommendation wait, short
+  rationale. Then end your turn with only the word waiting.
+
+  Called curia (ctrl+o to expand)
+
+⏺ waiting
+
+✻ Churned for 2s · done 6:39 PM
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  Haiku 5.5 · ctx 7% · $0.05 · 5h 86%

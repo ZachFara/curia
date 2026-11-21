@@ -59,7 +59,9 @@ const (
 	promptMark   = "❯"
 	ruleRune     = '─'
 	minRuleRunes = 10
-	maxFooter    = 2
+	// maxFooter is the most rows under the box: up to three of the user's
+	// status line, the footer and the Stop-hook line.
+	maxFooter = 5
 	// dialogScan is how many lines from the bottom are searched for a
 	// dialog's or menu's hints.
 	dialogScan = 20
@@ -107,6 +109,7 @@ var idleFooters = []string{
 	"⏵⏵ accept edits on (shift+tab to cycle)",
 	"⏸ plan mode on (shift+tab to cycle)",
 	"⏸ manual mode on · ? for shortcuts",
+	"⏸ manual mode on", // 80 columns cut " · ? for shortcuts" (live check 5)
 	"⏵⏵ auto mode on (shift+tab to cycle) · /tasks to see subagents",
 	"⏵⏵ accept edits on (shift+tab to cycle) · /tasks to see subagents",
 	"⏸ plan mode on (shift+tab to cycle) · /tasks to see subagents",
@@ -270,10 +273,14 @@ func isRule(l string) bool {
 	return n >= minRuleRunes
 }
 
-// footerState reads the lines under the input box: promptEmpty when they
-// are exactly one known idle footer line.
+// footerState reads the lines under the input box. Rows under the box are
+// the user's status line (any text, Claude Code draws it first), then the
+// footer, then at most the Stop-hook line. The status line cannot be matched
+// by content, so the rule is by position: promptEmpty only when the last
+// row, the Stop-hook line aside, is exactly one known idle footer. A dialog
+// or anything else under the box ends in no idle footer and is refused.
 func footerState(footer []string) promptState {
-	idle := 0
+	idle, last := 0, ""
 	for _, l := range footer {
 		l = strings.TrimSpace(l)
 		switch {
@@ -283,12 +290,12 @@ func footerState(footer []string) promptState {
 			return promptDraft // shown only while the prompt holds a draft
 		case slices.Contains(idleFooters, l):
 			idle++
-		case l == stopHookFooter:
-		case l != "":
-			return promptUnknown
+		}
+		if l != "" && l != stopHookFooter {
+			last = l
 		}
 	}
-	if idle != 1 { // every captured idle prompt has exactly one footer line
+	if idle != 1 || !slices.Contains(idleFooters, last) { // every captured idle prompt has exactly one footer line, last
 		return promptUnknown
 	}
 	return promptEmpty

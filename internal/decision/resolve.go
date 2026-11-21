@@ -54,7 +54,12 @@ func Resolve(d model.Decision, a model.Answer, now time.Time) (model.Decision, e
 	case d.Mode != model.ModeAssume:
 		d.Status, d.Delivery = model.StatusAnswered, model.DeliveryQueued
 	case d.AnswerKey != "" && d.AnswerKey == d.Recommendation:
+		// A bare confirmation gets no receipt: it would only interrupt. The
+		// user's words are information, so a note is delivered like an override.
 		d.Status, d.Delivery = model.StatusConfirmed, model.DeliveryNone
+		if reasoning != "" {
+			d.Delivery = model.DeliveryQueued
+		}
 	default:
 		d.Status, d.Delivery = model.StatusOverridden, model.DeliveryQueued
 	}

@@ -165,3 +165,29 @@ func (m DetailModel) clamp() DetailModel {
 	m.offset = max(min(m.offset, len(m.body())-m.room()), 0)
 	return m
 }
+
+// WithDetail returns m with the i key enabled in the popup: it shows the
+// model open builds for the selected session's id until it sends DetailClosedMsg.
+func (m Model) WithDetail(open func(sessionID string) tea.Model) Model {
+	return m.withView("detail", open)
+}
+
+// openDetail shows the detail view of the selected row's session (a team's
+// row: the member Enter would jump to).
+func (m Model) openDetail() (Model, tea.Cmd) {
+	r, ok := m.current()
+	switch {
+	case !ok:
+		return m, nil
+	case m.mode != ModePopup || m.views["detail"] == nil:
+		m.notice = "the agent detail opens in the popup (curia ui)"
+		return m, nil
+	}
+	return m.showChild(m.views["detail"](r.target().ID))
+}
+
+func (DetailClosedMsg) closedChild() {}
+
+func init() {
+	registerCommand(command{keys: []string{"i"}, help: "i detail", order: 20, run: Model.openDetail})
+}

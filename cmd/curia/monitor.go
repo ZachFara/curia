@@ -44,6 +44,8 @@ type monitorJob struct {
 var monitorJobs = []monitorJob{
 	{"sample resources", (*monitorEnv).sampleResources},
 	{"prune resources", (*monitorEnv).pruneResources},
+	{"fire schedules", (*monitorEnv).fireSchedules},
+	{"sample containers", (*monitorEnv).sampleContainers},
 }
 
 // monitorEnv is what a job may use.
@@ -56,6 +58,8 @@ type monitorEnv struct {
 	// server); ps is one snapshot of the process table. Tests replace them.
 	panes func(ctx context.Context, socket string) ([]tmux.Pane, error)
 	ps    func(ctx context.Context) ([]usage.ProcRow, error)
+	// tmuxFor is the tmux client of the server at socket (schedules type through it).
+	tmuxFor func(socket string) tmux.Client
 
 	lastPrune time.Time
 }
@@ -455,7 +459,8 @@ func runMonitorLoop(ctx context.Context, cfg config.Config, say func(string, ...
 		panes: func(ctx context.Context, socket string) ([]tmux.Pane, error) {
 			return tmux.NewExec(socket).ListPanes(ctx)
 		},
-		ps: psResources,
+		ps:      psResources,
+		tmuxFor: tmux.NewExec,
 	}
 	monitorLoopEnv(env)
 	logger.Info("monitor: started", "pid", os.Getpid(), "interval", cfg.Resources.Interval.String())

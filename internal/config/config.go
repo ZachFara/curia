@@ -63,6 +63,7 @@ type Config struct {
 	Tasks     Tasks     `toml:"tasks"`
 	Resources Resources `toml:"resources"`
 	Monitor   Monitor   `toml:"monitor"`
+	Schedule  Schedule  `toml:"schedule"`
 	Cost      Cost      `toml:"cost"`
 }
 
@@ -104,12 +105,22 @@ func validateEditor(v string) error {
 	return nil
 }
 
+// XDGDir is Curia's directory under an XDG base directory: $env when that is
+// an absolute path, else home/fallback. The XDG spec says a relative value is
+// invalid and must be ignored.
+func XDGDir(env, home, fallback string) string {
+	if d := os.Getenv(env); filepath.IsAbs(d) {
+		return filepath.Join(d, "curia")
+	}
+	return filepath.Join(home, fallback, "curia")
+}
+
 // Default returns the configuration used when no file overrides it.
 func Default() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
-		DBPath:            filepath.Join(home, ".local/share/curia/curia.db"),
-		LogPath:           filepath.Join(home, ".local/state/curia/curia.log"),
+		DBPath:            filepath.Join(XDGDir("XDG_DATA_HOME", home, ".local/share"), "curia.db"),
+		LogPath:           filepath.Join(XDGDir("XDG_STATE_HOME", home, ".local/state"), "curia.log"),
 		ContextMax:        map[string]int{},
 		DefaultContextMax: 200000,
 		ContextWarnPct:    60,
@@ -128,6 +139,7 @@ func Default() Config {
 		Review:  Review{Approve: "merge", Remote: "origin", DiffTool: "git"},
 		Ntfy:    Ntfy{Devices: map[string]string{}},
 		Restore: Restore{MaxAge: 24 * time.Hour},
+		Serve:   Serve{WebSession: 12 * time.Hour},
 
 		// Plan 5 additions.
 		Usage:  Usage{CheaperModel: "sonnet"},
@@ -137,6 +149,7 @@ func Default() Config {
 		Activity:  defaultActivity(),
 		Resources: defaultResources(),
 		Monitor:   Monitor{Autostart: true},
+		Schedule:  defaultSchedule(),
 		Tasks:     defaultTasks(),
 	}
 }
@@ -170,6 +183,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.Resources.validate(); err != nil {
+		return err
+	}
+	if err := c.Schedule.validate(); err != nil {
 		return err
 	}
 	if err := c.Cost.validate(); err != nil {
@@ -209,6 +225,10 @@ type Ntfy struct {
 type Serve struct {
 	Listen    string `toml:"listen"`
 	PublicURL string `toml:"public_url"`
+	// Web turns on the read-only web pages (F26); WebSession is how long a
+	// login cookie lasts.
+	Web        bool          `toml:"web"`
+	WebSession time.Duration `toml:"web_session"`
 }
 
 // Restore configures `curia restore`.
@@ -351,6 +371,9 @@ func (n Ntfy) validate() error {
 }
 
 func (s Serve) validate() error {
+	if s.WebSession < time.Minute || s.WebSession > 30*24*time.Hour {
+		return fmt.Errorf("serve.web_session must be between 1m and 720h, got %v", s.WebSession)
+	}
 	if err := validateURL("serve.public_url", s.PublicURL); err != nil {
 		return err
 	}
