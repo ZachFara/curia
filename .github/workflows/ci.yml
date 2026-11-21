@@ -133,7 +133,20 @@ jobs:
       # D-15: a failed first attempt is rerun once on a fresh runner by ci-rerun.yml.
       - if: github.run_attempt > 1
         run: echo "::warning::latency shard ${{ matrix.shard }} is an automatic rerun (attempt ${{ github.run_attempt }}) after a failed first attempt (ci-rerun.yml, D-15)"
-      - run: make test-latency SHARD=${{ matrix.shard }}
+      # "Could not measure" (machine too slow for a gate; the verdict's last line) also fails the job, so
+      # nothing unmeasured merges as a pass; it is rerun once like a failure and says what it is.
+      - env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set +e
+          make test-latency SHARD="$SHARD" 2>&1 | tee latency.out
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ] && grep -q '^LATENCY-COULD-NOT-MEASURE' latency.out; then
+            echo "::error::latency shard $SHARD was never measured: the runner was too slow for a gate. Rerun the job; this is not a code failure."
+            printf '### Latency shard %s: could not measure\nNo gate failed, but the machine was too slow to measure one. Needs a manual rerun, not a code fix.\n' "$SHARD" >>"$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
 
   # The required status check. Passes only if every job above succeeded:
   # failed, cancelled and skipped all fail it (if: always() so it still runs).

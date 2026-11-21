@@ -32,7 +32,7 @@ const latencyBatches = 3
 const latencyNominal = 2 * time.Millisecond
 
 // latencyMaxScale is the most a slow machine is excused: a reference more than
-// latencyMaxScale times latencyNominal fails the gate instead of stretching it further.
+// latencyMaxScale times latencyNominal means the gate could not be measured (internal/latency, owner decision 2026-11-20).
 const latencyMaxScale = 2
 
 // latencyGate runs batch latencyBatches times, always all of them (batch measures one batch
@@ -73,7 +73,7 @@ func latencyVerdict(median, threshold, ref time.Duration) (limit time.Duration, 
 	limit = time.Duration(float64(threshold) * scale)
 	switch {
 	case raw > latencyMaxScale:
-		fail = fmt.Sprintf("reference commit p95 took %v, %.2fx the nominal %v, over the %vx allowance: the machine is too slow for this gate, which fails rather than excuses it", ref, raw, latencyNominal, latencyMaxScale)
+		fail = fmt.Sprintf("could not measure: the machine is too slow for this gate (reference p95 %v, %.2f times the nominal %v, over the %vx allowance)", ref, raw, latencyNominal, latencyMaxScale)
 	case median >= limit:
 		fail = fmt.Sprintf("median p95 = %v, want < %v (threshold %v x scale %.2f; reference p95 %v, nominal %v)", median, limit, threshold, scale, ref, latencyNominal)
 	}

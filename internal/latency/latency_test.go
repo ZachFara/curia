@@ -34,8 +34,8 @@ func TestVerdictBelowNominalKeepsTheAbsoluteThreshold(t *testing.T) {
 
 func TestVerdictOverTwiceNominalFailsEvenWhenFast(t *testing.T) {
 	_, scale, fail := latency.Verdict(1*ms, threshold, latency.Nominal*21/10)
-	if scale != 2 || !strings.Contains(fail, "too slow") {
-		t.Errorf("scale %v, fail %q, want 2 and a too-slow failure", scale, fail)
+	if scale != 2 || !strings.HasPrefix(fail, latency.UnmeasuredPrefix) {
+		t.Errorf("scale %v, fail %q, want 2 and a could-not-measure verdict", scale, fail)
 	}
 }
 
@@ -71,9 +71,41 @@ func batches(gate string, p95s ...time.Duration) []latency.Result {
 
 func judge(t *testing.T, rs []latency.Result) (string, bool) {
 	t.Helper()
-	table, ok := latency.Judge(rs)
+	table, outcome := latency.Judge(rs)
 	t.Log(table)
-	return table, ok
+	return table, outcome == latency.Pass
+}
+
+func TestJudgeOutcomes(t *testing.T) {
+	slow := latency.Nominal * 3 // over the 2x allowance: could not measure
+	mk := func(gate string, p, ref time.Duration) []latency.Result {
+		rs := batches(gate, p, p, p)
+		for i := range rs {
+			rs[i].Ref95 = ref
+		}
+		return rs
+	}
+	for _, c := range []struct {
+		name string
+		rs   []latency.Result
+		want latency.Outcome
+	}{
+		{"within allowance, under threshold", mk("g", 5*ms, latency.Nominal), latency.Pass},
+		{"within allowance, over threshold", mk("g", 400*ms, latency.Nominal), latency.Fail},
+		{"over allowance", mk("g", 5*ms, slow), latency.CouldNotMeasure},
+		{"over allowance and over threshold", mk("g", 400*ms, slow), latency.CouldNotMeasure},
+		{"unmeasured and failing: fail wins", append(mk("a", 5*ms, slow), mk("b", 400*ms, latency.Nominal)...), latency.Fail},
+		{"unmeasured and passing", append(mk("a", 5*ms, slow), mk("b", 5*ms, latency.Nominal)...), latency.CouldNotMeasure},
+		{"no results", nil, latency.Fail},
+	} {
+		table, got := latency.Judge(c.rs)
+		if got != c.want {
+			t.Errorf("%s: outcome %v, want %v:\n%s", c.name, got, c.want, table)
+		}
+		if got == latency.CouldNotMeasure && (!strings.Contains(table, "could not measure: the machine is too slow") || strings.Contains(table, "FAIL")) {
+			t.Errorf("%s: table must say could not measure and not FAIL:\n%s", c.name, table)
+		}
+	}
 }
 
 func TestJudgeOneWildBatchPassesTwoFail(t *testing.T) {
@@ -123,7 +155,7 @@ func TestJudgeScaleIsTheMedianOfTheThreeClampedAndApplied(t *testing.T) {
 	for i := range rs { // median reference over 2x nominal: fails whatever the batches
 		rs[i].P95, rs[i].Ref95 = 1*ms, latency.Nominal*3
 	}
-	if table, ok := judge(t, rs); ok || !strings.Contains(table, "too slow") {
-		t.Errorf("a reference over 2x nominal passed:\n%s", table)
+	if table, ok := judge(t, rs); ok || !strings.Contains(table, "could not measure") {
+		t.Errorf("a reference over 2x nominal passed or was not reported as could not measure:\n%s", table)
 	}
 }

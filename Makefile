@@ -210,6 +210,8 @@ test-unit-cmd: latency-names
 ## noise spoils one batch of a gate, not all three); then internal/latency/verdict
 ## applies the median-of-three rule to the results file (docs/decisions/0012).
 ## A pass fails on a non-latency assertion; the p95 is judged by the verdict.
+## A gate on a machine over the 2x reference allowance is "could not measure", not a failure: if nothing
+## failed, the last line is LATENCY-COULD-NOT-MEASURE (and make still exits non-zero); a real failure wins.
 ## One run only here; CI reruns a failed latency job once on a fresh runner (.github/workflows/ci-rerun.yml, D-15).
 test-latency: latency-names
 	@dir="$$(mktemp -d)"; rc=0; \
