@@ -154,6 +154,7 @@ install-script:
 	@echo "==> install.sh tests"
 	@sh scripts/install_test.sh
 	@sh scripts/staged_tests_test.sh
+	@sh scripts/ci_retry_once_test.sh >/dev/null
 
 ## test: all tests under the race detector, in two steps
 # Several packages hold latency gates (the hook's 20 ms budget, the end-to-end
@@ -196,6 +197,7 @@ test-unit-cmd: latency-names
 ## noise spoils one batch of a gate, not all three); then internal/latency/verdict
 ## applies the median-of-three rule to the results file (docs/decisions/0012).
 ## A pass fails on a non-latency assertion; the p95 is judged by the verdict.
+## One run only here; CI wraps it in scripts/ci-retry-once.sh (rerun once, D-15).
 test-latency: latency-names
 	@pkgs=./...; \
 	if [ -n "$(SHARD)" ]; then pkgs="$$(scripts/shard.sh list latency | scripts/shard.sh pick $(SHARD) $(LATENCY_SHARDS))"; fi; \

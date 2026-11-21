@@ -82,7 +82,8 @@ jobs:
           go-version-file: go.mod
       - name: install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
-      - run: make test-latency SHARD=${{ matrix.shard }}
+      # D-15: a failed run is rerun once (scripts/ci-retry-once.sh); the job fails only if the rerun fails too.
+      - run: scripts/ci-retry-once.sh make test-latency SHARD=${{ matrix.shard }}
 
   # The required status check. Passes only if every job above succeeded:
   # failed, cancelled and skipped all fail it (if: always() so it still runs).
