@@ -14,4 +14,6 @@ Remote Control (`/rc`) was documented but never run: the probe is reserved for t
 
 ## Consequences
 
+- `rc --check` reads the indicator from the last three screen lines whatever the prompt state is; a busy pane could therefore show text that reads as `on` or `off`. Left as is (review B-9): requiring a known prompt would break `--check`, and the patterns are placeholders.
+
 - Until the owner's probe, the patterns are placeholders, so state is mostly `unknown`. A dialog after `/rc` reads "not confirmed" and blocks further typing into that session until `curia rc --check`. Replace the table from real captures, then update this record.

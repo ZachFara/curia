@@ -11,14 +11,14 @@ Not verified against real Claude Code sessions yet; see `README.md` "Status" and
 - `curia time` shows where agent time goes and how much is waiting on you.
 
 ### Settings
-- `curia config list|get|set|edit|doctor|history|rollback` and the dashboard's `S` view; every change is a revision. A repository's `.curia/config.toml` can only tighten. `C!` in the badge marks an edit made outside Curia.
+- `curia config list|get|set|edit|doctor|history|rollback` and the dashboard's `S` view; every change is a revision, and the file as it was before the first change is kept as a baseline so `rollback` restores it (`set` drops comments and says so). A repository's `.curia/config.toml` can only tighten. `C!` in the badge marks an edit made outside Curia.
 
 ### Resources and Docker
 - `curia monitor` samples CPU and memory per agent (`curia resources`, a dashboard column).
 - Agents Curia launches get a `docker` wrapper that labels containers and refuses `run`, `create` and `compose up` at 3 containers per session, 8 in all or 80% of Docker's memory; each cap is switched off by 0.
 
 ### Permissions, modes and budgets
-- `curia mode normal|edits|away|bypass`, `curia away` and `curia back`. Bypass means "allow what your Claude Code settings do not forbid".
+- `curia mode normal|edits|away|bypass`, `curia away` and `curia back` (`--all` lists every refusal; refusals are counted, never dropped). Bypass means "allow what your Claude Code settings do not forbid".
 - A per-task budget (`--budget`, marks in views) and an optional hard stop (`cost.budget_hard_stop`, off).
 - Curia's hook and `curia install` now protect Curia's own configuration, data and state from Claude Code's edit tools.
 
@@ -36,7 +36,6 @@ Not verified against real Claude Code sessions yet; see `README.md` "Status" and
 - A budget-stopped task can no longer file tasks; away agents still can.
 - Agents may now file tasks into the backlog (`tasks.agent_filed.level = off` stops that).
 - The popup now opens on the inbox.
-- `curia mcp --help` still says six tools; there are seven.
 
 ## 1.0.0
 
