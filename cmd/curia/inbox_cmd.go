@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"text/tabwriter"
@@ -100,13 +98,5 @@ func inboxPrintJSON(w io.Writer, items []ui.InboxItem) error {
 			sanitize.Line(it.TaskID, 80), it.At.UTC(), sanitize.Line(it.Summary, inboxLineLimit),
 		})
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(out); err != nil {
-		return err
-	}
-	_, err := w.Write(buf.Bytes())
-	return err
+	return writeJSON(w, out, "  ")
 }

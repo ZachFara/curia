@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -131,13 +129,5 @@ func timelinePrintJSON(w io.Writer, evs []model.TimelineEvent) error {
 	for _, e := range evs {
 		rows = append(rows, row{e.At.UTC(), sanitize.Line(e.SessionID, 80), sanitize.Line(e.TaskID, 80), e.Kind, sanitize.Line(e.Line, timelineLineLimit)})
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(rows); err != nil {
-		return err
-	}
-	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
-	return err
+	return writeJSON(w, rows, "  ")
 }

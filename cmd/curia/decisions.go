@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -599,15 +597,7 @@ func decisionsPrintJSON(w io.Writer, ds []model.Decision) error {
 	for _, d := range ds {
 		rows = append(rows, decisionsToRow(d))
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(rows); err != nil {
-		return err
-	}
-	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
-	return err
+	return writeJSON(w, rows, "  ")
 }
 
 // decisionsCell makes ticket text, which is untrusted, safe as one table cell.

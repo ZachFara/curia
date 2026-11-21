@@ -2,6 +2,7 @@ package ui
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -24,5 +25,13 @@ func TestResourcesColumn(t *testing.T) {
 		if slices.Contains(titles, "CPU/RAM") {
 			t.Errorf("width %d, res %v: the table has a CPU/RAM column: %q", c.width, c.res, titles)
 		}
+	}
+}
+
+// D-5: the cell is drawn through the cleaning function like every other cell.
+func TestResourcesCellIsCleaned(t *testing.T) {
+	m, _ := newCostTest(t, ModePopup, 200, Budget{Res: map[string]string{"s1": "13%\x1b[31m\u202e 340M"}}, costSessions()...)
+	if v := m.View(); strings.ContainsAny(v, "\x1b\u202e") {
+		t.Errorf("a control or bidi rune of the CPU/RAM cell reached the view:\n%q", v)
 	}
 }

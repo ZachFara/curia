@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -161,15 +159,7 @@ func reviewsPrintJSON(w io.Writer, rs []model.Review) error {
 	for _, r := range rs {
 		rows = append(rows, reviewsToRow(r))
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(rows); err != nil {
-		return err
-	}
-	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
-	return err
+	return writeJSON(w, rows, "  ")
 }
 
 // reviewsCell makes agent or stored text, which is untrusted, safe as one table cell.

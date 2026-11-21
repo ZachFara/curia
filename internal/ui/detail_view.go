@@ -193,7 +193,7 @@ func (m DetailModel) diffLines(w int) []bodyLine {
 			out = append(out, kindLines(lineFaint, fmt.Sprintf("… %d more lines", len(lines)-i), w, 1)...)
 			break
 		}
-		out = append(out, bodyLine{text: truncate(l, w)})
+		out = append(out, bodyLine{text: truncate(gutter+l, w)}) // indented: a stat line cannot pass for a heading
 	}
 	if m.diff.Note != "" {
 		out = append(out, kindLines(lineWarn, sanitize.Line(m.diff.Note, 400), w, 1)...)
