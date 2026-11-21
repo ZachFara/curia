@@ -44,9 +44,9 @@ type monitorJob struct {
 var monitorJobs = []monitorJob{
 	{"sample resources", (*monitorEnv).sampleResources},
 	{"prune resources", (*monitorEnv).pruneResources},
-	{"fire schedules", (*monitorEnv).fireSchedules},
-	{"sample containers", (*monitorEnv).sampleContainers},
 	{"end away", (*monitorEnv).expireAway},
+	{"fire schedules", (*monitorEnv).fireSchedules},
+	{"sample containers", (*monitorEnv).sampleContainers}, // last of the state changers: a hung docker delays only auto-spawn
 	{"auto-spawn", (*monitorEnv).autoSpawn},
 }
 

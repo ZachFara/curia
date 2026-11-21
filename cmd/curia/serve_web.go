@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/notify"
 	"github.com/ZachFara/curia/internal/sanitize"
@@ -338,6 +339,12 @@ func (l *servewebLimiter) failed(addr string, now time.Time) {
 // servewebText is agent or imported text as a page shows it: cleaned and bounded.
 func servewebText(s string, limit int) string { return ui.Cell(sanitize.Line(s, limit)) }
 
+// servewebHiddenValue are the keys whose value is a path or a command: the
+// config registry has no kind for a key, so they are listed here.
+var servewebHiddenValue = map[string]bool{
+	"db_path": true, "log_path": true, "obsidian.dir": true, "editor": true, "costlens.analyzer": true,
+}
+
 type servewebPage struct {
 	Kind, Title string
 	Columns     []servewebColumn
@@ -426,6 +433,14 @@ func (w *serveWeb) build(ctx context.Context, route string) (servewebPage, error
 		return servewebPage{Kind: "usage", Title: "Usage", Text: buf.String()}, err
 	case "/settings":
 		rows, err := settingsSource{}.Rows(ctx)
+		for i, r := range rows {
+			if servewebHiddenValue[r.Key] { // a path or command under the home directory never leaves the machine
+				rows[i].Value = "(set)"
+				if r.Source == string(config.SourceDefault) {
+					rows[i].Value = "(default)"
+				}
+			}
+		}
 		return servewebPage{Kind: "settings", Title: "Settings", Settings: rows}, err
 	}
 	if route == "/say" {

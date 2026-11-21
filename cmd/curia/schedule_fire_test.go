@@ -279,3 +279,67 @@ func TestScheduleOnlyLimitedNeedsIdleAfterTheSample(t *testing.T) {
 		t.Errorf("sent %d, want 0 (idle before the limit sample)", n)
 	}
 }
+
+// A run claimed but never finished (a crash after the claim) is marked
+// interrupted at the next pass, not fired again; a run claimed a moment ago
+// may still be running and is left alone.
+func TestScheduleClaimedButUnfinishedRunIsMarkedInterrupted(t *testing.T) {
+	e, _, fake := schedFixture(t, readSession("a", model.StateIdle, "%1"))
+	old := schedAdd(t, e.st, func(sc *store.Schedule) { sc.NextRun = schedNow.Add(-2 * time.Hour) })
+	fresh := schedAdd(t, e.st, func(sc *store.Schedule) { sc.NextRun = schedNow.Add(-time.Second) })
+	for _, c := range []struct {
+		sc  store.Schedule
+		ran time.Time
+	}{{old, schedNow.Add(-time.Hour)}, {fresh, schedNow}} {
+		if _, ok, err := e.st.ClaimSchedule(context.Background(), c.sc, time.Time{}, "fired", c.ran); err != nil || !ok {
+			t.Fatalf("claim = %v, %v", ok, err)
+		}
+	}
+	e.tickAt(t)
+	for id, want := range map[string]string{old.ID: "interrupted", fresh.ID: "fired"} {
+		if runs, _ := e.st.ScheduleRuns(context.Background(), id, 5); len(runs) != 1 || runs[0].Outcome != want {
+			t.Errorf("%s runs = %+v, want one %s", id, runs, want)
+		}
+	}
+	if n := len(schedMessages(t, e.st)) + len(sendTyped(fake)); n != 0 {
+		t.Errorf("an interrupted run was fired again: %d messages or lines", n)
+	}
+}
+
+func TestScheduleRecipientsExcludeEndedAndStale(t *testing.T) {
+	var ss []model.Session
+	for _, st := range []model.State{model.StateIdle, model.StateEnded, model.StateStale} {
+		ss = append(ss, model.Session{ID: string(st), State: st})
+	}
+	if got := scheduleRecipients(ss, "all", nil); len(got) != 1 || got[0].ID != "idle" {
+		t.Errorf("recipients = %+v, want only the idle session", got)
+	}
+}
+
+// The label "(scheduled S-n) " must still fit the 800 rune message limit at
+// firing, so a longer text is refused when it is created.
+func TestScheduleDraftBoundsTheTextForTheLabel(t *testing.T) {
+	old := scheduleAll
+	scheduleAll = true
+	t.Cleanup(func() { scheduleAll = old })
+	if _, err := scheduleDraft(strings.Repeat("a", 760), schedNow); err != nil {
+		t.Errorf("760 runes refused: %v", err)
+	}
+	if _, err := scheduleDraft(strings.Repeat("a", 761), schedNow); err == nil || !strings.Contains(err.Error(), "at most 760 characters") {
+		t.Errorf("761 runes: err = %v, want a refusal naming 760 characters", err)
+	}
+}
+
+// The cheap, state-changing jobs run before the one that can wait on docker.
+func TestMonitorJobsEndAwayAndFireSchedulesBeforeDockerSampling(t *testing.T) {
+	var names []string
+	for _, j := range monitorJobs {
+		names = append(names, j.name)
+	}
+	idx := func(n string) int { return slices.Index(names, n) }
+	for _, n := range []string{"end away", "fire schedules"} {
+		if idx(n) < 0 || idx(n) > idx("sample containers") {
+			t.Errorf("job order %v: %q must run before sample containers", names, n)
+		}
+	}
+}
