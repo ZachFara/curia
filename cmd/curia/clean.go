@@ -14,6 +14,7 @@ import (
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/task"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -125,7 +126,7 @@ func cleanCheck(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 		return t, "", false, fmt.Errorf("%s has a live session %s in %s: end it first (or curia pause %s). Nothing was removed",
 			id, spawnShortID(live[0].ID), spawnWhere(panes, live[0].Pane), id)
 	}
-	if t.Pane != "" && lifecyclePaneStateOf(panes, perr, t.Pane, "", t.LaunchedAt) != lifecyclePaneGone {
+	if t.Pane != "" && lifecycleTaskPaneState(panes, perr, t) != lifecyclePaneGone {
 		return t, "", false, fmt.Errorf("%s's window %s is still open (or tmux cannot tell): close it first. Nothing was removed",
 			id, spawnWhere(panes, t.Pane))
 	}
@@ -263,8 +264,13 @@ func cleanDeleteBranch(ctx context.Context, t model.Task, force bool, out io.Wri
 // the board neither shows nor spawns.
 func cleanRecord(ctx context.Context, st *store.Store, t model.Task, out io.Writer) error {
 	now := clock()
-	_, err := st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
-		cur.Branch, cur.Worktree, cur.Pane, cur.ResumeSession = "", "", "", ""
+	rs, err := st.ListReviews(ctx, store.ReviewFilter{TaskID: t.ID, Limit: 1})
+	if err != nil {
+		return err
+	}
+	done := len(rs) > 0 && task.Derive(t, nil, 0, rs[0].Status) == model.TaskDone
+	_, err = st.UpdateTask(ctx, t.ID, func(cur model.Task) (model.Task, error) {
+		cur.Branch, cur.Worktree, cur.Pane, cur.PaneSocket, cur.ResumeSession = "", "", "", "", ""
 		cur.PausedAt, cur.LaunchedAt, cur.CleanedAt, cur.UpdatedAt = time.Time{}, time.Time{}, now, now
 		cur.Status = model.TaskDropped // off the board: nothing spawns it again by accident
 		return cur, nil
@@ -272,6 +278,11 @@ func cleanRecord(ctx context.Context, st *store.Store, t model.Task, out io.Writ
 	if err != nil {
 		return fmt.Errorf("%s: the worktree and branch are gone, but recording it failed: %w. To finish: run curia clean %s again",
 			t.ID, err, t.ID)
+	}
+	if done {
+		_, _ = fmt.Fprintf(out, "Cleaned %s (done: its worktree and branch are removed, and it leaves the board; curia task edit %s --status ready brings it back)\n",
+			t.ID, t.ID)
+		return nil
 	}
 	_, _ = fmt.Fprintf(out, "Cleaned %s (marked dropped, so the board no longer offers it; curia task edit %s --status ready brings it back)\n",
 		t.ID, t.ID)

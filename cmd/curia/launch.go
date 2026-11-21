@@ -132,7 +132,7 @@ func launchAgent(ctx context.Context, cfg config.Config, args []string) error {
 	if err != nil {
 		return fmt.Errorf("%s not found: %w", argv[0], err)
 	}
-	if err = launchExec(path, argv, launchEnv(os.Environ(), id, launchTeam && argv[0] == model.AgentClaude)); err != nil {
+	if err = launchExec(path, argv, dockerLaunchEnv(cfg, launchEnv(os.Environ(), id, launchTeam && argv[0] == model.AgentClaude))); err != nil {
 		return fmt.Errorf("start %s: %w", path, err)
 	}
 	return nil

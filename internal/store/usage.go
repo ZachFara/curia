@@ -169,8 +169,8 @@ const pruneCursorKey = "cost_prune_after"
 // Ingest stores r in one write transaction (plan section 4.2): the
 // session's cost and cache values (an absent value keeps the stored one;
 // no row is created for an unknown session), a cost sample when the
-// session exists and r has a cost, one usage sample per window (for an
-// unknown session too: the windows are the account's), each unless the
+// session exists and r has a cost, one usage sample per window (only when
+// the session exists: an unknown session stores nothing), each unless the
 // series' newest sample has the same values and is less than SampleRepeat
 // older, and then at most PruneBatch old samples deleted, usage samples
 // first. It is not activity: the session's state and times are not
@@ -357,10 +357,20 @@ func pruneCapped(ctx context.Context, tx *sql.Tx, limit int64) (int64, error) {
 	}
 	var total int64
 	for i, q := range []struct {
-		sql  string
-		keep int
-	}{{pruneUsageCap, UsageMaxRows}, {pruneCostCap, CostMaxRows}} {
+		sql, table string
+		keep       int
+	}{{pruneUsageCap, "usage_samples", UsageMaxRows}, {pruneCostCap, "cost_samples", CostMaxRows}} {
 		if !over[i].Bool {
+			continue
+		}
+		// The probe is a rowid span, which gaps (old deletions) inflate: only
+		// a real count over the bound, found by a scan that stops at keep+1
+		// rows, may delete. It runs only when the probe fires.
+		var really bool
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) > ? FROM (SELECT 1 FROM `+q.table+` LIMIT ?)`, q.keep, q.keep+1).Scan(&really); err != nil {
+			return 0, err
+		}
+		if !really {
 			continue
 		}
 		out, err := tx.ExecContext(ctx, q.sql, q.keep, limit-total)

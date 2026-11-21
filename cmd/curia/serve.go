@@ -140,14 +140,14 @@ func serveRunServer(cmd *cobra.Command, ln net.Listener, st *store.Store, cfg co
 		if pub == "" {
 			pub = "http://" + where
 		}
-		deps.Web = servewebNew(servewebOpts{Store: st, Log: logger, Now: clock, TTL: cfg.Serve.WebSession, PublicURL: pub})
+		deps.Web = servewebNew(servewebOpts{Store: st, Log: logger, Now: clock, TTL: cfg.Serve.WebSession, PublicURL: pub, Tmux: deps.Tmux, Write: cfg.Serve.WebWrite})
 	}
 	h := serveHandler(deps)
 	srv := serveNewServer(h, logger)
 	logger.Info("serve: listening", "addr", where)
 	serveStartLines(cmd.OutOrStdout(), where)
 	if cfg.Serve.Web {
-		serveWebStartLine(cmd.OutOrStdout(), where)
+		serveWebStartLine(cmd.OutOrStdout(), where, cfg.Serve.WebWrite)
 	}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
@@ -201,9 +201,13 @@ func serveStartLines(out io.Writer, where string) {
 }
 
 // serveWebStartLine says the web page is on (spec F26): the same two conditions as the answer buttons.
-func serveWebStartLine(out io.Writer, where string) {
-	_, _ = fmt.Fprintf(out, "curia serve: the read-only web page is on at %s: every page needs a device token (curia serve token <device>). "+
-		"Keep the ntfy topic private and this endpoint on your tailnet only, never Tailscale Funnel\n", where)
+func serveWebStartLine(out io.Writer, where string, write bool) {
+	mode := "read-only: writes are off"
+	if write {
+		mode = "writes are on (serve.web_write): the page can move tasks between backlog, ready and dropped and send confirmed messages"
+	}
+	_, _ = fmt.Fprintf(out, "curia serve: the web page is on at %s, %s: every page needs a device token (curia serve token <device>). "+
+		"Keep the ntfy topic private and this endpoint on your tailnet only, never Tailscale Funnel\n", where, mode)
 }
 
 // serveListenAddr is the address to listen on: flag, else cfg, else serveDefaultListen. It returns an

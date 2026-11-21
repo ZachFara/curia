@@ -102,9 +102,15 @@ func (s *Store) enableWAL(ctx context.Context) error {
 	deadline := time.Now().Add(busyTimeout)
 	for {
 		var mode string
-		err := s.db.QueryRowContext(ctx, `PRAGMA journal_mode = WAL`).Scan(&mode)
+		// A SELECT first: an already-WAL file needs no write, so Open must
+		// not wait in the writer queue (the status line and the badge open
+		// the store under a tight budget).
+		err := s.db.QueryRowContext(ctx, `SELECT journal_mode FROM pragma_journal_mode`).Scan(&mode)
 		if err == nil && mode != "wal" {
-			return fmt.Errorf("journal_mode is %q, want wal", mode)
+			err = s.db.QueryRowContext(ctx, `PRAGMA journal_mode = WAL`).Scan(&mode)
+			if err == nil && mode != "wal" {
+				return fmt.Errorf("journal_mode is %q, want wal", mode)
+			}
 		}
 		if !isBusy(err) || time.Now().After(deadline) {
 			return err

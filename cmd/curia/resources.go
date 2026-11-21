@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"text/tabwriter"
 	"time"
 
@@ -83,9 +84,13 @@ func liveResources(ctx context.Context, st *store.Store, cfg config.Config, now 
 func resourceCells(ctx context.Context, st *store.Store, cfg config.Config, now time.Time) (map[string]string, error) {
 	rows, err := liveResources(ctx, st, cfg, now)
 	cells := map[string]string{}
+	ctr, _ := readContainerView(ctx, st, cfg, now).bySession()
 	for _, r := range rows {
 		if r.Fresh {
 			cells[r.ID] = usage.ResourceCell(r.CPU, r.RSSMB*1024, r.At, now, cfg.Resources.Interval)
+			if n := ctr[r.ID]; n > 0 {
+				cells[r.ID] += " " + strconv.Itoa(n) + "c" // containers beside the processes
+			}
 		}
 	}
 	return cells, err
@@ -115,8 +120,9 @@ func runResources(cmd *cobra.Command, _ []string) error {
 	}
 	running, _ := monitorRunning(monitorLockPath(cfg))
 	w := cmd.OutOrStdout()
+	cv := readContainerView(cmd.Context(), st, cfg, now)
 	if resourcesJSON {
-		return printResourcesJSON(w, rows, cpu, mb, running)
+		return printResourcesJSON(w, rows, cpu, mb, running, cv)
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "SESSION\tCPU\tRAM")
@@ -131,13 +137,14 @@ func runResources(cmd *cobra.Command, _ []string) error {
 	if err = tw.Flush(); err != nil {
 		return err
 	}
+	printContainers(w, cv)
 	if !running {
 		_, err = fmt.Fprintln(w, "resources: monitor not running (curia monitor start)")
 	}
 	return err
 }
 
-func printResourcesJSON(w io.Writer, rows []resourceSample, cpu float64, mb int64, running bool) error {
+func printResourcesJSON(w io.Writer, rows []resourceSample, cpu float64, mb int64, running bool, cv containerView) error {
 	type jsonRow struct {
 		ID        string     `json:"id"`
 		Fresh     bool       `json:"fresh"`
@@ -149,7 +156,18 @@ func printResourcesJSON(w io.Writer, rows []resourceSample, cpu float64, mb int6
 		Sessions       []jsonRow `json:"sessions"`
 		Total          any       `json:"total"`
 		MonitorRunning bool      `json:"monitor_running"`
-	}{Sessions: []jsonRow{}, MonitorRunning: running}
+		Containers     []any     `json:"containers"`
+		DockerVM       any       `json:"docker_vm"`
+	}{Sessions: []jsonRow{}, MonitorRunning: running, Containers: []any{}}
+	for _, c := range cv.Rows {
+		out.Containers = append(out.Containers, map[string]any{
+			"id": c.ID, "name": sanitize.Line(c.Name, 120), "session": c.SessionID,
+			"attributed_by": c.By, "cpu_pct": c.CPU, "mem_mb": c.MemMB,
+		})
+	}
+	if cv.VM != nil {
+		out.DockerVM = map[string]any{"used_mb": cv.VM.UsedMB, "limit_mb": cv.VM.LimitMB}
+	}
 	for _, r := range rows {
 		j := jsonRow{ID: sanitize.Line(r.ID, 80), Fresh: r.Fresh}
 		if r.Fresh {
@@ -161,4 +179,25 @@ func printResourcesJSON(w io.Writer, rows []resourceSample, cpu float64, mb int6
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+// printContainers lists the containers the monitor last saw beside the
+// processes, the unattributed ones as such, and the Docker VM line. Nothing
+// is printed when there is nothing current.
+func printContainers(w io.Writer, cv containerView) {
+	if len(cv.Rows) > 0 {
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "CONTAINER\tSESSION\tCPU\tRAM\tBY")
+		for _, c := range cv.Rows {
+			sess := "unattributed"
+			if c.SessionID != "" {
+				sess = sanitize.Line(c.SessionID, 40)
+			}
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%.0f%%\t%dM\t%s\n", sanitize.Line(c.Name, 40), sess, c.CPU, c.MemMB, sanitize.Line(c.By, 10))
+		}
+		_ = tw.Flush()
+	}
+	if cv.VM != nil {
+		_, _ = fmt.Fprintln(w, dockerVMText(*cv.VM)+" (containers' use only)")
+	}
 }

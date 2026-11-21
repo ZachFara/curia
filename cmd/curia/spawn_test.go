@@ -45,6 +45,7 @@ func spawnNewFixture(t *testing.T) *spawnFixture {
 	t.Helper()
 	userTerminalAs(t, true) // the user, at a terminal
 	f := &spawnFixture{t: t, db: hookHome(t), fake: useFakeTmux(t)}
+	f.fake.Socket = "/tmp/tmux-501/first" // the server the task's windows open on
 	f.start = time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	f.now = f.start
 	f.repo = worktreeRepo(t, "api-server")
@@ -58,7 +59,8 @@ func spawnNewFixture(t *testing.T) *spawnFixture {
 		t.Fatal(err)
 	}
 	f.st = st
-	prevClock, prevSleep, prevBin, prevLimit := clock, spawnSleep, spawnBin, spawnSetupLimit
+	prevClock, prevSleep, prevBin, prevLimit, prevLook := clock, spawnSleep, spawnBin, spawnSetupLimit, launchLookPath
+	launchLookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil } // every agent is installed
 	clock = func() time.Time { return f.now }
 	spawnSleep = func(d time.Duration) {
 		f.now = f.now.Add(d)
@@ -69,7 +71,7 @@ func spawnNewFixture(t *testing.T) *spawnFixture {
 	}
 	spawnBin = func() (string, error) { return spawnTestBin, nil }
 	t.Cleanup(func() {
-		clock, spawnSleep, spawnBin, spawnSetupLimit = prevClock, prevSleep, prevBin, prevLimit
+		clock, spawnSleep, spawnBin, spawnSetupLimit, launchLookPath = prevClock, prevSleep, prevBin, prevLimit, prevLook
 		_ = st.Close()
 	})
 	return f
@@ -1447,5 +1449,47 @@ func TestSpawnHostileStoredModelOfOtherAgent(t *testing.T) {
 				t.Errorf("stored %q/%q, want codex and no model", tk.Agent, tk.AgentModel)
 			}
 		})
+	}
+}
+
+// An agent may spawn a ready task but not choose how it runs (Ruling 113).
+func TestSpawnByAgentRefusesHowItRuns(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Fix", "Body")
+	f.update("T-1", func(tk *model.Task) { tk.Status = model.TaskReady })
+	before := f.get("T-1")
+	for opt, o := range map[string]spawnOptions{
+		"--agent":  {Agent: model.AgentCodex},
+		"--model":  {Model: "gpt-expensive"},
+		"--team":   {Team: true},
+		"--resume": {Resume: "0b9a2c1e-0000-4000-8000-000000000000"},
+	} {
+		o.ReadyOnly = true
+		f.fake.Calls = nil
+		_, _, err := f.spawn("T-1", o)
+		if err == nil || !strings.Contains(err.Error(), opt+" is the user's choice") || !strings.Contains(err.Error(), "stored values apply") {
+			t.Errorf("%s: err = %v, want a refusal naming it and the stored values", opt, err)
+		}
+		f.wantNothingStarted("T-1")
+	}
+	if tk := f.get("T-1"); tk.Agent != before.Agent || tk.AgentModel != before.AgentModel {
+		t.Errorf("stored agent %q model %q, want unchanged", tk.Agent, tk.AgentModel)
+	}
+}
+
+// --agent codex without codex on PATH is refused before anything is stored:
+// the task keeps its agent and its model.
+func TestSpawnCodexNotInstalledStoresNothing(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Fix", "Body")
+	f.update("T-1", func(tk *model.Task) { tk.AgentModel = "opus" })
+	launchLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	_, _, err := f.spawn("T-1", spawnOptions{Agent: model.AgentCodex})
+	if err == nil || !strings.Contains(err.Error(), "codex is not installed") || !strings.Contains(err.Error(), "--agent claude") {
+		t.Fatalf("err = %v, want codex is not installed, with --agent claude", err)
+	}
+	f.wantNothingStarted("T-1")
+	if tk := f.get("T-1"); tk.Agent == model.AgentCodex || tk.AgentModel != "opus" {
+		t.Errorf("stored agent %q model %q, want unchanged", tk.Agent, tk.AgentModel)
 	}
 }
