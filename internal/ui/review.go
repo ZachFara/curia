@@ -983,8 +983,8 @@ func (m Model) openReview() (Model, tea.Cmd) {
 		m.notice = noticeNoReviewWaiting
 		return m, nil
 	}
-	if now := m.now(); now.Sub(m.rowSince) < max(m.rowWait, dwell) {
-		m.rowSince, m.rowWait, m.notice = now, quietPeriod, noticeTooSoon
+	if now := m.now(); now.Sub(m.reviewWait.since) < max(m.reviewWait.wait, dwell) {
+		m.reviewWait.since, m.reviewWait.wait, m.notice = now, quietPeriod, noticeTooSoon
 		return m, nil
 	}
 	return m.showChild(m.views["review"](r.s.TaskID))

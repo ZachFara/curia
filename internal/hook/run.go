@@ -240,13 +240,13 @@ func runStop(ctx context.Context, ev model.Event, start *startInfo, st *store.St
 	var claimed stopClaims
 	var errs error
 	err := st.UpdateSessionTx(ctx, ev.SessionID, func(tx *store.Tx, s model.Session, _ bool) (model.Session, error) {
-		var readErr, decideErr error
+		var readErr, claimErr error
 		out, readErr = apply(s, ev, start, cfg, func(ev *model.Event) bool {
 			var open bool
-			claimed, open, decideErr = decide(ctx, tx, ev)
+			claimed, open, claimErr = claimStopDeliveries(ctx, tx, ev)
 			return open
 		})
-		errs = errors.Join(readErr, decideErr)
+		errs = errors.Join(readErr, claimErr)
 		return out, nil
 	})
 	if err != nil {
@@ -266,7 +266,7 @@ func runStop(ctx context.Context, ev model.Event, start *startInfo, st *store.St
 	return res, errors.Join(errs, err)
 }
 
-// decide reads, on tx at ev's time, the open blocking tickets of ev's
+// claimStopDeliveries reads, on tx at ev's time, the open blocking tickets of ev's
 // session and whether answers or instructions are queued for it, in one
 // small statement (store.StopState); only for a kind that is queued does it
 // run that kind's claim, so the common Stop prepares no claim. Answers come
@@ -277,7 +277,7 @@ func runStop(ctx context.Context, ev model.Event, start *startInfo, st *store.St
 // nothing, and the other kind is still claimed; a failed read counts as no
 // ticket and nothing queued. Errors are returned. A Codex event claims
 // nothing: nothing is handed to Codex at Stop (plan section 4.10).
-func decide(ctx context.Context, tx *store.Tx, ev *model.Event) (stopClaims, bool, error) {
+func claimStopDeliveries(ctx context.Context, tx *store.Tx, ev *model.Event) (stopClaims, bool, error) {
 	state, readErr := tx.StopState(ctx, ev.SessionID, ev.At)
 	if ev.Agent == model.AgentCodex {
 		return stopClaims{}, state.OpenBlocking > 0, readErr
@@ -352,12 +352,14 @@ func sessionStart(ctx context.Context, ev model.Event, env Env, st *store.Store)
 }
 
 // apply is the update Run makes inside the store transaction. start is what
-// git and tmux said, or nil when they were not asked. decisions, set on
-// Stop only, runs after the transcript is folded in: it may set
-// ev.StopBlocked and reports whether the session has an open blocking
-// ticket. It is not called for an event the state machine ignores. apply
-// itself must not call the store.
-func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config, decisions func(*model.Event) bool) (model.Session, error) {
+// git and tmux said, or nil when they were not asked. stopClaim, set on Stop
+// only, runs after the transcript is folded in and claims the Stop's queued
+// deliveries: it sets ev.StopBlocked (through the pointer, on apply's own
+// copy of the event, which state.Apply then reads) and reports whether the
+// session has an open blocking ticket. It is not called for an event the
+// state machine ignores, so an ignored Stop claims nothing: that is why the
+// claim cannot simply run before apply. apply itself must not call the store.
+func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config, stopClaim func(*model.Event) bool) (model.Session, error) {
 	if state.Ignores(s, ev) {
 		return s, nil // the transcript is not read either
 	}
@@ -375,8 +377,8 @@ func apply(s model.Session, ev model.Event, start *startInfo, cfg config.Config,
 		ev.Message = first
 	}
 	open := false
-	if decisions != nil {
-		open = decisions(&ev)
+	if stopClaim != nil {
+		open = stopClaim(&ev)
 	}
 	s = state.Apply(s, ev, open)
 	recordEndReason(&s, ev)
