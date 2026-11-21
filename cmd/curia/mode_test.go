@@ -185,3 +185,15 @@ func TestModeBypassShowsInTheBadgeOnlyWhileLive(t *testing.T) {
 		t.Errorf("badge = %q after expiry", badge)
 	}
 }
+
+func TestModeSaysWhichSessionsHaveNoRoot(t *testing.T) {
+	st := modeEnv(t, "")
+	now := time.Now()
+	if err := st.UpsertSession(context.Background(), model.Session{ID: "s3", Agent: "claude", Cwd: "/x", State: model.StateIdle, StartedAt: now, UpdatedAt: now, SeenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runRoot(t, "mode", "edits", "--all")
+	if err != nil || !strings.Contains(out, "1 session(s) have no repository or worktree") || !strings.Contains(out, "s3") {
+		t.Errorf("out = %q, %v", out, err)
+	}
+}

@@ -1,7 +1,6 @@
 package hook
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"os"
@@ -138,12 +137,13 @@ func effectiveMode(ev model.Event, cfg config.Config, sess model.Session) string
 	return m
 }
 
-// modeRoot is the directory paths must be inside: the session's stored
-// worktree, else its stored repository, else the directory Curia checked for
-// it; "" when that is not an absolute path, is "/", or is the home directory
+// modeRoot is the directory paths must be inside: the one frozen when the
+// mode was set (the worktree, else the repository, as they were then; see
+// store.SetModes), which no hook event changes afterwards, so an agent that
+// moves does not move it. "" when none was frozen, or when that is not an absolute path, is "/", or is the home directory
 // or one of its parents (everything would be inside). Never the event's cwd.
 func modeRoot(sess model.Session) string {
-	root := cmp.Or(sess.Worktree, sess.Repo, sess.CheckedCwd)
+	root := sess.ModeRoot
 	if !filepath.IsAbs(root) {
 		return ""
 	}
@@ -184,14 +184,18 @@ func pathsInRoot(ev model.Event, in map[string]json.RawMessage, root string) (pa
 		return nil, false
 	}
 	home, _ := os.UserHomeDir()
-	roots := []string{strings.ToLower(root), strings.ToLower(resolved(root))}
+	// Allow decisions keep case (insideExact): over-allowing is the risk.
+	roots := []string{root, resolved(root)}
+	if cwd := ev.Cwd; !filepath.IsAbs(cwd) || !insideExact(filepath.Clean(cwd), roots) || !insideExact(resolved(cwd), roots) {
+		return nil, false // the call does not run inside the root
+	}
 	for _, key := range []string{"file_path", "notebook_path", "path"} {
 		var p string
 		if json.Unmarshal(in[key], &p) != nil || p == "" {
 			continue
 		}
 		found, fine := targets(p, ev.Cwd, home)
-		if !fine || slices.ContainsFunc(found, func(t string) bool { return !inside(t, roots) }) {
+		if !fine || slices.ContainsFunc(found, func(t string) bool { return !insideExact(t, roots) }) {
 			return nil, false
 		}
 		paths = append(paths, found...)

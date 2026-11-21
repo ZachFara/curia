@@ -259,3 +259,10 @@ func inside(p string, roots []string) bool {
 	p = strings.ToLower(p)
 	return slices.ContainsFunc(roots, func(r string) bool { return p == r || strings.HasPrefix(p, r+string(filepath.Separator)) })
 }
+
+// insideExact is inside with case kept, for allow decisions: on a
+// case-sensitive file system two directories can differ only in case, so
+// folding could allow a path outside the root. (Deny checks keep folding.)
+func insideExact(p string, roots []string) bool {
+	return slices.ContainsFunc(roots, func(r string) bool { return p == r || strings.HasPrefix(p, r+string(filepath.Separator)) })
+}

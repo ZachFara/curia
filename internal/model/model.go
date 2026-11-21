@@ -66,6 +66,9 @@ type Session struct {
 	// (zero: never).
 	Mode      string
 	ModeUntil time.Time
+	// ModeRoot is the directory the mode allows paths in, frozen by
+	// store.SetModes; "" means none.
+	ModeRoot string
 	// RC, RCHow and RCCheckedAt are F21's Remote Control belief (off, pending,
 	// on or unknown; "" reads as off), how Curia knows it and when it looked.
 	RC, RCHow   string

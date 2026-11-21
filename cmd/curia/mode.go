@@ -170,6 +170,7 @@ func modeApply(ctx context.Context, st *store.Store, cfg config.Config, scope st
 		return err
 	}
 	_, _ = fmt.Fprintf(out, "%d live session(s) of %s now in mode %s%s.\n", n, label, mode, modeUntilText(until))
+	modeSayNoRoot(out, before)
 	leaving := slices.ContainsFunc(before, func(s model.Session) bool {
 		m := modeNow(s, cfg, now)
 		return m == model.ModeAway || m == model.ModeBypass
@@ -259,4 +260,19 @@ func modeSafeID(id string) bool {
 	return id != "" && len(id) <= 64 && !strings.ContainsFunc(id, func(r rune) bool {
 		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_'
 	})
+}
+
+// modeSayNoRoot names the sessions with no repository or worktree: the mode
+// froze no root for them, so it allows no path.
+func modeSayNoRoot(out io.Writer, sessions []model.Session) {
+	noRoot := slices.DeleteFunc(slices.Clone(sessions), func(s model.Session) bool { return s.Worktree != "" || s.Repo != "" })
+	if len(noRoot) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(noRoot))
+	for _, s := range noRoot {
+		ids = append(ids, spawnShortID(s.ID))
+	}
+	_, _ = fmt.Fprintf(out, "%d session(s) have no repository or worktree (%s), so they have no path to allow in: edits allows nothing for them and away denies.\n",
+		len(noRoot), sanitize.Line(strings.Join(ids, ", "), 120))
 }
