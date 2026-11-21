@@ -110,6 +110,9 @@ func Get(c Config, key string) (string, bool) {
 	case reflect.Map, reflect.Slice:
 		return fmt.Sprintf("(%d entries)", v.Len()), true
 	}
+	if v.CanInt() && v.Int() == 0 && zeroIsOff[l.key] {
+		return "off", true
+	}
 	return fmt.Sprint(v.Interface()), true
 }
 
@@ -204,17 +207,19 @@ func number(c Config, l leaf) float64 {
 	return float64(v.Int())
 }
 
+// zeroIsOff are the keys whose 0 means off (or no limit): shown as "off", and
+// for a repository file 0 is the loosest value.
+var zeroIsOff = map[string]bool{
+	"resources.max_containers_per_session": true, "resources.max_containers_total": true,
+	"resources.docker_memory_refuse_pct": true, "resources.container_memory_mb": true, "resources.container_cpus": true,
+}
+
 // loosens reports whether going from old to next breaks the policy.
 func loosens(p Policy, l leaf, old, next Config) bool {
-	if l.key == "cost.task_budget_default" {
-		// 0 means no budget, so it is not "lower": a repository may only lower a nonzero default.
+	if l.key == "cost.task_budget_default" || zeroIsOff[l.key] {
+		// 0 means none or off, so it is not "lower": a repository may only lower a nonzero value, never switch it off or set one over none.
 		o, n := number(old, l), number(next, l)
 		return (o == 0) != (n == 0) || n > o
-	}
-	if l.key == "resources.container_memory_mb" || l.key == "resources.container_cpus" {
-		// 0 means no limit, the loosest: a repository may add one or lower one.
-		o, n := number(old, l), number(next, l)
-		return n == 0 && o != 0 || n > o && o != 0
 	}
 	switch p {
 	case PolicyLower:

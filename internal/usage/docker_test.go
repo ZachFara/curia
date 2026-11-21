@@ -174,20 +174,39 @@ func TestAttributeContainers(t *testing.T) {
 	}
 }
 
-func TestComposeRunning(t *testing.T) {
-	cs := []Container{{ComposeProject: "app", ComposeDir: "/w/app"}}
+func TestComposeRunningNeedsTheSameProjectInTheSameSession(t *testing.T) {
+	cs := []Container{{ComposeProject: "my-app", ComposeDir: "/w/My-App", SessionID: "S1"}, {ComposeProject: "theirs", SessionID: "S2"}}
 	for _, c := range []struct {
-		args []string
-		want bool
+		name    string
+		args    []string
+		session string
+		want    bool
 	}{
-		{[]string{"compose", "-p", "app", "up"}, true},
-		{[]string{"compose", "-p", "other", "-f", "/x/c.yml", "up"}, false},
-		{[]string{"compose", "up"}, true}, // cwd is the project's directory
-		{[]string{"compose", "-f", "/w/app/compose.yml", "up"}, true},
-		{[]string{"compose", "--project-directory", "/w/new", "up"}, false},
+		{"same -p", []string{"compose", "-p", "my-app", "up"}, "S1", true},
+		{"same directory, other -p", []string{"compose", "-p", "other", "up"}, "S1", false},
+		{"default name from cwd", []string{"compose", "up"}, "S1", true},
+		{"name from the -f directory", []string{"compose", "-f", "/x/Other/c.yml", "up"}, "S1", false},
+		{"another session's project", []string{"compose", "-p", "theirs", "up"}, "S1", false},
+		{"no session known", []string{"compose", "-p", "my-app", "up"}, "", false},
 	} {
-		if got := ComposeRunning(cs, ParseDocker(c.args), "", "/w/app"); got != c.want {
-			t.Errorf("%q = %v, want %v", c.args, got, c.want)
+		if got := ComposeRunning(cs, ParseDocker(c.args), "", "/w/My-App", c.session); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestCapOffAndMemoryThreshold(t *testing.T) {
+	cs := []Container{{SessionID: "A"}, {SessionID: "A"}, {SessionID: "A"}}
+	if m := DockerOverCap(cs, "A", 0, 0); m != "" {
+		t.Errorf("both caps off: %q", m)
+	}
+	if m := DockerOverCap(cs, "A", 0, 3); !strings.Contains(m, "max_containers_total") {
+		t.Errorf("per-session off, total on: %q", m)
+	}
+	if m := DockerOverCap(cs, "A", 3, 0); !strings.Contains(m, "max_containers_per_session") {
+		t.Errorf("total off, per-session on: %q", m)
+	}
+	if DockerMemoryOver(81, 100, 80) == "" || DockerMemoryOver(80, 100, 80) != "" || DockerMemoryOver(99, 100, 0) != "" || DockerMemoryOver(5, 0, 80) != "" {
+		t.Error("memory threshold wrong")
 	}
 }

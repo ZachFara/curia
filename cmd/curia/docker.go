@@ -128,8 +128,12 @@ func dockerPrepare(bin string, call usage.DockerCall, args []string) []string {
 	var sess model.Session
 	var id string
 	var refs []usage.SessionRef
+	var vm *store.DockerVM
 	if err == nil {
 		defer func() { _ = st.Close() }()
+		if cur, ok, verr := st.LatestDockerVM(ctx); verr == nil && ok && usage.ResourceFresh(cur.At, clock(), cfg.Resources.Interval) {
+			vm = &cur
+		}
 		sess, id = mcpSession(ctx, st, slog.New(slog.DiscardHandler))
 		refs = dockerSessionRefs(ctx, st)
 	} else {
@@ -141,7 +145,7 @@ func dockerPrepare(bin string, call usage.DockerCall, args []string) []string {
 	}
 	// D-16 = A: compose up is refused at a cap like run and create, unless its
 	// project already runs (it then only adds what is missing).
-	if msg := dockerCapMessage(ctx, bin, cfg, refs, id, call); msg != "" {
+	if msg := dockerCapMessage(ctx, bin, cfg, refs, id, call, vm); msg != "" {
 		dockerRefuse(cfg, id, msg)
 	}
 	if call.Kind != "run" {
@@ -157,22 +161,34 @@ func dockerPrepare(bin string, call usage.DockerCall, args []string) []string {
 	return usage.DockerInsert(args, call.At, add)
 }
 
-// dockerCapMessage is the one count check (the caller decides what over cap
-// means): "" while under the caps or when docker cannot be asked.
-func dockerCapMessage(ctx context.Context, bin string, cfg config.Config, refs []usage.SessionRef, session string, call usage.DockerCall) string {
+// dockerCapMessage is the one count and memory check (the caller refuses on
+// a message): "" while under the caps, with every cap off, when docker cannot
+// be asked, or for a compose up of a project this session already runs. vm is
+// the monitor's last current reading, nil when there is none (the memory
+// check is then skipped).
+func dockerCapMessage(ctx context.Context, bin string, cfg config.Config, refs []usage.SessionRef, session string, call usage.DockerCall, vm *store.DockerVM) string {
+	r := cfg.Resources
+	if r.MaxContainersPerSession == 0 && r.MaxContainersTotal == 0 && r.DockerMemoryRefusePct == 0 {
+		return ""
+	}
 	out, err := dockerOutput(ctx, bin, dockerCallTimeout, "ps", "--format", usage.DockerPSFormat)
 	if err != nil {
 		return ""
 	}
-	ps := usage.ParseDockerPS(out)
-	if cwd, _ := os.Getwd(); call.Kind == "compose" && usage.ComposeRunning(ps, call, os.Getenv("COMPOSE_PROJECT_NAME"), cwd) {
-		return ""
-	}
-	cs := usage.AttributeContainers(ps, refs)
 	if !dockerSafeID.MatchString(session) {
 		session = ""
 	}
-	return usage.DockerOverCap(cs, session, cfg.Resources.MaxContainersPerSession, cfg.Resources.MaxContainersTotal)
+	cs := usage.AttributeContainers(usage.ParseDockerPS(out), refs)
+	if cwd, _ := os.Getwd(); call.Kind == "compose" && usage.ComposeRunning(cs, call, os.Getenv("COMPOSE_PROJECT_NAME"), cwd, session) {
+		return ""
+	}
+	if msg := usage.DockerOverCap(cs, session, r.MaxContainersPerSession, r.MaxContainersTotal); msg != "" {
+		return msg
+	}
+	if vm != nil {
+		return usage.DockerMemoryOver(vm.UsedMB, vm.LimitMB, r.DockerMemoryRefusePct)
+	}
+	return ""
 }
 
 // dockerRefuse prints msg, records the refusal in Curia's log and exits 1.

@@ -63,6 +63,7 @@ var keyPolicy = map[string]Policy{
 	"monitor.autostart":                    PolicyNone,
 	"resources.max_containers_per_session": PolicyLower, // F19, Ruling 146: a repository may only tighten
 	"resources.max_containers_total":       PolicyLower,
+	"resources.docker_memory_refuse_pct":   PolicyLower,
 	"resources.container_memory_mb":        PolicyLower, // 0 = none is the loosest
 	"resources.container_cpus":             PolicyLower,
 	"tasks.agent_filed.level":              PolicyLevel,

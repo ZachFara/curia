@@ -377,7 +377,7 @@ func composeOwner(dir string, sessions []SessionRef) string {
 
 // DockerOverCap is the one count check, for run and create (refused) and for
 // compose (warned): "" while under the caps, else one line naming the cap.
-// session "" (a caller no session is known for) is held to the total only.
+// A cap of 0 is off. session "" (a caller no session is known for) is held to the total only.
 func DockerOverCap(cs []Container, session string, maxPer, maxTotal int) string {
 	per, total := 0, 0
 	for _, c := range cs {
@@ -390,9 +390,9 @@ func DockerOverCap(cs []Container, session string, maxPer, maxTotal int) string 
 	}
 	const tail = " Stop one, or ask the user to raise the cap."
 	switch {
-	case session != "" && per >= maxPer:
+	case session != "" && maxPer > 0 && per >= maxPer:
 		return fmt.Sprintf("curia: refused: this session already runs %d containers (resources.max_containers_per_session).%s", per, tail)
-	case total >= maxTotal:
+	case maxTotal > 0 && total >= maxTotal:
 		return fmt.Sprintf("curia: refused: %d containers already run for all sessions (resources.max_containers_total).%s", total, tail)
 	}
 	return ""
@@ -411,32 +411,62 @@ func noteProject(project map[string]string, name, id string) {
 	}
 }
 
-// ComposeRunning reports whether the project a `compose up` names already has
-// running containers: by its -p name (or env's COMPOSE_PROJECT_NAME), else by
-// its project directory, the first -f file's directory or cwd. Such an up
-// only adds what is missing, so the caller does not refuse it at the cap.
-func ComposeRunning(cs []Container, c DockerCall, envProject, cwd string) bool {
+// ComposeRunning reports whether the project a `compose up` would use already
+// runs, attributed to the same session (cs is AttributeContainers' output):
+// the project is -p, else envProject (COMPOSE_PROJECT_NAME), else the base
+// name of the project directory (--project-directory, the first -f file's
+// directory or cwd) normalized as Compose does. Such an up only adds what is
+// missing, so the caller does not refuse it at the cap. A directory match
+// alone does not count.
+//
+// shortcut: --scale, extra -f files and profiles are not inspected, so an up
+// of a running project can still add containers past a cap; the caps stop
+// accidents, not an agent set on avoiding them. Upgrade by reading the file.
+func ComposeRunning(cs []Container, c DockerCall, envProject, cwd, session string) bool {
 	name := c.Project
 	if name == "" {
 		name = envProject
 	}
-	dir := c.Dir
-	if dir == "" && c.File != "" {
-		dir = filepath.Dir(c.File)
+	if name == "" {
+		dir := c.Dir
+		if dir == "" && c.File != "" {
+			dir = filepath.Dir(c.File)
+		}
+		if dir == "" || !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
+		name = composeName(filepath.Base(filepath.Clean(dir)))
 	}
-	if dir == "" {
-		dir = cwd
-	}
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(cwd, dir)
-	}
-	dir = filepath.Clean(dir)
 	for _, x := range cs {
-		if (name != "" && x.ComposeProject == name) || (x.ComposeDir != "" && filepath.Clean(x.ComposeDir) == dir) {
+		if session != "" && x.SessionID == session && x.ComposeProject == name {
 			return true
 		}
 	}
 	return false
+}
+
+// composeName is a directory name as Compose makes a project name: lowercase,
+// only a-z 0-9 _ -.
+func composeName(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + 'a' - 'A'
+		}
+		return -1
+	}, s)
+}
+
+// DockerMemoryOver is "" while Docker's memory in use is within pct percent
+// of its limit (or pct is 0, off, or the limit unknown), else one line.
+func DockerMemoryOver(usedMB, limitMB int64, pct int) string {
+	if pct <= 0 || limitMB <= 0 || usedMB*100 <= limitMB*int64(pct) {
+		return ""
+	}
+	return fmt.Sprintf("curia: refused: Docker memory is at %d%% of its %.1f GB limit (resources.docker_memory_refuse_pct). Stop a container, or ask the user to raise the cap.",
+		usedMB*100/limitMB, float64(limitMB)/1024)
 }
 
 // parseCompose reads the options of `docker compose` and says whether the

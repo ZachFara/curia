@@ -406,3 +406,55 @@ func TestDockerLaunchEnvPutsTheWrapperFirstOnce(t *testing.T) {
 		t.Errorf("no docker symlink: %v", err)
 	}
 }
+
+// dockerCapRig has S1 running three labeled containers, the monitor's VM
+// reading at 90 percent, and the given [resources] lines.
+func dockerCapRig(t *testing.T, resources string) *dockerRig {
+	t.Helper()
+	r := newDockerRig(t, "[resources]\n"+resources)
+	r.write(r.ps, psRow("aaaaaaaaaaa1", "S1", "", "")+psRow("aaaaaaaaaaa2", "S1", "", "")+psRow("aaaaaaaaaaa3", "S1", "", ""))
+	st, err := store.Open(filepath.Join(filepath.Dir(r.log), "c.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerSeedSessions(t, st, "S1")
+	if err = st.AddDockerVM(context.Background(), time.Now(), 900, 1000); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	return r
+}
+
+func TestDockerCapsAreIndependentlySwitchable(t *testing.T) {
+	env := []string{"CURIA_SESSION_ID=S1"}
+	for _, c := range []struct {
+		name, cfg, want string // want: the cap named in the refusal, "" for none
+	}{
+		{"defaults", "", "max_containers_per_session"},
+		{"per-session off", "max_containers_per_session = 0\ndocker_memory_refuse_pct = 0\n", ""},
+		{"total on, per-session off", "max_containers_per_session = 0\nmax_containers_total = 3\ndocker_memory_refuse_pct = 0\n", "max_containers_total"},
+		{"counts off, threshold on", "max_containers_per_session = 0\nmax_containers_total = 0\n", "docker_memory_refuse_pct"},
+		{"threshold off, counts off", "max_containers_per_session = 0\nmax_containers_total = 0\ndocker_memory_refuse_pct = 0\n", ""},
+		{"threshold above use", "max_containers_per_session = 0\nmax_containers_total = 0\ndocker_memory_refuse_pct = 95\n", ""},
+	} {
+		r := dockerCapRig(t, c.cfg)
+		for _, args := range [][]string{{"run", "img"}, {"compose", "-p", "new", "up"}} {
+			_ = os.Remove(r.log)
+			_, errOut, code := r.run("", env, args...)
+			if c.want == "" && (code != 0 || errOut != "err "+strings.Join(r.calls()[len(r.calls())-1], " ")+"\n") {
+				t.Errorf("%s %q: refused (exit %d, %q), want pass", c.name, args, code, errOut)
+			}
+			if c.want != "" && (code != 1 || !strings.Contains(errOut, c.want)) {
+				t.Errorf("%s %q: exit %d stderr %q, want a refusal naming %s", c.name, args, code, errOut, c.want)
+			}
+		}
+	}
+	// With everything off the wrapper does not even ask docker for a count.
+	r := dockerCapRig(t, "max_containers_per_session = 0\nmax_containers_total = 0\ndocker_memory_refuse_pct = 0\n")
+	r.run("", env, "run", "img")
+	for _, c := range r.calls() {
+		if c[0] == "ps" {
+			t.Errorf("docker ps called with every cap off: %q", c)
+		}
+	}
+}
