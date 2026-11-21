@@ -85,6 +85,12 @@ var timelineSources = []timelineSource{
 		kind: "'push_sent'", line: "p.ref || ' sent to ' || p.device",
 	},
 	{
+		// F26 part 2: what a web device did, recorded as a WebAction event.
+		from: "events e", where: "e.kind = 'WebAction' AND json_valid(e.payload)",
+		ref: "CAST(e.id AS TEXT)", at: "e.at", session: "''", task: "COALESCE(json_extract(e.payload, '$.task'), '')", repo: "''",
+		kind: "'web_action'", line: "COALESCE(json_extract(e.payload, '$.device'), '') || ': ' || COALESCE(json_extract(e.payload, '$.action'), '')",
+	},
+	{
 		from: "schedule_runs r", where: "1", // F22: one line per fire or skipped fire
 		ref: "CAST(r.id AS TEXT)", at: "r.ran_at", session: "''", task: "''", repo: "''",
 		kind: "'schedule_run'", line: "r.schedule_id || ' ' || r.outcome",

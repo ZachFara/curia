@@ -229,6 +229,8 @@ type Serve struct {
 	// login cookie lasts.
 	Web        bool          `toml:"web"`
 	WebSession time.Duration `toml:"web_session"`
+	// WebWrite adds the page's three task moves and its messages (F26 part 2).
+	WebWrite bool `toml:"web_write"`
 }
 
 // Restore configures `curia restore`.

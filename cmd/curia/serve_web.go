@@ -24,6 +24,7 @@ import (
 	"github.com/ZachFara/curia/internal/notify"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/tmux"
 	"github.com/ZachFara/curia/internal/ui"
 )
 
@@ -53,6 +54,8 @@ const (
 	servewebMaxFailures  = 5   // wrong tokens per address per minute before a wrong one is 429
 	servewebMaxAddrs     = 128 // addresses the limiter remembers
 	servewebMaxSessions  = 64
+	servewebMaxWrites    = 20      // state-changing requests per device per minute
+	servewebMaxWriteBody = 8 << 10 // bytes of a state-changing request
 	servewebMaxLoginBody = 1 << 10
 	servewebColumnCap    = 100 // cards per board column
 	servewebRowCap       = 200 // rows of the timeline and the decision log
@@ -72,10 +75,15 @@ type servewebOpts struct {
 	Now       func() time.Time
 	TTL       time.Duration // a session cookie's lifetime
 	PublicURL string        // serve.public_url, or the listener's own URL
+	Tmux      tmux.Client   // delivers a confirmed message
+	Write     bool          // serve.web_write
 }
 
 type servewebSession struct {
 	device, hash string // the device and its token hash when the session began
+	csrf         string // 256 random bits, made with the session (so rotated on every login)
+	flash        string // the last result of a write, shown for a minute
+	flashUntil   time.Time
 	exp          time.Time
 }
 
@@ -83,14 +91,14 @@ type serveWeb struct {
 	servewebOpts
 	host, origin string
 	secure       bool
-	lim          *servewebLimiter
+	lim, wlim    *servewebLimiter // wrong tokens per address; writes per device
 
 	mu       sync.Mutex
 	sessions map[[32]byte]servewebSession // by SHA-256 of the cookie value
 }
 
 func servewebNew(o servewebOpts) *serveWeb {
-	w := &serveWeb{servewebOpts: o, lim: servewebNewLimiter(), sessions: map[[32]byte]servewebSession{}}
+	w := &serveWeb{servewebOpts: o, lim: servewebNewLimiter(servewebMaxFailures), wlim: servewebNewLimiter(servewebMaxWrites), sessions: map[[32]byte]servewebSession{}}
 	if u, err := url.Parse(o.PublicURL); err == nil {
 		w.host, w.origin, w.secure = u.Host, u.Scheme+"://"+u.Host, u.Scheme == "https"
 	}
@@ -98,7 +106,11 @@ func servewebNew(o servewebOpts) *serveWeb {
 }
 
 // handles reports whether path is one of the web routes.
-func (*serveWeb) handles(path string) bool { _, ok := servewebRoutes[path]; return ok }
+func (w *serveWeb) handles(path string) bool {
+	_, ok := servewebRoutes[path]
+	_, wok := servewebWriteRoutes[path]
+	return ok || wok && w.Write
+}
 
 func (w *serveWeb) reply(rw http.ResponseWriter, r *http.Request, route string, code int, ctype string, body []byte) {
 	h := rw.Header()
@@ -130,6 +142,10 @@ func (w *serveWeb) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		w.text(rw, r, route, http.StatusForbidden, "forbidden")
 		return
 	}
+	if _, ok := servewebWriteRoutes[route]; ok && w.Write && servewebWriteRoutes[route] {
+		w.action(rw, r, route)
+		return
+	}
 	post := servewebRoutes[route]
 	switch {
 	case r.Method == http.MethodGet || r.Method == http.MethodHead:
@@ -149,11 +165,12 @@ func (w *serveWeb) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		w.reply(rw, r, route, http.StatusOK, "text/html; charset=utf-8", servewebLoginPage)
 		return
 	}
-	if !w.authed(r) {
+	_, sess, ok := w.authed(r)
+	if !ok {
 		w.text(rw, r, route, http.StatusUnauthorized, "unauthorized: log in at /login")
 		return
 	}
-	w.page(rw, r, route)
+	w.page(rw, r, route, sess)
 }
 
 // originOK: the Host is the public URL's host and an Origin, when sent, is its origin.
@@ -231,38 +248,44 @@ func (w *serveWeb) newSession(dev, hash string, now time.Time) (string, error) {
 		}
 		delete(w.sessions, oldest)
 	}
-	w.sessions[sha256.Sum256([]byte(value))] = servewebSession{device: dev, hash: hash, exp: now.Add(w.TTL)}
+	c := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, c); err != nil {
+		return "", err
+	}
+	w.sessions[sha256.Sum256([]byte(value))] = servewebSession{device: dev, hash: hash, csrf: base64.RawURLEncoding.EncodeToString(c), exp: now.Add(w.TTL)}
 	return value, nil
 }
 
 // authed: a live session whose device still holds the same token.
-func (w *serveWeb) authed(r *http.Request) bool {
+func (w *serveWeb) authed(r *http.Request) ([32]byte, servewebSession, bool) {
 	c, err := r.Cookie(servewebCookie)
 	if err != nil {
-		return false
+		return [32]byte{}, servewebSession{}, false
 	}
+	key := sha256.Sum256([]byte(c.Value))
 	w.mu.Lock()
-	s, ok := w.sessions[sha256.Sum256([]byte(c.Value))]
+	s, ok := w.sessions[key]
 	w.mu.Unlock()
 	if !ok || !w.Now().Before(s.exp) {
-		return false
+		return key, s, false
 	}
 	devs, err := w.Store.Devices(r.Context())
 	if err != nil {
-		return false
+		return key, s, false
 	}
 	for _, d := range devs {
 		if d.Name == s.device && subtle.ConstantTimeCompare([]byte(d.TokenSHA256), []byte(s.hash)) == 1 {
-			return true
+			return key, s, true
 		}
 	}
-	return false
+	return key, s, false
 }
 
 // servewebLimiter counts wrong tokens per remote address in one-minute windows.
 type servewebLimiter struct {
-	mu sync.Mutex
-	m  map[string]*servewebWindow
+	max int // events per window before limited
+	mu  sync.Mutex
+	m   map[string]*servewebWindow
 }
 
 type servewebWindow struct {
@@ -270,7 +293,9 @@ type servewebWindow struct {
 	n      int
 }
 
-func servewebNewLimiter() *servewebLimiter { return &servewebLimiter{m: map[string]*servewebWindow{}} }
+func servewebNewLimiter(limit int) *servewebLimiter {
+	return &servewebLimiter{max: limit, m: map[string]*servewebWindow{}}
+}
 
 func (l *servewebLimiter) size() int { l.mu.Lock(); defer l.mu.Unlock(); return len(l.m) }
 
@@ -278,7 +303,7 @@ func (l *servewebLimiter) limited(addr string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	e := l.m[addr]
-	return e != nil && e.minute.Equal(now.Truncate(time.Minute)) && e.n >= servewebMaxFailures
+	return e != nil && e.minute.Equal(now.Truncate(time.Minute)) && e.n >= l.max
 }
 
 func (l *servewebLimiter) failed(addr string, now time.Time) {
@@ -321,6 +346,11 @@ type servewebPage struct {
 	Summary     string
 	Text        string
 	Settings    []ui.SettingRow
+	// Writes (serve.web_write): the forms, their token and the last result.
+	Write       bool
+	CSRF, Flash string
+	Targets     []servewebTarget
+	Held        []servewebHeld
 }
 
 type servewebColumn struct {
@@ -329,18 +359,27 @@ type servewebColumn struct {
 	Cards       []servewebCard
 }
 
-type servewebCard struct{ ID, Title, Repo, Priority string }
+type servewebCard struct {
+	ID, Title, Repo, Priority string
+	Moves                     []string // the drop targets this card may go to (writes on)
+}
 
 type servewebEvent struct{ At, Who, Kind, Line string }
 
 type servewebDecision struct{ ID, Status, Scope, Date, Reuse, Asked, Question, Answer string }
 
-func (w *serveWeb) page(rw http.ResponseWriter, r *http.Request, route string) {
+func (w *serveWeb) page(rw http.ResponseWriter, r *http.Request, route string, sess servewebSession) {
 	if route == "/web.css" {
 		w.reply(rw, r, route, http.StatusOK, "text/css; charset=utf-8", servewebCSS)
 		return
 	}
 	p, err := w.build(r.Context(), route)
+	if w.Write {
+		p.Write, p.CSRF = true, sess.csrf
+		if w.Now().Before(sess.flashUntil) {
+			p.Flash = sess.flash
+		}
+	}
 	var buf bytes.Buffer
 	if err == nil {
 		err = servewebPageTmpl.Execute(&buf, p)
@@ -389,6 +428,9 @@ func (w *serveWeb) build(ctx context.Context, route string) (servewebPage, error
 		rows, err := settingsSource{}.Rows(ctx)
 		return servewebPage{Kind: "settings", Title: "Settings", Settings: rows}, err
 	}
+	if route == "/say" {
+		return w.sayPage(ctx, now)
+	}
 	return w.board(ctx, now)
 }
 
@@ -409,7 +451,11 @@ func (w *serveWeb) board(ctx context.Context, now time.Time) (servewebPage, erro
 			if pri == 0 {
 				pri = model.PriorityNormal
 			}
-			col.Cards = append(col.Cards, servewebCard{c.Task.ID, servewebText(c.Task.Title, servewebTextLimit), servewebText(filepath.Base(c.Task.Repo), 40), fmt.Sprint(pri)})
+			card := servewebCard{ID: c.Task.ID, Title: servewebText(c.Task.Title, servewebTextLimit), Repo: servewebText(filepath.Base(c.Task.Repo), 40), Priority: fmt.Sprint(pri)}
+			if w.Write {
+				card.Moves = servewebMovesFrom(st)
+			}
+			col.Cards = append(col.Cards, card)
 		}
 		p.Columns = append(p.Columns, col)
 	}
