@@ -12,3 +12,7 @@ UPDATE permission_events SET
 WHERE id IN (SELECT MIN(id) FROM permission_events GROUP BY session_id, tool, summary, verdict);
 DELETE FROM permission_events WHERE id NOT IN (SELECT MIN(id) FROM permission_events GROUP BY session_id, tool, summary, verdict);
 CREATE UNIQUE INDEX permission_events_key ON permission_events (session_id, period, tool, summary, verdict);
+-- Pruning picks candidates by expiry, so each age column has an index (last_at is set on every insert).
+UPDATE permission_events SET last_at = at WHERE last_at IS NULL;
+CREATE INDEX permission_events_last ON permission_events (last_at);
+CREATE INDEX IF NOT EXISTS auto_spawn_runs_at ON auto_spawn_runs (at);

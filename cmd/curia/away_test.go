@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,6 +200,31 @@ func TestBackSummaryCountsRepeatsAndKeepsLaterRefusals(t *testing.T) {
 	out, err := runRoot(t, "back")
 	if err != nil || !strings.Contains(out, "Refused (601 call(s)") || !strings.Contains(out, "600x s1 Bash: rm x") || !strings.Contains(out, "1x s1 Write: /etc/passwd") {
 		t.Errorf("summary: %v\n%.500s", err, out)
+	}
+}
+
+// 31 distinct refusals: 30 listed in the order first seen, the rest counted, and `back --all` lists every one.
+func TestBackSummaryListsFirstSeenAndSaysWhatIsLeftOut(t *testing.T) {
+	st, now := awayEnv(t, awaySess("s1", "idle", ""))
+	if _, err := runRoot(t, "away", "2h"); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(30 * time.Minute)
+	ctx := context.Background()
+	for i := range 31 {
+		_ = st.AddPermissionEvent(ctx, store.PermissionEvent{SessionID: "s1", Mode: "away", Tool: "Bash", Summary: fmt.Sprintf("cmd%02d", i), Verdict: "deny", At: *now})
+	}
+	for range 200 { // repeats of the last one must not change which groups appear
+		_ = st.AddPermissionEvent(ctx, store.PermissionEvent{SessionID: "s1", Mode: "away", Tool: "Bash", Summary: "cmd30", Verdict: "deny", At: *now})
+	}
+	out, err := runRoot(t, "back")
+	if err != nil || !strings.Contains(out, "cmd29") || strings.Contains(out, "cmd30") || !strings.Contains(out, "and 1 more kind(s) of refusal: `curia back --all`") {
+		t.Fatalf("summary: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { backAll = false })
+	out, err = runRoot(t, "back", "--all")
+	if err != nil || !strings.Contains(out, "201x s1 Bash: cmd30") || strings.Contains(out, "more kind(s)") {
+		t.Errorf("back --all: %v\n%s", err, out)
 	}
 }
 

@@ -18,19 +18,20 @@ const (
 
 // PruneHistory trims the tables that only grow: denials, the auto log and
 // schedule runs by age, config revisions to the newest ConfigRevisionsKeep
-// and the baselines. Each statement reads at most historyPruneBatch rows from
-// the oldest id (rows are appended in time order), like PruneEvents; the
-// monitor runs it every minute, so a backlog drains in passes.
+// and the baselines. Each statement picks its candidates by expiry (an
+// indexed column, oldest first, at most historyPruneBatch), never by id and
+// then age: a row that is old by id but kept fresh by repeats must not fill
+// the window. The monitor runs it every minute, so a backlog drains in passes.
 func (s *Store) PruneHistory(ctx context.Context, now time.Time) error {
 	for _, q := range []struct {
 		name, sql string
 		arg       any
 	}{
-		{"denials", `DELETE FROM permission_events WHERE COALESCE(last_at, at) < ?1 AND id IN (SELECT id FROM permission_events ORDER BY id LIMIT ?2)`, formatTime(now.Add(-PermissionEventKeep))},
-		{"auto log", `DELETE FROM auto_spawn_runs WHERE at < ?1 AND id IN (SELECT id FROM auto_spawn_runs ORDER BY id LIMIT ?2)`, formatTime(now.Add(-HistoryKeep))},
-		{"schedule runs", `DELETE FROM schedule_runs WHERE ran_at < ?1 AND id IN (SELECT id FROM schedule_runs ORDER BY id LIMIT ?2)`, formatTime(now.Add(-HistoryKeep))},
-		{"config revisions", `DELETE FROM config_revisions WHERE actor <> 'baseline' AND n IN (SELECT n FROM config_revisions
-WHERE n <= (SELECT MAX(n) FROM config_revisions) - ?1 ORDER BY n LIMIT ?2)`, ConfigRevisionsKeep},
+		{"denials", `DELETE FROM permission_events WHERE id IN (SELECT id FROM permission_events WHERE last_at < ?1 ORDER BY last_at LIMIT ?2)`, formatTime(now.Add(-PermissionEventKeep))},
+		{"auto log", `DELETE FROM auto_spawn_runs WHERE id IN (SELECT id FROM auto_spawn_runs WHERE at < ?1 ORDER BY at LIMIT ?2)`, formatTime(now.Add(-HistoryKeep))},
+		{"schedule runs", `DELETE FROM schedule_runs WHERE id IN (SELECT id FROM schedule_runs WHERE ran_at < ?1 ORDER BY ran_at LIMIT ?2)`, formatTime(now.Add(-HistoryKeep))},
+		{"config revisions", `DELETE FROM config_revisions WHERE n IN (SELECT n FROM config_revisions
+WHERE actor <> 'baseline' AND n <= (SELECT MAX(n) FROM config_revisions) - ?1 ORDER BY n LIMIT ?2)`, ConfigRevisionsKeep},
 	} {
 		if _, err := s.db.ExecContext(ctx, q.sql, q.arg, historyPruneBatch); err != nil {
 			return fmt.Errorf("store: prune %s: %w", q.name, err)
