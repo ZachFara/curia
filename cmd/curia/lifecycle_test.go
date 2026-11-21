@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -851,6 +852,29 @@ func TestCleanRemovesMergedBranchAndWorktree(t *testing.T) {
 	}
 	lifecycleWantOrder(t, out, "merged into main", "Removed worktree", "1 ignored", "node_modules/",
 		"Deleted branch "+lifecycleBranch, "Cleaned T-1")
+}
+
+// Live check, D4: cleaning a task that is done says its worktree was cleaned,
+// not that the task was marked dropped as if it had been abandoned.
+func TestCleanDoneTaskSaysCleaned(t *testing.T) {
+	f := lifecycleWithLead(t)
+	lifecycleCommitOnBranch(f, "the fix")
+	gitRun(t, f.repo, "merge", "-q", "--no-ff", "--no-edit", lifecycleBranch)
+	ctx := context.Background()
+	if _, _, err := f.st.CompleteTask(ctx, model.Review{TaskID: "T-1", SessionID: "s1", Summary: "done", Tests: model.TestsPassed, CreatedAt: f.now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.st.CloseReview(ctx, "R-1", store.ReviewClose{Status: model.ReviewMerged, How: model.ApproveMerge}, f.now); err != nil {
+		t.Fatal(err)
+	}
+	lifecycleEnded(f)
+	out, err := lifecycleRun(t, "clean", "T-1")
+	if err != nil {
+		t.Fatalf("clean: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "marked dropped") || !strings.Contains(out, "Cleaned T-1 (done: its worktree and branch are removed") {
+		t.Errorf("clean of a done task printed:\n%s\nwant it to say the done task's worktree was cleaned", out)
+	}
 }
 
 func TestCleanRefusesUnmerged(t *testing.T) {

@@ -213,7 +213,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	_, err = fmt.Fprintln(out, "Curia is installed.\n"+
 		"Next steps:\n"+
 		"  1. Restart any running Claude Code sessions so they pick up the hooks, skill and MCP server.\n"+
-		"  2. Run: tmux source-file ~/.tmux.conf")
+		"  2. Run: tmux source-file ~/.tmux.conf\n"+
+		"     (install writes the tmux config but does not load it into a running tmux: until you run this or restart tmux,\n"+
+		"     the key bindings, the badge and focus-events are not active.)")
 	return err
 }
 
