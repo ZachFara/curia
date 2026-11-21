@@ -35,8 +35,27 @@ const Batches = 3
 const Nominal = 2 * time.Millisecond
 
 // MaxScale is the most a slow machine is excused: a reference more than
-// MaxScale times Nominal fails the gate instead of stretching it further.
+// MaxScale times Nominal means the gate could not be measured (owner decision
+// 2026-11-20): not a pass, and not a failure of the code.
 const MaxScale = 2
+
+// UnmeasuredPrefix starts the verdict text of a gate whose machine was too slow.
+const UnmeasuredPrefix = "could not measure: "
+
+// CouldNotMeasureMarker is the last line the verdict program prints for that outcome.
+const CouldNotMeasureMarker = "LATENCY-COULD-NOT-MEASURE: no gate failed, but the machine was too slow to measure at least one; not a code failure, rerun on another machine"
+
+// Outcome is the result of judging the gates of a run.
+type Outcome int
+
+// Pass: every gate measured and under its threshold. CouldNotMeasure: no
+// failure, but at least one gate ran on a machine over the allowance. Fail: a
+// real failure anywhere (it wins). The order is the precedence.
+const (
+	Pass Outcome = iota
+	CouldNotMeasure
+	Fail
+)
 
 // Gate runs batch Batches times, always all of them (batch measures one batch
 // with the gate's own sample count, logs its own p50, p95 and max, and
@@ -70,14 +89,15 @@ func Gate(t testing.TB, what string, threshold time.Duration, batch func() time.
 }
 
 // Verdict returns the effective threshold, the scale (the reference p95 over
-// Nominal, clamped to [1, MaxScale]) and, when the gate fails, why.
+// Nominal, clamped to [1, MaxScale]) and, when the gate fails or cannot be
+// measured (fail starts with UnmeasuredPrefix), why.
 func Verdict(median, threshold, ref time.Duration) (limit time.Duration, scale float64, fail string) {
 	raw := float64(ref) / float64(Nominal)
 	scale = min(max(raw, 1), MaxScale)
 	limit = time.Duration(float64(threshold) * scale)
 	switch {
 	case raw > MaxScale:
-		fail = fmt.Sprintf("reference commit p95 took %v, %.2fx the nominal %v, over the %vx allowance: the machine is too slow for this gate, which fails rather than excuses it", ref, raw, Nominal, MaxScale)
+		fail = fmt.Sprintf(UnmeasuredPrefix+"the machine is too slow for this gate (reference p95 %v, %.2f times the nominal %v, over the %vx allowance)", ref, raw, Nominal, MaxScale)
 	case median >= limit:
 		fail = fmt.Sprintf("median p95 = %v, want < %v (threshold %v x scale %.2f; reference p95 %v, nominal %v)", median, limit, threshold, scale, ref, Nominal)
 	}
@@ -191,12 +211,13 @@ func ReadResults(r io.Reader) ([]Result, error) {
 // assertion in any pass, and the median p95 under the threshold times the scale
 // of the MEDIAN reference p95 (clamped as Verdict does: a single pass's inflated
 // reference cannot excuse the gate, and a reference over MaxScale x Nominal
-// fails it). It returns the table, always, and whether every gate passed.
-func Judge(rs []Result) (table string, ok bool) {
+// is CouldNotMeasure, not a failure). It returns the table, always, and the
+// outcome: Fail if anything really failed, else CouldNotMeasure if any gate
+// was over the allowance, else Pass.
+func Judge(rs []Result) (table string, outcome Outcome) {
 	var b strings.Builder
-	ok = len(rs) > 0
-	if !ok {
-		return "no latency results: no gate ran in this shard, which fails\n", false
+	if len(rs) == 0 {
+		return "no latency results: no gate ran in this shard, which fails\n", Fail
 	}
 	var order []string
 	by := map[string][]Result{}
@@ -227,15 +248,18 @@ func Judge(rs []Result) (table string, ok bool) {
 		default:
 			limit, scale, fail = Verdict(median(p95s), got[0].Threshold, median(refs))
 		}
-		verdict := "ok"
-		if fail != "" {
-			verdict, ok = "FAIL "+fail, false
+		verdict, o := "ok", Pass
+		if strings.HasPrefix(fail, UnmeasuredPrefix) {
+			verdict, o = fail, CouldNotMeasure
+		} else if fail != "" {
+			verdict, o = "FAIL "+fail, Fail
 		}
+		outcome = max(outcome, o) // Fail outranks CouldNotMeasure outranks Pass
 		var m time.Duration
 		if len(p95s) > 0 {
 			m = median(p95s)
 		}
 		fmt.Fprintf(&b, "%s: batch p95 %v at %v, median %v, reference p95 %v, scale %.2f, effective threshold %v: %s\n", g, p95s, at, m, refs, scale, limit, verdict)
 	}
-	return b.String(), ok
+	return b.String(), outcome
 }
