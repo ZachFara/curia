@@ -104,7 +104,12 @@ func TestModeDefaultFromConfig(t *testing.T) {
 	st := openStore(t)
 	env := (&fakeEnv{}).env("%3")
 	modeSession(t, st, env, cfg, proj, "", time.Time{})
-	wantAllow(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/a.go")+`}`, proj, "")), "default edits")
+	// A default has no frozen root (none was set), so it allows no path.
+	notAllowed(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/a.go")+`}`, proj, "")), "default edits")
+	if _, err := st.SetModes(context.Background(), store.ModeScope{All: true}, "edits", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	wantAllow(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/a.go")+`}`, proj, "")), "edits set")
 }
 
 // An expired mode is absent: the default applies again.
@@ -338,7 +343,7 @@ func TestModeAwayGlobGrep(t *testing.T) {
 func TestModeRootFromTheStoredSession(t *testing.T) {
 	home, proj, cfg := denyHome(t)
 	for _, mode := range []string{"edits", "away"} {
-		st := openStore(t)
+		st, raw := openWithRaw(t)
 		env := (&fakeEnv{}).env("%3")
 		modeSession(t, st, env, cfg, proj, mode, time.Time{})
 		// An event whose cwd is elsewhere does not move the root.
@@ -348,14 +353,14 @@ func TestModeRootFromTheStoredSession(t *testing.T) {
 		}
 		notAllowed(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":"x.go"}`, other, "")), mode+" event cwd outside the stored root")
 		for _, root := range []string{home, filepath.Dir(home), "/"} {
-			if err := st.UpdateSession(context.Background(), "A", func(s model.Session, _ bool) model.Session { s.Worktree = root; return s }); err != nil {
+			if _, err := raw.Exec(`UPDATE sessions SET mode_root = ?`, root); err != nil {
 				t.Fatal(err)
 			}
 			res := pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/a.go")+`}`, proj, ""))
 			notAllowed(t, res, mode+" root "+root)
 		}
 	}
-	// No worktree: the stored repo is the root, not the event's cwd.
+	// No worktree: the repo at the time the mode was set is the root, not the cwd.
 	st := openStore(t)
 	env := (&fakeEnv{}).env("%3")
 	pre(t, st, env, cfg, preBody("Bash", `{"command":"ls"}`, proj, ""))
@@ -363,4 +368,82 @@ func TestModeRootFromTheStoredSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	notAllowed(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/a.go")+`}`, proj, "")), "repo /src/curia is not the cwd")
+}
+
+// The root is frozen when the mode is set: an agent that moves (the hook
+// records a new repo and cwd) does not move the allow root, and an event cwd
+// outside the root allows nothing.
+func TestModeRootIsFrozenWhenSet(t *testing.T) {
+	home, proj, cfg := denyHome(t)
+	other := filepath.Join(home, "other")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"edits", "away"} {
+		st := openStore(t)
+		env := (&fakeEnv{}).env("%3")
+		env.Git = func(string) (string, string, string) { return proj, "b", "" } // a repo, no worktree
+		pre(t, st, env, cfg, preBody("Bash", `{"command":"ls"}`, proj, ""))
+		if _, err := st.SetModes(context.Background(), store.ModeScope{All: true}, mode, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		wantAllow(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":"a.go"}`, proj, "")), mode+" before the move")
+		// The agent cds elsewhere and the hook records it.
+		if err := st.UpdateSession(context.Background(), "A", func(s model.Session, _ bool) model.Session {
+			s.Repo, s.CheckedCwd, s.Cwd = other, other, other
+			return s
+		}); err != nil {
+			t.Fatal(err)
+		}
+		notAllowed(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(other+"/x.go")+`}`, other, "")), mode+" edit where the agent went")
+		notAllowed(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/a.go")+`}`, other, "")), mode+" root edit with a cwd outside it")
+		wantAllow(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/a.go")+`}`, proj, "")), mode+" root edit from inside")
+	}
+}
+
+// With no repository or worktree when the mode is set there is no root:
+// nothing path-based is allowed, even once the session lands in a repository.
+func TestModeNoRootAllowsNoPath(t *testing.T) {
+	home, proj, cfg := denyHome(t)
+	for _, mode := range []string{"edits", "away"} {
+		st := openStore(t)
+		env := (&fakeEnv{}).env("%3")
+		env.Git = func(string) (string, string, string) { return "", "", "" }
+		pre(t, st, env, cfg, preBody("Bash", `{"command":"ls"}`, home, ""))
+		if _, err := st.SetModes(context.Background(), store.ModeScope{All: true}, mode, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		call := preBody("Write", `{"file_path":`+quote(proj+"/a.go")+`}`, proj, "")
+		notAllowed(t, pre(t, st, env, cfg, call), mode+" no root")
+		if err := st.UpdateSession(context.Background(), "A", func(s model.Session, _ bool) model.Session { s.Repo = proj; return s }); err != nil {
+			t.Fatal(err)
+		}
+		notAllowed(t, pre(t, st, env, cfg, call), mode+" repo filled in later")
+	}
+}
+
+// Containment for an allow keeps case: two directories differing only in
+// case are two directories on a case-sensitive file system.
+func TestModeAllowContainmentKeepsCase(t *testing.T) {
+	if !hook.InsideExact("/src/repo/a", []string{"/src/repo"}) || hook.InsideExact("/src/Repo/a", []string{"/src/repo"}) ||
+		hook.InsideExact("/src/repository", []string{"/src/repo"}) || !hook.InsideExact("/src/repo", []string{"/src/repo"}) {
+		t.Error("InsideExact folds case or matches a prefix that is not a directory")
+	}
+	home, _, cfg := denyHome(t)
+	lower, upper := filepath.Join(home, "repo"), filepath.Join(home, "Repo")
+	for _, d := range []string{lower, upper} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, _ := os.Stat(lower)
+	b, _ := os.Stat(upper)
+	if os.SameFile(a, b) {
+		t.Skip("case-insensitive file system: the two directories are one; the unit test above covers the comparison")
+	}
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	modeSession(t, st, env, cfg, lower, "edits", time.Time{})
+	wantAllow(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(lower+"/a.go")+`}`, lower, "")), "same case")
+	notAllowed(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(upper+"/a.go")+`}`, lower, "")), "other case")
 }

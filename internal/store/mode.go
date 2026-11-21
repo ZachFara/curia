@@ -18,7 +18,8 @@ type ModeScope struct {
 
 // SetModes sets the mode of every session in scope that has not ended and
 // returns how many it changed. until is when the mode lapses (zero: never).
-// It is the only writer of sessions.mode, so a session update by the hook
+// It also freezes sessions.mode_root from the worktree, else the repository, as
+// they are now (NULL when neither is known). It is the only writer of both, so a session update by the hook
 // cannot change a mode. mode must be one of model.Modes.
 func (s *Store) SetModes(ctx context.Context, scope ModeScope, mode string, until time.Time) (int, error) {
 	if !slices.Contains(model.Modes, mode) {
@@ -31,7 +32,7 @@ func (s *Store) SetModes(ctx context.Context, scope ModeScope, mode string, unti
 	if !until.IsZero() {
 		u = formatTime(until)
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE sessions SET mode = ?, mode_until = ? WHERE state != ? AND (? OR repo = ?)`,
+	res, err := s.db.ExecContext(ctx, `UPDATE sessions SET mode = ?, mode_until = ?, mode_root = COALESCE(NULLIF(worktree, ''), NULLIF(repo, '')) WHERE state != ? AND (? OR repo = ?)`,
 		mode, u, model.StateEnded, scope.All, scope.Repo)
 	if err != nil {
 		return 0, fmt.Errorf("store: set modes: %w", err)
