@@ -1,0 +1,30 @@
+[
+  {
+    "id": "S-2",
+    "text": "resume work",
+    "kind": "daily",
+    "spec": "02:00",
+    "target": "repo:api-server",
+    "if_idle": false,
+    "only_limited": true,
+    "status": "active",
+    "next_run_at": "2026-11-12T02:00:00Z",
+    "last_outcome": "",
+    "created_via": "cli",
+    "created_at": "2026-11-11T10:00:00Z"
+  },
+  {
+    "id": "S-1",
+    "text": "continue",
+    "kind": "at",
+    "spec": "2026-11-12T02:00:00Z",
+    "target": "all",
+    "if_idle": true,
+    "only_limited": false,
+    "status": "active",
+    "next_run_at": "2026-11-12T02:00:00Z",
+    "last_outcome": "",
+    "created_via": "cli",
+    "created_at": "2026-11-11T09:00:00Z"
+  }
+]

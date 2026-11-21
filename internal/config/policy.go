@@ -70,4 +70,7 @@ var keyPolicy = map[string]Policy{
 	"resources.docker_memory_refuse_pct":   PolicyLower,
 	"resources.container_memory_mb":        PolicyLower, // 0 = none is the loosest
 	"resources.container_cpus":             PolicyLower,
+	"schedule.late_window":                 PolicyLower, // F28: lower the window
+	"schedule.reset_grace":                 PolicyLower,
+	"schedule.limited_pct":                 PolicyNone,
 }

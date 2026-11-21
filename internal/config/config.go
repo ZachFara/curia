@@ -63,6 +63,7 @@ type Config struct {
 	Tasks     Tasks     `toml:"tasks"`
 	Resources Resources `toml:"resources"`
 	Monitor   Monitor   `toml:"monitor"`
+	Schedule  Schedule  `toml:"schedule"`
 	Cost      Cost      `toml:"cost"`
 }
 
@@ -148,6 +149,7 @@ func Default() Config {
 		Activity:  defaultActivity(),
 		Resources: defaultResources(),
 		Monitor:   Monitor{Autostart: true},
+		Schedule:  defaultSchedule(),
 		Tasks:     defaultTasks(),
 	}
 }
@@ -181,6 +183,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.Resources.validate(); err != nil {
+		return err
+	}
+	if err := c.Schedule.validate(); err != nil {
 		return err
 	}
 	if err := c.Cost.validate(); err != nil {
