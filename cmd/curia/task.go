@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -127,7 +128,7 @@ func taskDefaultEditor(ctx context.Context, argv []string, path string) error {
 	return c.Run()
 }
 
-// taskLogger opens the log file for gitInfo's warnings; when it does not
+// taskLogger opens the log file for gitops.Info's warnings; when it does not
 // open, warnings are dropped.
 func taskLogger(cfg config.Config) (*slog.Logger, func()) {
 	logger, closeLog, err := openLog(cfg.LogPath)
@@ -148,7 +149,7 @@ func taskGitRepo(ctx context.Context, dir string, logger *slog.Logger) (repo, br
 	if fi, serr := os.Stat(abs); serr != nil || !fi.IsDir() {
 		return "", "", "", fmt.Errorf("%s is not a directory", sanitize.Line(abs, 200))
 	}
-	repo, branch, worktree = gitInfo(ctx, abs, logger)
+	repo, branch, worktree = gitops.Info(ctx, abs, logger, subprocessTimeout)
 	if repo == "" {
 		return "", "", "", fmt.Errorf("%s is not inside a git repository", sanitize.Line(abs, 200))
 	}

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
@@ -338,7 +339,7 @@ func TestCleanNamesIgnoredFilesAndNeedsForce(t *testing.T) {
 	if got := lifecycleRead(t, filepath.Join(f.worktree("T-1"), ".env")); got != "TOKEN=1\n" {
 		t.Errorf(".env = %q, want it kept", got)
 	}
-	if ok, _ := refExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); !ok {
+	if ok, _ := gitops.RefExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); !ok {
 		t.Error("branch deleted")
 	}
 	out, err := lifecycleRun(t, "clean", "T-1", "--force")
@@ -839,7 +840,7 @@ func TestCleanRemovesMergedBranchAndWorktree(t *testing.T) {
 	if worktreeExists(f.worktree("T-1")) {
 		t.Error("worktree still on disk")
 	}
-	if ok, err := refExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); err != nil || ok {
+	if ok, err := gitops.RefExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); err != nil || ok {
 		t.Errorf("branch exists %v (%v), want deleted", ok, err)
 	}
 	if got := worktreeGit(t, f.repo, "rev-parse", "main"); got != mainHead {
@@ -894,7 +895,7 @@ func TestCleanRefusesUnmerged(t *testing.T) {
 	if !worktreeExists(f.worktree("T-1")) {
 		t.Error("worktree removed")
 	}
-	if ok, _ := refExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); !ok {
+	if ok, _ := gitops.RefExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); !ok {
 		t.Error("branch deleted")
 	}
 
@@ -905,7 +906,7 @@ func TestCleanRefusesUnmerged(t *testing.T) {
 	if worktreeExists(f.worktree("T-1")) {
 		t.Error("worktree still on disk")
 	}
-	if ok, _ := refExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); ok {
+	if ok, _ := gitops.RefExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); ok {
 		t.Error("branch still there")
 	}
 	lifecycleWantOrder(t, out, "not merged", "--force", "lost", "unmerged work", "Removed worktree", "Deleted branch")
@@ -922,7 +923,7 @@ func TestCleanForceNeverForcesWorktreeRemoval(t *testing.T) {
 	if got := lifecycleRead(t, filepath.Join(f.worktree("T-1"), "draft.txt")); got != "draft\n" {
 		t.Errorf("draft.txt = %q", got)
 	}
-	if ok, _ := refExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); !ok {
+	if ok, _ := gitops.RefExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); !ok {
 		t.Error("branch deleted although the worktree stayed")
 	}
 	if !f.get("T-1").CleanedAt.IsZero() {
@@ -937,7 +938,7 @@ func TestCleanNeverTouchesBase(t *testing.T) {
 	if _, err := lifecycleRun(t, "clean", "T-1", "--force"); err == nil || !strings.Contains(err.Error(), "base branch") {
 		t.Errorf("clean of the base = %v, want a refusal", err)
 	}
-	if ok, _ := refExists(context.Background(), f.repo, "refs/heads/main"); !ok {
+	if ok, _ := gitops.RefExists(context.Background(), f.repo, "refs/heads/main"); !ok {
 		t.Error("main deleted")
 	}
 	if !worktreeExists(f.worktree("T-1")) {
@@ -958,7 +959,7 @@ func TestCleanRefusesWithLiveAgent(t *testing.T) {
 	if !worktreeExists(f.worktree("T-1")) {
 		t.Error("worktree removed")
 	}
-	if ok, _ := refExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); !ok {
+	if ok, _ := gitops.RefExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); !ok {
 		t.Error("branch deleted")
 	}
 	if got := lifecycleKills(f); len(got) != 0 {
@@ -975,7 +976,7 @@ func TestCleanAfterPause(t *testing.T) {
 	if err != nil {
 		t.Fatalf("clean: %v\n%s", err, out)
 	}
-	if ok, _ := refExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); ok {
+	if ok, _ := gitops.RefExists(context.Background(), f.repo, "refs/heads/"+lifecycleBranch); ok {
 		t.Error("branch still there")
 	}
 	tk := f.get("T-1")

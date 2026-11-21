@@ -1,4 +1,4 @@
-package main
+package gitops
 
 import (
 	"bytes"
@@ -15,14 +15,17 @@ import (
 	"time"
 )
 
-// fakeGitArgs is the argv gitInfo passes after `-C <cwd>`.
+// subprocessTimeout is the bound cmd/curia passes to Info (its hook's subprocess timeout).
+const subprocessTimeout = time.Second
+
+// fakeGitArgs is the argv Info passes after `-C <cwd>`.
 const fakeGitArgs = "rev-parse --path-format=absolute --show-toplevel --absolute-git-dir --git-common-dir"
 
 // useFakeGit puts a "git" on PATH that is a symlink to /bin/sh and returns
-// the cwd to pass to gitInfo: a shell script file. gitInfo runs
+// the cwd to pass to Info: a shell script file. Info runs
 // `git -C <cwd> <args>`, which /bin/sh reads as -C (noclobber) and then runs
 // the script with <args> as $1, $2, ... (A real executable would need a file
-// mode gosec rejects in tests.) This depends on gitInfo's argv: should it
+// mode gosec rejects in tests.) This depends on Info's argv: should it
 // change, sh rejects the options, or the script exits 97 naming the
 // arguments, and the test sees that failure in the log rather than passing.
 // Every run appends a line to the returned calls file.
@@ -43,11 +46,11 @@ func useFakeGit(t *testing.T, script string) (cwd, calls string) {
 	return cwd, calls
 }
 
-// gitRun runs git in dir with gitEnv and a fixed identity.
+// gitRun runs git in dir with Env and a fixed identity.
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com"}, args...)...)
-	cmd.Env = gitEnv()
+	cmd.Env = Env()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v %s", args, err, out)
 	}
@@ -75,13 +78,13 @@ func hermeticGit(t *testing.T) string {
 	return dir
 }
 
-// gitInit makes dir a git repository on branch. It runs git with gitEnv, so
+// gitInit makes dir a git repository on branch. It runs git with Env, so
 // a GIT_DIR inherited from a git hook cannot make it reinitialise (and mark
 // bare) the repository running the tests.
 func gitInit(t *testing.T, dir, branch string) {
 	t.Helper()
 	cmd := exec.Command("git", "init", "-q", "-b", branch, dir)
-	cmd.Env = gitEnv()
+	cmd.Env = Env()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v %s", err, out)
 	}
@@ -102,17 +105,17 @@ func logLines(buf *bytes.Buffer) []string {
 func TestGitInfo(t *testing.T) {
 	dir := hermeticGit(t)
 	// A git hook (lefthook's pre-commit runs these tests) exports GIT_DIR and
-	// friends; gitInfo must look at cwd regardless.
+	// friends; Info must look at cwd regardless.
 	other := t.TempDir()
 	gitInit(t, other, "main")
 	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
 	t.Setenv("GIT_WORK_TREE", other)
 	logger, buf := testLogger()
 
-	if repo, branch, wt := gitInfo(context.Background(), dir, logger); repo != "" || branch != "" || wt != "" {
+	if repo, branch, wt := Info(context.Background(), dir, logger, subprocessTimeout); repo != "" || branch != "" || wt != "" {
 		t.Errorf("outside a repo: %q, %q, %q", repo, branch, wt)
 	}
-	if repo, branch, wt := gitInfo(context.Background(), "", logger); repo != "" || branch != "" || wt != "" {
+	if repo, branch, wt := Info(context.Background(), "", logger, subprocessTimeout); repo != "" || branch != "" || wt != "" {
 		t.Errorf("empty cwd: %q, %q, %q", repo, branch, wt)
 	}
 	if lines := logLines(buf); lines != nil {
@@ -124,10 +127,10 @@ func TestGitInfo(t *testing.T) {
 	if err := os.Mkdir(sub, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	repo, branch, wt := gitInfo(context.Background(), sub, logger)
+	repo, branch, wt := Info(context.Background(), sub, logger, subprocessTimeout)
 	wantRepo, _ := filepath.EvalSymlinks(dir)
 	if repo != wantRepo || branch != "feat/x" || wt != "" {
-		t.Errorf("gitInfo = %q, %q, %q, want %q, feat/x and no worktree", repo, branch, wt, wantRepo)
+		t.Errorf("Info = %q, %q, %q, want %q, feat/x and no worktree", repo, branch, wt, wantRepo)
 	}
 	if lines := logLines(buf); lines != nil {
 		t.Errorf("logged for a good repo: %q", lines)
@@ -137,7 +140,7 @@ func TestGitInfo(t *testing.T) {
 func TestGitInfoLogsMissingGit(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	logger, buf := testLogger()
-	if repo, branch, wt := gitInfo(context.Background(), t.TempDir(), logger); repo != "" || branch != "" || wt != "" {
+	if repo, branch, wt := Info(context.Background(), t.TempDir(), logger, subprocessTimeout); repo != "" || branch != "" || wt != "" {
 		t.Errorf("without git: %q, %q, %q", repo, branch, wt)
 	}
 	if lines := logLines(buf); len(lines) != 1 || !strings.Contains(lines[0], "git failed") {
@@ -151,12 +154,12 @@ func TestGitInfoLogsTimeout(t *testing.T) {
 	cwd, _ := useFakeGit(t, "/bin/sleep 5\nexit 0\n")
 	logger, buf := testLogger()
 	start := time.Now()
-	repo, branch, wt := gitInfo(context.Background(), cwd, logger)
+	repo, branch, wt := Info(context.Background(), cwd, logger, subprocessTimeout)
 	// The grandchild keeps stdout open for 5s; gitWaitDelay stops the wait
 	// soon after the timeout, well before the grandchild exits.
 	elapsed := time.Since(start)
 	if elapsed < subprocessTimeout || elapsed > subprocessTimeout+time.Second {
-		t.Errorf("gitInfo took %v, want about %v", elapsed, subprocessTimeout)
+		t.Errorf("Info took %v, want about %v", elapsed, subprocessTimeout)
 	}
 	if repo != "" || branch != "" || wt != "" {
 		t.Errorf("after a timeout: %q, %q, %q", repo, branch, wt)
@@ -174,9 +177,9 @@ func TestGitInfoIsOneProcess(t *testing.T) {
 	gitDir := fakeGitDir(t, "ref: refs/heads/feat/one\n")
 	cwd, calls := useFakeGit(t, "printf '/fake/wt\\n%s\\n/fake/repo/.git\\n' '"+gitDir+"'\n")
 	logger, buf := testLogger()
-	repo, branch, wt := gitInfo(context.Background(), cwd, logger)
+	repo, branch, wt := Info(context.Background(), cwd, logger, subprocessTimeout)
 	if repo != "/fake/repo" || branch != "feat/one" || wt != "/fake/wt" {
-		t.Errorf("gitInfo = %q, %q, %q, want /fake/repo, feat/one, /fake/wt", repo, branch, wt)
+		t.Errorf("Info = %q, %q, %q, want /fake/repo, feat/one, /fake/wt", repo, branch, wt)
 	}
 	if b, _ := os.ReadFile(filepath.Clean(calls)); string(b) != "run\n" {
 		t.Errorf("git ran %d times, want once", strings.Count(string(b), "run"))
@@ -193,11 +196,11 @@ func TestGitInfoLinkedWorktree(t *testing.T) {
 	wt := filepath.Join(t.TempDir(), "wt")
 	gitRun(t, dir, "worktree", "add", "-q", "-b", "feat/wt", wt)
 	logger, buf := testLogger()
-	repo, branch, worktree := gitInfo(context.Background(), wt, logger)
+	repo, branch, worktree := Info(context.Background(), wt, logger, subprocessTimeout)
 	wantRepo, _ := filepath.EvalSymlinks(dir)
 	wantWorktree, _ := filepath.EvalSymlinks(wt)
 	if repo != wantRepo || branch != "feat/wt" || worktree != wantWorktree {
-		t.Errorf("gitInfo = %q, %q, %q, want %q, feat/wt, %q", repo, branch, worktree, wantRepo, wantWorktree)
+		t.Errorf("Info = %q, %q, %q, want %q, feat/wt, %q", repo, branch, worktree, wantRepo, wantWorktree)
 	}
 	if lines := logLines(buf); lines != nil {
 		t.Errorf("log = %q, want none", lines)
@@ -210,10 +213,10 @@ func TestGitInfoDetachedHead(t *testing.T) {
 	gitRun(t, dir, "commit", "-q", "--allow-empty", "-m", "first")
 	gitRun(t, dir, "checkout", "-q", "--detach")
 	logger, buf := testLogger()
-	repo, branch, wt := gitInfo(context.Background(), dir, logger)
+	repo, branch, wt := Info(context.Background(), dir, logger, subprocessTimeout)
 	wantRepo, _ := filepath.EvalSymlinks(dir)
 	if repo != wantRepo || branch != "" || wt != "" {
-		t.Errorf("gitInfo = %q, %q, %q, want %q and no branch or worktree", repo, branch, wt, wantRepo)
+		t.Errorf("Info = %q, %q, %q, want %q and no branch or worktree", repo, branch, wt, wantRepo)
 	}
 	if lines := logLines(buf); lines != nil {
 		t.Errorf("log = %q, want none", lines)
@@ -232,16 +235,16 @@ func TestGitInfoHeadFIFODoesNotBlock(t *testing.T) {
 	start := time.Now()
 	done := make(chan [3]string, 1)
 	go func() {
-		repo, branch, wt := gitInfo(context.Background(), cwd, logger)
+		repo, branch, wt := Info(context.Background(), cwd, logger, subprocessTimeout)
 		done <- [3]string{repo, branch, wt}
 	}()
 	select {
 	case got := <-done:
 		if got != [3]string{"/fake/repo", "", ""} {
-			t.Errorf("gitInfo = %q, want /fake/repo and no branch", got)
+			t.Errorf("Info = %q, want /fake/repo and no branch", got)
 		}
 	case <-time.After(subprocessTimeout + time.Second):
-		t.Fatalf("gitInfo still blocked on a FIFO HEAD after %v", time.Since(start))
+		t.Fatalf("Info still blocked on a FIFO HEAD after %v", time.Since(start))
 	}
 	if lines := logLines(buf); len(lines) != 1 || !strings.Contains(lines[0], "HEAD") {
 		t.Errorf("log = %q, want one line about HEAD", lines)
@@ -260,9 +263,9 @@ func TestGitInfoBadHeadFile(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cwd, _ := useFakeGit(t, "printf '/fake/repo\\n%s\\n/fake/repo/.git\\n' '"+tc.gitDir+"'\n")
 			logger, buf := testLogger()
-			repo, branch, wt := gitInfo(context.Background(), cwd, logger)
+			repo, branch, wt := Info(context.Background(), cwd, logger, subprocessTimeout)
 			if repo != "/fake/repo" || branch != "" || wt != "" {
-				t.Errorf("gitInfo = %q, %q, %q, want /fake/repo and no branch or worktree", repo, branch, wt)
+				t.Errorf("Info = %q, %q, %q, want /fake/repo and no branch or worktree", repo, branch, wt)
 			}
 			if lines := logLines(buf); len(lines) != 1 || !strings.Contains(lines[0], tc.wantLog) {
 				t.Errorf("log = %q, want one line about %s", lines, tc.wantLog)
@@ -278,10 +281,10 @@ func TestGitInfoMainWorktree(t *testing.T) {
 	// A linked worktree elsewhere does not change what the main one reports.
 	gitRun(t, dir, "worktree", "add", "-q", "-b", "feat/wt", filepath.Join(t.TempDir(), "wt"))
 	logger, buf := testLogger()
-	repo, branch, wt := gitInfo(context.Background(), dir, logger)
+	repo, branch, wt := Info(context.Background(), dir, logger, subprocessTimeout)
 	wantRepo, _ := filepath.EvalSymlinks(dir)
 	if repo != wantRepo || branch != "main" || wt != "" {
-		t.Errorf("gitInfo = %q, %q, %q, want %q, main and no worktree", repo, branch, wt, wantRepo)
+		t.Errorf("Info = %q, %q, %q, want %q, main and no worktree", repo, branch, wt, wantRepo)
 	}
 	if lines := logLines(buf); lines != nil {
 		t.Errorf("log = %q, want none", lines)
@@ -299,11 +302,11 @@ func TestGitInfoSubdirectoryOfWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	logger, buf := testLogger()
-	repo, branch, worktree := gitInfo(context.Background(), sub, logger)
+	repo, branch, worktree := Info(context.Background(), sub, logger, subprocessTimeout)
 	wantRepo, _ := filepath.EvalSymlinks(dir)
 	wantWorktree, _ := filepath.EvalSymlinks(wt)
 	if repo != wantRepo || branch != "curia/T-7-x" || worktree != wantWorktree {
-		t.Errorf("gitInfo = %q, %q, %q, want %q, curia/T-7-x, %q", repo, branch, worktree, wantRepo, wantWorktree)
+		t.Errorf("Info = %q, %q, %q, want %q, curia/T-7-x, %q", repo, branch, worktree, wantRepo, wantWorktree)
 	}
 	if lines := logLines(buf); lines != nil {
 		t.Errorf("log = %q, want none", lines)
@@ -322,9 +325,9 @@ func TestGitInfoRepoFromCommonDir(t *testing.T) {
 	} {
 		cwd, _ := useFakeGit(t, "printf '/fake/top\\n%s\\n%s\\n' '"+gitDir+"' '"+common+"'\n")
 		logger, buf := testLogger()
-		repo, branch, wt := gitInfo(context.Background(), cwd, logger)
+		repo, branch, wt := Info(context.Background(), cwd, logger, subprocessTimeout)
 		if repo != want[0] || branch != "main" || wt != want[1] {
-			t.Errorf("common dir %s: gitInfo = %q, %q, %q, want %q, main, %q", common, repo, branch, wt, want[0], want[1])
+			t.Errorf("common dir %s: Info = %q, %q, %q, want %q, main, %q", common, repo, branch, wt, want[0], want[1])
 		}
 		if lines := logLines(buf); lines != nil {
 			t.Errorf("common dir %s: log = %q, want none", common, lines)
@@ -345,8 +348,8 @@ func TestGitInfoUnexpectedOutput(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cwd, _ := useFakeGit(t, "printf '%s' '"+out+"'\n")
 			logger, buf := testLogger()
-			if repo, branch, wt := gitInfo(context.Background(), cwd, logger); repo != "" || branch != "" || wt != "" {
-				t.Errorf("gitInfo = %q, %q, %q, want nothing", repo, branch, wt)
+			if repo, branch, wt := Info(context.Background(), cwd, logger, subprocessTimeout); repo != "" || branch != "" || wt != "" {
+				t.Errorf("Info = %q, %q, %q, want nothing", repo, branch, wt)
 			}
 			if lines := logLines(buf); len(lines) != 1 || !strings.Contains(lines[0], "unexpected output") {
 				t.Errorf("log = %q, want one line about unexpected output", lines)
@@ -358,7 +361,7 @@ func TestGitInfoUnexpectedOutput(t *testing.T) {
 // TestRunGroupOwnProcessGroup: the child leads a process group of its own,
 // so a signal to Curia's group does not reach it.
 func TestRunGroupOwnProcessGroup(t *testing.T) {
-	out, _, err := runGroup(context.Background(), "", os.Environ(), "/bin/sh", "-c", "ps -o pgid= -p $$; echo $$")
+	out, _, err := RunProcessGroup(context.Background(), "", os.Environ(), "/bin/sh", "-c", "ps -o pgid= -p $$; echo $$")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +384,7 @@ func TestRunGroupStopsWithTermThenKill(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	out, _, err := runGroup(ctx, "", os.Environ(), "/bin/sh", "-c", "trap 'echo got TERM; exit 3' TERM; sleep 30 & wait")
+	out, _, err := RunProcessGroup(ctx, "", os.Environ(), "/bin/sh", "-c", "trap 'echo got TERM; exit 3' TERM; sleep 30 & wait")
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 3 || out != "got TERM" {
 		t.Errorf("a child that stops on SIGTERM: out %q, err %v; want it to see TERM and exit 3", out, err)
@@ -391,9 +394,9 @@ func TestRunGroupStopsWithTermThenKill(t *testing.T) {
 	defer cancel2()
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	start := time.Now()
-	_, _, err = runGroup(ctx2, "", os.Environ(), "/bin/sh", "-c", "trap '' TERM; sleep 30 & echo $! > '"+pidFile+"'; wait")
+	_, _, err = RunProcessGroup(ctx2, "", os.Environ(), "/bin/sh", "-c", "trap '' TERM; sleep 30 & echo $! > '"+pidFile+"'; wait")
 	if took := time.Since(start); took > 10*time.Second {
-		t.Errorf("runGroup took %s to stop a child that ignores SIGTERM", took)
+		t.Errorf("RunProcessGroup took %s to stop a child that ignores SIGTERM", took)
 	}
 	if ws, ok := exitStatus(err); !ok || ws.Signal() != syscall.SIGKILL {
 		t.Errorf("a child that ignores SIGTERM: err %v, want it killed", err)
@@ -414,7 +417,7 @@ func TestRunGroupStopsWithTermThenKill(t *testing.T) {
 // groupMaxOut bytes of each stream, and it does not die writing once no one
 // reads.
 func TestRunGroupOutputInFiles(t *testing.T) {
-	out, errOut, err := runGroup(context.Background(), "", os.Environ(), "/bin/sh", "-c",
+	out, errOut, err := RunProcessGroup(context.Background(), "", os.Environ(), "/bin/sh", "-c",
 		"echo out; echo err >&2; head -c 200000 /dev/zero | tr '\\0' x")
 	if err != nil {
 		t.Fatal(err)

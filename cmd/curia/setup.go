@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -383,7 +384,7 @@ func setupApprovable(ctx context.Context, st *store.Store, id string) (model.Tas
 	if !found {
 		return model.Task{}, setupScript{}, fmt.Errorf("no task %s", id)
 	}
-	ours, err := worktreeIsOurs(ctx, t.Repo, t.Worktree, t.Branch)
+	ours, err := gitops.WorktreeIsOurs(ctx, t.Repo, t.Worktree, t.Branch)
 	if t.Worktree == "" || err != nil || !ours {
 		return model.Task{}, setupScript{}, fmt.Errorf("%s has no worktree to read %s from: run curia spawn %s first", id, setupName, id)
 	}

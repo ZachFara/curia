@@ -172,3 +172,15 @@ func logWarn(logPath, msg string, args ...any) {
 		_ = closeLog()
 	}
 }
+
+// requireRegular passes on a stat error, or reports one when fi is not a
+// regular file.
+func requireRegular(fi os.FileInfo, err error) error {
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file (%v)", fi.Name(), fi.Mode().Type())
+	}
+	return nil
+}

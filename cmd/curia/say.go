@@ -20,6 +20,7 @@ import (
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/deliver"
 	"github.com/ZachFara/curia/internal/fleet"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/route"
@@ -498,7 +499,7 @@ func (s *saySource) applyRule(ctx context.Context, m model.Message, now time.Tim
 // checked out there, and marks m applied with its T- id.
 func (s *saySource) applyTask(ctx context.Context, m model.Message, now time.Time) model.MessageOutcome {
 	first, _, _ := strings.Cut(m.Text, "\n")
-	_, branch, _ := gitInfo(ctx, m.TargetRepo, s.log)
+	_, branch, _ := gitops.Info(ctx, m.TargetRepo, s.log, subprocessTimeout)
 	t, ps := taskCheck(model.Task{
 		Title: sanitize.Line(first, task.MaxTitle), Body: m.Text, Repo: m.TargetRepo, BaseBranch: branch,
 		Status: model.TaskBacklog, Source: model.SourceLocal, CreatedAt: now,

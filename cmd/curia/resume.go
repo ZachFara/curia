@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
@@ -72,7 +73,7 @@ func resumeTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config
 // resumeAfterWIP reports whether t's branch ends in the WIP commit its
 // pause made, which the resumed agent is then told about.
 func resumeAfterWIP(ctx context.Context, t model.Task) bool {
-	subject, err := worktreeRun(ctx, worktreeGitLimit, t.Repo, "log", "-1", "--no-show-signature", "--format=%s", "refs/heads/"+t.Branch, "--")
+	subject, err := gitops.Output(ctx, gitops.GitLimit, t.Repo, "log", "-1", "--no-show-signature", "--format=%s", "refs/heads/"+t.Branch, "--")
 	return err == nil && subject == "curia: WIP "+t.ID+" (paused)"
 }
 
@@ -91,7 +92,7 @@ func resumeCheck(ctx context.Context, st *store.Store, id string) (model.Task, e
 	if _, _, err = lifecycleWorktree(ctx, t); err != nil {
 		return t, err
 	}
-	ok, err := refExists(ctx, t.Repo, "refs/heads/"+t.Branch)
+	ok, err := gitops.RefExists(ctx, t.Repo, "refs/heads/"+t.Branch)
 	if err != nil {
 		return t, err
 	}

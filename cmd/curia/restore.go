@@ -24,6 +24,7 @@ import (
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/deliver"
 	"github.com/ZachFara/curia/internal/fleet"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -860,7 +861,7 @@ func restorePutBack(ctx context.Context, e restoreEnv, planned model.Session, op
 // branch and takes the task's launch claim (store.ClaimLaunch, against the
 // pane the plan read), so no curia spawn of the task runs meanwhile.
 func restoreClaimTask(ctx context.Context, st *store.Store, t model.Task) (model.Task, error) {
-	ours, err := worktreeIsOurs(ctx, t.Repo, t.Worktree, t.Branch)
+	ours, err := gitops.WorktreeIsOurs(ctx, t.Repo, t.Worktree, t.Branch)
 	if err != nil {
 		return model.Task{}, err
 	}

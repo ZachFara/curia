@@ -1,4 +1,4 @@
-package main
+package gitops
 
 import (
 	"context"
@@ -46,11 +46,11 @@ func worktreeWrite(t *testing.T, path, content string) {
 	}
 }
 
-// worktreeGit runs git in dir with gitEnv and returns its trimmed stdout.
+// worktreeGit runs git in dir with Env and returns its trimmed stdout.
 func worktreeGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = gitEnv()
+	cmd.Env = Env()
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("git %v in %s: %v", args, dir, err)
@@ -75,8 +75,8 @@ func TestWorktreeAddNewAndExistingBranch(t *testing.T) {
 	mainHead := worktreeGit(t, repo, "rev-parse", "main")
 
 	path := worktreePathFor(repo, "api-T-1")
-	if err := worktreeAdd(ctx, repo, path, "curia/T-1-x", "main"); err != nil {
-		t.Fatalf("worktreeAdd (new branch): %v", err)
+	if err := AddWorktree(ctx, repo, path, "curia/T-1-x", "main"); err != nil {
+		t.Fatalf("AddWorktree (new branch): %v", err)
 	}
 	if got := worktreeGit(t, path, "symbolic-ref", "HEAD"); got != "refs/heads/curia/T-1-x" {
 		t.Errorf("new worktree HEAD = %q, want refs/heads/curia/T-1-x", got)
@@ -88,30 +88,30 @@ func TestWorktreeAddNewAndExistingBranch(t *testing.T) {
 	gitRun(t, repo, "branch", "curia/T-2-y", "main")
 	path2 := worktreePathFor(repo, "api-T-2")
 	// The base is not used for a branch that exists.
-	if err := worktreeAdd(ctx, repo, path2, "curia/T-2-y", "no-such-base"); err != nil {
-		t.Fatalf("worktreeAdd (existing branch): %v", err)
+	if err := AddWorktree(ctx, repo, path2, "curia/T-2-y", "no-such-base"); err != nil {
+		t.Fatalf("AddWorktree (existing branch): %v", err)
 	}
 	if got := worktreeGit(t, path2, "symbolic-ref", "HEAD"); got != "refs/heads/curia/T-2-y" {
 		t.Errorf("existing-branch worktree HEAD = %q", got)
 	}
 
 	path3 := worktreePathFor(repo, "api-T-3")
-	err := worktreeAdd(ctx, repo, path3, "curia/T-3-z", "no-such-base")
+	err := AddWorktree(ctx, repo, path3, "curia/T-3-z", "no-such-base")
 	if err == nil || !strings.Contains(err.Error(), "does not resolve") {
-		t.Errorf("worktreeAdd with a base that does not resolve = %v, want a 'does not resolve' error", err)
+		t.Errorf("AddWorktree with a base that does not resolve = %v, want a 'does not resolve' error", err)
 	}
 	for _, bad := range [][2]string{{"-x", "main"}, {"curia/T-3-z", "-main"}, {"a..b", "main"}} {
-		if err := worktreeAdd(ctx, repo, path3, bad[0], bad[1]); err == nil {
-			t.Errorf("worktreeAdd(branch %q, base %q) succeeded", bad[0], bad[1])
+		if err := AddWorktree(ctx, repo, path3, bad[0], bad[1]); err == nil {
+			t.Errorf("AddWorktree(branch %q, base %q) succeeded", bad[0], bad[1])
 		}
 	}
-	if err := worktreeAdd(ctx, repo, "relative/path", "curia/T-3-z", "main"); err == nil {
-		t.Error("worktreeAdd with a relative path succeeded")
+	if err := AddWorktree(ctx, repo, "relative/path", "curia/T-3-z", "main"); err == nil {
+		t.Error("AddWorktree with a relative path succeeded")
 	}
 	if worktreeExists(path3) {
 		t.Errorf("%s exists after failed adds", path3)
 	}
-	if ok, err := refExists(ctx, repo, "refs/heads/curia/T-3-z"); err != nil || ok {
+	if ok, err := RefExists(ctx, repo, "refs/heads/curia/T-3-z"); err != nil || ok {
 		t.Errorf("branch of the failed add: exists %v, err %v", ok, err)
 	}
 }
@@ -120,12 +120,12 @@ func TestWorktreeIsOurs(t *testing.T) {
 	ctx := context.Background()
 	repo := worktreeRepo(t, "api")
 	path := worktreePathFor(repo, "api-T-1")
-	if err := worktreeAdd(ctx, repo, path, "curia/T-1-x", "main"); err != nil {
+	if err := AddWorktree(ctx, repo, path, "curia/T-1-x", "main"); err != nil {
 		t.Fatal(err)
 	}
 	other := worktreeRepo(t, "other")
 	otherPath := worktreePathFor(other, "other-T-1")
-	if err := worktreeAdd(ctx, other, otherPath, "curia/T-1-x", "main"); err != nil {
+	if err := AddWorktree(ctx, other, otherPath, "curia/T-1-x", "main"); err != nil {
 		t.Fatal(err)
 	}
 	plain := filepath.Join(filepath.Dir(repo), "plain")
@@ -144,9 +144,9 @@ func TestWorktreeIsOurs(t *testing.T) {
 		{"a missing path", repo, worktreePathFor(repo, "api-T-9"), "curia/T-1-x", false},
 	}
 	for _, c := range cases {
-		got, err := worktreeIsOurs(ctx, c.repo, c.path, c.branch)
+		got, err := WorktreeIsOurs(ctx, c.repo, c.path, c.branch)
 		if err != nil || got != c.want {
-			t.Errorf("%s: worktreeIsOurs = %v, %v; want %v, nil", c.name, got, err, c.want)
+			t.Errorf("%s: WorktreeIsOurs = %v, %v; want %v, nil", c.name, got, err, c.want)
 		}
 	}
 	// A symlink to the worktree is not the worktree.
@@ -154,8 +154,8 @@ func TestWorktreeIsOurs(t *testing.T) {
 	if err := os.Symlink(path, link); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := worktreeIsOurs(ctx, repo, link, "curia/T-1-x"); err != nil || got {
-		t.Errorf("a symlink to the worktree: worktreeIsOurs = %v, %v; want false", got, err)
+	if got, err := WorktreeIsOurs(ctx, repo, link, "curia/T-1-x"); err != nil || got {
+		t.Errorf("a symlink to the worktree: WorktreeIsOurs = %v, %v; want false", got, err)
 	}
 }
 
@@ -163,30 +163,30 @@ func TestWorktreeRemoveRefusesDirtyWithoutForce(t *testing.T) {
 	ctx := context.Background()
 	repo := worktreeRepo(t, "api")
 	path := worktreePathFor(repo, "api-T-1")
-	if err := worktreeAdd(ctx, repo, path, "curia/T-1-x", "main"); err != nil {
+	if err := AddWorktree(ctx, repo, path, "curia/T-1-x", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if dirty, err := worktreeDirty(ctx, path); err != nil || dirty {
+	if dirty, err := WorktreeDirty(ctx, path); err != nil || dirty {
 		t.Fatalf("fresh worktree: dirty %v, err %v", dirty, err)
 	}
 	worktreeWrite(t, filepath.Join(path, "new.txt"), "x\n")
-	if dirty, err := worktreeDirty(ctx, path); err != nil || !dirty {
+	if dirty, err := WorktreeDirty(ctx, path); err != nil || !dirty {
 		t.Fatalf("worktree with an untracked file: dirty %v, err %v", dirty, err)
 	}
-	if err := worktreeRemove(ctx, repo, path, false); err == nil {
-		t.Fatal("worktreeRemove of a dirty worktree without force succeeded")
+	if err := RemoveWorktree(ctx, repo, path, false); err == nil {
+		t.Fatal("RemoveWorktree of a dirty worktree without force succeeded")
 	}
 	if !worktreeExists(filepath.Join(path, "new.txt")) {
 		t.Fatal("the refused remove deleted files")
 	}
-	if err := worktreeRemove(ctx, repo, path, true); err != nil {
-		t.Fatalf("worktreeRemove with force: %v", err)
+	if err := RemoveWorktree(ctx, repo, path, true); err != nil {
+		t.Fatalf("RemoveWorktree with force: %v", err)
 	}
 	if worktreeExists(path) {
 		t.Errorf("%s still exists after a forced remove", path)
 	}
-	if _, err := worktreeDirty(ctx, path); err == nil {
-		t.Error("worktreeDirty of a removed worktree succeeded")
+	if _, err := WorktreeDirty(ctx, path); err == nil {
+		t.Error("WorktreeDirty of a removed worktree succeeded")
 	}
 }
 
@@ -194,15 +194,15 @@ func TestWorktreeCommitAllTakesUntracked(t *testing.T) {
 	ctx := context.Background()
 	repo := worktreeRepo(t, "api")
 	path := worktreePathFor(repo, "api-T-1")
-	if err := worktreeAdd(ctx, repo, path, "curia/T-1-x", "main"); err != nil {
+	if err := AddWorktree(ctx, repo, path, "curia/T-1-x", "main"); err != nil {
 		t.Fatal(err)
 	}
 	worktreeWrite(t, filepath.Join(path, ".gitignore"), "*.log\n")
 	worktreeWrite(t, filepath.Join(path, "a.txt"), "a\n")
 	worktreeWrite(t, filepath.Join(path, "sub", "b.txt"), "b\n")
 	worktreeWrite(t, filepath.Join(path, "debug.log"), "noise\n")
-	if err := worktreeCommitAll(ctx, path, "wip: T-1", false); err != nil {
-		t.Fatalf("worktreeCommitAll: %v", err)
+	if err := CommitAll(ctx, path, "wip: T-1", false); err != nil {
+		t.Fatalf("CommitAll: %v", err)
 	}
 	files := strings.Fields(worktreeGit(t, path, "ls-tree", "-r", "--name-only", "HEAD"))
 	for _, want := range []string{".gitignore", "README", "a.txt", "sub/b.txt"} {
@@ -216,7 +216,7 @@ func TestWorktreeCommitAllTakesUntracked(t *testing.T) {
 	if got := worktreeGit(t, path, "log", "-1", "--format=%s"); got != "wip: T-1" {
 		t.Errorf("commit subject = %q", got)
 	}
-	if dirty, err := worktreeDirty(ctx, path); err != nil || dirty {
+	if dirty, err := WorktreeDirty(ctx, path); err != nil || dirty {
 		t.Errorf("after commit: dirty %v, err %v", dirty, err)
 	}
 	if got := worktreeGit(t, repo, "symbolic-ref", "HEAD"); got != "refs/heads/main" {
@@ -227,7 +227,7 @@ func TestWorktreeCommitAllTakesUntracked(t *testing.T) {
 }
 
 // worktreeCheckCommitHooks checks that a failing pre-commit hook fails
-// worktreeCommitAll and that noVerify skips it.
+// CommitAll and that noVerify skips it.
 func worktreeCheckCommitHooks(t *testing.T, repo, path string) {
 	t.Helper()
 	ctx := context.Background()
@@ -245,11 +245,11 @@ func worktreeCheckCommitHooks(t *testing.T, repo, path string) {
 	}
 	gitRun(t, repo, "config", "core.hooksPath", hooks)
 	worktreeWrite(t, filepath.Join(path, "c.txt"), "c\n")
-	if err := worktreeCommitAll(ctx, path, "wip 2", false); err == nil {
-		t.Fatal("worktreeCommitAll succeeded through a failing pre-commit hook")
+	if err := CommitAll(ctx, path, "wip 2", false); err == nil {
+		t.Fatal("CommitAll succeeded through a failing pre-commit hook")
 	}
-	if err := worktreeCommitAll(ctx, path, "wip 2", true); err != nil {
-		t.Fatalf("worktreeCommitAll with noVerify: %v", err)
+	if err := CommitAll(ctx, path, "wip 2", true); err != nil {
+		t.Fatalf("CommitAll with noVerify: %v", err)
 	}
 	if got := worktreeGit(t, path, "log", "-1", "--format=%s"); got != "wip 2" {
 		t.Errorf("commit subject = %q, want wip 2", got)
@@ -260,13 +260,13 @@ func TestBranchMergedAndDelete(t *testing.T) {
 	ctx := context.Background()
 	repo := worktreeRepo(t, "api")
 	gitRun(t, repo, "branch", "feat/a", "main")
-	if merged, err := branchMerged(ctx, repo, "feat/a", "main"); err != nil || !merged {
+	if merged, err := BranchMerged(ctx, repo, "feat/a", "main"); err != nil || !merged {
 		t.Fatalf("feat/a: merged %v, err %v; want true", merged, err)
 	}
-	if err := branchDelete(ctx, repo, "feat/a", false); err != nil {
-		t.Fatalf("branchDelete(feat/a): %v", err)
+	if err := BranchDelete(ctx, repo, "feat/a", false); err != nil {
+		t.Fatalf("BranchDelete(feat/a): %v", err)
 	}
-	if ok, err := refExists(ctx, repo, "refs/heads/feat/a"); err != nil || ok {
+	if ok, err := RefExists(ctx, repo, "refs/heads/feat/a"); err != nil || ok {
 		t.Errorf("feat/a after delete: exists %v, err %v", ok, err)
 	}
 
@@ -275,19 +275,19 @@ func TestBranchMergedAndDelete(t *testing.T) {
 	gitRun(t, repo, "add", "-A")
 	gitRun(t, repo, "commit", "-q", "-m", "b")
 	gitRun(t, repo, "checkout", "-q", "main")
-	if merged, err := branchMerged(ctx, repo, "feat/b", "main"); err != nil || merged {
+	if merged, err := BranchMerged(ctx, repo, "feat/b", "main"); err != nil || merged {
 		t.Fatalf("feat/b: merged %v, err %v; want false", merged, err)
 	}
-	if err := branchDelete(ctx, repo, "feat/b", false); err == nil {
-		t.Fatal("branchDelete of an unmerged branch without force succeeded")
+	if err := BranchDelete(ctx, repo, "feat/b", false); err == nil {
+		t.Fatal("BranchDelete of an unmerged branch without force succeeded")
 	}
-	if ok, err := refExists(ctx, repo, "refs/heads/feat/b"); err != nil || !ok {
+	if ok, err := RefExists(ctx, repo, "refs/heads/feat/b"); err != nil || !ok {
 		t.Fatalf("feat/b after refused delete: exists %v, err %v", ok, err)
 	}
-	if err := branchDelete(ctx, repo, "feat/b", true); err != nil {
-		t.Fatalf("branchDelete with force: %v", err)
+	if err := BranchDelete(ctx, repo, "feat/b", true); err != nil {
+		t.Fatalf("BranchDelete with force: %v", err)
 	}
-	if ok, err := refExists(ctx, repo, "refs/heads/feat/b"); err != nil || ok {
+	if ok, err := RefExists(ctx, repo, "refs/heads/feat/b"); err != nil || ok {
 		t.Errorf("feat/b after forced delete: exists %v, err %v", ok, err)
 	}
 	worktreeCheckBadNames(t, repo)
@@ -298,16 +298,16 @@ func TestBranchMergedAndDelete(t *testing.T) {
 func worktreeCheckBadNames(t *testing.T, repo string) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := branchMerged(ctx, repo, "no-such", "main"); err == nil {
-		t.Error("branchMerged of a missing branch succeeded")
+	if _, err := BranchMerged(ctx, repo, "no-such", "main"); err == nil {
+		t.Error("BranchMerged of a missing branch succeeded")
 	}
 	for _, bad := range []string{"-D", "a..b", ""} {
-		if err := branchDelete(ctx, repo, bad, true); err == nil {
-			t.Errorf("branchDelete(%q) succeeded", bad)
+		if err := BranchDelete(ctx, repo, bad, true); err == nil {
+			t.Errorf("BranchDelete(%q) succeeded", bad)
 		}
 	}
-	if _, err := refExists(ctx, repo, "--all"); err == nil {
-		t.Error("refExists of an option succeeded")
+	if _, err := RefExists(ctx, repo, "--all"); err == nil {
+		t.Error("RefExists of an option succeeded")
 	}
 }
 
@@ -315,9 +315,9 @@ func TestGitErrorsAreCleaned(t *testing.T) {
 	ctx := context.Background()
 	repo := worktreeRepo(t, "api")
 	hostile := filepath.Join(filepath.Dir(repo), "x\x1b[31mred\x07\nline")
-	err := worktreeRemove(ctx, repo, hostile, false)
+	err := RemoveWorktree(ctx, repo, hostile, false)
 	if err == nil {
-		t.Fatal("worktreeRemove of a path that is no worktree succeeded")
+		t.Fatal("RemoveWorktree of a path that is no worktree succeeded")
 	}
 	msg := err.Error()
 	if strings.ContainsFunc(msg, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
@@ -335,13 +335,13 @@ func TestWorktreeFunctionsIgnoreGitEnv(t *testing.T) {
 	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
 	t.Setenv("GIT_WORK_TREE", other)
 	path := worktreePathFor(repo, "api-T-1")
-	if err := worktreeAdd(ctx, repo, path, "curia/T-1-x", "main"); err != nil {
+	if err := AddWorktree(ctx, repo, path, "curia/T-1-x", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := worktreeIsOurs(ctx, repo, path, "curia/T-1-x"); err != nil || !ok {
-		t.Errorf("worktreeIsOurs = %v, %v; want the worktree to belong to repo", ok, err)
+	if ok, err := WorktreeIsOurs(ctx, repo, path, "curia/T-1-x"); err != nil || !ok {
+		t.Errorf("WorktreeIsOurs = %v, %v; want the worktree to belong to repo", ok, err)
 	}
-	if ok, err := refExists(ctx, other, "refs/heads/curia/T-1-x"); err != nil || ok {
+	if ok, err := RefExists(ctx, other, "refs/heads/curia/T-1-x"); err != nil || ok {
 		t.Errorf("the branch went to the GIT_DIR repository: exists %v, err %v", ok, err)
 	}
 }
