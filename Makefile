@@ -170,7 +170,8 @@ install-script:
 # (scripts/check-latency-names.sh fails the gate otherwise).
 LATENCY_TESTS := Latency|TestReplayFiveSessions
 # CI-only shard counts (scripts/shard.sh): the ONE place they are set; ci.yml
-# builds its matrices from `make shard-matrices`. Latency shards are by gate.
+# builds its matrices from `make shard-matrices`. Latency shards are by gate,
+# balanced by the rough seconds in scripts/latency-weights.txt.
 LATENCY_SHARDS := 6
 CMD_SHARDS     := 6
 # CI job `unit-store` runs this package alone; `unit-rest` runs every other
@@ -215,7 +216,7 @@ test-unit-cmd: latency-names
 ## One run only here; CI reruns a failed latency job once on a fresh runner (.github/workflows/ci-rerun.yml, D-15).
 test-latency: latency-names
 	@dir="$$(mktemp -d)"; rc=0; \
-	if [ -n "$(SHARD)" ]; then scripts/shard.sh list latency | scripts/shard.sh pick $(SHARD) $(LATENCY_SHARDS) | scripts/shard.sh group >"$$dir/runs"; \
+	if [ -n "$(SHARD)" ]; then scripts/shard.sh list latency | scripts/shard.sh pickw $(SHARD) $(LATENCY_SHARDS) | scripts/shard.sh group >"$$dir/runs"; \
 	else echo './... $(LATENCY_TESTS)' >"$$dir/runs"; fi; \
 	for pass in 1 2 3; do \
 		while read -r pkg re; do \

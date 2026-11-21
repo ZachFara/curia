@@ -12,7 +12,8 @@ for kind in latency:"$LATENCY_SHARDS" cmd:"$CMD_SHARDS"; do
 	n=${kind##*:}
 	full=$(scripts/shard.sh list "$name")
 	[ -n "$full" ] || { echo "no $name items found"; bad=1; continue; }
-	got=$(for ((i = 0; i < n; i++)); do printf '%s\n' "$full" | scripts/shard.sh pick "$i" "$n"; done | LC_ALL=C sort)
+	pick=pick; [ "$name" = latency ] && pick=pickw
+	got=$(for ((i = 0; i < n; i++)); do printf '%s\n' "$full" | scripts/shard.sh "$pick" "$i" "$n"; done | LC_ALL=C sort)
 	if [ "$got" != "$full" ]; then
 		echo "$name shards are not a partition of the set (missing or duplicated items):"
 		diff <(echo "$full") <(echo "$got") || true
@@ -20,6 +21,9 @@ for kind in latency:"$LATENCY_SHARDS" cmd:"$CMD_SHARDS"; do
 	fi
 	# The matrix comes from `make shard-matrices` (the Makefile's count), never a literal list.
 	grep -q "fromJSON(needs.plan.outputs.$name)" .github/workflows/ci.yml || { echo "ci.yml's $name matrix must be fromJSON(needs.plan.outputs.$name)"; bad=1; }
+	if [ "$name" = latency ]; then # a gate without a weight only warns: it counts as 15 s
+		for g in $(printf '%s\n' "$full" | awk '{print $2}'); do grep -q "^$g " scripts/latency-weights.txt || echo "warning: latency gate $g has no weight in scripts/latency-weights.txt (counts as 15 s)"; done
+	fi
 	echo "$name: $(echo "$full" | wc -l | tr -d ' ') items in $n shards, partition ok"
 done
 # unit-store, unit-rest and cmd/curia together are every package, each once.
