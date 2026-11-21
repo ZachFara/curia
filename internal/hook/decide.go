@@ -35,10 +35,10 @@ const (
 // like Curia imitate them.
 var curiaTools = []string{
 	"mcp__curia__search_decisions", "mcp__curia__request_decision", "mcp__curia__check_decision",
-	"mcp__curia__withdraw_decision", "mcp__curia__check_messages", "mcp__curia__complete_task",
+	"mcp__curia__withdraw_decision", "mcp__curia__check_messages", "mcp__curia__complete_task", "mcp__curia__file_task",
 }
 
-// IsCuriaTool reports whether name is exactly one of Curia's six MCP tools.
+// IsCuriaTool reports whether name is exactly one of Curia's seven MCP tools.
 func IsCuriaTool(name string) bool { return slices.Contains(curiaTools, name) }
 
 // editTools are the tools whose target path decides file protection. Bash
