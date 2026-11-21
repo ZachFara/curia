@@ -61,7 +61,27 @@ type Session struct {
 	// CacheRecacheTokens is what a cold cache would have to re-read, as a
 	// count of tokens (Curia keeps no price table, Ruling P5-R2); 0 unknown.
 	CacheRecacheTokens int64
+	// Mode is the session's permission mode (F20), written only by
+	// store.SetModes; "" means the configured default. ModeUntil lapses it
+	// (zero: never).
+	Mode      string
+	ModeUntil time.Time
+	// RC, RCHow and RCCheckedAt are F21's Remote Control belief (off, pending,
+	// on or unknown; "" reads as off), how Curia knows it and when it looked.
+	RC, RCHow   string
+	RCCheckedAt time.Time
 }
+
+// F20 permission modes.
+const (
+	ModeNormal = "normal"
+	ModeEdits  = "edits"
+	ModeAway   = "away"
+	ModeBypass = "bypass"
+)
+
+// Modes lists the valid modes, mildest first.
+var Modes = []string{ModeNormal, ModeEdits, ModeAway, ModeBypass}
 
 // Team roles.
 const (

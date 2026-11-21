@@ -74,4 +74,8 @@ var keyPolicy = map[string]Policy{
 	"schedule.reset_grace":                 PolicyLower,
 	"schedule.limited_pct":                 PolicyNone,
 	"serve.web_write":                      PolicyNone, // lets a device token move tasks and type into agents (F26)
+	"rc.launch":                            PolicyNone, // Remote Control is a reach extension (F21, F28)
+	"mode.default":                         PolicyNone, // a repository can never raise a mode (F20)
+	"mode.away_allow":                      PolicyNone, // a list of allowed commands is a grant
+	"mode.bypass_for":                      PolicyNone,
 }

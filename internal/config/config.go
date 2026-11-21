@@ -65,6 +65,8 @@ type Config struct {
 	Monitor   Monitor   `toml:"monitor"`
 	Schedule  Schedule  `toml:"schedule"`
 	Cost      Cost      `toml:"cost"`
+	Mode      Mode      `toml:"mode"`
+	RC        RC        `toml:"rc"`
 }
 
 // maxEditor bounds the editor option, in bytes.
@@ -151,6 +153,7 @@ func Default() Config {
 		Monitor:   Monitor{Autostart: true},
 		Schedule:  defaultSchedule(),
 		Tasks:     defaultTasks(),
+		Mode:      defaultMode(),
 	}
 }
 
@@ -183,6 +186,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.Resources.validate(); err != nil {
+		return err
+	}
+	if err := c.Mode.validate(); err != nil {
 		return err
 	}
 	if err := c.Schedule.validate(); err != nil {

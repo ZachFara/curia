@@ -57,8 +57,20 @@ func (m DetailModel) head() string {
 	if s.State == model.StateEnded && s.EndReason != "" {
 		state += " (" + sanitize.Line(s.EndReason, 20) + ")"
 	}
-	parts := []string{sanitize.Line(s.ID, maxIDCells), state, sanitize.Line(s.Repo, 40), sanitize.Line(s.Branch, 60), sanitize.Line(s.TaskID, maxIDCells)}
+	parts := []string{sanitize.Line(s.ID, maxIDCells), state, sanitize.Line(s.Repo, 40), sanitize.Line(s.Branch, 60), sanitize.Line(s.TaskID, maxIDCells), detailMode(s)}
+	if s.RC == "on" {
+		parts = append(parts, "RC on")
+	}
 	return truncate(strings.Join(nonEmpty(parts), " · "), m.textWidth())
+}
+
+// detailMode is the session's own permission mode (F20) when it is not the
+// plain one and has not lapsed; the configured default is not shown here.
+func detailMode(s model.Session) string {
+	if s.Mode == "" || s.Mode == model.ModeNormal || (!s.ModeUntil.IsZero() && !time.Now().Before(s.ModeUntil)) {
+		return ""
+	}
+	return "mode " + sanitize.Line(s.Mode, 10)
 }
 
 func nonEmpty(in []string) []string {
@@ -101,6 +113,10 @@ func (m DetailModel) body() []bodyLine {
 	}
 	section("Cost")
 	one(linePlain, m.costText())
+	if d.Session.RC != "" { // F21: Curia's belief, how it knows and when
+		section("Remote Control")
+		one(linePlain, sanitize.Line(d.Session.RC, 20)+" via "+sanitize.Line(d.Session.RCHow, 20)+", checked "+d.Session.RCCheckedAt.UTC().Format("2006-01-02 15:04"))
+	}
 	if d.Resources != "" {
 		section("Resources")
 		one(linePlain, d.Resources)
