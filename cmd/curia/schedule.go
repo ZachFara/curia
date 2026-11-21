@@ -2,10 +2,8 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -316,15 +314,7 @@ func runScheduleLs(cmd *cobra.Command, _ []string) error {
 	}
 	w := cmd.OutOrStdout()
 	if scheduleJSON {
-		var buf bytes.Buffer
-		enc := json.NewEncoder(&buf)
-		enc.SetEscapeHTML(false)
-		enc.SetIndent("", "  ")
-		if err = enc.Encode(rows); err != nil {
-			return err
-		}
-		_, err = io.WriteString(w, escapeUnprintable(buf.String()))
-		return err
+		return writeJSON(w, rows, "  ")
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ID\tSTATUS\tNEXT\tTARGET\tLAST\tTEXT")
