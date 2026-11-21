@@ -326,9 +326,14 @@ func TestAutoSpawnForecastAndResourcePressure(t *testing.T) {
 		}
 	})
 	statusExec(t, f.db, `DELETE FROM usage_samples`)
-	t.Run("docker memory over the threshold with fresh samples", func(t *testing.T) {
-		autoDockerMem = func(context.Context) (float64, bool) { return 90, true }
-		t.Cleanup(func() { autoDockerMem = func(context.Context) (float64, bool) { return 0, false } })
+	// The Docker VM reading comes from the store, the threshold from resources.docker_memory_refuse_pct.
+	vm := func(age time.Duration, usedMB int64) {
+		if err := f.st.AddDockerVM(context.Background(), f.now.Add(31*time.Second-age), usedMB, 1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("docker memory over the threshold with a fresh sample", func(t *testing.T) {
+		vm(time.Second, 900)
 		if w := autoPass(t, f, e); len(w) != 0 {
 			t.Fatalf("windows = %q over the memory threshold", w)
 		}
@@ -336,31 +341,52 @@ func TestAutoSpawnForecastAndResourcePressure(t *testing.T) {
 			t.Fatalf("newest = %+v, want memory", rs[0])
 		}
 	})
-	t.Run("stale samples skip the check", func(t *testing.T) {
-		autoDockerMem = func(context.Context) (float64, bool) { return 99, false }
+	t.Run("key at 0 skips the check", func(t *testing.T) {
+		autoUserFile(t, "[tasks.auto_spawn]\nenabled = true\n[resources]\ndocker_memory_refuse_pct = 0\n")
+		vm(time.Second, 990)
 		if w := autoPass(t, f, e); len(w) != 1 {
-			t.Fatalf("windows = %q, want the start with stale memory samples", w)
+			t.Fatalf("windows = %q, want the start with the check off", w)
 		}
 	})
+}
+
+func TestAutoSpawnStaleDockerSampleSkipsTheCheck(t *testing.T) {
+	f := spawnNewFixture(t)
+	autoEnable(t, "")
+	autoReady(f, "a")
+	if err := f.st.AddDockerVM(context.Background(), f.now.Add(-time.Hour), 990, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if w := autoPass(t, f, autoEnv(f)); len(w) != 1 {
+		t.Fatalf("windows = %q, want the start with a stale sample", w)
+	}
 }
 
 // The latest sample of a window whose reset has passed counts as 0.
 func TestAutoUsageWindowRules(t *testing.T) {
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 	full := model.UsageSample{N: 1, At: now.Add(-time.Hour), Window: model.WindowFiveHour, UsedPct: 100, ResetsAt: now.Add(time.Hour)}
-	if _, f := autoUsage([]model.UsageSample{full}, now); !f {
+	if _, f := autoUsage([]model.UsageSample{full}, now, 100); !f {
 		t.Error("a window at 100% before its reset is not full")
 	}
 	past := full
 	past.ResetsAt = now.Add(-time.Minute)
-	if _, f := autoUsage([]model.UsageSample{past}, now); f {
+	if _, f := autoUsage([]model.UsageSample{past}, now, 100); f {
 		t.Error("a sample of a window that has reset still counts")
+	}
+	half := full
+	half.UsedPct = 60
+	if _, f := autoUsage([]model.UsageSample{half}, now, 50); !f {
+		t.Error("schedule.limited_pct = 50 ignored: 60% is not full")
+	}
+	if _, f := autoUsage([]model.UsageSample{half}, now, 100); f {
+		t.Error("60% counts as full at limited_pct = 100")
 	}
 	older := full
 	older.At, older.UsedPct = now.Add(-2*time.Hour), 10
 	newer := full
 	newer.N, newer.At, newer.UsedPct = 2, now.Add(-30*time.Minute), 40
-	if _, f := autoUsage([]model.UsageSample{full, older, newer}, now); f {
+	if _, f := autoUsage([]model.UsageSample{full, older, newer}, now, 100); f {
 		t.Error("an older reading beat the newest")
 	}
 }

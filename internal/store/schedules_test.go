@@ -57,6 +57,34 @@ func TestClaimScheduleOnceWithTwoClaimers(t *testing.T) {
 	}
 }
 
+// A daily schedule has a next run: of two claimers of the same due time exactly one wins, and the next time is stored once.
+func TestClaimDailyScheduleOnceWithTwoClaimers(t *testing.T) {
+	s := open(t, dbPath(t))
+	sc := newSchedule(t, s, schedBase)
+	next := schedBase.Add(24 * time.Hour)
+	var wins int
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, ok, err := s.ClaimSchedule(context.Background(), sc, next, "fired", schedBase); err == nil && ok {
+				mu.Lock()
+				wins++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("wins = %d on a daily schedule, want 1", wins)
+	}
+	if got, _, _ := s.GetSchedule(context.Background(), sc.ID); got.Status != "active" || !got.NextRun.Equal(next) {
+		t.Errorf("after a daily fire: %+v, want active at %v", got, next)
+	}
+}
+
 func TestScheduleLifecycleAndCap(t *testing.T) {
 	ctx := context.Background()
 	s := open(t, dbPath(t))

@@ -91,7 +91,7 @@ func TestAutoClaimOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ok, err := s.AutoClaim(ctx, tk.ID, tk.ReadyHash, autoT, autoLim)
+			ok, err := s.AutoClaim(ctx, tk, autoT, autoLim)
 			if err != nil {
 				t.Error(err)
 			}
@@ -116,19 +116,19 @@ func TestAutoClaimHoldsIntervalAndDailyCap(t *testing.T) {
 	s := open(t, dbPath(t))
 	ctx := context.Background()
 	a, b := readyTask(t, s, "a"), readyTask(t, s, "b")
-	if ok, _ := s.AutoClaim(ctx, a.ID, a.ReadyHash, autoT, autoLim); !ok {
+	if ok, _ := s.AutoClaim(ctx, a, autoT, autoLim); !ok {
 		t.Fatal("first claim refused")
 	}
-	if ok, _ := s.AutoClaim(ctx, b.ID, b.ReadyHash, autoT.Add(4*time.Minute), autoLim); ok {
+	if ok, _ := s.AutoClaim(ctx, b, autoT.Add(4*time.Minute), autoLim); ok {
 		t.Error("a claim inside the interval won")
 	}
-	if ok, _ := s.AutoClaim(ctx, b.ID, "stale-hash", autoT.Add(6*time.Minute), autoLim); ok {
+	if ok, _ := s.AutoClaim(ctx, func() model.Task { x := b; x.ReadyHash = "stale-hash"; return x }(), autoT.Add(6*time.Minute), autoLim); ok {
 		t.Error("a claim with a hash that is not the stored one won")
 	}
-	if ok, _ := s.AutoClaim(ctx, b.ID, b.ReadyHash, autoT.Add(6*time.Minute), store.AutoLimits{MaxPerDay: 1, Interval: time.Minute}); ok {
+	if ok, _ := s.AutoClaim(ctx, b, autoT.Add(6*time.Minute), store.AutoLimits{MaxPerDay: 1, Interval: time.Minute}); ok {
 		t.Error("a claim at the daily cap won")
 	}
-	if ok, _ := s.AutoClaim(ctx, b.ID, b.ReadyHash, autoT.Add(6*time.Minute), autoLim); !ok {
+	if ok, _ := s.AutoClaim(ctx, b, autoT.Add(6*time.Minute), autoLim); !ok {
 		t.Error("a claim after the interval and under the cap was refused")
 	}
 }
@@ -138,7 +138,7 @@ func TestAutoReleaseRestores(t *testing.T) {
 	s := open(t, dbPath(t))
 	ctx := context.Background()
 	tk := readyTask(t, s, "a")
-	if ok, _ := s.AutoClaim(ctx, tk.ID, tk.ReadyHash, autoT, autoLim); !ok {
+	if ok, _ := s.AutoClaim(ctx, tk, autoT, autoLim); !ok {
 		t.Fatal("claim refused")
 	}
 	if err := s.AutoRelease(ctx, tk.ID, autoT, time.Time{}, tk.ReadyHash); err != nil {
@@ -219,7 +219,7 @@ func TestAutoReleaseSkipsATaskThatLeftReady(t *testing.T) {
 	s := open(t, dbPath(t))
 	ctx := context.Background()
 	tk := readyTask(t, s, "a")
-	if ok, _ := s.AutoClaim(ctx, tk.ID, tk.ReadyHash, autoT, autoLim); !ok {
+	if ok, _ := s.AutoClaim(ctx, tk, autoT, autoLim); !ok {
 		t.Fatal("claim refused")
 	}
 	if _, err := s.UpdateTask(ctx, tk.ID, func(x model.Task) (model.Task, error) { x.Status = model.TaskBacklog; return x, nil }); err != nil {
@@ -244,10 +244,23 @@ func TestAutoClaimCountsFailedAttemptsTowardTheDailyCap(t *testing.T) {
 		}
 	}
 	lim := store.AutoLimits{MaxPerDay: 2, Interval: time.Minute}
-	if ok, _ := s.AutoClaim(ctx, tk.ID, tk.ReadyHash, autoT.Add(time.Hour), lim); ok {
+	if ok, _ := s.AutoClaim(ctx, tk, autoT.Add(time.Hour), lim); ok {
 		t.Error("a claim after two failed attempts won with max_per_day 2")
 	}
-	if ok, _ := s.AutoClaim(ctx, tk.ID, tk.ReadyHash, autoT.Add(25*time.Hour), lim); !ok {
+	if ok, _ := s.AutoClaim(ctx, tk, autoT.Add(25*time.Hour), lim); !ok {
 		t.Error("a claim a day after the failures was refused")
+	}
+}
+
+// An edit after the eligibility read keeps the stored hash, so the claim must see the text change.
+func TestAutoClaimRefusesTextEditedSinceTheRead(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	read := readyTask(t, s, "a")
+	if _, err := s.UpdateTask(ctx, read.ID, func(c model.Task) (model.Task, error) { c.Title = "edited"; return c, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.AutoClaim(ctx, read, autoT, autoLim); ok {
+		t.Fatal("the claim succeeded on text that changed after the read")
 	}
 }

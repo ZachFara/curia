@@ -41,11 +41,6 @@ import (
 const (
 	// autoEvery is the job's own tick (F29: 30 seconds), apart from the monitor's.
 	autoEvery = 30 * time.Second
-	// autoLimitedPct is schedule.limited_pct's default (F29 check 5). That key and
-	// resources.docker_memory_refuse_pct (autoMemRefusePct) are F22's and F19's;
-	// they are constants here until those features land.
-	autoLimitedPct   = 100.0
-	autoMemRefusePct = 80.0
 	// autoUsageLook bounds the usage samples read for the "window full" check.
 	autoUsageLook = 8 * 24 * time.Hour
 )
@@ -67,10 +62,6 @@ var (
 		}
 		return c.Tasks.AutoSpawn
 	}
-	// autoDockerMem is Docker's memory use in percent of its limit, and whether
-	// the reading is fresh. F19's Docker sampling is not built yet, so it is
-	// never fresh and the memory check is skipped, as the spec says for stale data.
-	autoDockerMem = func(context.Context) (pct float64, fresh bool) { return 0, false }
 )
 
 // autoShared is what one pass reads once for every candidate.
@@ -84,7 +75,7 @@ type autoShared struct {
 	memKnown   bool
 }
 
-func autoReadShared(ctx context.Context, st *store.Store, now time.Time) (autoShared, error) {
+func autoReadShared(ctx context.Context, st *store.Store, cfg config.Config, now time.Time) (autoShared, error) {
 	var s autoShared
 	sessions, err := st.ListSessions(ctx, store.ListFilter{})
 	if err != nil {
@@ -106,15 +97,20 @@ func autoReadShared(ctx context.Context, st *store.Store, now time.Time) (autoSh
 	if err != nil {
 		return s, err
 	}
-	s.warn, s.full = autoUsage(samples, now)
-	s.memPct, s.memKnown = autoDockerMem(ctx)
+	s.warn, s.full = autoUsage(samples, now, cfg.Schedule.LimitedPct)
+	// Check 6 reads the monitor's newest VM sample; a stale or missing one, or the key at 0, skips it.
+	if vm, ok, verr := st.LatestDockerVM(ctx); verr != nil {
+		return s, verr
+	} else if ok && vm.LimitMB > 0 && cfg.Resources.DockerMemoryRefusePct > 0 && usage.ResourceFresh(vm.At, now, cfg.Resources.Interval) {
+		s.memPct, s.memKnown = float64(vm.UsedMB)*100/float64(vm.LimitMB), true
+	}
 	return s, nil
 }
 
 // autoUsage is check 5: a forecast warning, or a window whose latest sample
-// is at or above autoLimitedPct. The latest sample of a window whose
+// is at or above limitedPct (schedule.limited_pct). The latest sample of a window whose
 // resets_at has passed counts as 0.
-func autoUsage(samples []model.UsageSample, now time.Time) (warn, full bool) {
+func autoUsage(samples []model.UsageSample, now time.Time, limitedPct float64) (warn, full bool) {
 	_, warn = usage.Warning(usage.Forecasts(samples, now), now)
 	latest := map[model.UsageWindow]model.UsageSample{}
 	for _, s := range samples {
@@ -123,7 +119,7 @@ func autoUsage(samples []model.UsageSample, now time.Time) (warn, full bool) {
 		}
 	}
 	for _, s := range latest {
-		if (s.ResetsAt.IsZero() || s.ResetsAt.After(now)) && s.UsedPct >= autoLimitedPct {
+		if (s.ResetsAt.IsZero() || s.ResetsAt.After(now)) && s.UsedPct >= limitedPct {
 			full = true
 		}
 	}
@@ -154,7 +150,7 @@ func autoRows(ctx context.Context, st *store.Store, cfg config.Config, now time.
 		}
 		return int(a.Task.N - b.Task.N)
 	})
-	sh, err := autoReadShared(ctx, st, now)
+	sh, err := autoReadShared(ctx, st, cfg, now)
 	if err != nil {
 		return nil, sh, err
 	}
@@ -175,7 +171,7 @@ func autoRows(ctx context.Context, st *store.Store, cfg config.Config, now time.
 			Now: now, Enabled: rc.Enabled && cfg.Tasks.AutoSpawn.Enabled, Bypass: sh.bypass,
 			Live: sh.live, MaxAgents: rc.MaxAgents, StartedToday: sh.today, MaxPerDay: rc.MaxPerDay,
 			LastStart: sh.last, Interval: rc.Interval, ForecastWarn: sh.warn, WindowFull: sh.full,
-			MemKnown: sh.memKnown, MemPct: sh.memPct, MemRefusePct: autoMemRefusePct,
+			MemKnown: sh.memKnown, MemPct: sh.memPct, MemRefusePct: float64(cfg.Resources.DockerMemoryRefusePct),
 		}
 		rows = append(rows, autoRow{c, rc, task.AutoEligible(g, cand)})
 	}
@@ -252,7 +248,7 @@ func autoDetail(reason string, t model.Task) string {
 // spawn gives the claim back and is retried after the interval.
 func (e *monitorEnv) autoStart(ctx context.Context, cfg config.Config, r autoRow, now time.Time) error {
 	t := r.Card.Task
-	ok, err := e.st.AutoClaim(ctx, t.ID, t.ReadyHash, now, store.AutoLimits{MaxPerDay: r.Cfg.MaxPerDay, Interval: r.Cfg.Interval})
+	ok, err := e.st.AutoClaim(ctx, t, now, store.AutoLimits{MaxPerDay: r.Cfg.MaxPerDay, Interval: r.Cfg.Interval})
 	if err != nil || !ok {
 		return err
 	}

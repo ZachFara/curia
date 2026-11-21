@@ -44,24 +44,26 @@ func (s *Store) MarkReady(ctx context.Context, id string) error {
 	return nil
 }
 
-// AutoClaim is the one UPDATE that lets the monitor start task id: it needs
-// the stored hash to be hash (the caller's eligibility check read it), no
+// AutoClaim is the one UPDATE that lets the monitor start task t, as the
+// caller's eligibility check read it: it needs the stored hash and the text
+// (an edit keeps a stale hash, so the hash alone does not see one) to be
+// unchanged since, no
 // auto-spawn or failed attempt within the interval, and fewer than
 // MaxPerDay in 24 hours (failed spawn attempts count, so a task that keeps
 // failing is not retried without end). It sets auto_spawned_at and clears the hash (the
 // readiness is consumed), so a second claimer, or a restart, finds nothing
 // to claim. ok is false when it lost.
-func (s *Store) AutoClaim(ctx context.Context, id, hash string, now time.Time, lim AutoLimits) (ok bool, err error) {
+func (s *Store) AutoClaim(ctx context.Context, t model.Task, now time.Time, lim AutoLimits) (ok bool, err error) {
 	res, err := s.db.ExecContext(ctx, `
 UPDATE tasks SET auto_spawned_at = ?1, ready_hash = NULL
-WHERE id = ?2 AND status = 'ready' AND ready_hash = ?3
+WHERE id = ?2 AND status = 'ready' AND ready_hash = ?3 AND title = ?7 AND body = ?8
   AND NOT EXISTS (SELECT 1 FROM tasks WHERE auto_spawned_at > ?4)
   AND NOT EXISTS (SELECT 1 FROM auto_spawn_runs WHERE at > ?4 AND check_ = 'spawn_failed')
   AND (SELECT count(*) FROM tasks WHERE auto_spawned_at > ?5)
     + (SELECT count(*) FROM auto_spawn_runs WHERE at > ?5 AND check_ = 'spawn_failed') < ?6`,
-		formatTime(now), id, hash, formatTime(now.Add(-lim.Interval)), formatTime(now.Add(-24*time.Hour)), lim.MaxPerDay)
+		formatTime(now), t.ID, t.ReadyHash, formatTime(now.Add(-lim.Interval)), formatTime(now.Add(-24*time.Hour)), lim.MaxPerDay, t.Title, t.Body)
 	if err != nil {
-		return false, fail("auto claim", id, err)
+		return false, fail("auto claim", t.ID, err)
 	}
 	n, _ := res.RowsAffected()
 	return n == 1, nil
