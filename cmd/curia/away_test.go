@@ -13,6 +13,9 @@ import (
 	"github.com/ZachFara/curia/internal/store"
 )
 
+// bidi is a right-to-left override, built so the source holds no bidirectional control character.
+var bidi = string(rune(0x202e))
+
 var awayT0 = time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
 
 func awayReset(t *testing.T) {
@@ -52,8 +55,10 @@ func awayEnv(t *testing.T, sessions ...model.Session) (*store.Store, *time.Time)
 }
 
 func awaySess(id, state string, mode string) model.Session {
-	return model.Session{ID: id, Agent: "claude", Repo: "/r/" + id, Cwd: "/r", State: model.State(state), Mode: mode,
-		StartedAt: awayT0, UpdatedAt: awayT0, SeenAt: awayT0}
+	return model.Session{
+		ID: id, Agent: "claude", Repo: "/r/" + id, Cwd: "/r", State: model.State(state), Mode: mode,
+		StartedAt: awayT0, UpdatedAt: awayT0, SeenAt: awayT0,
+	}
 }
 
 func modeIs(t *testing.T, st *store.Store, id, want string) {
@@ -161,7 +166,7 @@ func TestBackSummaryGroupsDenialsAndNeverShowsRawInput(t *testing.T) {
 	}
 	*now = now.Add(30 * time.Minute)
 	ctx := context.Background()
-	evil := "rm \x1b[31m-rf\x1b[0m ‮evil " + strings.Repeat("A", 1<<20)
+	evil := "rm \x1b[31m-rf\x1b[0m " + bidi + "evil " + strings.Repeat("A", 1<<20)
 	for range 3 {
 		_ = st.AddPermissionEvent(ctx, store.PermissionEvent{SessionID: "s1", Mode: "away", Tool: "Bash", Summary: evil, Verdict: "deny", At: *now})
 	}
@@ -174,7 +179,7 @@ func TestBackSummaryGroupsDenialsAndNeverShowsRawInput(t *testing.T) {
 	if !strings.Contains(out, "Refused (4 call(s)") || !strings.Contains(out, "3x s1") || !strings.Contains(out, "1x s2 Write: /etc/passwd") {
 		t.Errorf("denials not grouped once each with their count:\n%s", out)
 	}
-	if strings.ContainsAny(out, "\x1b‮") || strings.Contains(out, "git status") || len(out) > 8000 {
+	if strings.ContainsAny(out, "\x1b"+bidi) || strings.Contains(out, "git status") || len(out) > 8000 {
 		t.Errorf("summary shows raw or unbounded input (%d bytes):\n%.600s", len(out), out)
 	}
 }
@@ -190,13 +195,12 @@ func TestBackSummaryGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join("testdata", "back-summary.golden.txt")
 	if os.Getenv("UPDATE_GOLDEN") != "" {
-		_ = os.WriteFile(path, []byte(out), 0o644)
+		_ = os.WriteFile("testdata/back-summary.golden.txt", []byte(out), 0o600)
 	}
-	want, err := os.ReadFile(path)
+	want, err := os.ReadFile("testdata/back-summary.golden.txt")
 	if err != nil || string(want) != out {
-		t.Errorf("summary differs from %s (UPDATE_GOLDEN=1 rewrites it):\n%s", path, out)
+		t.Errorf("summary differs from testdata/back-summary.golden.txt (UPDATE_GOLDEN=1 rewrites it):\n%s", out)
 	}
 }
 
@@ -286,4 +290,62 @@ func TestAwayNotReadyNeedsTheMessageThenATurnEnd(t *testing.T) {
 	if got := notReady(); got != "busy (sitting at a permission prompt)" {
 		t.Errorf("after the turns: %q, want only busy, at a permission prompt", got)
 	}
+}
+
+// A session in away that ends during the period and is resumed after `back`
+// (same id) comes back in its previous mode, never away.
+func TestSessionThatEndedDuringAwayIsNotAwayWhenResumedAfterBack(t *testing.T) {
+	st, _ := awayEnv(t, awaySess("e1", "idle", "edits"), awaySess("e2", "idle", ""))
+	ctx := context.Background()
+	if _, err := runRoot(t, "away", "2h"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"e1", "e2"} {
+		if err := st.UpsertSession(ctx, awaySess(id, "ended", "")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := runRoot(t, "back"); err != nil {
+		t.Fatal(err)
+	}
+	modeIs(t, st, "e1", "edits")
+	modeIs(t, st, "e2", "")
+}
+
+// A session resumed during the period keeps nothing it carried: away now,
+// its old mode back at `back`; bypass is never left in force and a mode that
+// lapsed meanwhile restores to the default.
+func TestSessionResumedDuringAwayIsAwayAndRestoredAtBack(t *testing.T) {
+	st, now := awayEnv(t, awaySess("r1", "idle", ""), awaySess("r2", "idle", ""), awaySess("r3", "idle", ""))
+	ctx := context.Background()
+	for id, m := range map[string]string{"r1": "edits", "r2": "bypass", "r3": "bypass"} {
+		until := awayT0.Add(10 * time.Hour)
+		if id == "r3" {
+			until = awayT0.Add(90 * time.Minute) // lapses during the period
+		}
+		if _, err := st.SetModes(ctx, store.ModeScope{Repo: "/r/" + id}, m, until); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := runRoot(t, "away", "2h"); err != nil {
+		t.Fatal(err)
+	}
+	// They were all put away at the start; a resume re-reads the row as its older mode (Claude Code resumes the same id).
+	for id, m := range map[string]string{"r1": "edits", "r2": "bypass", "r3": "bypass"} {
+		if _, err := st.SetModes(ctx, store.ModeScope{Repo: "/r/" + id}, m, awayT0.Add(10*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.InheritAway(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		modeIs(t, st, id, "away")
+	}
+	// r3's saved bypass lapses: the saved entry says until 10h, so it is dropped as bypass anyway.
+	*now = now.Add(time.Hour)
+	if _, err := runRoot(t, "back"); err != nil {
+		t.Fatal(err)
+	}
+	modeIs(t, st, "r1", "edits")
+	modeIs(t, st, "r2", "")
+	modeIs(t, st, "r3", "")
 }

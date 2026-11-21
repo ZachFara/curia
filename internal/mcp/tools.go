@@ -339,13 +339,7 @@ func (t *tools) request(ctx context.Context, args json.RawMessage, now time.Time
 	if terr := t.checkDiffersFrom(ctx, d); terr != nil {
 		return nil, terr
 	}
-	coerced := false
-	if d.Mode == model.ModeBlocking {
-		// F20: while the owner is away a blocking ticket would stall the agent with nobody to answer.
-		if away, aerr := t.Store.SessionAway(ctx, c.SessionID, now); aerr == nil && away {
-			d.Mode, d.CoercedFrom, d.Assumption, d.ExpiresAt, coerced = model.ModeAssume, string(model.ModeBlocking), "proceed with option "+d.Recommendation, time.Time{}, true
-		}
-	}
+	d, coerced := t.coerceWhileAway(ctx, d, c.SessionID, now)
 	stored, dup, err := t.Store.CreateDecision(ctx, d)
 	if err != nil {
 		return nil, t.internal("request_decision", err)
@@ -372,6 +366,20 @@ func (t *tools) request(ctx context.Context, args json.RawMessage, now time.Time
 		res.Instruction = instrAssume
 	}
 	return res, nil
+}
+
+// coerceWhileAway is F20: while the owner is away a blocking ticket would stall
+// its agent with nobody to answer, so it is stored as an assumption that
+// waits for the user (no expiry, never answered by Curia).
+func (t *tools) coerceWhileAway(ctx context.Context, d model.Decision, session string, now time.Time) (model.Decision, bool) {
+	if d.Mode != model.ModeBlocking {
+		return d, false
+	}
+	if away, err := t.Store.SessionAway(ctx, session, now); err != nil || !away {
+		return d, false
+	}
+	d.Mode, d.CoercedFrom, d.Assumption, d.ExpiresAt = model.ModeAssume, string(model.ModeBlocking), "proceed with option "+d.Recommendation, time.Time{}
+	return d, true
 }
 
 // invalidTicket lists every problem of a refused ticket.

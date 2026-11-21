@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/ZachFara/curia/internal/notify"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/tmux"
 )
 
 // awayFlags are the flags of `curia away`; tests reset them.
@@ -103,18 +105,9 @@ func runAway(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = st.Close() }()
 	ctx, out := cmd.Context(), cmd.OutOrStdout()
-	if open, ok, oerr := st.OpenAway(ctx); oerr != nil || ok {
-		if oerr != nil {
-			return oerr
-		}
-		return fmt.Errorf("already away until %s: curia back ends it", open.EndsAt.Local().Format("15:04"))
-	}
-	scope := store.ModeScope{All: true}
-	if awayFlags.repo != "" {
-		modeFlags.repo, modeFlags.all = awayFlags.repo, false
-		if scope, _, err = modeScope(ctx); err != nil {
-			return err
-		}
+	scope, err := awayCheck(ctx, st)
+	if err != nil {
+		return err
 	}
 	logger, closeLog, err := openLog(cfg.LogPath)
 	if err != nil {
@@ -125,46 +118,16 @@ func runAway(cmd *cobra.Command, args []string) error {
 	if err = reconcile(ctx, st, tm, cfg.LogPath, clock()); err != nil {
 		return err
 	}
-	live, err := modeLive(ctx, st, scope)
+	sent, notReady, err := awayAsk(ctx, st, tm, logger, scope, dur)
 	if err != nil {
 		return err
-	}
-	sent := map[string]string{} // session id -> message id
-	var notReady []string
-	for _, s := range live {
-		if s.State == model.StateEnded || s.State == model.StateStale {
-			continue
-		}
-		if s.Pane == "" || s.Agent == model.AgentCodex {
-			notReady = append(notReady, spawnShortID(s.ID)+" (cannot be messaged)")
-			continue
-		}
-		m, merr := st.CreateMessage(ctx, model.Message{
-			Text: fmt.Sprintf(awayLeaving, dur), Kind: model.KindInstruction, Sender: model.SenderUser,
-			TargetSession: s.ID, RoutedBy: model.RoutedSend, Status: model.MsgQueued, CreatedAt: clock(),
-		})
-		if merr != nil {
-			notReady = append(notReady, spawnShortID(s.ID)+" (not messaged: "+sanitize.Line(merr.Error(), 80)+")")
-			continue
-		}
-		if _, derr := deliver.Message(ctx, st, tm, logger, m.ID, clock()); derr != nil {
-			logger.Warn("away: deliver", "session", s.ID, "err", derr.Error())
-		}
-		sent[s.ID] = m.ID
 	}
 	if len(sent) > 0 {
 		_, _ = fmt.Fprintf(out, "Asked %d agent(s) to raise what they foresee and end their turn; waiting up to %s.\n", len(sent), cfg.Away.PrepareWait)
 	}
-	deadline := clock().Add(cfg.Away.PrepareWait)
-	var waiting []string
-	for {
-		if waiting, err = awayNotReady(ctx, st, sent); err != nil {
-			return err
-		}
-		if len(waiting) == 0 || !clock().Before(deadline) || ctx.Err() != nil {
-			break
-		}
-		awaySleep(ctx, awayPoll)
+	waiting, err := awayWait(ctx, st, sent, cfg.Away.PrepareWait)
+	if err != nil {
+		return err
 	}
 	notReady = append(notReady, waiting...)
 	now := clock()
@@ -174,6 +137,69 @@ func runAway(cmd *cobra.Command, args []string) error {
 	}
 	awayPrint(out, cfg, run, len(sent), notReady)
 	return nil
+}
+
+// awayCheck refuses a second period and resolves --repo (default: everyone).
+func awayCheck(ctx context.Context, st *store.Store) (store.ModeScope, error) {
+	open, ok, err := st.OpenAway(ctx)
+	if err != nil {
+		return store.ModeScope{}, err
+	}
+	if ok {
+		return store.ModeScope{}, fmt.Errorf("already away until %s: curia back ends it", open.EndsAt.Local().Format("15:04"))
+	}
+	if awayFlags.repo == "" {
+		return store.ModeScope{All: true}, nil
+	}
+	modeFlags.repo, modeFlags.all = awayFlags.repo, false
+	scope, _, err := modeScope(ctx)
+	return scope, err
+}
+
+// awayAsk sends the leaving message to each live agent it can reach (the F18
+// delivery path: typed into an idle pane, or handed over at its next stop) and
+// returns the message id per session and who could not be messaged.
+func awayAsk(ctx context.Context, st *store.Store, tm tmux.Client, logger *slog.Logger, scope store.ModeScope, dur time.Duration) (sent map[string]string, notReady []string, err error) {
+	live, err := modeLive(ctx, st, scope)
+	if err != nil {
+		return nil, nil, err
+	}
+	sent = map[string]string{}
+	for _, s := range live {
+		if s.State == model.StateEnded || s.State == model.StateStale {
+			continue
+		}
+		if s.Pane == "" || s.Agent == model.AgentCodex {
+			notReady = append(notReady, spawnShortID(s.ID)+" (cannot be messaged)")
+			continue
+		}
+		m, err := st.CreateMessage(ctx, model.Message{
+			Text: fmt.Sprintf(awayLeaving, dur), Kind: model.KindInstruction, Sender: model.SenderUser,
+			TargetSession: s.ID, RoutedBy: model.RoutedSend, Status: model.MsgQueued, CreatedAt: clock(),
+		})
+		if err != nil {
+			notReady = append(notReady, spawnShortID(s.ID)+" (not messaged: "+sanitize.Line(err.Error(), 80)+")")
+			continue
+		}
+		if _, err = deliver.Message(ctx, st, tm, logger, m.ID, clock()); err != nil {
+			logger.Warn("away: deliver", "session", s.ID, "err", err.Error())
+		}
+		sent[s.ID] = m.ID
+	}
+	return sent, notReady, nil
+}
+
+// awayWait polls awayNotReady until nobody is left or wait has passed, and
+// returns who was not ready.
+func awayWait(ctx context.Context, st *store.Store, sent map[string]string, wait time.Duration) ([]string, error) {
+	deadline := clock().Add(wait)
+	for {
+		waiting, err := awayNotReady(ctx, st, sent)
+		if err != nil || len(waiting) == 0 || !clock().Before(deadline) || ctx.Err() != nil {
+			return waiting, err
+		}
+		awaySleep(ctx, awayPoll)
+	}
 }
 
 // awayNotReady lists, for each session sent the leaving message, those that
@@ -257,28 +283,11 @@ func runBack(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = st.Close() }()
 	ctx, out := cmd.Context(), cmd.OutOrStdout()
 	now := clock()
-	run, ok, err := st.OpenAway(ctx)
+	run, ok, err := awayEnd(ctx, st, now)
 	if err != nil {
 		return err
 	}
-	if ok {
-		var won bool
-		if run, won, err = st.EndAway(ctx, run.ID, now); err != nil {
-			return err
-		}
-		if won {
-			if err = awayFinish(ctx, st, &run); err != nil {
-				return err
-			}
-		} else { // the monitor ended it a moment ago
-			run, ok, err = st.UnshownAway(ctx)
-			if err != nil || !ok {
-				return err
-			}
-		}
-	} else if run, ok, err = st.UnshownAway(ctx); err != nil {
-		return err
-	} else if !ok {
+	if !ok {
 		_, err = fmt.Fprintln(out, "You are not away, and there is no summary you have not seen.")
 		return err
 	}
@@ -289,6 +298,25 @@ func runBack(cmd *cobra.Command, _ []string) error {
 	}
 	_, _ = fmt.Fprint(out, run.Summary)
 	return st.MarkAwayShown(ctx, run.ID, now)
+}
+
+// awayEnd ends the open period, or finds the one that ended since the user
+// last looked (the deadline, or the monitor a moment ago); ok is false when
+// there is neither.
+func awayEnd(ctx context.Context, st *store.Store, now time.Time) (run store.AwayRun, ok bool, err error) {
+	if run, ok, err = st.OpenAway(ctx); err != nil {
+		return run, false, err
+	}
+	if ok {
+		var won bool
+		if run, won, err = st.EndAway(ctx, run.ID, now); err != nil || won {
+			if err == nil {
+				err = awayFinish(ctx, st, &run)
+			}
+			return run, err == nil, err
+		}
+	}
+	return st.UnshownAway(ctx)
 }
 
 // awayFinish builds the summary of an ended run and stores it.
@@ -313,45 +341,11 @@ func awaySummary(ctx context.Context, st *store.Store, run store.AwayRun) (strin
 		to, how = run.EndsAt, "ended by itself at its deadline"
 	}
 	w("Away %s to %s (%s), %s.", run.StartedAt.Local().Format("2006-01-02 15:04"), to.Local().Format("15:04"), to.Sub(run.StartedAt).Round(time.Minute), how)
-	events, err := st.TimelineBetween(ctx, run.StartedAt, to.Add(time.Nanosecond))
+	did, err := awayDid(ctx, st, run.StartedAt, to)
 	if err != nil {
 		return "", err
 	}
-	sessions, err := st.ListSessions(ctx, store.ListFilter{})
-	if err != nil {
-		return "", err
-	}
-	repo := map[string]string{}
-	for _, s := range sessions {
-		repo[s.ID] = filepath.Base(s.Repo)
-	}
-	counts := map[string]map[string]int{}
-	for _, kind := range []string{"turn_end", "ticket_raised", "review_opened", "message_delivered"} {
-		for _, e := range events[kind] {
-			if counts[e.SessionID] == nil {
-				counts[e.SessionID] = map[string]int{}
-			}
-			counts[e.SessionID][kind]++
-		}
-	}
-	ids := make([]string, 0, len(counts))
-	for id := range counts {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-	w("What each agent did:")
-	if len(ids) == 0 {
-		w("  nothing recorded")
-	}
-	for i, id := range ids {
-		if i == awaySessionsShown {
-			w("  … and %d more", len(ids)-i)
-			break
-		}
-		c := counts[id]
-		w("  %s %s: %d turn(s), %d ticket(s) raised, %d review(s) opened, %d message(s) delivered",
-			spawnShortID(id), sanitize.Line(repo[id], 40), c["turn_end"], c["ticket_raised"], c["review_opened"], c["message_delivered"])
-	}
+	b.WriteString(did)
 	groups, total, err := st.Denials(ctx, run.StartedAt, to)
 	if err != nil {
 		return "", err
@@ -379,6 +373,51 @@ func awaySummary(ctx context.Context, st *store.Store, run store.AwayRun) (strin
 		w("Not ready when you left: %s", sanitize.Line(strings.Join(run.NotReady, ", "), 400))
 	}
 	w("Curia's own mode rows are restored (a saved bypass is dropped; type it again). Claude Code's own permission mode is NOT restored: a session resumed during away or bypass is in Claude Code's default mode now.")
+	return b.String(), nil
+}
+
+// awayDid is "what each agent did" from the timeline of the window.
+func awayDid(ctx context.Context, st *store.Store, from, to time.Time) (string, error) {
+	events, err := st.TimelineBetween(ctx, from, to.Add(time.Nanosecond))
+	if err != nil {
+		return "", err
+	}
+	sessions, err := st.ListSessions(ctx, store.ListFilter{})
+	if err != nil {
+		return "", err
+	}
+	repo := map[string]string{}
+	for _, s := range sessions {
+		repo[s.ID] = filepath.Base(s.Repo)
+	}
+	counts := map[string]map[string]int{}
+	for _, kind := range []string{"turn_end", "ticket_raised", "review_opened", "message_delivered"} {
+		for _, e := range events[kind] {
+			if counts[e.SessionID] == nil {
+				counts[e.SessionID] = map[string]int{}
+			}
+			counts[e.SessionID][kind]++
+		}
+	}
+	ids := make([]string, 0, len(counts))
+	for id := range counts {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	var b strings.Builder
+	b.WriteString("What each agent did:\n")
+	if len(ids) == 0 {
+		b.WriteString("  nothing recorded\n")
+	}
+	for i, id := range ids {
+		if i == awaySessionsShown {
+			fmt.Fprintf(&b, "  … and %d more\n", len(ids)-i)
+			break
+		}
+		c := counts[id]
+		fmt.Fprintf(&b, "  %s %s: %d turn(s), %d ticket(s) raised, %d review(s) opened, %d message(s) delivered\n",
+			spawnShortID(id), sanitize.Line(repo[id], 40), c["turn_end"], c["ticket_raised"], c["review_opened"], c["message_delivered"])
+	}
 	return b.String(), nil
 }
 
