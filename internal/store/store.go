@@ -306,7 +306,7 @@ SELECT COALESCE(id, ''), COALESCE(agent, ''), COALESCE(tmux_pane, ''), COALESCE(
   started_at, updated_at, transcript_offset, COALESCE(task_id, ''), COALESCE(worktree, ''),
   COALESCE(team_id, ''), COALESCE(team_role, ''), COALESCE(team_member, ''), COALESCE(tmux_socket, ''),
   COALESCE(end_reason, ''), cost_usd, cache_expires_at, COALESCE(cache_rebuild_usd, 0),
-  COALESCE(recache_tokens, 0), COALESCE(checked_cwd, '')
+  COALESCE(recache_tokens, 0), COALESCE(checked_cwd, ''), COALESCE(mode, ''), mode_until
 FROM sessions`
 
 // GetSession returns the session with the given id, and false if there is none.
@@ -362,13 +362,13 @@ type scanner interface {
 
 func scanSession(sc scanner) (model.Session, error) {
 	var sess model.Session
-	var seen, started, updated, cache sql.NullString
+	var seen, started, updated, cache, modeUntil sql.NullString
 	var cost sql.NullFloat64
 	err := sc.Scan(&sess.ID, &sess.Agent, &sess.Pane, &sess.TmuxSession, &sess.TmuxWindow, &sess.Cwd,
 		&sess.Repo, &sess.Branch, &sess.State, &sess.Model, &sess.ContextUsed, &sess.ContextMax,
 		&sess.SubagentsActive, &sess.LastUpdate, &seen, &sess.TranscriptPath, &started, &updated,
 		&sess.TranscriptOffset, &sess.TaskID, &sess.Worktree, &sess.TeamID, &sess.TeamRole, &sess.TeamMember,
-		&sess.Socket, &sess.EndReason, &cost, &cache, &sess.CacheRebuildUSD, &sess.CacheRecacheTokens, &sess.CheckedCwd)
+		&sess.Socket, &sess.EndReason, &cost, &cache, &sess.CacheRebuildUSD, &sess.CacheRecacheTokens, &sess.CheckedCwd, &sess.Mode, &modeUntil)
 	if err != nil {
 		return model.Session{}, err
 	}
@@ -383,6 +383,9 @@ func scanSession(sc scanner) (model.Session, error) {
 		return model.Session{}, err
 	}
 	if sess.UpdatedAt, err = parseTime(updated); err != nil {
+		return model.Session{}, err
+	}
+	if sess.ModeUntil, err = parseTime(modeUntil); err != nil {
 		return model.Session{}, err
 	}
 	return sess, nil

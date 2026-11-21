@@ -61,6 +61,9 @@ var keyPolicy = map[string]Policy{
 	"resources.enabled":             PolicyNone,      // the spec's F28 table: nothing
 	"resources.interval":            PolicyNone,      // monitor.* and resources.*: a repository cannot change when Curia samples
 	"monitor.autostart":             PolicyNone,
+	"mode.default":                  PolicyNone, // a repository can never raise a mode (F20)
+	"mode.away_allow":               PolicyNone, // a list of allowed commands is a grant
+	"mode.bypass_for":               PolicyNone,
 	"tasks.agent_filed.level":       PolicyLevel,
 	"tasks.agent_filed.max_per_day": PolicyLower,
 }

@@ -1060,6 +1060,10 @@ var userOnlyCommands = map[string][]string{
 	"curia show":            {"s1"}, // the transcript can hold anything the agent saw: no agent reads another session's
 	"curia resume":          {"T-1"},
 	"curia config set":      {"notify_bell", "true"},
+	"curia mode normal":     {},
+	"curia mode edits":      {},
+	"curia mode away":       {"--all"},
+	"curia mode bypass":     {"--all", "--for", "1h"},
 	"curia config edit":     {},
 	"curia config rollback": {"1"},
 	"curia clean":           {"T-1"},
@@ -1093,6 +1097,7 @@ var userNotOnlyCommands = map[string]string{
 	"curia ingest":                "run by cost-lens and status lines inside agent sessions; writes only cost, cache and usage readings, which nothing automatic depends on",
 	"curia launch":                "runs the agent in the caller's own process; spawn decides what is started",
 	"curia ls":                    "reads the sessions only",
+	"curia mode":                  "prints each live session's mode; the setting subcommands are user-only",
 	"curia mcp":                   "run by Claude Code; its tools cannot decide, send, spawn or pause; complete_task only files the caller's own task for review",
 	"curia messages ls":           "reads the messages only",
 	"curia next":                  "moves the tmux client to a session; changes nothing",

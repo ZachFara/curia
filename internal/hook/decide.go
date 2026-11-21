@@ -54,7 +54,7 @@ func PreToolUseNoStore(payload []byte, cfg config.Config) []byte {
 	if err != nil {
 		return nil
 	}
-	out, _ := preToolUse(context.Background(), ev, payload, cfg, nil, "")
+	out, _ := preToolUse(context.Background(), ev, payload, cfg, nil, "", model.Session{})
 	return out
 }
 
@@ -63,7 +63,7 @@ func PreToolUseNoStore(payload []byte, cfg config.Config) []byte {
 // deferred by Run, so file protection holds when the update failed.
 func decideAfter(ctx context.Context, res *Result, ev model.Event, payload []byte, envTask string, st *store.Store, cfg config.Config) {
 	if ev.Kind == model.PreToolUse {
-		res.Stdout, res.Undecided = preToolUse(ctx, ev, payload, cfg, st, cmp.Or(res.Session.TaskID, envTask))
+		res.Stdout, res.Undecided = preToolUse(ctx, ev, payload, cfg, st, cmp.Or(res.Session.TaskID, envTask), res.Session)
 	}
 }
 
@@ -71,10 +71,12 @@ func decideAfter(ctx context.Context, res *Result, ev model.Event, payload []byt
 // (Curia prints nothing, as before), else the one line that denies the call
 // and shows the reason to the model (probe P1: permissionDecision "deny").
 // Denials come first and cannot be undone by anything after them. F20's
-// modes will add their "allow" decisions after both denies, at the marked
-// place, so an allow can never override a deny. st may be nil (no store).
+// modes add their allow (and away's deny) decisions after both denies, at the
+// marked place, so an allow can never override a deny. sess is the session as
+// the event's update loaded it (zero when it could not be: no mode is known,
+// so nothing is allowed). st may be nil (no store).
 // A kind of check that could not be made is returned in undecided.
-func preToolUse(ctx context.Context, ev model.Event, payload []byte, cfg config.Config, st *store.Store, taskID string) (line []byte, undecided []string) {
+func preToolUse(ctx context.Context, ev model.Event, payload []byte, cfg config.Config, st *store.Store, taskID string, sess model.Session) (line []byte, undecided []string) {
 	if reason, problem := protectedFile(ev, payload, cfg); reason != "" {
 		return denyLine(reason), nil
 	} else if problem {
@@ -93,18 +95,22 @@ func preToolUse(ctx context.Context, ev model.Event, payload []byte, cfg config.
 				"(curia task edit %s --budget). The stop can land up to one tool call late.", why, sanitize.Line(taskID, 40))), undecided
 		}
 	}
-	// F20 modes: the "allow" decisions go here.
-	return nil, undecided
+	// F20 modes: the "allow" decisions go here, after every denial.
+	return modeLine(ctx, ev, payload, cfg, sess, st), undecided
 }
 
 // denyLine is the hook output that denies a tool call: one line of JSON,
 // HTML escaping off, and a newline. Claude Code shows reason to the model.
-func denyLine(reason string) []byte {
+func denyLine(reason string) []byte { return decisionLine("deny", reason) }
+
+// decisionLine is the observed form of a PreToolUse decision (probe P1) for
+// "deny" or "allow".
+func decisionLine(decision, reason string) []byte {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(map[string]any{"hookSpecificOutput": map[string]string{
-		"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason,
+		"hookEventName": "PreToolUse", "permissionDecision": decision, "permissionDecisionReason": reason,
 	}})
 	return b.Bytes()
 }

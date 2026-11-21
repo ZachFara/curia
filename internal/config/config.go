@@ -64,6 +64,7 @@ type Config struct {
 	Resources Resources `toml:"resources"`
 	Monitor   Monitor   `toml:"monitor"`
 	Cost      Cost      `toml:"cost"`
+	Mode      Mode      `toml:"mode"`
 }
 
 // maxEditor bounds the editor option, in bytes.
@@ -138,6 +139,7 @@ func Default() Config {
 		Resources: defaultResources(),
 		Monitor:   Monitor{Autostart: true},
 		Tasks:     defaultTasks(),
+		Mode:      defaultMode(),
 	}
 }
 
@@ -170,6 +172,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.Resources.validate(); err != nil {
+		return err
+	}
+	if err := c.Mode.validate(); err != nil {
 		return err
 	}
 	if err := c.Cost.validate(); err != nil {
