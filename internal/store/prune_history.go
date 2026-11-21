@@ -26,7 +26,7 @@ func (s *Store) PruneHistory(ctx context.Context, now time.Time) error {
 		name, sql string
 		arg       any
 	}{
-		{"denials", `DELETE FROM permission_events WHERE at < ?1 AND id IN (SELECT id FROM permission_events ORDER BY id LIMIT ?2)`, formatTime(now.Add(-PermissionEventKeep))},
+		{"denials", `DELETE FROM permission_events WHERE COALESCE(last_at, at) < ?1 AND id IN (SELECT id FROM permission_events ORDER BY id LIMIT ?2)`, formatTime(now.Add(-PermissionEventKeep))},
 		{"auto log", `DELETE FROM auto_spawn_runs WHERE at < ?1 AND id IN (SELECT id FROM auto_spawn_runs ORDER BY id LIMIT ?2)`, formatTime(now.Add(-HistoryKeep))},
 		{"schedule runs", `DELETE FROM schedule_runs WHERE ran_at < ?1 AND id IN (SELECT id FROM schedule_runs ORDER BY id LIMIT ?2)`, formatTime(now.Add(-HistoryKeep))},
 		{"config revisions", `DELETE FROM config_revisions WHERE actor <> 'baseline' AND n IN (SELECT n FROM config_revisions

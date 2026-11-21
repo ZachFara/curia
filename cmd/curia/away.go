@@ -370,24 +370,19 @@ func awaySummary(ctx context.Context, st *store.Store, run store.AwayRun) (strin
 		return "", err
 	}
 	b.WriteString(did)
-	groups, total, capped, err := st.Denials(ctx, run.StartedAt, to)
+	groups, total, notRecorded, err := st.Denials(ctx, run.StartedAt, to)
 	if err != nil {
 		return "", err
 	}
-	more := ""
-	if capped {
-		more = " or more" // a session reached the stored-rows cap: later denials were not counted
-	}
-	w("Refused (%d%s call(s); one line per session, tool and command line):", total, more)
+	w("Refused (%d call(s); one line per session, tool and command line):", total)
 	if total == 0 {
 		w("  nothing")
 	}
 	for _, d := range groups {
-		x := ""
-		if d.Count >= store.PermissionEventCap {
-			x = "+" // this session stopped counting at the cap
-		}
-		w("  %d%sx %s %s: %s", d.Count, x, spawnShortID(d.SessionID), sanitize.Line(d.Tool, 40), sanitize.Line(d.Summary, 100))
+		w("  %dx %s %s: %s", d.Count, spawnShortID(d.SessionID), sanitize.Line(d.Tool, 40), sanitize.Line(d.Summary, 100))
+	}
+	if notRecorded > 0 {
+		w("  %d further refusal(s) not recorded (a session passed %d distinct ones)", notRecorded, store.PermissionDistinctCap)
 	}
 	wt, err := st.Waiting(ctx, run.StartedAt, to)
 	if err != nil {

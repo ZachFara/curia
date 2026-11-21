@@ -184,19 +184,21 @@ func TestBackSummaryGroupsDenialsAndNeverShowsRawInput(t *testing.T) {
 	}
 }
 
-// A flooding session stops counting at the cap, and the summary says so.
-func TestBackSummarySaysOrMoreAtTheCap(t *testing.T) {
+// A flood of identical refusals is one line with its count; a later different one still shows.
+func TestBackSummaryCountsRepeatsAndKeepsLaterRefusals(t *testing.T) {
 	st, now := awayEnv(t, awaySess("s1", "idle", ""))
 	if _, err := runRoot(t, "away", "2h"); err != nil {
 		t.Fatal(err)
 	}
 	*now = now.Add(30 * time.Minute)
-	for range store.PermissionEventCap + 50 {
-		_ = st.AddPermissionEvent(context.Background(), store.PermissionEvent{SessionID: "s1", Mode: "away", Tool: "Bash", Summary: "rm x", Verdict: "deny", At: *now})
+	ctx := context.Background()
+	for range 600 {
+		_ = st.AddPermissionEvent(ctx, store.PermissionEvent{SessionID: "s1", Mode: "away", Tool: "Bash", Summary: "rm x", Verdict: "deny", At: *now})
 	}
+	_ = st.AddPermissionEvent(ctx, store.PermissionEvent{SessionID: "s1", Mode: "away", Tool: "Write", Summary: "/etc/passwd", Verdict: "deny", At: *now})
 	out, err := runRoot(t, "back")
-	if err != nil || !strings.Contains(out, "Refused (500 or more call(s)") || !strings.Contains(out, "500+x s1") {
-		t.Errorf("summary at the cap: %v\n%.400s", err, out)
+	if err != nil || !strings.Contains(out, "Refused (601 call(s)") || !strings.Contains(out, "600x s1 Bash: rm x") || !strings.Contains(out, "1x s1 Write: /etc/passwd") {
+		t.Errorf("summary: %v\n%.500s", err, out)
 	}
 }
 

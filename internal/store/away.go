@@ -334,31 +334,32 @@ const (
 	maxDenialSummary = 200
 )
 
-// Denials groups the denied calls in [from, to] by session, tool and command
-// line, most frequent first, and returns how many there were in all; capped
-// says a session reached PermissionEventCap, so the counts are "or more".
-func (s *Store) Denials(ctx context.Context, from, to time.Time) (groups []Denial, total int, capped bool, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT session_id, tool, substr(summary, 1, ?), COUNT(*) AS c FROM permission_events
+// Denials groups the denied calls first seen in [from, to] by session, tool
+// and command line, most frequent first, and returns how many calls there were
+// in all; notRecorded is how many more were refused after a session reached
+// PermissionDistinctCap (they have no line, only this count).
+func (s *Store) Denials(ctx context.Context, from, to time.Time) (groups []Denial, total, notRecorded int, err error) {
+	f, t := formatTime(from), formatTime(to)
+	rows, err := s.db.QueryContext(ctx, `SELECT session_id, tool, substr(summary, 1, ?), SUM(n) AS c FROM permission_events
 WHERE verdict = 'deny' AND at >= ? AND at <= ? GROUP BY session_id, tool, substr(summary, 1, ?) ORDER BY c DESC, MIN(id) LIMIT ?`,
-		maxDenialSummary, formatTime(from), formatTime(to), maxDenialSummary, maxDenialGroups)
+		maxDenialSummary, f, t, maxDenialSummary, maxDenialGroups)
 	if err != nil {
-		return nil, 0, false, fmt.Errorf("store: denials: %w", err)
+		return nil, 0, 0, fmt.Errorf("store: denials: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var d Denial
 		if err = rows.Scan(&d.SessionID, &d.Tool, &d.Summary, &d.Count); err != nil {
-			return nil, 0, false, fmt.Errorf("store: denials: %w", err)
+			return nil, 0, 0, fmt.Errorf("store: denials: %w", err)
 		}
 		groups = append(groups, d)
 	}
 	if err = rows.Err(); err != nil {
-		return nil, 0, false, fmt.Errorf("store: denials: %w", err)
+		return nil, 0, 0, fmt.Errorf("store: denials: %w", err)
 	}
-	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(c), 0), COALESCE(MAX(c), 0) >= ? FROM
-(SELECT COUNT(*) AS c FROM permission_events WHERE verdict = 'deny' AND at >= ? AND at <= ? GROUP BY session_id)`,
-		PermissionEventCap, formatTime(from), formatTime(to)).Scan(&total, &capped)
-	return groups, total, capped, err
+	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(n) FILTER (WHERE verdict = 'deny'), 0), COALESCE(SUM(n) FILTER (WHERE verdict = ?), 0)
+FROM permission_events WHERE verdict IN ('deny', ?) AND at >= ? AND at <= ?`, permissionOverflow, permissionOverflow, f, t).Scan(&total, &notRecorded)
+	return groups, total, notRecorded, err
 }
 
 // AwayWaiting is what waits for the user at the end of a period.
