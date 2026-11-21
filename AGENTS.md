@@ -102,6 +102,8 @@ Commands:
 | `go test -race ./internal/<pkg>/ -v` | Run one package's tests while iterating. |
 | `make tools` | Install the pinned tool versions into `.bin/` (done automatically by `make check`). |
 
+CI also runs `make size-report` in the `static` job, as a report-only step (`continue-on-error`) whose output goes to the job summary: it lists the ten largest non-test files (flagged over 800 lines), the lines and file count per package (flagged over 5000 lines), the `cmd/curia` file count and `dupl` clone groups, and its flags never fail a build.
+
 Rules for the toolchain:
 
 - Do not run `go mod tidy` or add a dependency without a decision record in `docs/decisions/` (after V1, a new dependency needs one). Every dependency V1 uses is already in `go.mod` and `go.sum` (decision 0009) and Plans 2 to 5 added no module (decision 0011; Plan 3 parses Backlog.md by hand and runs the router as a subprocess; Plan 4 sends ntfy pushes and serves its endpoint with the standard library's `net/http`). No task edits `go.mod` or `go.sum`.
