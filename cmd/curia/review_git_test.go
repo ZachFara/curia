@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
@@ -40,7 +41,7 @@ func reviewNew(t *testing.T) *reviewFixture {
 	f.commitOnBranch("auth.go", "package auth\n", "fix auth")
 	f.origin = filepath.Join(filepath.Dir(f.repo), "origin.git")
 	cmd := exec.Command("git", "init", "-q", "--bare", f.origin)
-	cmd.Env = gitEnv()
+	cmd.Env = gitops.Env()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare: %v %s", err, out)
 	}
@@ -103,8 +104,8 @@ func (f *reviewFixture) approve(how model.ApproveHow, seen string) (string, erro
 	f.t.Helper()
 	if seen == "" {
 		seen = strings.Repeat("0", 40)
-		if res := runGit(context.Background(), f.repo, "rev-parse", "--verify", "-q", "refs/heads/"+reviewBranch); res.err == nil {
-			seen = res.out
+		if out, err := gitops.Output(context.Background(), gitops.GitLimit, f.repo, "rev-parse", "--verify", "-q", "refs/heads/"+reviewBranch); err == nil {
+			seen = out
 		}
 	}
 	return reviewApprove(context.Background(), f.st, f.cfg, "R-1", how, seen, model.AnsweredCLI, f.now)
@@ -112,7 +113,7 @@ func (f *reviewFixture) approve(how model.ApproveHow, seen string) (string, erro
 
 // hasMergeHead reports whether the main checkout has a merge under way.
 func (f *reviewFixture) hasMergeHead() bool {
-	ok, err := refExists(context.Background(), f.repo, "MERGE_HEAD")
+	ok, err := gitops.RefExists(context.Background(), f.repo, "MERGE_HEAD")
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -228,7 +229,7 @@ func TestMergeHappyPath(t *testing.T) {
 	if head != branchHead || !strings.Contains(stat, "auth.go") {
 		t.Fatalf("reviewCheck = %q, %q; want the branch head %q and its stat", stat, head, branchHead)
 	}
-	if err = reviewMerge(context.Background(), f.get("T-1"), head); err != nil {
+	if err = gitops.Merge(context.Background(), f.get("T-1"), head); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.head(f.repo, "main^1"); got != mainBefore {
@@ -259,8 +260,8 @@ func TestMergeRefusesMovedBranch(t *testing.T) {
 	}
 	f.commitOnBranch("late.go", "package auth\n", "late") // after the checks, before the merge
 	before := f.head(f.repo, "HEAD")
-	if err = reviewMerge(context.Background(), f.get("T-1"), head); !errors.Is(err, errReviewBranchChanged) {
-		t.Fatalf("reviewMerge = %v, want the changed-branch refusal", err)
+	if err = gitops.Merge(context.Background(), f.get("T-1"), head); !errors.Is(err, gitops.ErrBranchChanged) {
+		t.Fatalf("gitops.Merge = %v, want the changed-branch refusal", err)
 	}
 	if f.head(f.repo, "HEAD") != before || f.status() != "" {
 		t.Error("the repository changed")
@@ -363,7 +364,7 @@ func TestMergeRefusesWhileUserMerges(t *testing.T) {
 	gitRun(t, f.repo, "switch", "-q", "main")
 	f.commitOnMain("README", "theirs\n", "theirs")
 	cmd := exec.Command("git", "-C", f.repo, "merge", "mine")
-	cmd.Env = gitEnv()
+	cmd.Env = gitops.Env()
 	if err := cmd.Run(); err == nil {
 		t.Fatal("the user's merge did not stop on a conflict")
 	}
@@ -595,7 +596,7 @@ func TestPRPushesAndCallsGh(t *testing.T) {
 	if got := worktreeGit(t, f.origin, "rev-parse", "refs/heads/"+reviewBranch); got != head {
 		t.Errorf("origin has %s at %s, want %s", reviewBranch, got, head)
 	}
-	if _, err = worktreeRun(context.Background(), worktreeGitLimit, f.origin, "rev-parse", "--verify", "-q", "refs/heads/main"); err == nil {
+	if _, err = gitops.Output(context.Background(), gitops.GitLimit, f.origin, "rev-parse", "--verify", "-q", "refs/heads/main"); err == nil {
 		t.Error("the base was pushed")
 	}
 	tk, r := f.get("T-1"), f.review()
@@ -696,7 +697,7 @@ func TestPRGhMissingOrFailing(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "gh is not on PATH") || !strings.Contains(err.Error(), "--merge") {
 		t.Fatalf("gh missing: error = %v", err)
 	}
-	if _, err = worktreeRun(context.Background(), worktreeGitLimit, f.origin, "rev-parse", "--verify", "-q", "refs/heads/"+reviewBranch); err == nil {
+	if _, err = gitops.Output(context.Background(), gitops.GitLimit, f.origin, "rev-parse", "--verify", "-q", "refs/heads/"+reviewBranch); err == nil {
 		t.Error("gh missing: the branch was pushed")
 	}
 	f.wantPending()
@@ -762,7 +763,7 @@ func TestPRRefusedWhenBranchMovesAfterPush(t *testing.T) {
 	lifecycleHooks(f.spawnFixture, "pre-push", "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\ncd '"+f.wt+"' && echo late > late.txt && git add late.txt && "+
 		"git -c user.name=t -c user.email=t@example.com commit -q -m late --no-verify\n")
 	_, err := f.approve(model.ApprovePR, "")
-	if err == nil || !strings.Contains(err.Error(), "is pushed to origin at "+head[:7]+", but "+errReviewBranchChanged.Error()) {
+	if err == nil || !strings.Contains(err.Error(), "is pushed to origin at "+head[:7]+", but "+gitops.ErrBranchChanged.Error()) {
 		t.Fatalf("error = %v, want the pushed-but-changed refusal", err)
 	}
 	if len(gh.calls) != 0 {
@@ -1200,22 +1201,6 @@ func TestDiffStatKeepsLeadingSpace(t *testing.T) {
 	}
 }
 
-// TestReviewObjectIDLen: the length --head must have is asked of git: 40
-// for a SHA-1 repository, 64 for a SHA-256 one.
-func TestReviewObjectIDLen(t *testing.T) {
-	for format, want := range map[string]int{"sha1": 40, "sha256": 64} {
-		dir := t.TempDir()
-		cmd := exec.Command("git", "init", "-q", "--object-format="+format, dir)
-		cmd.Env = gitEnv()
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git init --object-format=%s: %v %s", format, err, out)
-		}
-		if got, err := reviewObjectIDLen(context.Background(), dir); err != nil || got != want {
-			t.Errorf("%s: %d, %v; want %d", format, got, err, want)
-		}
-	}
-}
-
 // reviewHookAt installs hook name in f, which touches marker <dir>/in, then
 // waits for <dir>/go to appear (or 30 s) and exits with code; it returns the
 // marker and the release file.
@@ -1416,9 +1401,9 @@ func TestOrphanMergeKeepsIntent(t *testing.T) {
 		f.now, reviewIntentHold); err != nil {
 		t.Fatal(err)
 	}
-	orphan := make(chan gitResult, 1)
+	orphan := make(chan gitops.Result, 1)
 	go func() {
-		orphan <- runGitGroup(ctx, f.repo, "merge", "--no-ff", "--no-edit", "--no-autostash", "-m", "Merge", head)
+		orphan <- gitops.RunGroup(ctx, f.repo, "merge", "--no-ff", "--no-edit", "--no-autostash", "-m", "Merge", head)
 	}()
 	reviewWaitFile(t, in)
 	_, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.now.Add(11*time.Minute))
@@ -1430,8 +1415,8 @@ func TestOrphanMergeKeepsIntent(t *testing.T) {
 		t.Errorf("intent after the refusal = %+v, want the earlier one, untouched", r)
 	}
 	worktreeWrite(t, release, "")
-	if res := <-orphan; res.err != nil {
-		t.Fatalf("the orphaned merge: %v %s", res.err, res.stderr)
+	if res := <-orphan; res.Err() != nil {
+		t.Fatalf("the orphaned merge: %v %s", res.Err(), res.Stderr())
 	}
 	line, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApproveMerge, head, model.AnsweredCLI, f.now.Add(12*time.Minute))
 	if err != nil || !strings.Contains(line, "is already merged into main; recorded") {
@@ -1522,7 +1507,7 @@ func TestMergeReportedDoneButNotInBase(t *testing.T) {
 	lifecycleHooks(f.spawnFixture, "post-merge", "#!/bin/sh\ngit reset -q --hard HEAD^\n")
 	before := f.head(f.repo, "HEAD")
 	line, err := f.approve(model.ApproveMerge, "")
-	if err == nil || !strings.Contains(err.Error(), "git merge reported success, but main does not contain "+reviewShort(f.head(f.wt, "HEAD"))) ||
+	if err == nil || !strings.Contains(err.Error(), "git merge reported success, but main does not contain "+gitops.Short(f.head(f.wt, "HEAD"))) ||
 		!strings.Contains(err.Error(), "git -C "+f.repo+" log") || !strings.Contains(err.Error(), "The review stays pending") {
 		t.Fatalf("approve = %q, %v; want the missing merge reported", line, err)
 	}
@@ -1551,9 +1536,9 @@ func TestOrphanMergeRefusesEveryClaim(t *testing.T) {
 		f.now, reviewIntentHold); err != nil {
 		t.Fatal(err)
 	}
-	orphan := make(chan gitResult, 1)
+	orphan := make(chan gitops.Result, 1)
 	go func() {
-		orphan <- runGitGroup(ctx, f.repo, "merge", "--no-ff", "--no-edit", "--no-autostash", "-m", "Merge", head)
+		orphan <- gitops.RunGroup(ctx, f.repo, "merge", "--no-ff", "--no-edit", "--no-autostash", "-m", "Merge", head)
 	}()
 	reviewWaitFile(t, in)
 	later := f.now.Add(11 * time.Minute)
@@ -1579,8 +1564,8 @@ func TestOrphanMergeRefusesEveryClaim(t *testing.T) {
 		t.Errorf("gh ran: %+v", gh.calls)
 	}
 	worktreeWrite(t, release, "")
-	if res := <-orphan; res.err != nil {
-		t.Fatalf("the orphaned merge: %v %s", res.err, res.stderr)
+	if res := <-orphan; res.Err() != nil {
+		t.Fatalf("the orphaned merge: %v %s", res.Err(), res.Stderr())
 	}
 	line, err := reviewApprove(ctx, f.st, f.cfg, "R-1", model.ApprovePR, head, model.AnsweredCLI, later.Add(time.Minute))
 	if err != nil || !strings.Contains(line, "is already merged into main; recorded") {
@@ -1632,17 +1617,17 @@ var reviewOddKinds = []struct {
 	}},
 }
 
-// reviewManyModified commits reviewModifiedMax+1 files on main and modifies
+// reviewManyModified commits gitops.ModifiedMax+1 files on main and modifies
 // each in the main checkout.
 func (f *reviewFixture) reviewManyModified() {
 	f.t.Helper()
 	dir := filepath.Join(f.repo, "many")
-	for i := range reviewModifiedMax + 1 {
+	for i := range gitops.ModifiedMax + 1 {
 		worktreeWrite(f.t, filepath.Join(dir, strconv.Itoa(i)), "a\n")
 	}
 	gitRun(f.t, f.repo, "add", "-A")
 	gitRun(f.t, f.repo, "commit", "-q", "-m", "many")
-	for i := range reviewModifiedMax + 1 {
+	for i := range gitops.ModifiedMax + 1 {
 		worktreeWrite(f.t, filepath.Join(dir, strconv.Itoa(i)), "b\n")
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -488,11 +489,11 @@ func spawnWorktree(ctx context.Context, st *store.Store, t model.Task, out io.Wr
 	if err != nil {
 		return t, err
 	}
-	if err = errors.Join(worktreeCheckBranch("branch", branch), worktreeCheckBranch("base", t.BaseBranch),
-		worktreeCheckRepo(ctx, t.Repo)); err != nil {
+	if err = errors.Join(gitops.CheckBranch("branch", branch), gitops.CheckBranch("base", t.BaseBranch),
+		gitops.CheckRepo(ctx, t.Repo)); err != nil {
 		return t, err
 	}
-	ours, err := worktreeIsOurs(ctx, t.Repo, path, branch)
+	ours, err := gitops.WorktreeIsOurs(ctx, t.Repo, path, branch)
 	if err != nil {
 		return t, err
 	}
@@ -512,7 +513,7 @@ func spawnWorktree(ctx context.Context, st *store.Store, t model.Task, out io.Wr
 // new branch from the base, or again on the branch that exists (after a
 // pause or a clean of the worktree), with its commits.
 func spawnNewWorktree(ctx context.Context, t model.Task, path, branch, shown string, out io.Writer) error {
-	existed, err := refExists(ctx, t.Repo, "refs/heads/"+branch)
+	existed, err := gitops.RefExists(ctx, t.Repo, "refs/heads/"+branch)
 	if err == nil {
 		err = spawnAddWorktree(ctx, t, path, branch)
 	}
@@ -536,7 +537,7 @@ func spawnAddWorktree(ctx context.Context, t model.Task, path, branch string) er
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	return worktreeAdd(ctx, t.Repo, path, branch, t.BaseBranch)
+	return gitops.AddWorktree(ctx, t.Repo, path, branch, t.BaseBranch)
 }
 
 // spawnStoreAgent stores the agent on the task before the window opens:
@@ -580,7 +581,7 @@ func spawnCommand(bin, id string, o spawnOptions) []string {
 // that does not exist, so the worktree is checked again first: it must
 // still be the task's worktree (the setup script ran in it).
 func spawnWindow(ctx context.Context, tm tmux.Client, t model.Task, o spawnOptions) (tmux.Pane, error) {
-	ours, err := worktreeIsOurs(ctx, t.Repo, t.Worktree, t.Branch)
+	ours, err := gitops.WorktreeIsOurs(ctx, t.Repo, t.Worktree, t.Branch)
 	if err != nil {
 		return tmux.Pane{}, err
 	}

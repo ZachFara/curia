@@ -23,6 +23,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/message"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -966,7 +967,7 @@ func TestReviewSourceApproveRefusesChangedBranch(t *testing.T) {
 	}
 	f.commitOnBranch("late.go", "package auth\n", "late commit") // lands after the user looked
 	before := f.head(f.repo, "HEAD")
-	if _, err = src.Approve(context.Background(), "R-1", det.Head); !errors.Is(err, errReviewBranchChanged) {
+	if _, err = src.Approve(context.Background(), "R-1", det.Head); !errors.Is(err, gitops.ErrBranchChanged) {
 		t.Fatalf("Approve with the old head: %v, want the changed-branch refusal", err)
 	}
 	if f.head(f.repo, "HEAD") != before {

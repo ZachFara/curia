@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
@@ -304,7 +305,7 @@ func TestSpawnRefusals(t *testing.T) {
 			f.wantNothingStarted(c.id)
 		}
 	}
-	if ok, err := refExists(context.Background(), f.repo, "refs/heads/"+task.Branch("T-4", "Bad base")); err != nil || ok {
+	if ok, err := gitops.RefExists(context.Background(), f.repo, "refs/heads/"+task.Branch("T-4", "Bad base")); err != nil || ok {
 		t.Errorf("branch of T-4: exists %v, err %v", ok, err)
 	}
 }
@@ -598,7 +599,7 @@ func TestSpawnSetupFailureLeavesWorktree(t *testing.T) {
 		t.Fatal("spawn with a failing setup succeeded")
 	}
 	wt := f.worktree("T-1")
-	if ok, err := worktreeIsOurs(context.Background(), f.repo, wt, f.get("T-1").Branch); err != nil || !ok {
+	if ok, err := gitops.WorktreeIsOurs(context.Background(), f.repo, wt, f.get("T-1").Branch); err != nil || !ok {
 		t.Fatalf("worktree after a failed setup: ours %v, err %v", ok, err)
 	}
 	if w := f.windows(); len(w) != 0 {

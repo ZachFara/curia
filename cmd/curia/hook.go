@@ -20,6 +20,7 @@ import (
 	"github.com/ZachFara/curia/internal/attention"
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/fleet"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/hook"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
@@ -409,7 +410,7 @@ func hookEnv(ctx context.Context, client tmux.Client, logger *slog.Logger) hook.
 		Pane:   os.Getenv("TMUX_PANE"),
 		Now:    time.Now,
 		TaskID: hookTaskID(os.Getenv("CURIA_TASK_ID")),
-		Git:    func(cwd string) (string, string, string) { return gitInfo(ctx, cwd, logger) },
+		Git:    func(cwd string) (string, string, string) { return gitops.Info(ctx, cwd, logger, subprocessTimeout) },
 		PaneInfo: func(pane string) (string, string, string) {
 			pctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
 			defer cancel()

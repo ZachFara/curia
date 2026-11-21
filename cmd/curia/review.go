@@ -20,6 +20,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/deliver"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -413,9 +414,9 @@ func reviewFlagHead(ctx context.Context, st *store.Store, r model.Review, how mo
 		return "", err
 	}
 	if reviewHeadFlag != "" {
-		return reviewResolveHead(ctx, t, reviewHeadFlag)
+		return gitops.ResolveHead(ctx, t, reviewHeadFlag)
 	}
-	head, err := reviewHead(ctx, t)
+	head, err := gitops.BranchHead(ctx, t)
 	switch {
 	case err != nil:
 		return "", err
@@ -423,7 +424,7 @@ func reviewFlagHead(ctx context.Context, st *store.Store, r model.Review, how mo
 		return "", fmt.Errorf("--approve needs --head <commit>, and branch %s does not exist", t.Branch)
 	}
 	what := ""
-	if stat, serr := reviewStatAt(ctx, t, head, reviewStatWidth); serr == nil && stat != "" {
+	if stat, serr := gitops.StatAt(ctx, t, head, gitops.StatWidth); serr == nil && stat != "" {
 		lines := strings.Split(stat, "\n")
 		what = " (" + strings.TrimSpace(lines[len(lines)-1]) + ")"
 	}
@@ -594,7 +595,7 @@ func reviewApprove(ctx context.Context, st *store.Store, cfg config.Config, revi
 			return "", fmt.Errorf("the branch changed since you looked: %s is now at %s. Look at it again with curia review %s",
 				t.Branch, head, r.ID)
 		}
-		return "", errReviewBranchChanged
+		return "", gitops.ErrBranchChanged
 	}
 	if err = reviewApproveReady(ctx, r, t, how, now); err != nil {
 		return "", err
@@ -622,13 +623,13 @@ func reviewApproveReady(ctx context.Context, r model.Review, t model.Task, how m
 // operation under way, no staged change) before the approval claims the review (C-B); an earlier approval's
 // git that may still run there is refused before, by reviewEarlierMerge.
 func reviewMergeReady(ctx context.Context, r model.Review, t model.Task) error {
-	if err := reviewCheckNames(t); err != nil {
+	if err := gitops.CheckNames(t); err != nil {
 		return err
 	}
-	if err := reviewCheckCheckout(ctx, t); err != nil {
+	if err := gitops.CheckCheckout(ctx, t); err != nil {
 		return reviewEarlierApproval(r, t, err)
 	}
-	staged, err := reviewStaged(ctx, t.Repo, "HEAD")
+	staged, err := gitops.Staged(ctx, t.Repo, "HEAD")
 	switch {
 	case err != nil:
 		return err
@@ -653,11 +654,11 @@ func reviewEarlierMerge(ctx context.Context, r model.Review, t model.Task, now t
 	if !reviewHasCheckout(t) {
 		return nil
 	}
-	op, err := reviewInProgress(ctx, t.Repo)
+	op, err := gitops.InProgress(ctx, t.Repo)
 	if err != nil {
 		return err
 	}
-	staged, err := reviewStaged(ctx, t.Repo, "HEAD")
+	staged, err := gitops.Staged(ctx, t.Repo, "HEAD")
 	if err != nil {
 		return err
 	}
@@ -672,7 +673,7 @@ func reviewEarlierMerge(ctx context.Context, r model.Review, t model.Task, now t
 	return fmt.Errorf("%s holds a merge under way or staged changes, and an earlier approval of %s (merge at %s, since %s) may still "+
 		"be running git there. Nothing was done: wait for it to finish, then %s again%s. If no git runs there, what is staged "+
 		"is what that approval's merge left: look with git -C %s status",
-		repo, r.ID, sanitize.Line(reviewShort(r.Head), 10), r.IntentAt.Local().Format("15:04:05"), verb, then, repo)
+		repo, r.ID, sanitize.Line(gitops.Short(r.Head), 10), r.IntentAt.Local().Format("15:04:05"), verb, then, repo)
 }
 
 // reviewEarlierApproval is refusal err of the checkout, with a sentence added when an earlier approval's
@@ -683,13 +684,13 @@ func reviewEarlierApproval(r model.Review, t model.Task, err error) error {
 		return err
 	}
 	return fmt.Errorf("%w. An earlier approval of %s (merge at %s, since %s) did not finish: once its merge is in %s, approving "+
-		"again records it", err, r.ID, sanitize.Line(reviewShort(r.Head), 10), r.IntentAt.Local().Format("15:04:05"), t.BaseBranch)
+		"again records it", err, r.ID, sanitize.Line(gitops.Short(r.Head), 10), r.IntentAt.Local().Format("15:04:05"), t.BaseBranch)
 }
 
 // reviewHasCheckout reports whether t names a checkout an approval could have run git in: its names are valid
 // and its repository path exists.
 func reviewHasCheckout(t model.Task) bool {
-	if reviewCheckNames(t) != nil {
+	if gitops.CheckNames(t) != nil {
 		return false
 	}
 	_, err := os.Stat(t.Repo)
@@ -718,7 +719,7 @@ func reviewBusyAgain(r model.Review, err error, verb string) error {
 	since := r.IntentAt.Local()
 	return fmt.Errorf("%s is being approved (%s at %s) by another curia since %s: wait for it to finish. "+
 		"If that curia was killed, %s again after %s", r.ID, sanitize.Line(string(r.ApprovedHow), 10),
-		sanitize.Line(reviewShort(r.Head), 10), since.Format("15:04:05"), verb, since.Add(reviewIntentHold).Format("15:04:05"))
+		sanitize.Line(gitops.Short(r.Head), 10), since.Format("15:04:05"), verb, since.Add(reviewIntentHold).Format("15:04:05"))
 }
 
 // reviewBusyNow is reviewBusyError with review r read again, so that the
@@ -738,11 +739,11 @@ func reviewBusyNow(ctx context.Context, st *store.Store, r model.Review, err err
 func reviewFoundDone(ctx context.Context, st *store.Store, r model.Review, t model.Task, seen string,
 	via model.AnsweredVia, now time.Time,
 ) (line string, done bool, err error) {
-	if r.IntentAt.IsZero() || r.ApprovedHow != model.ApproveMerge || !reviewHeadPattern.MatchString(r.Head) ||
+	if r.IntentAt.IsZero() || r.ApprovedHow != model.ApproveMerge || !gitops.HeadPattern.MatchString(r.Head) ||
 		(seen != "" && seen != r.Head) || !reviewInBase(ctx, t, r.Head) {
 		return "", false, nil
 	}
-	what := fmt.Sprintf("%s (%s) is already merged into %s; recorded", t.Branch, reviewShort(r.Head), t.BaseBranch)
+	what := fmt.Sprintf("%s (%s) is already merged into %s; recorded", t.Branch, gitops.Short(r.Head), t.BaseBranch)
 	_, expired, err := st.CloseReview(ctx, r.ID, store.ReviewClose{
 		Status: model.ReviewMerged, How: model.ApproveMerge, DiffStat: r.DiffStat, Head: r.Head, Via: via,
 	}, now)
@@ -756,14 +757,14 @@ func reviewFoundDone(ctx context.Context, st *store.Store, r model.Review, t mod
 // reviewInBase reports whether t's branch is at head and t's base contains
 // it. Anything it cannot read is false.
 func reviewInBase(ctx context.Context, t model.Task, head string) bool {
-	if reviewCheckNames(t) != nil {
+	if gitops.CheckNames(t) != nil {
 		return false
 	}
-	cur, err := reviewHead(ctx, t)
+	cur, err := gitops.BranchHead(ctx, t)
 	if err != nil || cur != head {
 		return false
 	}
-	n, err := reviewAhead(ctx, t, head)
+	n, err := gitops.Ahead(ctx, t, head)
 	return err == nil && n == 0
 }
 
@@ -772,8 +773,8 @@ func reviewInBase(ctx context.Context, t model.Task, head string) bool {
 func reviewApproveMerge(ctx context.Context, st *store.Store, r, prior model.Review, t model.Task, stat, head string,
 	via model.AnsweredVia, now time.Time,
 ) (string, error) {
-	what := fmt.Sprintf("merged %s into %s (%s)", t.Branch, t.BaseBranch, reviewShort(head))
-	if err := reviewMerge(ctx, t, head); err != nil {
+	what := fmt.Sprintf("merged %s into %s (%s)", t.Branch, t.BaseBranch, gitops.Short(head))
+	if err := gitops.Merge(ctx, t, head); err != nil {
 		if !reviewHolds(ctx, t, head) {
 			return "", reviewMergeRelease(ctx, st, r, prior, err)
 		}
@@ -795,23 +796,23 @@ func reviewApproveMerge(ctx context.Context, st *store.Store, r, prior model.Rev
 // reviewHolds reports whether t's base contains head after a merge failed (git stopped after the merge
 // commit), on a context detached from ctx's end; a read that fails is false.
 func reviewHolds(ctx context.Context, t model.Task, head string) bool {
-	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), worktreeGitLimit)
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gitops.GitLimit)
 	defer cancel()
-	n, err := reviewAhead(actx, t, head)
+	n, err := gitops.Ahead(actx, t, head)
 	return err == nil && n == 0
 }
 
 // reviewMergeRelease follows a failed merge of head that left it outside the base: it keeps r's intent when
-// Curia left the checkout as it found it (errReviewLeft), else clears it (or puts back the earlier intent it
+// Curia left the checkout as it found it (gitops.ErrLeft), else clears it (or puts back the earlier intent it
 // replaced: reviewRelease), and returns the merge's error.
 func reviewMergeRelease(ctx context.Context, st *store.Store, r, prior model.Review, failed error) error {
-	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), worktreeGitLimit)
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), gitops.GitLimit)
 	defer cancel()
-	if errors.Is(failed, errReviewLeft) { // what git left is unknown: the intent stays, the claim with it
+	if errors.Is(failed, gitops.ErrLeft) { // what git left is unknown: the intent stays, the claim with it
 		return failed
 	}
 	if err := reviewRelease(actx, st, r, prior); err != nil {
-		return fmt.Errorf("%w (and clearing the approval's claim failed: %s)", failed, sanitize.Line(err.Error(), reviewGitErrMax))
+		return fmt.Errorf("%w (and clearing the approval's claim failed: %s)", failed, sanitize.Line(err.Error(), gitops.ErrMax))
 	}
 	return failed
 }
@@ -828,7 +829,7 @@ func reviewApprovePR(ctx context.Context, st *store.Store, cfg config.Config, r,
 	}
 	if err != nil {
 		if rerr := reviewRelease(context.WithoutCancel(ctx), st, r, prior); rerr != nil {
-			err = fmt.Errorf("%w (and clearing the approval's claim failed: %s)", err, sanitize.Line(rerr.Error(), reviewGitErrMax))
+			err = fmt.Errorf("%w (and clearing the approval's claim failed: %s)", err, sanitize.Line(rerr.Error(), gitops.ErrMax))
 		}
 		return "", err
 	}
@@ -918,7 +919,7 @@ func reviewRequestChanges(ctx context.Context, st *store.Store, tm tmux.Client, 
 		out, err = deliver.Message(ctx, st, tm, logger, m.ID, now)
 	}
 	if err != nil {
-		return "", fmt.Errorf("%sthe note is saved but could not be sent: %s", done, sanitize.Line(err.Error(), reviewGitErrMax))
+		return "", fmt.Errorf("%sthe note is saved but could not be sent: %s", done, sanitize.Line(err.Error(), gitops.ErrMax))
 	}
 	return done + sayOutcomeLine(out), nil
 }
@@ -1008,7 +1009,7 @@ func reviewDetail(ctx context.Context, st *store.Store, cfg config.Config, r mod
 	if !run.Started.IsZero() && r.CreatedAt.After(run.Started) {
 		d.Duration = r.CreatedAt.Sub(run.Started)
 	}
-	d.DiffStat, d.DiffNote, d.Head = reviewDiffStat(ctx, t, reviewStatWidth)
+	d.DiffStat, d.DiffNote, d.Head = reviewDiffStat(ctx, t, gitops.StatWidth)
 	return d, nil
 }
 

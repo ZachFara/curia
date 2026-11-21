@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -137,7 +138,7 @@ func modeScope(ctx context.Context) (store.ModeScope, string, error) {
 	if err != nil {
 		return store.ModeScope{}, "", err
 	}
-	repo, _, _ := gitInfo(ctx, abs, nil)
+	repo, _, _ := gitops.Info(ctx, abs, nil, subprocessTimeout)
 	if repo == "" {
 		return store.ModeScope{}, "", fmt.Errorf("%s is not inside a git repository: use --all, or --repo <path>", sanitize.Line(abs, 120))
 	}

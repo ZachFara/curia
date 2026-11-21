@@ -1,4 +1,7 @@
-package main
+// Package gitops runs git for Curia: the repository and worktree calls of
+// task spawn, pause and clean, and the merge and diff of a review approval.
+// It runs git and nothing else; printing and commands stay in cmd/curia.
+package gitops
 
 import (
 	"bytes"
@@ -25,10 +28,10 @@ const gitWaitDelay = 100 * time.Millisecond
 // A symbolic ref is far shorter.
 const maxHeadBytes = 4096
 
-// gitInfo returns, for cwd, the main repository's top level, the current
+// Info returns, for cwd, the main repository's top level, the current
 // branch and, in a linked worktree, that worktree's top level (else empty),
 // or empty strings when cwd is empty or not in a repository. It runs one git
-// process, bounded by subprocessTimeout, for the top level, the git dir and
+// process, bounded by timeout, for the top level, the git dir and
 // the common dir (plan section 4.5), then reads the branch from
 // <git dir>/HEAD: "ref: refs/heads/<branch>", and anything else (a detached
 // HEAD) is no branch. This is right in a linked worktree, whose git dir has
@@ -36,16 +39,16 @@ const maxHeadBytes = 4096
 // absolute paths, and any failure other than "not a git repository" (git
 // missing, a timeout, an unreadable HEAD), is logged on logger as one
 // warning.
-func gitInfo(ctx context.Context, cwd string, logger *slog.Logger) (repo, branch, worktree string) {
+func Info(ctx context.Context, cwd string, logger *slog.Logger, timeout time.Duration) (repo, branch, worktree string) {
 	if cwd == "" { // git -C "" would use this process's directory
 		return "", "", ""
 	}
-	ctx, cancel := context.WithTimeout(ctx, subprocessTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	res := runGit(ctx, cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir")
+	res := Run(ctx, cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir")
 	if res.err != nil {
 		if !res.notARepository() {
-			res.log(logger, cwd)
+			res.log(logger, cwd, timeout)
 		}
 		return "", "", ""
 	}
@@ -118,10 +121,10 @@ func requireRegular(fi os.FileInfo, err error) error {
 	return nil
 }
 
-// gitResult is the outcome of one git call. out and stderr are trimmed;
-// raw is stdout as git wrote it (runGit only), for output whose leading
+// Result is the outcome of one git call. out and stderr are trimmed;
+// raw is stdout as git wrote it (Run only), for output whose leading
 // spaces mean something, such as a diff stat's column alignment.
-type gitResult struct {
+type Result struct {
 	args        []string
 	out, stderr string
 	raw         string
@@ -129,30 +132,36 @@ type gitResult struct {
 	timedOut    bool
 }
 
+// Err is the error of the call, nil when git exited 0.
+func (r Result) Err() error { return r.err }
+
+// Stderr is git's trimmed stderr.
+func (r Result) Stderr() string { return r.stderr }
+
 // notARepository reports whether git ran and said cwd is not in a
 // repository, which is normal and not worth logging.
-func (r gitResult) notARepository() bool {
+func (r Result) notARepository() bool {
 	var exit *exec.ExitError
 	return !r.timedOut && errors.As(r.err, &exit) && strings.Contains(r.stderr, "not a git repository")
 }
 
-func (r gitResult) log(logger *slog.Logger, cwd string) {
+func (r Result) log(logger *slog.Logger, cwd string, timeout time.Duration) {
 	msg := r.err.Error()
 	if r.timedOut {
-		msg = "timed out after " + subprocessTimeout.String() + ": " + msg
+		msg = "timed out after " + timeout.String() + ": " + msg
 	}
 	logger.Warn("git failed", "cwd", cwd, "args", strings.Join(r.args, " "), "err", msg, "stderr", r.stderr)
 }
 
-// runGit runs git -C cwd args and waits for it. Its stdout and stderr are
+// Run runs git -C cwd args and waits for it. Its stdout and stderr are
 // captured, never passed through.
-func runGit(ctx context.Context, cwd string, args ...string) gitResult {
+func Run(ctx context.Context, cwd string, args ...string) Result {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", cwd}, args...)...)
-	cmd.Env = gitEnv()
+	cmd.Env = Env()
 	cmd.WaitDelay = gitWaitDelay
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
-	res := gitResult{args: args}
+	res := Result{args: args}
 	res.err = cmd.Run()
 	res.timedOut = ctx.Err() != nil
 	res.raw = out.String()
@@ -160,15 +169,15 @@ func runGit(ctx context.Context, cwd string, args ...string) gitResult {
 	return res
 }
 
-// groupGrace is how long a child run by runGroup has to stop after SIGTERM
+// groupGrace is how long a child run by RunProcessGroup has to stop after SIGTERM
 // before its process group is killed. Tests shorten it.
 var groupGrace = 5 * time.Second
 
-// groupMaxOut bounds what runGroup keeps of a child's stdout and of its
+// groupMaxOut bounds what RunProcessGroup keeps of a child's stdout and of its
 // stderr, each.
 const groupMaxOut = 64 << 10
 
-// runGroup runs the program at path with args in dir and env, for the git
+// RunProcessGroup runs the program at path with args in dir and env, for the git
 // and gh calls of an approval, which change the user's repository or a
 // remote and must not be cut short by accident. The child runs in a process
 // group of its own, so a hang-up or a Ctrl-C meant for Curia's group never
@@ -178,7 +187,7 @@ const groupMaxOut = 64 << 10
 // SIGTERM, and SIGKILL after groupGrace; once a stopped child has exited,
 // whatever is left of its group (a hook that ignored SIGTERM) is killed too.
 // stdout and stderr are kept up to groupMaxOut bytes each.
-func runGroup(ctx context.Context, dir string, env []string, path string, args ...string) (stdout, stderr string, err error) {
+func RunProcessGroup(ctx context.Context, dir string, env []string, path string, args ...string) (stdout, stderr string, err error) {
 	outF, err := groupTempFile()
 	if err != nil {
 		return "", "", err
@@ -249,21 +258,21 @@ func groupRead(f *os.File) string {
 	return strings.TrimSpace(string(b))
 }
 
-// runGitGroup is runGit through runGroup: git -C cwd args, in a process
+// RunGroup is Run through RunProcessGroup: git -C cwd args, in a process
 // group of its own, stopped with SIGTERM and then killed when ctx ends.
-func runGitGroup(ctx context.Context, cwd string, args ...string) gitResult {
+func RunGroup(ctx context.Context, cwd string, args ...string) Result {
 	return runGitGroupEnv(ctx, cwd, nil, args...)
 }
 
-// runGitGroupEnv is runGitGroup with extra added to git's environment.
-func runGitGroupEnv(ctx context.Context, cwd string, extra []string, args ...string) gitResult {
-	res := gitResult{args: args}
+// runGitGroupEnv is RunGroup with extra added to git's environment.
+func runGitGroupEnv(ctx context.Context, cwd string, extra []string, args ...string) Result {
+	res := Result{args: args}
 	path, err := exec.LookPath("git")
 	if err != nil {
 		res.err = err
 		return res
 	}
-	res.out, res.stderr, res.err = runGroup(ctx, "", append(gitEnv(), extra...), path, append([]string{"-C", cwd}, args...)...)
+	res.out, res.stderr, res.err = RunProcessGroup(ctx, "", append(Env(), extra...), path, append([]string{"-C", cwd}, args...)...)
 	res.timedOut = ctx.Err() != nil
 	return res
 }
@@ -278,10 +287,10 @@ var gitRepoVars = []string{
 	"GIT_SHALLOW_FILE", "GIT_COMMON_DIR",
 }
 
-// gitEnv is this process's environment without gitRepoVars, so git finds
+// Env is this process's environment without gitRepoVars, so git finds
 // the repository from -C alone, and with LC_ALL=C, so its messages are the
 // English ones notARepository matches.
-func gitEnv() []string {
+func Env() []string {
 	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
 		name, _, _ := strings.Cut(kv, "=")
 		return slices.Contains(gitRepoVars, name)

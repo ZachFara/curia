@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -65,7 +66,7 @@ func cleanTask(ctx context.Context, st *store.Store, tm tmux.Client, cfg config.
 	if err != nil {
 		return err
 	}
-	exists, err := refExists(ctx, t.Repo, "refs/heads/"+t.Branch)
+	exists, err := gitops.RefExists(ctx, t.Repo, "refs/heads/"+t.Branch)
 	if err != nil {
 		return err
 	}
@@ -151,7 +152,7 @@ func cleanCheckIgnored(ctx context.Context, t model.Task, path string, force boo
 // commits that deleting it would lose: those in neither the base nor any
 // remote. With force it says it goes on and names them again.
 func cleanCheckMerged(ctx context.Context, t model.Task, force bool, out io.Writer) error {
-	merged, err := branchMerged(ctx, t.Repo, t.Branch, t.BaseBranch)
+	merged, err := gitops.BranchMerged(ctx, t.Repo, t.Branch, t.BaseBranch)
 	if err != nil {
 		return err
 	}
@@ -188,7 +189,7 @@ func cleanCheckMerged(ctx context.Context, t model.Task, force bool, out io.Writ
 // them (short id and cleaned subject), newest first.
 func cleanLost(ctx context.Context, t model.Task) (int, []string, error) {
 	rng := []string{"refs/heads/" + t.Branch, "--not", t.BaseBranch, "--remotes", "--"}
-	count, err := worktreeRun(ctx, worktreeGitLimit, t.Repo, append([]string{"rev-list", "--count"}, rng...)...)
+	count, err := gitops.Output(ctx, gitops.GitLimit, t.Repo, append([]string{"rev-list", "--count"}, rng...)...)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -199,7 +200,7 @@ func cleanLost(ctx context.Context, t model.Task) (int, []string, error) {
 	if n == 0 {
 		return 0, nil, nil
 	}
-	log, err := worktreeRun(ctx, worktreeGitLimit, t.Repo,
+	log, err := gitops.Output(ctx, gitops.GitLimit, t.Repo,
 		append([]string{"log", "--no-show-signature", "--format=%h %s", "--max-count=" + strconv.Itoa(cleanLostShown)}, rng...)...)
 	if err != nil {
 		return 0, nil, err
@@ -221,13 +222,13 @@ func cleanRemoveWorktree(ctx context.Context, t model.Task, path string, out io.
 	n, names, err := lifecycleIgnored(ctx, path)
 	if err == nil {
 		var ours bool
-		ours, err = worktreeIsOurs(ctx, t.Repo, path, t.Branch)
+		ours, err = gitops.WorktreeIsOurs(ctx, t.Repo, path, t.Branch)
 		if err == nil && !ours {
 			err = fmt.Errorf("%s is no longer %s's worktree on %s; Curia leaves it alone", sanitize.Line(path, 300), t.ID, t.Branch)
 		}
 	}
 	if err == nil {
-		err = worktreeRemove(ctx, t.Repo, path, false)
+		err = gitops.RemoveWorktree(ctx, t.Repo, path, false)
 	}
 	if err != nil {
 		return fmt.Errorf("%s not cleaned: %w (Curia never forces the removal). Nothing was removed: the worktree %s and the branch %s stay. "+
@@ -244,9 +245,9 @@ func cleanRemoveWorktree(ctx context.Context, t model.Task, path string, out io.
 
 // cleanDeleteBranch deletes the branch: git branch -d, or -D under force.
 func cleanDeleteBranch(ctx context.Context, t model.Task, force bool, out io.Writer) error {
-	sha, err := worktreeRun(ctx, worktreeGitLimit, t.Repo, "rev-parse", "--short", "refs/heads/"+t.Branch)
+	sha, err := gitops.Output(ctx, gitops.GitLimit, t.Repo, "rev-parse", "--short", "refs/heads/"+t.Branch)
 	if err == nil {
-		err = branchDelete(ctx, t.Repo, t.Branch, force)
+		err = gitops.BranchDelete(ctx, t.Repo, t.Branch, force)
 	}
 	if err != nil {
 		return fmt.Errorf("%s not fully cleaned: %w. Left: the worktree gone, the branch %s kept. To finish: "+

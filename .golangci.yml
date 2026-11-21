@@ -405,6 +405,22 @@ linters:
             - pkg: github.com/ZachFara/curia
               desc: "internal/latency imports the standard library and the SQLite driver (the reference workload), no internal package (docs/decisions/0012)"
 
+        # Git operations moved out of cmd/curia: runs git and nothing else, so it
+        # needs the model's Task, the line cleaner and the branch-name check.
+        gitops:
+          list-mode: strict
+          files:
+            - "**/internal/gitops/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/gitops$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/gitops may import only model, sanitize and task: no store, no ui"
+
         tmux:
           list-mode: strict
           files:
@@ -686,6 +702,7 @@ linters:
             - github.com/ZachFara/curia/internal/ui$
             - github.com/ZachFara/curia/internal/install$
             - github.com/ZachFara/curia/internal/latency$
+            - github.com/ZachFara/curia/internal/gitops$
           deny:
             - pkg: github.com/ZachFara/curia
               desc: "cmd/curia may import only the internal packages in the plan's File structure table (docs/decisions/0003)"
@@ -711,6 +728,7 @@ linters:
             - "!**/internal/config/**"
             - "!**/internal/sanitize/**"
             - "!**/internal/latency/**"
+            - "!**/internal/gitops/**"
             - "!**/internal/decision/**"
             - "!**/internal/precedent/**"
             - "!**/internal/task/**"

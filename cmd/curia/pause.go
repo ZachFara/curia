@@ -17,6 +17,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/fleet"
+	"github.com/ZachFara/curia/internal/gitops"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -355,7 +356,7 @@ func pauseCheckStopped(ctx context.Context, st *store.Store, tm tmux.Client, t m
 // which touches no file) when the commit fails, so a failure leaves the
 // worktree as it was. It returns what it committed, for later messages.
 func pauseCommit(ctx context.Context, t model.Task, path string, noVerify bool, out io.Writer) (string, error) {
-	dirty, err := worktreeDirty(ctx, path)
+	dirty, err := gitops.WorktreeDirty(ctx, path)
 	if err != nil {
 		return "", pauseCommitError(t, path, err, "the index untouched")
 	}
@@ -363,7 +364,7 @@ func pauseCommit(ctx context.Context, t model.Task, path string, noVerify bool, 
 		_, _ = fmt.Fprintf(out, "Nothing to commit in %s\n", sanitize.Line(path, 300))
 		return "no commit", nil
 	}
-	tree, err := worktreeRun(ctx, worktreeGitLimit, path, "write-tree")
+	tree, err := gitops.Output(ctx, gitops.GitLimit, path, "write-tree")
 	if err == nil && !lifecycleObjectID.MatchString(tree) {
 		err = fmt.Errorf("git write-tree printed %q", sanitize.Line(tree, 80))
 	}
@@ -371,15 +372,15 @@ func pauseCommit(ctx context.Context, t model.Task, path string, noVerify bool, 
 		return "", pauseCommitError(t, path, err, "the index untouched")
 	}
 	msg := "curia: WIP " + t.ID + " (paused)"
-	if err = worktreeCommitAll(ctx, path, msg, noVerify); err != nil {
+	if err = gitops.CommitAll(ctx, path, msg, noVerify); err != nil {
 		index := "the index is as it was"
-		if _, rerr := worktreeRun(ctx, worktreeGitLimit, path, "read-tree", tree); rerr != nil {
+		if _, rerr := gitops.Output(ctx, gitops.GitLimit, path, "read-tree", tree); rerr != nil {
 			index = fmt.Sprintf("the index could not be put back (%v): everything is staged; git -C %s read-tree %s restores it",
 				rerr, sanitize.Line(path, 300), tree)
 		}
 		return "", pauseCommitError(t, path, err, index)
 	}
-	sha, err := worktreeRun(ctx, worktreeGitLimit, path, "rev-parse", "--short", "HEAD")
+	sha, err := gitops.Output(ctx, gitops.GitLimit, path, "rev-parse", "--short", "HEAD")
 	if err != nil {
 		sha = "(unknown)"
 	}
@@ -420,12 +421,12 @@ func pauseKeepWorktree(ctx context.Context, path string, out io.Writer) bool {
 // pauseRemove removes the worktree with git worktree remove, never forced,
 // after checking once more that it is the task's own.
 func pauseRemove(ctx context.Context, t model.Task, path, left string, out io.Writer) error {
-	ours, err := worktreeIsOurs(ctx, t.Repo, path, t.Branch)
+	ours, err := gitops.WorktreeIsOurs(ctx, t.Repo, path, t.Branch)
 	if err == nil && !ours {
 		err = fmt.Errorf("%s is no longer %s's worktree on %s; Curia leaves it alone", sanitize.Line(path, 300), t.ID, t.Branch)
 	}
 	if err == nil {
-		err = worktreeRemove(ctx, t.Repo, path, false)
+		err = gitops.RemoveWorktree(ctx, t.Repo, path, false)
 	}
 	if err != nil {
 		return fmt.Errorf("%s not paused: %w (Curia never forces the removal). %s "+
@@ -562,7 +563,7 @@ func lifecycleLoad(ctx context.Context, st *store.Store, id string) (model.Task,
 // worktree on its branch (not moved, replaced or a symlink). It returns the
 // path and whether the worktree is on disk.
 func lifecycleWorktree(ctx context.Context, t model.Task) (string, bool, error) {
-	if err := errors.Join(worktreeCheckBranch("branch", t.Branch), worktreeCheckBranch("base", t.BaseBranch)); err != nil {
+	if err := errors.Join(gitops.CheckBranch("branch", t.Branch), gitops.CheckBranch("base", t.BaseBranch)); err != nil {
 		return "", false, err
 	}
 	if t.Branch == t.BaseBranch {
@@ -576,7 +577,7 @@ func lifecycleWorktree(ctx context.Context, t model.Task) (string, bool, error) 
 		return "", false, fmt.Errorf("%s's recorded worktree %s is not where Curia puts it (%s): Curia leaves it alone",
 			t.ID, sanitize.Line(t.Worktree, 300), sanitize.Line(path, 300))
 	}
-	if err = worktreeCheckRepo(ctx, t.Repo); err != nil {
+	if err = gitops.CheckRepo(ctx, t.Repo); err != nil {
 		return "", false, err
 	}
 	if _, err = os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
@@ -584,7 +585,7 @@ func lifecycleWorktree(ctx context.Context, t model.Task) (string, bool, error) 
 	} else if err != nil {
 		return "", false, err
 	}
-	ours, err := worktreeIsOurs(ctx, t.Repo, path, t.Branch)
+	ours, err := gitops.WorktreeIsOurs(ctx, t.Repo, path, t.Branch)
 	if err != nil {
 		return "", false, err
 	}
@@ -635,10 +636,10 @@ func lifecycleLaunching(t model.Task, linked []model.Session, panes []tmux.Pane,
 // lifecycleIgnored counts the ignored entries in the worktree at path (an
 // ignored directory counts once) and names the first few, cleaned.
 func lifecycleIgnored(ctx context.Context, path string) (int, []string, error) {
-	if err := worktreeCheckPath(path); err != nil {
+	if err := gitops.CheckPath(path); err != nil {
 		return 0, nil, err
 	}
-	out, err := worktreeRun(ctx, worktreeGitLimit, path, "status", "--porcelain", "--ignored=traditional", "--untracked-files=normal")
+	out, err := gitops.Output(ctx, gitops.GitLimit, path, "status", "--porcelain", "--ignored=traditional", "--untracked-files=normal")
 	if err != nil {
 		return 0, nil, err
 	}
