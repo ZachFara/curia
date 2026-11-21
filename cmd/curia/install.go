@@ -301,7 +301,7 @@ func installTools(out io.Writer, settings string) error {
 // Claude Code enforces them even when the hook fails. Edit rules do not stop
 // a Bash command that writes the files.
 func installDeny(out io.Writer, settings string) error {
-	if err := install.DenyOwnFiles(settings, time.Now()); err != nil {
+	if err := install.DenyOwnFiles(settings, time.Now(), configuredFiles()...); err != nil {
 		return err
 	}
 	installSay(out, "protection: Claude Code may not edit Curia's config, data or state files (deny rules in %s; "+
@@ -380,7 +380,7 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	bin := target.path
-	if err = install.Unhooks(p.settings, bin); err != nil {
+	if err = install.Unhooks(p.settings, bin, configuredFiles()...); err != nil {
 		return err
 	}
 	removed, err := install.RemoveStatusLine(p.settings, bin)
@@ -508,4 +508,14 @@ func init() {
 			RunE: userOnlyRunE("uninstall", "uninstall Curia", runUninstall),
 		},
 	)
+}
+
+// configuredFiles are the configured database and log paths, for the deny
+// rules; none when the configuration cannot be read (the XDG rules remain).
+func configuredFiles() []string {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil
+	}
+	return []string{cfg.DBPath, cfg.LogPath}
 }

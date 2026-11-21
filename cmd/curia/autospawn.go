@@ -256,6 +256,10 @@ func (e *monitorEnv) autoStart(ctx context.Context, cfg config.Config, r autoRow
 	if err != nil || !ok {
 		return err
 	}
+	// shortcut: a crash between the claim and the spawn leaves the task ready
+	// with no hash and a start counted (nothing starts twice, nothing is logged),
+	// and a long spawn (up to spawnSetupLimit+2m) holds the monitor pass and the
+	// jobs behind it; fix both with a claim row finished by the spawn if they bite.
 	// A spawn may run an approved setup script for minutes: it gets its own
 	// deadline, not the tick's.
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), spawnSetupLimit+2*time.Minute)

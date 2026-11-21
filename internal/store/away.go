@@ -18,6 +18,7 @@ var ErrAwayOpen = errors.New("store: an away period is already running")
 type SavedMode struct {
 	Mode  string    `json:"mode"`
 	Until time.Time `json:"until"`
+	Root  string    `json:"root,omitempty"` // its mode_root; rows saved before this field restore with none
 }
 
 // AwayRun is one away period (F20).
@@ -106,7 +107,7 @@ func (s *Store) StartAway(ctx context.Context, scope ModeScope, now, ends time.T
 	if err != nil {
 		return AwayRun{}, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE sessions SET mode = ?, mode_until = ? WHERE state != ? AND (? OR repo = ?)`,
+	if _, err = tx.ExecContext(ctx, `UPDATE sessions SET mode = ?, mode_until = ?, mode_root = `+modeRootSQL+` WHERE state != ? AND (? OR repo = ?)`,
 		model.ModeAway, formatTime(ends), model.StateEnded, scope.All, scope.Repo); err != nil {
 		return AwayRun{}, fmt.Errorf("store: start away: %w", err)
 	}
@@ -130,7 +131,7 @@ func (s *Store) StartAway(ctx context.Context, scope ModeScope, now, ends time.T
 
 // savedModes reads the mode rows of the live sessions in scope that have one.
 func savedModes(ctx context.Context, tx *sql.Tx, scope ModeScope) (map[string]SavedMode, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id, COALESCE(mode, ''), mode_until FROM sessions WHERE state != ? AND (? OR repo = ?)`,
+	rows, err := tx.QueryContext(ctx, `SELECT id, COALESCE(mode, ''), mode_until, COALESCE(mode_root, '') FROM sessions WHERE state != ? AND (? OR repo = ?)`,
 		model.StateEnded, scope.All, scope.Repo)
 	if err != nil {
 		return nil, fmt.Errorf("store: start away: %w", err)
@@ -138,9 +139,9 @@ func savedModes(ctx context.Context, tx *sql.Tx, scope ModeScope) (map[string]Sa
 	defer func() { _ = rows.Close() }()
 	saved := map[string]SavedMode{}
 	for rows.Next() {
-		var id, mode string
+		var id, mode, root string
 		var until sql.NullString
-		if err = rows.Scan(&id, &mode, &until); err != nil {
+		if err = rows.Scan(&id, &mode, &until, &root); err != nil {
 			return nil, fmt.Errorf("store: start away: %w", err)
 		}
 		if mode == "" {
@@ -150,7 +151,7 @@ func savedModes(ctx context.Context, tx *sql.Tx, scope ModeScope) (map[string]Sa
 		if perr != nil {
 			return nil, fmt.Errorf("store: start away: %w", perr)
 		}
-		saved[id] = SavedMode{Mode: mode, Until: u}
+		saved[id] = SavedMode{Mode: mode, Until: u, Root: root}
 	}
 	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: start away: %w", err)
@@ -182,11 +183,14 @@ func restoreModes(ctx context.Context, tx *sql.Tx, r AwayRun, now time.Time) err
 		return fmt.Errorf("store: end away: %w", err)
 	}
 	for _, sid := range ids {
-		var mode, until any // NULL: the default
+		var mode, until, root any // NULL: the default, and no root
 		if sv, ok := r.Saved[sid]; ok && sv.Mode != model.ModeBypass && (sv.Until.IsZero() || now.Before(sv.Until)) {
 			mode, until = sv.Mode, formatTime(sv.Until)
+			if sv.Root != "" {
+				root = sv.Root
+			}
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE sessions SET mode = ?, mode_until = ? WHERE id = ?`, mode, until, sid); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE sessions SET mode = ?, mode_until = ?, mode_root = ? WHERE id = ?`, mode, until, root, sid); err != nil {
 			return fmt.Errorf("store: end away: %w", err)
 		}
 	}
@@ -263,9 +267,9 @@ func (s *Store) InheritAway(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("store: inherit away: %w", err)
 	}
-	var repo, mode string
+	var repo, mode, root string
 	var until sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT repo, COALESCE(mode, ''), mode_until FROM sessions WHERE id = ? AND state != ?`, sessionID, model.StateEnded).Scan(&repo, &mode, &until)
+	err = tx.QueryRowContext(ctx, `SELECT repo, COALESCE(mode, ''), mode_until, COALESCE(mode_root, '') FROM sessions WHERE id = ? AND state != ?`, sessionID, model.StateEnded).Scan(&repo, &mode, &until, &root)
 	if errors.Is(err, sql.ErrNoRows) || (r.Scope != "" && r.Scope != repo) || mode == model.ModeAway {
 		return nil
 	}
@@ -273,18 +277,18 @@ func (s *Store) InheritAway(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("store: inherit away: %w", err)
 	}
 	if mode != "" {
-		if err = saveMode(ctx, tx, r, sessionID, mode, until); err != nil {
+		if err = saveMode(ctx, tx, r, sessionID, mode, root, until); err != nil {
 			return err
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE sessions SET mode = ?, mode_until = ? WHERE id = ?`, model.ModeAway, formatTime(r.EndsAt), sessionID); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE sessions SET mode = ?, mode_until = ?, mode_root = `+modeRootSQL+` WHERE id = ?`, model.ModeAway, formatTime(r.EndsAt), sessionID); err != nil {
 		return fmt.Errorf("store: inherit away: %w", err)
 	}
 	return tx.Commit()
 }
 
 // saveMode adds a session's own mode to the run's saved modes.
-func saveMode(ctx context.Context, tx *sql.Tx, r AwayRun, sessionID, mode string, until sql.NullString) error {
+func saveMode(ctx context.Context, tx *sql.Tx, r AwayRun, sessionID, mode, root string, until sql.NullString) error {
 	u, err := parseTime(until)
 	if err != nil {
 		return fmt.Errorf("store: inherit away: %w", err)
@@ -292,7 +296,7 @@ func saveMode(ctx context.Context, tx *sql.Tx, r AwayRun, sessionID, mode string
 	if r.Saved == nil {
 		r.Saved = map[string]SavedMode{}
 	}
-	r.Saved[sessionID] = SavedMode{Mode: mode, Until: u}
+	r.Saved[sessionID] = SavedMode{Mode: mode, Until: u, Root: root}
 	sj, _ := json.Marshal(r.Saved)
 	if _, err = tx.ExecContext(ctx, `UPDATE away_runs SET saved_modes = ? WHERE id = ?`, string(sj), r.ID); err != nil {
 		return fmt.Errorf("store: inherit away: %w", err)

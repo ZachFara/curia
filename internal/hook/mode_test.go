@@ -74,6 +74,7 @@ func TestModeDecisionTable(t *testing.T) {
 		{"web fetch", [2]string{"WebFetch", `{"url":"https://example.com"}`}, map[string]string{"normal": "quiet", "edits": "quiet", "away": "deny", "bypass": "allow"}},
 		{"other server's mcp tool", [2]string{"mcp__other__run", `{}`}, map[string]string{"normal": "quiet", "edits": "quiet", "away": "deny", "bypass": "allow"}},
 		{"curia tool", [2]string{"mcp__curia__request_decision", `{}`}, map[string]string{"normal": "quiet", "edits": "quiet", "away": "allow", "bypass": "allow"}},
+		{"curia file_task", [2]string{"mcp__curia__file_task", `{}`}, map[string]string{"normal": "quiet", "edits": "quiet", "away": "allow", "bypass": "allow"}},
 		{"imitation of a curia tool", [2]string{"mcp__curia2__request_decision", `{}`}, map[string]string{"normal": "quiet", "edits": "quiet", "away": "deny", "bypass": "allow"}},
 		{"asks the user", [2]string{"AskUserQuestion", `{}`}, map[string]string{"normal": "quiet", "edits": "quiet", "away": "deny", "bypass": "quiet"}},
 	}
@@ -277,7 +278,7 @@ func TestModeNeverAllowsGitInternals(t *testing.T) {
 	}
 	paths := []string{
 		".git/config", ".git/hooks/pre-commit", "sub/.git/config", ".claude/settings.json", ".curia/setup.sh",
-		".gitattributes", ".gitmodules", ".mcp.json", ".envrc", ".vscode/tasks.json", ".idea/x", ".pre-commit-config.yaml", ".githooks/pre-commit", "lefthook.yml", ".lefthook.yml", "lefthook.yaml", "lefthook-local.yml", ".lefthook.toml", ".devcontainer/devcontainer.json", ".lefthook/x", "wt/.git", "wt/gd/config", ".GIT/config",
+		".gitattributes", ".gitmodules", ".mcp.json", ".envrc", ".vscode/tasks.json", ".idea/x", ".pre-commit-config.yaml", ".githooks/pre-commit", "lefthook.yml", ".lefthook.yml", "lefthook.yaml", "lefthook-local.yml", ".lefthook.toml", ".devcontainer/devcontainer.json", ".lefthook/x", "wt/.git", "wt/gd/config", ".GIT/config", ".yarnrc.yml", ".cargo/config.toml",
 	}
 	for _, mode := range []string{"edits", "away"} {
 		st := openStore(t)
@@ -446,4 +447,28 @@ func TestModeAllowContainmentKeepsCase(t *testing.T) {
 	modeSession(t, st, env, cfg, lower, "edits", time.Time{})
 	wantAllow(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(lower+"/a.go")+`}`, lower, "")), "same case")
 	notAllowed(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(upper+"/a.go")+`}`, lower, "")), "other case")
+}
+
+// Review A-1: an away Bash allow needs a frozen root AND a cwd inside it, even for plain words.
+func TestModeAwayBashNeedsCwdInsideRoot(t *testing.T) {
+	home, proj, cfg := denyHome(t)
+	cmds := []string{"git status", "git log", "git diff a b", "git add x"}
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	modeSession(t, st, env, cfg, proj, "away", time.Time{})
+	for _, c := range cmds {
+		wantAllow(t, pre(t, st, env, cfg, preBody("Bash", `{"command":`+quote(c)+`}`, proj, "")), "cwd inside: "+c)
+		for _, cwd := range []string{"/etc", home} {
+			wantDeny(t, pre(t, st, env, cfg, preBody("Bash", `{"command":`+quote(c)+`}`, cwd, "")), c+" from "+cwd)
+		}
+	}
+	noRoot := openStore(t)
+	env.Git = func(string) (string, string, string) { return "", "", "" }
+	pre(t, noRoot, env, cfg, preBody("Bash", `{"command":"ls"}`, home, ""))
+	if _, err := noRoot.SetModes(context.Background(), store.ModeScope{All: true}, "away", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cmds {
+		wantDeny(t, pre(t, noRoot, env, cfg, preBody("Bash", `{"command":`+quote(c)+`}`, proj, "")), "no root: "+c)
+	}
 }
