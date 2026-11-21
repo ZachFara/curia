@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -132,9 +131,7 @@ func runShow(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if showJSON {
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		return enc.Encode(showJSONOf(data, diff))
+		return writeJSON(cmd.OutOrStdout(), showJSONOf(data, diff), "  ")
 	}
 	_, err = fmt.Fprintln(cmd.OutOrStdout(), showText(data, diff))
 	return err

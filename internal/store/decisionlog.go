@@ -41,12 +41,12 @@ WHERE (? = '' OR d.n IN (SELECT rowid FROM decisions_fts WHERE decisions_fts MAT
 
 const decisionLogRows = `SELECT d.id, d.question, d.answer, d.scope, d.repo, d.status, d.created_at, d.answered_at,
   d.superseded_at IS NOT NULL,
-  (SELECT count(*) FROM decisions r WHERE r.precedent_of = d.id),
-  (SELECT max(COALESCE(r.closed_at, r.created_at)) FROM decisions r WHERE r.precedent_of = d.id),
+  (SELECT count(*) FROM decisions r WHERE r.precedent_of != '' AND r.precedent_of = d.id),
+  (SELECT max(COALESCE(r.closed_at, r.created_at)) FROM decisions r WHERE r.precedent_of != '' AND r.precedent_of = d.id),
   (SELECT count(*) FROM decisions a WHERE a.near_match = d.id)` + decisionLogWhere + `
 ORDER BY d.n DESC LIMIT ?`
 
-const decisionLogSummary = `SELECT count(*), coalesce(sum(EXISTS (SELECT 1 FROM decisions r WHERE r.precedent_of = d.id)), 0)` +
+const decisionLogSummary = `SELECT count(*), coalesce(sum(EXISTS (SELECT 1 FROM decisions r WHERE r.precedent_of != '' AND r.precedent_of = d.id)), 0)` +
 	decisionLogWhere + ` AND ` + decided + ` AND d.superseded_at IS NULL`
 
 // DecisionLog returns the newest decisions q selects with their reuse (the

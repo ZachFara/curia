@@ -99,10 +99,11 @@ func (m DecisionLogModel) fullLines(w int) []string {
 	}
 	add("reused  " + DecisionLogReuse(r, m.now()) + "; asked again " + fmt.Sprint(r.AskedAgain))
 	add("")
+	block := func(s string) { all = append(all, indent(wrap(s, w-len(gutter)))...) } // indented: a line cannot pass for a heading
 	add("Question")
-	add(sanitize.Text(r.Question, decisionLogTextMax))
+	block(sanitize.Text(r.Question, decisionLogTextMax))
 	add("")
 	add("Answer")
-	add(sanitize.Text(r.Answer, decisionLogTextMax))
+	block(sanitize.Text(r.Answer, decisionLogTextMax))
 	return all[min(m.at, max(len(all)-1, 0)):]
 }

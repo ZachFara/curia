@@ -1142,12 +1142,13 @@ var userNotOnlyCommands = map[string]string{
 	"curia completion zsh":        "cobra's shell completion script",
 }
 
-// unclassifiedCommands are the leaf commands under root in neither table,
-// and the ones in both.
+// unclassifiedCommands are the commands under root that can run (leaves and
+// parents with a run function of their own) in neither table, and the ones
+// in both.
 func unclassifiedCommands(root *cobra.Command) []string {
 	var out []string
 	userOnlyWalk(root, func(c *cobra.Command) {
-		if c.HasSubCommands() {
+		if !c.Runnable() {
 			return
 		}
 		path := c.CommandPath()
@@ -1176,6 +1177,14 @@ func TestEveryCommandIsClassified(t *testing.T) {
 	defer rootCmd.RemoveCommand(dummy)
 	if got := unclassifiedCommands(rootCmd); !slices.Contains(got, "curia approve-everything") {
 		t.Errorf("an unclassified command is not reported: %v", got)
+	}
+	// D-9: a parent that can run itself is checked too.
+	parent := &cobra.Command{Use: "approve-all", RunE: func(*cobra.Command, []string) error { return nil }}
+	parent.AddCommand(&cobra.Command{Use: "now", Run: func(*cobra.Command, []string) {}})
+	rootCmd.AddCommand(parent)
+	defer rootCmd.RemoveCommand(parent)
+	if got := unclassifiedCommands(rootCmd); !slices.Contains(got, "curia approve-all") {
+		t.Errorf("an unclassified runnable parent is not reported: %v", got)
 	}
 }
 

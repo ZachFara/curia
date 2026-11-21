@@ -395,7 +395,7 @@ func installJSONString(s string) string {
 	return string(b)
 }
 
-func TestInstallAllowsSixToolsByDefault(t *testing.T) {
+func TestInstallAllowsSevenToolsByDefault(t *testing.T) {
 	installRecord(t)
 	h := installSetup(t, "")
 	out, err := installRun(t, "install")

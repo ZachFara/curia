@@ -716,7 +716,7 @@ func TestNotifyWithoutPaneLeavesSlot(t *testing.T) {
 	}
 }
 
-func TestMCPOverPipesListsSixTools(t *testing.T) {
+func TestMCPOverPipesChecksMessagesOnce(t *testing.T) {
 	db := mcpEnv(t)
 	st := mcpOpenStore(t, db)
 	t.Setenv("CURIA_SESSION_ID", "S1")
