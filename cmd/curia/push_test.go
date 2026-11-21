@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/mcp"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/notify"
 	"github.com/ZachFara/curia/internal/store"
@@ -1107,13 +1108,19 @@ func TestPushTestGuards(t *testing.T) {
 	}
 }
 
-func TestMCPHelpSaysSixTools(t *testing.T) {
+func TestMCPHelpNamesEveryRegisteredTool(t *testing.T) {
 	cmd, _, err := rootCmd.Find([]string{"mcp"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(cmd.Long, "six tools") || !strings.Contains(cmd.Long, "complete_task") {
-		t.Errorf("mcp help = %q", cmd.Long)
+	tools := mcp.Tools(mcp.Deps{})
+	if len(tools) != 7 || !strings.Contains(cmd.Long, "seven tools") {
+		t.Errorf("%d tools registered; mcp help = %q, want seven tools", len(tools), cmd.Long)
+	}
+	for _, tl := range tools {
+		if !strings.Contains(cmd.Long, tl.Name) {
+			t.Errorf("mcp help does not name %s: %q", tl.Name, cmd.Long)
+		}
 	}
 }
 

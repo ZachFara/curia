@@ -175,7 +175,7 @@ func TestAttributeContainers(t *testing.T) {
 }
 
 func TestComposeRunningNeedsTheSameProjectInTheSameSession(t *testing.T) {
-	cs := []Container{{ComposeProject: "my-app", ComposeDir: "/w/My-App", SessionID: "S1"}, {ComposeProject: "theirs", SessionID: "S2"}}
+	cs := []Container{{ComposeProject: "my-app", ComposeDir: "/w/My-App", SessionID: "S1"}, {ComposeProject: "theirs", SessionID: "S2"}, {ComposeProject: "loose"}}
 	for _, c := range []struct {
 		name    string
 		args    []string
@@ -187,6 +187,7 @@ func TestComposeRunningNeedsTheSameProjectInTheSameSession(t *testing.T) {
 		{"default name from cwd", []string{"compose", "up"}, "S1", true},
 		{"name from the -f directory", []string{"compose", "-f", "/x/Other/c.yml", "up"}, "S1", false},
 		{"another session's project", []string{"compose", "-p", "theirs", "up"}, "S1", false},
+		{"an unattributed container", []string{"compose", "-p", "loose", "up"}, "S1", false},
 		{"no session known", []string{"compose", "-p", "my-app", "up"}, "", false},
 	} {
 		if got := ComposeRunning(cs, ParseDocker(c.args), "", "/w/My-App", c.session); got != c.want {

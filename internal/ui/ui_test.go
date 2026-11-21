@@ -134,7 +134,7 @@ func newTest(t *testing.T, mode Mode, sessions ...model.Session) (tea.Model, *tm
 		{ID: "%5", Session: "work", WindowID: "@2", WindowName: "server"},
 	}}
 	src := &fakeSource{sessions: sessions}
-	m := New(src, fake, config.Default(), func() time.Time { return testNow }, mode)
+	m := New(src, fake, config.Default(), dashClock.reset().now, mode)
 	return refresh(t, m), fake, src
 }
 
@@ -353,6 +353,27 @@ func TestSwitchFailureShownAndPopupStays(t *testing.T) {
 	}
 }
 
+// dashClock is the clock of the models newTest and newTeamTest return, so a
+// test can let a prompt's dwell pass.
+var dashClock sayClock
+
+func (c *sayClock) reset() *sayClock {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = testNow
+	return c
+}
+
+// confirmY lets the dwell pass and answers a prompt with a y of its own,
+// then the wait after it.
+func confirmY(t *testing.T, m tea.Model) tea.Model {
+	t.Helper()
+	dashClock.advance(time.Second)
+	p := &dashPump{t: t, m: m}
+	p.run(p.stepConfirm())
+	return p.m
+}
+
 func TestKillRequiresConfirmation(t *testing.T) {
 	m, fake, _ := newTest(t, ModePopup, threeSessions()...)
 	m, _ = press(m, "down", "x")
@@ -366,11 +387,12 @@ func TestKillRequiresConfirmation(t *testing.T) {
 	if got := calls(fake, "KillPane"); len(got) != 0 {
 		t.Fatalf("x then j killed: %q", got)
 	}
-	_, cmd := press(m, "x", "y")
+	m, _ = press(m, "x")
+	m = confirmY(t, m)
 	if got := calls(fake, "KillPane"); !slices.Equal(got, []string{"KillPane %5"}) {
 		t.Errorf("KillPane calls = %q, want [KillPane %%5]", got)
 	}
-	if isQuit(cmd) {
+	if _, ok := m.(Model); !ok {
 		t.Error("popup quit after killing")
 	}
 }
@@ -381,7 +403,7 @@ func TestKillTargetsPaneChosenAtPrompt(t *testing.T) {
 	// A refresh reorders the rows while the prompt is open.
 	src.sessions = slices.Concat(threeSessions()[1:2], threeSessions()[:1], threeSessions()[2:])
 	m = refresh(t, m)
-	_, _ = press(m, "y")
+	_ = confirmY(t, m)
 	if got := calls(fake, "KillPane"); !slices.Equal(got, []string{"KillPane %5"}) {
 		t.Errorf("KillPane calls = %q, want [KillPane %%5]", got)
 	}
@@ -631,10 +653,15 @@ func TestEmptyView(t *testing.T) {
 func TestFastTypedKeysEachCount(t *testing.T) {
 	m, fake, _ := newTest(t, ModePopup, threeSessions()...)
 	m, _ = m.Update(key("jj"))
-	m, _ = m.Update(key("kx"))
-	_, _ = m.Update(key("y"))
-	if got := calls(fake, "KillPane"); !slices.Equal(got, []string{"KillPane %5"}) {
-		t.Errorf("KillPane calls = %q, want [KillPane %%5]", got)
+	m, _ = m.Update(key("kx")) // the k moves, the x opens the kill prompt
+	if s := statusLine(m); !strings.Contains(s, "kill pane %5?") {
+		t.Errorf("status line = %q, want the kill prompt after jjkx", s)
+	}
+	// A y typed into a read of several keys no longer kills (D-3): the kill
+	// is behind the shared confirm gate, as pause is.
+	_, _ = m.Update(key("yy"))
+	if got := calls(fake, "KillPane"); len(got) != 0 {
+		t.Errorf("KillPane calls = %q, want none for a y in a burst", got)
 	}
 	m, _, _ = newTest(t, ModePopup, threeSessions()...)
 	m, _ = m.Update(key("/au"))
@@ -1366,7 +1393,7 @@ func newTeamTest(t *testing.T, mode Mode) (tea.Model, *tmux.Fake, *fakeSource) {
 		{ID: "%10", Session: "work", WindowID: "@2", WindowName: "server"},
 	}}
 	src := &fakeSource{sessions: teamSessions(), counts: teamCounts(), tasks: taskTasks()}
-	m := refresh(t, New(src, fake, config.Default(), func() time.Time { return testNow }, mode))
+	m := refresh(t, New(src, fake, config.Default(), dashClock.reset().now, mode))
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 200, Height: 20})
 	return m, fake, src
 }
@@ -1503,7 +1530,8 @@ func TestKillRefusedOnGroupRow(t *testing.T) {
 	}
 	// Expanded, x on a teammate asks for that pane.
 	m, fake, _ = newTeamTest(t, ModePopup)
-	_, _ = press(m, " ", "j", "x", "y")
+	m, _ = press(m, " ", "j", "x")
+	_ = confirmY(t, m)
 	if got := calls(fake, "KillPane"); !slices.Equal(got, []string{"KillPane %11"}) {
 		t.Errorf("KillPane calls = %q, want alpha's pane", got)
 	}
@@ -1666,9 +1694,13 @@ func TestBoardSpawnInFlightRefusesSecond(t *testing.T) {
 	clk = clk.Add(time.Second)
 	m, _ = press(m, "n")
 	clk = clk.Add(time.Second)
-	m, spawn := press(m, "y")
-	if spawn == nil {
+	m, wait := press(m, "y")
+	if wait == nil {
 		t.Fatal("y started no spawn")
+	}
+	m, spawn := m.Update(wait()) // the confirm message after burstGap (D-1)
+	if spawn == nil {
+		t.Fatal("the confirm started no spawn")
 	}
 	if len(bsrc.spawns) != 0 {
 		t.Fatal("the spawn ran on the update loop")
@@ -2487,7 +2519,8 @@ func TestKillAndJumpRefuseOtherServer(t *testing.T) {
 		t.Errorf("the view does not say why:\n%s", v)
 	}
 	m = selectID(t, m, "a")
-	_, _ = press(m, "x", "y")
+	m, _ = press(m, "x")
+	_ = confirmY(t, m)
 	if got := calls(fake, "KillPane"); !slices.Equal(got, []string{"KillPane %3"}) {
 		t.Errorf("this server's session: kill calls %q", got)
 	}

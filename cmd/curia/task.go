@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -447,15 +445,7 @@ func taskPrintJSON(w io.Writer, cards []task.Card) error {
 	for _, c := range cards {
 		rows = append(rows, taskToRow(c))
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(rows); err != nil {
-		return err
-	}
-	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
-	return err
+	return writeJSON(w, rows, "  ")
 }
 
 // taskCell makes task text, which is untrusted, safe as one table cell.

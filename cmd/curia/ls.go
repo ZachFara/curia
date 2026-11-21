@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -111,15 +109,7 @@ func printJSON(w io.Writer, sessions []model.Session) error {
 			StartedAt: jsonTime(s.StartedAt), UpdatedAt: jsonTime(s.UpdatedAt),
 		})
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false) // "&&" in a command stays readable
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(rows); err != nil {
-		return err
-	}
-	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
-	return err
+	return writeJSON(w, rows, "  ")
 }
 
 // escapeUnprintable writes every unprintable rune of encoded JSON (C1

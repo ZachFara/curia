@@ -598,3 +598,27 @@ func TestServewebServerUsesNoSlogForTokens(t *testing.T) {
 		t.Fatal("servewebNew returned nil")
 	}
 }
+
+func TestServewebSettingsHoldNoPathsOrCommands(t *testing.T) {
+	f := servewebNewFix(t, true, "http")
+	path, err := configUserPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	conf := "db_path = \"" + f.home + "/PATH-DB/curia.db\"\nlog_path = \"" + f.home + "/PATH-LOG/c.log\"\neditor = \"EDITOR-CMD -w\"\n[obsidian]\ndir = \"" + f.home + "/PATH-VAULT\"\n[costlens]\nanalyzer = \"" + f.home + "/PATH-AN.js\"\n"
+	if err = os.WriteFile(path, []byte(conf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := servewebBody(t, f.do(http.MethodGet, "/settings", f.login(f.device("phone")), nil))
+	for _, bad := range []string{f.home, "PATH-DB", "PATH-LOG", "PATH-VAULT", "PATH-AN", "EDITOR-CMD"} {
+		if strings.Contains(b, bad) {
+			t.Errorf("the settings page shows %q", bad)
+		}
+	}
+	if !strings.Contains(b, "(set)") {
+		t.Errorf("the settings page does not say a path key is set")
+	}
+}

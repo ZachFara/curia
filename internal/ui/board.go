@@ -150,8 +150,16 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
+	case boardConfirmMsg:
+		if !m.gate.due(msg.seq) {
+			return m, nil
+		}
+		return m.confirm()
 	case tea.KeyMsg:
 		m.gate.keyed(m.now())
+		if m.gate.waiting() {
+			return m.keyAfterConfirm()
+		}
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste {
 			return m.updateRunes(msg)
 		}
@@ -569,6 +577,27 @@ func (m BoardModel) confirmKey(msg tea.KeyMsg) (BoardModel, tea.Cmd) {
 		m.gate.refuse(now)
 		return m, nil
 	}
+	seq := m.gate.take(m.now())
+	return m, tea.Tick(burstGap, func(time.Time) tea.Msg { return boardConfirmMsg{seq: seq} })
+}
+
+// boardConfirmMsg spawns the task of the y taken as seq once burstGap has
+// passed with no other key.
+type boardConfirmMsg struct{ seq int }
+
+// keyAfterConfirm handles a key that came while a taken y waits out
+// burstGap: within it, the y came in a burst and is refused; later it stands.
+func (m BoardModel) keyAfterConfirm() (BoardModel, tea.Cmd) {
+	if m.gate.late() {
+		m.notice = "too soon: press y again"
+		return m, nil
+	}
+	return m.confirm()
+}
+
+// confirm spawns the pending task, unless it changed meanwhile.
+func (m BoardModel) confirm() (BoardModel, tea.Cmd) {
+	m.gate.confirmAt = time.Time{}
 	p := m.pending
 	m.confirming, m.pending = false, task.Card{}
 	if c, ok := m.current(); !ok || !sameCard(c, p) {

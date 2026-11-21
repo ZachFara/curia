@@ -382,10 +382,20 @@ func TestServewebConfirmRefusesAnExpiredOrForeignMessage(t *testing.T) {
 	tok := f.csrf(cookie)
 	f.post("/say/send", cookie, tok, url.Values{"target": {"session:s1"}, "text": {"hello"}})
 	id := f.messages()[0].ID
-	f.now.Add(int64(time.Hour))
+	// past the hold, still inside the one hour session: the refusal is confirm's own
+	f.now.Add(int64(30 * time.Minute))
 	f.post("/say/confirm", cookie, tok, url.Values{"id": {id}})
 	if got := f.messages()[0]; got.Status == model.MsgDelivered || got.Status == model.MsgQueued {
 		t.Errorf("a confirmation after the hold ended released the message: %s", got.Status)
+	}
+	// a held message that is not the user's cannot be confirmed from the web
+	a, err := f.st.CreateMessage(context.Background(), model.Message{Text: "x", Kind: model.KindInstruction, Sender: model.SenderAgent, TargetSession: "s1", RoutedBy: model.RoutedManual, Status: model.MsgHeld, HoldUntil: f.clock().Add(time.Minute), CreatedAt: f.clock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.post("/say/confirm", cookie, tok, url.Values{"id": {a.ID}})
+	if got, _, _ := f.st.GetMessage(context.Background(), a.ID); got.Status != model.MsgHeld {
+		t.Errorf("confirm released a held message that is not the user's: %s", got.Status)
 	}
 	// a queued message from the terminal cannot be pushed through the confirm route
 	m, err := f.st.CreateMessage(context.Background(), model.Message{Text: "x", Kind: model.KindInstruction, Sender: model.SenderUser, TargetSession: "s1", RoutedBy: model.RoutedManual, Status: model.MsgQueued, CreatedAt: f.clock()})

@@ -37,6 +37,10 @@ const (
 // fireSchedules fires every due schedule once.
 func (e *monitorEnv) fireSchedules(ctx context.Context) error {
 	now := e.now()
+	// shortcut: a run is unfinished when still fired with no results after a minute (the job's deadline is 20 s).
+	if err := e.st.InterruptScheduleRuns(ctx, now.Add(-time.Minute)); err != nil {
+		return err
+	}
 	due, err := e.st.DueSchedules(ctx, now)
 	if err != nil {
 		return err

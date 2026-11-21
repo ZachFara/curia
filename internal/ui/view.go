@@ -338,7 +338,7 @@ func (m Model) resText(r row) string {
 		return ""
 	}
 	if t, ok := m.budget.Res[r.s.ID]; ok {
-		return t
+		return clean(t)
 	}
 	return "?"
 }

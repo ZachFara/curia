@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -176,9 +175,7 @@ func printResourcesJSON(w io.Writer, rows []resourceSample, cpu float64, mb int6
 		out.Sessions = append(out.Sessions, j)
 	}
 	out.Total = map[string]any{"cpu_pct": cpu, "rss_mb": mb}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
+	return writeJSON(w, out, "  ")
 }
 
 // printContainers lists the containers the monitor last saw beside the
