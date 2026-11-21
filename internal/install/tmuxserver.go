@@ -14,20 +14,29 @@ import (
 // its standard output; the error carries tmux's own message.
 type TmuxRunner func(ctx context.Context, args ...string) (string, error)
 
-// focusHook is the hook the snippet sets.
-const focusHook = "pane-focus-in"
-
-// focusHookIndex is the index of the focus hook's array that the snippet
-// sets, so that sourcing it again, or for a new binary, replaces Curia's own
+// hookKind is one hook the snippet sets as one entry of the hook's array:
+// the hook, Curia's index in it, the end of the command Curia runs (after
+// the binary) and a regular expression for how show-hooks prints that end.
+// Sourcing the snippet again, or for a new binary, replaces Curia's own
 // entry and keeps every other entry where it is (a plain set-hook replaces
 // the whole array).
-const focusHookIndex = 77
+type hookKind struct {
+	hook   string
+	index  int
+	suffix string
+	tail   string
+}
 
-// focusHookName is the snippet's entry, such as pane-focus-in[77].
-var focusHookName = focusHook + "[" + strconv.Itoa(focusHookIndex) + "]"
+func (k hookKind) name() string { return k.hook + "[" + strconv.Itoa(k.index) + "]" }
 
-// seenSuffix ends the shell command of Curia's focus hook.
-const seenSuffix = " seen #{pane_id}"
+// The hooks the snippet sets: the focus hook (seen) and, when a client
+// attaches, the monitor's autostart (`curia monitor start --quiet`, which
+// does nothing when monitor.autostart is false or a monitor already runs).
+var (
+	focusKind  = hookKind{"pane-focus-in", 77, " seen #{pane_id}", ` seen .\{pane_id\}.?`}
+	attachKind = hookKind{"client-attached", 78, " monitor start --quiet", ` monitor start --quiet.?`}
+	hookKinds  = []hookKind{focusKind, attachKind}
+)
 
 // The badge in status-right is badgeStyle (or, from the Plan 1 snippet, a
 // space), badgeOpen, the binary as one shell word and badgeClose. The
@@ -193,12 +202,12 @@ type hookEntry struct {
 
 // ourHookBin returns the binary when command, as show-hooks prints it, is
 // exactly the snippet's focus hook for some binary, else "".
-func ourHookBin(command string) string {
+func ourHookBin(command string, k hookKind) string {
 	w, plain := tmuxWords(command)
 	if !plain || len(w) != 3 || w[0] != "run-shell" || w[1] != "-b" {
 		return ""
 	}
-	quoted, ok := strings.CutSuffix(w[2], seenSuffix)
+	quoted, ok := strings.CutSuffix(w[2], k.suffix)
 	if !ok {
 		return ""
 	}
@@ -211,11 +220,11 @@ func ourHookBin(command string) string {
 
 // parseHooks reads show-hooks output: one "name[index] command" line per
 // entry (a hook with no entry prints its bare name).
-func parseHooks(out string) []hookEntry {
+func parseHooks(out string, k hookKind) []hookEntry {
 	var entries []hookEntry
 	for _, line := range strings.Split(out, "\n") {
 		name, command, _ := strings.Cut(line, " ")
-		digits, ok := strings.CutPrefix(name, focusHook+"[")
+		digits, ok := strings.CutPrefix(name, k.hook+"[")
 		if !ok || command == "" {
 			continue
 		}
@@ -223,7 +232,7 @@ func parseHooks(out string) []hookEntry {
 		if err != nil || !strings.HasSuffix(digits, "]") {
 			continue
 		}
-		entries = append(entries, hookEntry{name: name, index: index, command: command, bin: ourHookBin(command)})
+		entries = append(entries, hookEntry{name: name, index: index, command: command, bin: ourHookBin(command, k)})
 	}
 	return entries
 }
@@ -272,7 +281,16 @@ func findBadges(v string) (found []badge, marks int) {
 type userTmux struct {
 	keys          map[string]bool // prefix keys bound
 	hook          bool            // a pane-focus-in line that mentions curia
+	attach        bool            // a client-attached line that mentions curia
 	badge, marker bool            // a line that mentions @curia_badge, @curia_marker_format
+}
+
+// hookOf reports whether a line of the user's own sets hook k's hook with curia in it.
+func (u userTmux) hookOf(k hookKind) bool {
+	if k == attachKind {
+		return u.attach
+	}
+	return u.hook
 }
 
 // readUserTmux reads the user's lines from the tmux configuration at path.
@@ -294,7 +312,8 @@ func readUserTmux(path string) (userTmux, error) {
 			if key, _, ok := prefixBinding(confWords(trimmed)); ok {
 				u.keys[key] = true
 			}
-			u.hook = u.hook || (strings.Contains(trimmed, focusHook) && strings.Contains(trimmed, "curia"))
+			u.hook = u.hook || (strings.Contains(trimmed, focusKind.hook) && strings.Contains(trimmed, "curia"))
+			u.attach = u.attach || (strings.Contains(trimmed, attachKind.hook) && strings.Contains(trimmed, "curia"))
 			u.badge = u.badge || strings.Contains(trimmed, "@curia_badge")
 			u.marker = u.marker || strings.Contains(trimmed, markerOption)
 		}
@@ -392,7 +411,9 @@ func UnloadTmux(ctx context.Context, run TmuxRunner, confPath, bin string, keys,
 	}
 	s := &tmuxSession{ctx: ctx, run: run, confPath: confPath, user: user, lead: "  "}
 	s.lines = []string{fmt.Sprintf("tmux: %s no longer loads Curia; undoing what it loaded in the running server %s:", confPath, socket)}
-	s.unloadHooks()
+	for _, k := range hookKinds {
+		s.unloadHooks(k)
+	}
 	for _, opt := range []string{"status-right", "status-left"} {
 		s.unloadBadge(opt)
 	}
@@ -403,26 +424,26 @@ func UnloadTmux(ctx context.Context, run TmuxRunner, confPath, bin string, keys,
 	return s.lines
 }
 
-func (s *tmuxSession) unloadHooks() {
-	out, err := s.run(s.ctx, "show-hooks", "-g", focusHook)
+func (s *tmuxSession) unloadHooks(k hookKind) {
+	out, err := s.run(s.ctx, "show-hooks", "-g", k.hook)
 	if err != nil {
-		s.say("%s: could not be read (%v); left as it is", focusHook, err)
+		s.say("%s: could not be read (%v); left as it is", k.hook, err)
 		return
 	}
-	removed := 0
-	for _, e := range parseHooks(out) {
+	removed, own := 0, s.user.hookOf(k)
+	for _, e := range parseHooks(out, k) {
 		switch {
 		case e.bin == "":
 			s.say("%s: not Curia's, kept: %s", e.name, e.command)
-		case s.user.hook:
-			s.say("%s: kept: %s sets a %s hook that mentions curia outside the curia block: %s", e.name, s.confPath, focusHook, e.command)
+		case own:
+			s.say("%s: kept: %s sets a %s hook that mentions curia outside the curia block: %s", e.name, s.confPath, k.hook, e.command)
 		case s.do(e.name, "set-hook", "-gu", e.name):
 			removed++
 			s.say("%s: removed Curia's hook: %s", e.name, e.command)
 		}
 	}
-	if removed == 0 && !s.user.hook {
-		s.say("%s: no Curia hook to remove", focusHook)
+	if removed == 0 && !own {
+		s.say("%s: no Curia hook to remove", k.hook)
 	}
 }
 
@@ -538,9 +559,11 @@ func handLines(confPath, bin string, keys TmuxKeys, user userTmux, cause error) 
 		"tmux: a tmux server that is still running keeps Curia's hook, keys, badge and marker until it restarts " +
 			"(tmux kill-server, which closes its sessions); to clear them by hand instead, run these in a shell inside it:",
 	}
-	if !user.hook {
-		lines = append(lines, "  tmux show-hooks -g "+focusHook+" | grep -F -- "+shellQuote(`run-shell -b "`+b+seenSuffix+`"`)+
-			` | cut -d' ' -f1 | while read -r h; do tmux set-hook -gu "$h"; done`)
+	for _, hk := range hookKinds {
+		if !user.hookOf(hk) {
+			lines = append(lines, "  tmux show-hooks -g "+hk.hook+" | grep -F -- "+shellQuote(`run-shell -b "`+b+hk.suffix+`"`)+
+				` | cut -d' ' -f1 | while read -r h; do tmux set-hook -gu "$h"; done`)
+		}
 	}
 	for _, k := range keyStates(bin, keys) {
 		if k.Key == "" || !ValidKey(k.Key) {
@@ -584,7 +607,9 @@ func RefreshTmux(ctx context.Context, run TmuxRunner, confPath, bin string, keys
 		return nil
 	}
 	s := &tmuxSession{ctx: ctx, run: run, confPath: confPath, user: user, lead: "tmux: "}
-	s.refreshHooks(bin)
+	for _, k := range hookKinds {
+		s.refreshHooks(bin, k)
+	}
 	for _, opt := range []string{"status-right", "status-left"} {
 		s.refreshBadge(opt, bin)
 	}
@@ -592,20 +617,20 @@ func RefreshTmux(ctx context.Context, run TmuxRunner, confPath, bin string, keys
 	return s.lines
 }
 
-func (s *tmuxSession) refreshHooks(bin string) {
-	if s.user.hook {
+func (s *tmuxSession) refreshHooks(bin string, k hookKind) {
+	if s.user.hookOf(k) {
 		return
 	}
-	out, err := s.run(s.ctx, "show-hooks", "-g", focusHook)
+	out, err := s.run(s.ctx, "show-hooks", "-g", k.hook)
 	if err != nil {
 		return
 	}
-	for _, e := range parseHooks(out) {
-		if e.bin == "" || (e.bin == bin && e.index == focusHookIndex) {
+	for _, e := range parseHooks(out, k) {
+		if e.bin == "" || (e.bin == bin && e.index == k.index) {
 			continue
 		}
 		if s.do(e.name, "set-hook", "-gu", e.name) {
-			s.say("%s removed, an earlier curia install's: %s (sourcing ~/.tmux.conf sets this binary's as %s)", e.name, e.command, focusHookName)
+			s.say("%s removed, an earlier curia install's: %s (sourcing ~/.tmux.conf sets this binary's as %s)", e.name, e.command, k.name())
 		}
 	}
 }

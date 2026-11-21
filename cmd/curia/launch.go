@@ -127,11 +127,12 @@ func launchAgent(ctx context.Context, cfg config.Config, args []string) error {
 	if err != nil {
 		return err
 	}
+	argv = launchWithRC(argv, cfg.RC.Launch, rcName(model.Session{TaskID: t.ID}, t.Title))
 	path, err := launchLookPath(argv[0])
 	if err != nil {
 		return fmt.Errorf("%s not found: %w", argv[0], err)
 	}
-	if err = launchExec(path, argv, launchEnv(os.Environ(), id, launchTeam && argv[0] == model.AgentClaude)); err != nil {
+	if err = launchExec(path, argv, dockerLaunchEnv(cfg, launchEnv(os.Environ(), id, launchTeam && argv[0] == model.AgentClaude))); err != nil {
 		return fmt.Errorf("start %s: %w", path, err)
 	}
 	return nil
@@ -252,4 +253,15 @@ func launchEnv(env []string, id string, team bool) []string {
 		env = append(env, launchTeamVar+"=1")
 	}
 	return env
+}
+
+// launchWithRC adds Remote Control to claude's argument vector when the user
+// turned rc.launch on: --remote-control with an explicit name right after
+// "claude", so the flag cannot take the brief for its optional value.
+// UNVERIFIED (cmd/curia/rc.go, item 4): the flag was seen in --help only.
+func launchWithRC(argv []string, on bool, name string) []string {
+	if !on || argv[0] != model.AgentClaude {
+		return argv
+	}
+	return append([]string{argv[0], "--remote-control", name}, argv[1:]...)
 }

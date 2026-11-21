@@ -44,6 +44,7 @@ type Deps struct {
 
 // The tools' fixed texts.
 const (
+	instrAway          = "The owner is away, so this ticket was stored as an assumption that waits for them: it is not answered. Do not take the action it covers (and nothing irreversible); continue with other safe work, or end your turn. The owner confirms or overrides it when back."
 	instrBlocking      = "Finish any safe work, then end your turn. The answer will arrive as a message; if it has not when you are next active, call check_decision."
 	instrAssume        = "Proceed with your assumption. You may be overridden later; if so, revert the work built on it."
 	instrPrecedent     = "A past decision looks like this one. If it settles your question, call withdraw_decision with precedent_id. If your case differs, call request_decision again with the same ticket plus differs_from and differs_why. Until then the ticket stays open."
@@ -104,9 +105,10 @@ const withdrawSchema = `{"type":"object","required":["id","reason"],"properties"
   "reason":{"type":"string","maxLength":300},
   "precedent_id":{"type":"string","description":"The past decision that settles this, if one does."}}}`
 
-// Tools returns the tools, exactly six, in this order: search_decisions,
+// Tools returns the tools, exactly seven, in this order: search_decisions,
 // request_decision, check_decision, withdraw_decision, check_messages,
-// complete_task. None of them answers, confirms, overrides, rescopes or
+// complete_task, file_task (which only stores a backlog task, or a ready one
+// when the user's setting says so, and cannot spawn or mark one ready). None of them answers, confirms, overrides, rescopes or
 // supersedes a ticket, sends a message, changes another session, or
 // approves, merges or closes a review (complete_task only opens or updates
 // the caller's own task's pending review). Each decision tool
@@ -142,6 +144,7 @@ func Tools(d Deps) []Tool {
 			InputSchema: json.RawMessage(messagesSchema), Call: t.messages,
 		},
 		t.completeTool(),
+		t.fileTool(),
 	}
 }
 
@@ -336,6 +339,7 @@ func (t *tools) request(ctx context.Context, args json.RawMessage, now time.Time
 	if terr := t.checkDiffersFrom(ctx, d); terr != nil {
 		return nil, terr
 	}
+	d, coerced := t.coerceWhileAway(ctx, d, c.SessionID, now)
 	stored, dup, err := t.Store.CreateDecision(ctx, d)
 	if err != nil {
 		return nil, t.internal("request_decision", err)
@@ -347,14 +351,35 @@ func (t *tools) request(ctx context.Context, args json.RawMessage, now time.Time
 		t.Notify(ctx, stored, c.Pane)
 	}
 	strong := t.strongPrecedent(ctx, stored, c)
+	if len(strong) > 0 { // F25: "asked again" counts tickets raised despite a near match
+		if err := t.Store.SetNearMatch(ctx, stored.ID, strong[0].ID); err != nil {
+			t.Log.Error("mcp: record near match", "tool", "request_decision", "decision", stored.ID, "err", err.Error())
+		}
+	}
 	res := requestResult{ID: stored.ID, Status: stored.Status, Mode: stored.Mode, Precedent: toPrecedents(strong), Instruction: instrBlocking}
 	switch {
 	case len(strong) > 0:
 		res.Instruction = instrPrecedent
+	case coerced:
+		res.Instruction = instrAway
 	case stored.Mode == model.ModeAssume:
 		res.Instruction = instrAssume
 	}
 	return res, nil
+}
+
+// coerceWhileAway is F20: while the owner is away a blocking ticket would stall
+// its agent with nobody to answer, so it is stored as an assumption that
+// waits for the user (no expiry, never answered by Curia).
+func (t *tools) coerceWhileAway(ctx context.Context, d model.Decision, session string, now time.Time) (model.Decision, bool) {
+	if d.Mode != model.ModeBlocking {
+		return d, false
+	}
+	if away, err := t.Store.SessionAway(ctx, session, now); err != nil || !away {
+		return d, false
+	}
+	d.Mode, d.CoercedFrom, d.Assumption, d.ExpiresAt = model.ModeAssume, string(model.ModeBlocking), "proceed with option "+d.Recommendation, time.Time{}
+	return d, true
 }
 
 // invalidTicket lists every problem of a refused ticket.

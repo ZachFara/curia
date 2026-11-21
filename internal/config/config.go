@@ -4,7 +4,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/netip"
 	"net/url"
 	"os"
@@ -15,8 +14,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-
-	"github.com/BurntSushi/toml"
 )
 
 // Config is Curia's runtime configuration.
@@ -60,6 +57,17 @@ type Config struct {
 	Obsidian Obsidian `toml:"obsidian"`
 	Linear   Linear   `toml:"linear"`
 	CostLens CostLens `toml:"costlens"`
+
+	// Plan 6 additions.
+	Activity  Activity  `toml:"activity"`
+	Tasks     Tasks     `toml:"tasks"`
+	Resources Resources `toml:"resources"`
+	Monitor   Monitor   `toml:"monitor"`
+	Schedule  Schedule  `toml:"schedule"`
+	Cost      Cost      `toml:"cost"`
+	Mode      Mode      `toml:"mode"`
+	Away      Away      `toml:"away"`
+	RC        RC        `toml:"rc"`
 }
 
 // maxEditor bounds the editor option, in bytes.
@@ -134,49 +142,67 @@ func Default() Config {
 		Review:  Review{Approve: "merge", Remote: "origin", DiffTool: "git"},
 		Ntfy:    Ntfy{Devices: map[string]string{}},
 		Restore: Restore{MaxAge: 24 * time.Hour},
+		Serve:   Serve{WebSession: 12 * time.Hour},
 
 		// Plan 5 additions.
 		Usage:  Usage{CheaperModel: "sonnet"},
 		Linear: Linear{URL: DefaultLinearURL},
+
+		// Plan 6 additions.
+		Activity:  defaultActivity(),
+		Resources: defaultResources(),
+		Monitor:   Monitor{Autostart: true},
+		Schedule:  defaultSchedule(),
+		Tasks:     defaultTasks(),
+		Mode:      defaultMode(),
+		Away:      defaultAway(),
 	}
 }
 
-// Load reads the TOML file at path over Default(). A missing file yields the
-// defaults. A leading "~" in the paths is expanded, and the CURIA_DB
-// environment variable, when set, overrides DBPath last.
+// Load resolves the configuration (see Resolve) from the user file at path
+// and the repository file of the current directory's repository. A missing
+// file yields the defaults. A leading "~" in the paths is expanded, and the
+// CURIA_DB environment variable, when set, overrides DBPath last.
 func Load(path string) (Config, error) {
-	c := Default()
-	data, err := os.ReadFile(filepath.Clean(path))
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-	case err != nil:
-		return Config{}, fmt.Errorf("read config: %w", err)
-	default:
-		if err := toml.Unmarshal(data, &c); err != nil {
-			return Config{}, fmt.Errorf("parse config %s: %w", path, err)
-		}
-	}
+	wd, _ := os.Getwd()
+	c, _, err := Resolve(Options{UserPath: path, RepoRoot: FindRepoRoot(wd)})
+	return c, err
+}
+
+// validate checks every section, each error naming its key, and normalizes
+// the paths and URLs.
+func (c *Config) validate() error {
 	if c.AssumeExpiry <= 0 {
-		return Config{}, fmt.Errorf("config %s: assume_expiry must be positive, got %v", path, c.AssumeExpiry)
+		return fmt.Errorf("assume_expiry must be positive, got %v", c.AssumeExpiry)
 	}
 	if err := c.Routing.validate(); err != nil {
-		return Config{}, fmt.Errorf("config %s: %w", path, err)
+		return err
 	}
 	if err := validateEditor(c.Editor); err != nil {
-		return Config{}, fmt.Errorf("config %s: %w", path, err)
+		return err
 	}
 	if err := c.validatePlan4(); err != nil {
-		return Config{}, fmt.Errorf("config %s: %w", path, err)
+		return err
 	}
-	if err := c.validatePlan5(); err != nil {
-		return Config{}, fmt.Errorf("config %s: %w", path, err)
+	if err := c.Tasks.validate(); err != nil {
+		return err
 	}
-	c.DBPath = expandHome(c.DBPath)
-	c.LogPath = expandHome(c.LogPath)
-	if env := os.Getenv("CURIA_DB"); env != "" {
-		c.DBPath = env
+	if err := c.Resources.validate(); err != nil {
+		return err
 	}
-	return c, nil
+	if err := c.Mode.validate(); err != nil {
+		return err
+	}
+	if err := c.Away.validate(); err != nil {
+		return err
+	}
+	if err := c.Schedule.validate(); err != nil {
+		return err
+	}
+	if err := c.Cost.validate(); err != nil {
+		return err
+	}
+	return c.validatePlan5()
 }
 
 func expandHome(p string) string {
@@ -210,6 +236,12 @@ type Ntfy struct {
 type Serve struct {
 	Listen    string `toml:"listen"`
 	PublicURL string `toml:"public_url"`
+	// Web turns on the read-only web pages (F26); WebSession is how long a
+	// login cookie lasts.
+	Web        bool          `toml:"web"`
+	WebSession time.Duration `toml:"web_session"`
+	// WebWrite adds the page's three task moves and its messages (F26 part 2).
+	WebWrite bool `toml:"web_write"`
 }
 
 // Restore configures `curia restore`.
@@ -352,6 +384,9 @@ func (n Ntfy) validate() error {
 }
 
 func (s Serve) validate() error {
+	if s.WebSession < time.Minute || s.WebSession > 30*24*time.Hour {
+		return fmt.Errorf("serve.web_session must be between 1m and 720h, got %v", s.WebSession)
+	}
 	if err := validateURL("serve.public_url", s.PublicURL); err != nil {
 		return err
 	}

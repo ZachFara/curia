@@ -1045,3 +1045,33 @@ func TestSayInterrupt(t *testing.T) {
 		t.Error("Result() is not ok after the send")
 	}
 }
+
+func TestSayBroadcastShowsCountAndABoundedList(t *testing.T) {
+	targets := make([]route.Candidate, 200)
+	for i := range targets {
+		targets[i] = route.Candidate{Key: fmt.Sprintf("s%d", i), Type: route.TargetSession, Label: fmt.Sprintf("日本語 api-server · main · %d", i)}
+	}
+	src := &fakeSay{prop: Proposal{
+		Kind: model.KindInstruction, Targets: targets, Routed: model.RoutedAddress,
+		Candidates: []route.Candidate{{Key: "broadcast", Type: route.TargetBroadcast, Label: "everyone (200)"}},
+	}, out: sentOutcome()}
+	r := newSayRun(t, src, "", 40)
+	r.typeText("continue")
+	r.at(sayGap, "enter")
+	checkClean(t, "broadcast", r.view(), 40)
+	r.wantIn("(200)")
+	r.wantIn("and 195 more")
+	if n := strings.Count(r.view(), "\n") + 1; n > 12 {
+		t.Errorf("view has %d lines, want it bounded:\n%s", n, r.view())
+	}
+	// Enter before the dwell does not send; the kind cannot change to a rule.
+	r.at(0, "enter")
+	r.at(sayGap, "k")
+	if slices.Contains(src.recorded(), "Send") {
+		t.Error("sent before the dwell, or after a refused kind change")
+	}
+	r.at(sayGap, "enter")
+	if c := src.lastChoice(t); c.Kind != model.KindInstruction || len(c.Proposal.Targets) != 200 {
+		t.Errorf("choice = %+v, want the instruction with its 200 targets", c)
+	}
+}

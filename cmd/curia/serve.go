@@ -66,6 +66,7 @@ type serveDeps struct {
 	Tmux  tmux.Client
 	Log   *slog.Logger
 	Now   func() time.Time
+	Web   *serveWeb // nil unless serve.web is on
 }
 
 func init() {
@@ -132,11 +133,22 @@ func serveRunServer(cmd *cobra.Command, ln net.Listener, st *store.Store, cfg co
 	ctx, stopSignals := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 	_, stopPush := pushStart(ctx, st, cfg, logger) // nobody kicks: the loop's own timer sends
-	h := serveHandler(serveDeps{Store: st, Tmux: newTmuxClient(), Log: logger, Now: clock})
-	srv := serveNewServer(h, logger)
 	where := ln.Addr().String()
+	deps := serveDeps{Store: st, Tmux: newTmuxClient(), Log: logger, Now: clock}
+	if cfg.Serve.Web {
+		pub := cfg.Serve.PublicURL
+		if pub == "" {
+			pub = "http://" + where
+		}
+		deps.Web = servewebNew(servewebOpts{Store: st, Log: logger, Now: clock, TTL: cfg.Serve.WebSession, PublicURL: pub, Tmux: deps.Tmux, Write: cfg.Serve.WebWrite})
+	}
+	h := serveHandler(deps)
+	srv := serveNewServer(h, logger)
 	logger.Info("serve: listening", "addr", where)
 	serveStartLines(cmd.OutOrStdout(), where)
+	if cfg.Serve.Web {
+		serveWebStartLine(cmd.OutOrStdout(), where, cfg.Serve.WebWrite)
+	}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	select {
@@ -186,6 +198,16 @@ func serveStartLines(out io.Writer, where string) {
 	_, _ = fmt.Fprintln(out, "curia serve: plain HTTP, no TLS here: a push's one-time token is the only check, so anyone who can "+
 		"reach this address and holds an unspent token can answer that token's ticket. Keep the ntfy topic private "+
 		"(self-hosted or access-controlled) and this endpoint on your tailnet")
+}
+
+// serveWebStartLine says the web page is on (spec F26): the same two conditions as the answer buttons.
+func serveWebStartLine(out io.Writer, where string, write bool) {
+	mode := "read-only: writes are off"
+	if write {
+		mode = "writes are on (serve.web_write): the page can move tasks between backlog, ready and dropped and send confirmed messages"
+	}
+	_, _ = fmt.Fprintf(out, "curia serve: the web page is on at %s, %s: every page needs a device token (curia serve token <device>). "+
+		"Keep the ntfy topic private and this endpoint on your tailnet only, never Tailscale Funnel\n", where, mode)
 }
 
 // serveListenAddr is the address to listen on: flag, else cfg, else serveDefaultListen. It returns an
@@ -267,6 +289,10 @@ func (e *serveEndpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.EscapedPath()
+	if e.d.Web != nil && e.d.Web.handles(path) {
+		e.d.Web.ServeHTTP(w, r)
+		return
+	}
 	var rep serveReply
 	switch {
 	case path == "/healthz" && r.Method == http.MethodGet:

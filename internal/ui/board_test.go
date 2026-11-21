@@ -416,6 +416,26 @@ func TestBoardSpawnConfirmHonoursDwell(t *testing.T) {
 	_ = m
 }
 
+// D-1: the board waits out burstGap after the y like pause does: a key that
+// follows within it shows the y came in a burst, and the spawn is refused.
+func TestBoardSpawnYFollowedByAKeyIsRefused(t *testing.T) {
+	src := &fakeBoardSource{}
+	src.set(card(1, model.TaskBacklog, ""))
+	m := newBoard(t, src, &tmux.Fake{}, 120, false)
+	m = bpress(t, m, "n")
+	boardClock.advance(time.Second)
+	m, wait := m.Update(bkey("y"))
+	if wait == nil {
+		t.Fatal("a lone y after the dwell did not wait out burstGap")
+	}
+	wantBoardCalls(t, src)
+	boardClock.advance(10 * time.Millisecond)
+	m, _ = m.Update(bkey("j"))
+	m, _ = m.Update(wait())
+	wantBoardCalls(t, src)
+	_ = m
+}
+
 func TestBoardSpawnHeldYNeverConfirms(t *testing.T) {
 	src := &fakeBoardSource{}
 	src.set(card(1, model.TaskBacklog, ""))
@@ -545,6 +565,21 @@ func TestBoardPasteIsNotACommand(t *testing.T) {
 		t.Errorf("tmux calls = %q", tm.Calls)
 	}
 	_ = m
+}
+
+// A y that arrives in one read with other keys, typed text the terminal did
+// not bracket, never confirms a spawn, as in the review and decide views.
+func TestBoardSpawnPromptRefusesABurstOfKeys(t *testing.T) {
+	src := &fakeBoardSource{line: "spawned T-1"}
+	src.set(card(1, model.TaskBacklog, ""))
+	m := newBoard(t, src, &tmux.Fake{}, 120, false)
+	m = bpress(t, m, "n")
+	boardClock.advance(time.Second)
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("yy")})
+	wantBoardCalls(t, src)
+	if s := lastLine(m); s != "spawn canceled" {
+		t.Errorf("status line = %q, want the cancel", s)
+	}
 }
 
 func TestBoardTypedTextIsNotACommand(t *testing.T) {
@@ -767,10 +802,11 @@ func TestBoardShowsActionInFlight(t *testing.T) {
 	m := newBoard(t, src, &tmux.Fake{}, 120, true)
 	m = bpress(t, m, "n")
 	boardClock.advance(time.Second)
-	m, act := m.Update(bkey("y"))
-	if act == nil {
+	m, wait := m.Update(bkey("y"))
+	if wait == nil {
 		t.Fatal("y started no spawn")
 	}
+	m, act := m.Update(wait()) // the confirm message after burstGap (D-1)
 	if s := lastLine(m); s != "spawning T-1…" {
 		t.Errorf("status line = %q, want the spawn in flight", s)
 	}

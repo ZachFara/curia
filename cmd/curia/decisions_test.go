@@ -1057,19 +1057,40 @@ var userOnlyCommands = map[string][]string{
 	"curia routing reset":   {},
 	"curia setup approve":   {"T-1"},
 	"curia pause":           {"T-1"},
+	"curia show":            {"s1"}, // the transcript can hold anything the agent saw: no agent reads another session's
 	"curia resume":          {"T-1"},
+	"curia config set":      {"notify_bell", "true"},
+	"curia mode normal":     {},
+	"curia mode edits":      {},
+	"curia mode away":       {"--all"},
+	"curia mode bypass":     {"--all", "--for", "1h"},
+	"curia away":            {"6h"},
+	"curia back":            {},
+	"curia config edit":     {},
+	"curia config rollback": {"1"},
 	"curia clean":           {"T-1"},
 	"curia task add":        {"a title"},
 	"curia task edit":       {"T-1", "--title", "x"},
 	"curia task ready":      {"T-1"},
+	"curia auto-spawn on":   {},
+	"curia auto-spawn off":  {},
 	"curia task import":     {"--backlog-md"},
 	"curia install":         {},
 	"curia uninstall":       {},
 	"curia review":          {"R-1", "--drop"},
 	"curia restore":         {"--dry-run"},
+	"curia rc":              {"--all"},
 	"curia serve":           {},
+	"curia serve token":     {"phone"},
+	"curia serve revoke":    {"phone"},
+	"curia serve devices":   {},
 	"curia export obsidian": {},
 	"curia export commons":  {"D-1"},
+	"curia monitor stop":    {},                             // ends a process the user runs
+	"curia schedule":        {"go", "--at", "+1h", "--all"}, // types into agents later: only the user schedules
+	"curia schedule cancel": {"S-1"},
+	"curia schedule pause":  {"S-1"},
+	"curia schedule resume": {"S-1"},
 }
 
 // userNotOnlyCommands are the leaf commands anyone, an agent included, may
@@ -1078,10 +1099,18 @@ var userOnlyCommands = map[string][]string{
 // neither, so a new command cannot be added without that decision.
 var userNotOnlyCommands = map[string]string{
 	"curia decisions ls":          "reads the tickets only",
+	"curia decisions log":         "reads the tickets and prints cleaned, bounded text; changes nothing",
+	"curia config list":           "reads the effective settings only",
+	"curia config get":            "reads one effective setting only",
+	"curia auto-spawn status":     "reads the setting, the log and the ready tasks and prints cleaned, bounded text; changes nothing",
+	"curia config history":        "reads the revisions only",
+	"curia config doctor":         "reports problems; acknowledges an external edit only when the user guard passes",
+	"curia inbox":                 "reads the tickets, sessions and reviews and prints cleaned, bounded text, as decisions ls and reviews ls do; changes nothing",
 	"curia hook":                  "run by Claude Code's hooks; records the calling session's own event",
 	"curia ingest":                "run by cost-lens and status lines inside agent sessions; writes only cost, cache and usage readings, which nothing automatic depends on",
 	"curia launch":                "runs the agent in the caller's own process; spawn decides what is started",
 	"curia ls":                    "reads the sessions only",
+	"curia mode":                  "prints each live session's mode; the setting subcommands are user-only",
 	"curia mcp":                   "run by Claude Code; its tools cannot decide, send, spawn or pause; complete_task only files the caller's own task for review",
 	"curia messages ls":           "reads the messages only",
 	"curia next":                  "moves the tmux client to a session; changes nothing",
@@ -1095,7 +1124,14 @@ var userNotOnlyCommands = map[string]string{
 	"curia spawn":                 "agents may spawn ready tasks only (Ruling 113)",
 	"curia status":                "prints the badge",
 	"curia task ls":               "reads the tasks only",
+	"curia timeline":              "reads existing rows and prints cleaned, bounded text, as ls and read do; changes nothing",
 	"curia ui":                    "a view; its user actions go through the guard (uiUserActions)",
+	"curia monitor start":         "run by tmux's run-shell with no terminal; starts the one instance the lock allows, and nothing depends on the monitor",
+	"curia resources":             "reads the monitor's samples and prints numbers by session id; changes nothing",
+	"curia monitor status":        "reads whether the lock is held; changes nothing",
+	"curia schedule ls":           "reads the schedules only and prints cleaned, bounded text; changes nothing",
+	"curia schedule show":         "reads one schedule and its runs and prints cleaned, bounded text; changes nothing",
+	"curia time":                  "reads the stored hook events and prints numbers; writes nothing and calls no model",
 	"curia usage":                 "reads the samples and tasks and prints numbers; it pauses nothing, and the pause it suggests is typed by the user",
 	"curia version":               "prints the version",
 	"curia help":                  "cobra's help",
@@ -1106,12 +1142,13 @@ var userNotOnlyCommands = map[string]string{
 	"curia completion zsh":        "cobra's shell completion script",
 }
 
-// unclassifiedCommands are the leaf commands under root in neither table,
-// and the ones in both.
+// unclassifiedCommands are the commands under root that can run (leaves and
+// parents with a run function of their own) in neither table, and the ones
+// in both.
 func unclassifiedCommands(root *cobra.Command) []string {
 	var out []string
 	userOnlyWalk(root, func(c *cobra.Command) {
-		if c.HasSubCommands() {
+		if !c.Runnable() {
 			return
 		}
 		path := c.CommandPath()
@@ -1140,6 +1177,14 @@ func TestEveryCommandIsClassified(t *testing.T) {
 	defer rootCmd.RemoveCommand(dummy)
 	if got := unclassifiedCommands(rootCmd); !slices.Contains(got, "curia approve-everything") {
 		t.Errorf("an unclassified command is not reported: %v", got)
+	}
+	// D-9: a parent that can run itself is checked too.
+	parent := &cobra.Command{Use: "approve-all", RunE: func(*cobra.Command, []string) error { return nil }}
+	parent.AddCommand(&cobra.Command{Use: "now", Run: func(*cobra.Command, []string) {}})
+	rootCmd.AddCommand(parent)
+	defer rootCmd.RemoveCommand(parent)
+	if got := unclassifiedCommands(rootCmd); !slices.Contains(got, "curia approve-all") {
+		t.Errorf("an unclassified runnable parent is not reported: %v", got)
 	}
 }
 

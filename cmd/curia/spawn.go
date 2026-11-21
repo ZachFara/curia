@@ -310,6 +310,8 @@ func spawnCheckTask(ctx context.Context, st *store.Store, id string, o *spawnOpt
 		return model.Task{}, fmt.Errorf("%s is dropped", id)
 	case !t.PausedAt.IsZero() && o.Resume == "":
 		return model.Task{}, fmt.Errorf("%s is paused: use curia resume", id)
+	case o.ReadyOnly && t.FiledBy != "":
+		return model.Task{}, fmt.Errorf("%s was filed by an agent: only the user spawns it (curia spawn %s at a terminal)", id, id)
 	case o.ReadyOnly && t.Status != model.TaskReady:
 		return model.Task{}, fmt.Errorf("%s is %s: an agent may spawn only a task the user marked ready (curia task ready %s)",
 			id, t.Status, id)

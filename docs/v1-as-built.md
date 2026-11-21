@@ -29,14 +29,14 @@ What was checked: the statements below were read against the code of the `plan-5
 
 | Difference | Source |
 | --- | --- |
-| Six MCP tools, none of which answers a ticket, sends, spawns, pauses, approves or merges: `search_decisions`, `request_decision`, `check_decision`, `withdraw_decision`, `check_messages`, `complete_task`. | `curia mcp --help` |
+| Six MCP tools in V1, none of which answers a ticket, sends, spawns, pauses, approves or merges: `search_decisions`, `request_decision`, `check_decision`, `withdraw_decision`, `check_messages`, `complete_task`. Plan 6 adds a seventh, `file_task`, which only files a task (the code now has seven). | `curia mcp --help` |
 | A superseded answer is never delivered as live; it goes out as a fixed retraction sentence. A `curia mcp` started before an upgrade keeps returning one as live until its session restarts. | Rulings 82, 90 |
 | An answer is typed into a pane only after a capture shows Claude Code's empty prompt; otherwise it waits for the Stop hook or `check_decision`. | Rulings 85, 110; decision 0013 |
 | `task edit` uses only the `editor` config option; `$EDITOR` and `$VISUAL` are not read. Spec amended. | Ruling 107 |
 | A message status is spelled `canceled`. Spec amended. | Ruling 97 |
 | The router call is `claude -p --model haiku` with no `--json-schema`, parsed strictly. Spec amended. | Ruling 99 |
 | The user-only commands (`say`, `decide`, `decisions edit`, `install`, `uninstall`, `messages cancel`, `routing reset`, `setup approve`, `pause`, `resume`, `clean`, `review`, `restore`, `serve`, task-writing commands) need a controlling terminal, so over SSH they need a pty. A rule given to `curia say` goes through the same check: `say` as a whole needs a terminal. Spec amended. | Rulings 112, 113, 119, 123; decision 0021 |
-| Agents cannot write tasks; an agent's spawn takes only a ready task and refuses `--agent`, `--model`, `--team`, `--resume`; an agent's `send` is limited to 5 queued per target and 20 per sender in 10 minutes. | Rulings 113, 185 |
+| In V1 agents cannot write tasks. Plan 6 lets an agent FILE a task into the backlog through `file_task` (on by default at level `backlog`, `tasks.agent_filed.level`), but it cannot edit, ready or drop one and cannot spawn a task it filed. An agent's spawn takes only a ready task and refuses `--agent`, `--model`, `--team`, `--resume`; an agent's `send` is limited to 5 queued per target and 20 per sender in 10 minutes. | Rulings 113, 185 |
 | Priority is P1 to P3, default P2, set with `--priority` on `task add` and `edit`; it is not shown on the task board. | Plan 5 decision 16 |
 | Linear import is read-only with a fixed filter (assigned to you, backlog or unstarted, optionally one team, at most 200 in four pages); one failed page imports nothing; a re-import updates title, body and tags only. | decision 0030; Ruling 168 |
 
@@ -84,6 +84,6 @@ What was checked: the statements below were read against the code of the `plan-5
 3. Interrupted merge: the code runs `git merge --abort` or `git reset --merge` in one proven case (`cmd/curia/review_git.go`).
 4. Where `curia serve` binds: loopback by default, Tailscale only if named, nothing detected (`cmd/curia/serve.go`).
 5. `--head`: a full 40 or 64 digit commit id; a prefix is refused (`reviewHeadPattern`).
-6. The MCP server has six tools, not five.
+6. The MCP server has six tools, not five (Plan 6 made it seven: `file_task`).
 7. SessionStart is `idle` (`internal/state/state.go`).
 8. A rule given to `curia say`: `say` is user-only and needs a controlling terminal for every message (`userOnly` runs first); without one, nothing is sent.

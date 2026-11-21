@@ -64,6 +64,16 @@ jobs:
 
       - run: make check-static check-shards
 
+      # Report only: sizes and duplication go in the job summary and never fail the job.
+      - name: size report
+        continue-on-error: true
+        run: |
+          {
+            echo '```text'
+            make -s size-report
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Step 1 of the tests, in jobs: cmd/curia (the slowest package) sharded by
   # test name, internal/store alone, every other package (computed, so a new
   # package is never forgotten). Shard counts live in the Makefile only;

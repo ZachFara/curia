@@ -40,7 +40,8 @@ func init() {
 			"click jumps to the session's pane (a team's: the member most in need of you)\n" +
 			"and closes the popup, d opens the session's decisions to answer them (not\n" +
 			"inside an agent session) and r the review waiting for its task (read-only\n" +
-			"inside an agent session), t opens\n" +
+			"inside an agent session), i a read-only detail of the session (curia show),\n" +
+			"t opens\n" +
 			"the task board (n there spawns a task), / filters on repo, branch, last\n" +
 			"update and member name, x then y kills the pane, q or Esc quits. From 100\n" +
 			"columns COST and CACHE show each session's cost and prompt cache; b sorts\n" +
@@ -88,6 +89,11 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 	if mode == ui.ModePopup {
 		bsrc := boardSource{st: st, tm: client, cfg: cfg, refused: refused}
 		m = m.WithBoard(func() tea.Model { return ui.NewBoard(bsrc, client, clock, true) })
+		m = m.WithTimeline(func() tea.Model { return ui.NewTimeline(timelineSource(st), clock).WithText(st.TimelineText) })
+		m = m.WithDecisionLog(func() tea.Model { return ui.NewDecisionLog(decisionlogSource(st), clock) })
+		m = m.WithSettings(func() tea.Model {
+			return ui.NewSettings(settingsSource{st: st, refused: refused}, clock, settingsReason(refused))
+		})
 		if refused == nil {
 			m = m.WithPause()
 		}
@@ -106,6 +112,8 @@ func runDashboard(mode ui.Mode, opts ...tea.ProgramOption) error {
 		var closeLog func() error
 		m, closeLog = dashboardPopupViews(m, st, client, cfg, refused)
 		defer func() { _ = closeLog() }()
+		m = m.WithInbox(func() tea.Model { return ui.NewInbox(inboxSource{st: st}, client, clock) })
+		m = m.WithDetail(func(id string) tea.Model { return ui.NewDetail(newDetailSource(st, cfg), id, clock) })
 	}
 	// A hang-up or SIGTERM ends the dashboard, but an approval (or another
 	// review action) in flight finishes and is recorded first (C1).
@@ -209,6 +217,17 @@ func (s storeSource) Reviews(ctx context.Context) (map[string]string, error) {
 // While a warning is in force the pause suggestion is curia usage's
 // (usageBuild), computed nowhere else.
 func (s storeSource) Budget(ctx context.Context) (ui.Budget, error) {
+	b, err := s.usageBudget(ctx)
+	if err != nil {
+		return b, err
+	}
+	// A failed read leaves the cells empty: the column is a view, not a reason to fail.
+	b.Res, _ = resourceCells(ctx, s.st, s.cfg, clock())
+	return b, nil
+}
+
+// usageBudget is Budget's usage part.
+func (s storeSource) usageBudget(ctx context.Context) (ui.Budget, error) {
 	now := clock()
 	since := now.Add(-usage.BurnWindow)
 	samples, err := s.st.UsageSince(ctx, since)
@@ -317,7 +336,11 @@ func (b boardSource) Cards(ctx context.Context) ([]task.Card, error) {
 	if err := reconcile(ctx, b.st, b.tm, b.cfg.LogPath, now); err != nil {
 		return nil, err
 	}
-	return taskCards(ctx, b.st, now)
+	cards, err := taskCards(ctx, b.st, now)
+	if err == nil {
+		err = taskBudgets(ctx, b.st, b.cfg, cards)
+	}
+	return cards, err
 }
 
 // SetStatus moves task id between backlog and ready, in one write
@@ -337,6 +360,9 @@ func (b boardSource) SetStatus(ctx context.Context, id string, to model.TaskStat
 		cur.Status, cur.UpdatedAt = to, clock()
 		return cur, nil
 	})
+	if err == nil && to == model.TaskReady {
+		err = b.st.MarkReady(ctx, id) // the user's own key: F29's ready_hash
+	}
 	if errors.Is(err, store.ErrNoTask) {
 		return fmt.Errorf("%s: no such task", sanitize.Line(id, 40))
 	}
@@ -374,4 +400,11 @@ func (b boardSource) Spawn(ctx context.Context, id string) (string, error) {
 		}
 	}
 	return strings.Join(parts, "; "), nil
+}
+
+// timelineSource reads the dashboard's timeline view from the store; the view only reads.
+func timelineSource(st *store.Store) ui.TimelineSource {
+	return func(ctx context.Context, f ui.TimelineFilter, after model.TimelineEvent, limit int) ([]model.TimelineEvent, error) {
+		return st.Timeline(ctx, store.TimelineQuery{Since: f.Since, Cursor: after, Repo: f.Repo, TaskID: f.TaskID, Limit: limit})
+	}
 }

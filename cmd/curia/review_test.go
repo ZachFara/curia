@@ -1224,7 +1224,7 @@ func TestDashboardWaitsForReviewAction(t *testing.T) {
 	lifecycleHooks(f.spawnFixture, "pre-merge-commit", "#!/bin/sh\nsleep 2\nexit 0\n")
 	prev := runProgram
 	runProgram = func(m tea.Model, _ ...tea.ProgramOption) error {
-		m, _ = m.Update(m.Init()())
+		m = uiToSessionList(m)
 		for _, k := range []string{"r", "a", "y"} {
 			f.now = f.now.Add(2 * time.Second)
 			var cmd tea.Cmd

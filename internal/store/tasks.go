@@ -39,20 +39,24 @@ func failTask(op, id string, err error) error {
 const selectTasks = `
 SELECT n, id, title, body, repo, base_branch, status, source, source_ref, tags, branch, worktree,
   team, agent_model, pane, resume_session, created_at, updated_at, launched_at, paused_at, cleaned_at,
-  priority, agent, pane_socket
+  priority, agent, COALESCE(filed_by, ''), COALESCE(filed_reason, ''), COALESCE(filer_lineage, ''), budget_usd, pane_socket,
+  COALESCE(ready_hash, ''), auto_spawned_at
 FROM tasks`
 
 // scanTask reads one row of selectTasks.
 func scanTask(sc scanner) (model.Task, error) {
 	var t model.Task
 	var tags string
-	var created, updated, launched, paused, cleaned sql.NullString
+	var created, updated, launched, paused, cleaned, autoAt sql.NullString
+	var budget sql.NullFloat64
 	err := sc.Scan(&t.N, &t.ID, &t.Title, &t.Body, &t.Repo, &t.BaseBranch, &t.Status, &t.Source, &t.SourceRef,
 		&tags, &t.Branch, &t.Worktree, &t.Team, &t.AgentModel, &t.Pane, &t.ResumeSession,
-		&created, &updated, &launched, &paused, &cleaned, &t.Priority, &t.Agent, &t.PaneSocket)
+		&created, &updated, &launched, &paused, &cleaned, &t.Priority, &t.Agent,
+		&t.FiledBy, &t.FiledReason, &t.FiledLineage, &budget, &t.PaneSocket, &t.ReadyHash, &autoAt)
 	if err != nil {
 		return model.Task{}, err
 	}
+	t.BudgetUSD = budget.Float64
 	t.Tags = strings.Fields(tags)
 	for _, f := range []struct {
 		dst *time.Time
@@ -63,6 +67,7 @@ func scanTask(sc scanner) (model.Task, error) {
 		{&t.LaunchedAt, launched},
 		{&t.PausedAt, paused},
 		{&t.CleanedAt, cleaned},
+		{&t.AutoSpawnedAt, autoAt},
 	} {
 		v, err := parseTime(f.src)
 		if err != nil {
@@ -129,6 +134,14 @@ func withDefaults(t model.Task) model.Task {
 	return t
 }
 
+// budgetArg stores no budget (0) as NULL.
+func budgetArg(v float64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
+}
+
 // insertTask inserts t with the next id, T-<n>, and created_at = updated_at
 // = t.CreatedAt, and returns the id. The write lock makes the subselect
 // agree with the rowid n the row receives; rows are never deleted, so an
@@ -143,15 +156,15 @@ func insertTask(ctx context.Context, tx *sql.Tx, t model.Task) (string, error) {
 INSERT INTO tasks (
   id, title, body, repo, base_branch, status, source, source_ref, tags, branch, worktree,
   team, agent_model, pane, resume_session, created_at, updated_at, launched_at, paused_at, cleaned_at,
-  priority, agent, pane_socket
+  priority, agent, budget_usd, pane_socket
 ) VALUES (
   'T-' || (SELECT COALESCE(MAX(n), 0) + 1 FROM tasks), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 ) RETURNING id`,
 		t.Title, t.Body, t.Repo, t.BaseBranch, t.Status, t.Source, t.SourceRef, strings.Join(t.Tags, " "),
 		t.Branch, t.Worktree, t.Team, t.AgentModel, t.Pane, t.ResumeSession,
 		formatTime(t.CreatedAt), formatTime(t.CreatedAt), formatTime(t.LaunchedAt), formatTime(t.PausedAt),
-		formatTime(t.CleanedAt), t.Priority, t.Agent, t.PaneSocket).Scan(&id)
+		formatTime(t.CleanedAt), t.Priority, t.Agent, budgetArg(t.BudgetUSD), t.PaneSocket).Scan(&id)
 	return id, err
 }
 
@@ -293,12 +306,13 @@ func (s *Store) UpdateTask(ctx context.Context, id string, fn func(model.Task) (
 		_, err = tx.ExecContext(ctx, `
 UPDATE tasks SET title = ?, body = ?, repo = ?, base_branch = ?, status = ?, source = ?, source_ref = ?,
   tags = ?, branch = ?, worktree = ?, team = ?, agent_model = ?, pane = ?, resume_session = ?,
-  updated_at = ?, launched_at = ?, paused_at = ?, cleaned_at = ?, priority = ?, agent = ?, pane_socket = ?
+  updated_at = ?, launched_at = ?, paused_at = ?, cleaned_at = ?, priority = ?, agent = ?, budget_usd = ?, pane_socket = ?,
+  ready_hash = CASE WHEN ? = 'ready' AND launched_at IS ? THEN ready_hash END
 WHERE n = ?`,
 			next.Title, next.Body, next.Repo, next.BaseBranch, next.Status, next.Source, next.SourceRef,
 			strings.Join(next.Tags, " "), next.Branch, next.Worktree, next.Team, next.AgentModel, next.Pane,
 			next.ResumeSession, formatTime(next.UpdatedAt), formatTime(next.LaunchedAt), formatTime(next.PausedAt),
-			formatTime(next.CleanedAt), next.Priority, next.Agent, next.PaneSocket, cur.N)
+			formatTime(next.CleanedAt), next.Priority, next.Agent, budgetArg(next.BudgetUSD), next.PaneSocket, next.Status, formatTime(next.LaunchedAt), cur.N)
 	}
 	if err != nil {
 		return model.Task{}, failTask("update task", id, err)
@@ -330,7 +344,7 @@ func (s *Store) ClaimLaunch(ctx context.Context, id, seenPane string, now time.T
 		err = ErrTaskBusy
 	}
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `UPDATE tasks SET launched_at = ?, pane = '' WHERE n = ?`, formatTime(now), cur.N)
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET launched_at = ?, pane = '', ready_hash = NULL WHERE n = ?`, formatTime(now), cur.N)
 	}
 	if err != nil {
 		return model.Task{}, failTask("claim launch of", id, err)

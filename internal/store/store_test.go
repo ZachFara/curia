@@ -26,9 +26,39 @@ func dbPath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "curia.db")
 }
 
-// open opens a Store and closes it when the test ends.
+var (
+	templateOnce sync.Once
+	templateDB   *sql.DB
+)
+
+// migratedTemplate returns a connection to a fresh, fully migrated
+// database, built once per test binary: migrating from scratch costs about
+// 250 ms under -race, which was most of the per-test cost. The file lives
+// in the OS temp directory for the rest of the run.
+func migratedTemplate() *sql.DB {
+	templateOnce.Do(func() {
+		p := filepath.Join(os.TempDir(), fmt.Sprintf("curia-store-template-%d.db", os.Getpid()))
+		s, err := store.Open(p)
+		if err == nil {
+			err = s.Close()
+		}
+		if err == nil {
+			templateDB, err = sql.Open("sqlite", p)
+		}
+		if err != nil {
+			panic(err)
+		}
+	})
+	return templateDB
+}
+
+// open opens a Store and closes it when the test ends. A path with no
+// database yet starts as a copy of the migrated template (VACUUM INTO
+// refuses an existing file, which then goes to Open as it is); tests of
+// migrating from scratch call store.Open directly.
 func open(t *testing.T, path string) *store.Store {
 	t.Helper()
+	_, _ = migratedTemplate().Exec(`VACUUM INTO ?`, path)
 	s, err := store.Open(path)
 	if err != nil {
 		t.Fatalf("Open(%q): %v", path, err)
@@ -196,6 +226,12 @@ var plan3Applied = []string{
 	"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_send_limits.sql",
 }
 
+// plan5Applied and plan6Applied are what each branch's binary applied before the merge.
+var (
+	plan5Applied = []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_context_live.sql", "0009_session_checked_cwd.sql"}
+	plan6Applied = []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0009_decision_near_match.sql"}
+)
+
 // migratedDatabase builds, at path, a database with exactly the migrations
 // named applied and recorded, as a binary built with only those files
 // leaves it.
@@ -277,6 +313,12 @@ func TestBothMigrationsNumberedFive(t *testing.T) {
 		{"plan 4 database", allMigrations[:5], allMigrations},
 		{"plan 3 database", plan3Applied, append(append(slices.Clone(plan3Applied), "0005_reviews.sql"), allMigrations[6:]...)},
 		{"plan 4 database with both 0005 files", allMigrations[:6], allMigrations},
+		// 0008 and 0009 each exist twice (plan-5: context_live, checked_cwd;
+		// plan-6: config_revisions, decision_near_match). They touch different
+		// tables or columns, so their order does not matter; a store that ran
+		// either branch's set gets the other branch's two files.
+		{"plan-5 database", plan5Applied, append(slices.Clone(plan5Applied), "0008_config_revisions.sql", "0009_decision_near_match.sql", "0010_task_pane_socket.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0017_schedules.sql", "0018_container_samples.sql", "0019_session_mode.sql", "0020_auto_spawn.sql", "0021_away_runs.sql", "0022_remote_control.sql", "0023_mode_root.sql", "0024_permission_counts.sql", "0025_schedule_run_interrupted.sql", "0025_timeline_indexes.sql")},
+		{"plan-6 database", plan6Applied, append(slices.Clone(plan6Applied), "0008_context_live.sql", "0009_session_checked_cwd.sql", "0010_task_pane_socket.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0017_schedules.sql", "0018_container_samples.sql", "0019_session_mode.sql", "0020_auto_spawn.sql", "0021_away_runs.sql", "0022_remote_control.sql", "0023_mode_root.sql", "0024_permission_counts.sql", "0025_schedule_run_interrupted.sql", "0025_timeline_indexes.sql")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			path := dbPath(t)

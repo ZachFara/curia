@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/fleet"
+	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/usage"
 )
@@ -73,7 +75,16 @@ func statusBadge(ctx context.Context, args []string) (string, error) {
 	counts.Reviews = reviews
 	counts.AutoOff = autoOff
 	counts.Forecast = statusForecast(ctx, st, now)
-	return fleet.Badge(counts), nil
+	badge := fleet.Badge(counts)
+	if settingsExternalPending(ctx, st) { // C!: the user file was edited outside Curia (F28)
+		badge = strings.TrimSpace(badge + " C!")
+	}
+	for _, s := range sessions { // F20: a live bypass is always visible
+		if modeNow(s, cfg, now) == model.ModeBypass {
+			return strings.TrimSpace(badge + " BYPASS"), nil
+		}
+	}
+	return badge, nil
 }
 
 // statusForecast is the badge's limit warning, already rendered: one read of

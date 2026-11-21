@@ -607,14 +607,14 @@ func TestReviewDiffNoteShown(t *testing.T) {
 	if stat < 0 || note < stat {
 		t.Errorf("the diff note is not under the diff stat:\n%s", view)
 	}
-	if i := slices.IndexFunc(r.review().body, func(l bodyLine) bool { return l.text == d.DiffNote }); i < 0 || r.review().body[i].kind != lineWarn {
+	if i := slices.IndexFunc(r.review().body, func(l bodyLine) bool { return l.text == gutter+d.DiffNote }); i < 0 || r.review().body[i].kind != lineWarn {
 		t.Errorf("the diff note is not drawn as a warning: %+v", r.review().body)
 	}
 
 	d.DiffStat, d.DiffNote = "", "branch curia/T-41-fix-the-auth-refresh does not exist"
 	src.set(d)
 	r = openReview(t, src, ReviewOptions{})
-	r.wantIn("Diff against main:\n" + d.DiffNote)
+	r.wantIn("Diff against main:\n" + gutter + d.DiffNote)
 }
 
 func TestReviewEmptyQueueAndNoReviewForTask(t *testing.T) {
@@ -674,14 +674,14 @@ func TestReviewScrollsLongSummary(t *testing.T) {
 		if n := len(strings.Split(r.view(), "\n")); n != 30 {
 			t.Errorf("width %d: %d lines, want the height 30", width, n)
 		}
-		r.wantIn("\n1\n2\n")
-		r.wantNotIn("\n500\n")
+		r.wantIn("\n  1\n  2\n")
+		r.wantNotIn("\n  500\n")
 		r.at(reviewGap, "j", "down")
 		r.wantNotIn("Summary (the agent's):")
 		for range 40 {
 			r.at(reviewGap, "pgdown")
 		}
-		r.wantIn("\n499\n500\n")
+		r.wantIn("\n  499\n  500\n")
 		r.wantIn("Sessions: 3")
 		checkClean(t, fmt.Sprintf("width %d scrolled", width), r.view(), width)
 		r.at(reviewGap, "k", "up", "pgup")

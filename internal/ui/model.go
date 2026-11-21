@@ -61,6 +61,10 @@ type Source interface {
 type Budget struct {
 	Status string             // the forecast warning or the API projection; "" when there is none
 	Burn   map[string]float64 // USD per hour by session id; nil when unknown
+	// Res is each session's CPU/RAM cell by session id (F19), only for a
+	// current sample; nil when the source has no resource data, empty when
+	// the monitor has none (the column then shows "?").
+	Res map[string]string
 
 	// The pause suggestion (section 4.4), only while a limit forecast is in
 	// force; PauseTask is "" when there is none.
@@ -163,29 +167,27 @@ type Model struct {
 
 	chain int // the refresh chain that is live; messages of earlier chains are dropped
 
-	open     func(sessionID string) tea.Model // builds the decide view; nil: d cannot answer
-	noAnswer string                           // why d cannot answer; "": inside an agent session
-	noKill   string                           // why x cannot kill; "": it can
-	board    func() tea.Model                 // builds the task board; nil: t and n say why
-	review   func(taskID string) tea.Model    // builds the review view; nil: r says why
-	noReview string                           // why r cannot open a review; "": inside an agent session
-	child    tea.Model                        // the decide view, the board or the review view while it is shown
-	childGen int                              // which child is (or was last) shown
+	views    map[string]func(arg string) tea.Model // each view's factory by name, set by its WithX in its own file; replaced, never mutated
+	noAnswer string                                // why d cannot answer; "": inside an agent session
+	noKill   string                                // why x cannot kill; "": it can
+	noReview string                                // why r cannot open a review; "": inside an agent session
+	child    tea.Model                             // the shown view: decide, board, review, ...
+	childGen int                                   // which child is (or was last) shown
 
 	rowFace  string        // the selected row and its task's pending review, as last drawn
 	rowSince time.Time     // when rowFace came, or an r too soon restarted the wait
 	rowWait  time.Duration // how long r waits from rowSince: dwell, then quietPeriod after an r too soon
 
-	pauseOn    bool            // WithPause: P can pause the suggested task
-	noPause    string          // why P cannot pause; "": noticeNoPause
-	pauseAsk   pauseSuggestion // what the open pause prompt names; zero: no prompt
-	pauseSince time.Time       // when the prompt opened, or a y too soon restarted its wait
-	pauseWait  time.Duration   // how long y waits from pauseSince: dwell, then quietPeriod after a y too soon
-	keyAt      time.Time       // when the last key came, acted on or not
-	prevKeyAt  time.Time       // when the key before it came
-	confirmAt  time.Time       // when a y was taken, waiting out burstGap before it pauses; zero when none
-	confirmSeq int             // the pauseConfirmMsg the taken y waits for
-	pausing    string          // the task a pause in flight is for; "" when none
+	pauseOn  bool            // WithPause: P can pause the suggested task
+	noPause  string          // why P cannot pause; "": noticeNoPause
+	pauseAsk pauseSuggestion // what the open pause prompt names; zero: no prompt
+	gate     confirmGate     // the pause prompt's wait and burst rule
+	pausing  string          // the task a pause in flight is for; "" when none
+
+	inbox    func() tea.Model // builds the inbox, the popup's default view; nil: none
+	inboxKey string           // the item the inbox opened a view for, and where it stood
+	inboxAt  int
+	viaInbox bool // the shown child was opened from the inbox, which a closing decide or review view returns to
 }
 
 // rowKind is what a row of the table stands for.
@@ -313,20 +315,6 @@ func New(src Source, tm tmux.Client, cfg config.Config, now func() time.Time, mo
 	return Model{src: src, tm: tm, cfg: cfg, now: now, mode: mode}
 }
 
-// WithDecide returns m with the d key enabled in the popup: on a row with
-// open tickets, d shows the model open builds for that session's id until
-// it sends DecideClosedMsg. Without it, d says why it cannot answer.
-func (m Model) WithDecide(open func(sessionID string) tea.Model) Model {
-	m.open = open
-	return m
-}
-
-// WithoutDecide returns m with the d key disabled, saying why when pressed.
-func (m Model) WithoutDecide(why string) Model {
-	m.open, m.noAnswer = nil, why
-	return m
-}
-
 // WithoutKill returns m with x (kill a pane) disabled, saying why when
 // pressed.
 func (m Model) WithoutKill(why string) Model {
@@ -334,26 +322,53 @@ func (m Model) WithoutKill(why string) Model {
 	return m
 }
 
-// WithBoard returns m with the t key enabled: t shows the model open builds
-// until it sends BoardClosedMsg, and n shows it with the notice "pick a
-// task, then n". Without it, both say the board is in the popup.
-func (m Model) WithBoard(open func() tea.Model) Model {
-	m.board = open
+// WithInbox returns m opening on the inbox: open builds it, Tab on the
+// session list returns to it, and the decide and review views it opens come
+// back to it when they close.
+func (m Model) WithInbox(open func() tea.Model) Model {
+	m.inbox = open
 	return m
 }
 
-// WithReview returns m with the r key enabled in the popup: on a row whose
-// task has a pending review, r shows the model open builds for that task's
-// id until it sends ReviewClosedMsg.
-func (m Model) WithReview(open func(taskID string) tea.Model) Model {
-	m.review = open
-	return m
+// openInboxMsg shows the inbox as the first view.
+type openInboxMsg struct{}
+
+func (m Model) openInbox() (Model, tea.Cmd) {
+	if m.inbox == nil || m.mode != ModePopup {
+		return m, nil
+	}
+	m.viaInbox = true
+	return m.showChild(m.inbox())
 }
 
-// WithoutReview returns m with the r key disabled, saying why when pressed.
-func (m Model) WithoutReview(why string) Model {
-	m.review, m.noReview = nil, why
-	return m
+// rebuiltInbox is a fresh inbox with the cursor where the item last opened stood.
+func (m Model) rebuiltInbox() tea.Model {
+	c := m.inbox()
+	if in, ok := c.(InboxModel); ok {
+		return in.keep(m.inboxKey, m.inboxAt)
+	}
+	return c
+}
+
+// openFromInbox opens the decide or review view for an item the inbox has
+// just found still waiting, by the same factories d and r use, or tells the
+// inbox why not (read-only, inside an agent session).
+func (m Model) openFromInbox(it InboxItem) (Model, tea.Cmd) {
+	switch {
+	case it.Kind == InboxReview && m.views["review"] != nil:
+		return m.showChild(m.views["review"](it.TaskID))
+	case it.Kind == InboxReview:
+		return m.tellInbox(cmp.Or(m.noReview, noticeNoReview))
+	case m.views["decide"] != nil:
+		return m.showChild(m.views["decide"](it.SessionID))
+	}
+	return m.tellInbox(cmp.Or(m.noAnswer, noticeNoAnswer))
+}
+
+func (m Model) tellInbox(text string) (Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.child, cmd = m.child.Update(InboxNoticeMsg{Text: text})
+	return m, wrapChild(m.childGen, cmd)
 }
 
 // WithPause returns m with the P key enabled in the popup: while the
@@ -373,6 +388,9 @@ func (m Model) WithoutPause(why string) Model {
 
 // Init starts the first refresh.
 func (m Model) Init() tea.Cmd {
+	if m.inbox != nil {
+		return func() tea.Msg { return openInboxMsg{} }
+	}
 	return m.refresh()
 }
 
@@ -424,6 +442,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateChild(msg)
 	}
 	switch msg := msg.(type) {
+	case openInboxMsg:
+		return m.openInbox()
 	case refreshMsg:
 		if msg.chain != m.chain {
 			return m, nil
@@ -453,8 +473,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // keyAfterPauseConfirm's, and several runes of one read are taken one by
 // one.
 func (m Model) keyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.prevKeyAt, m.keyAt = m.keyAt, m.now()
-	if !m.confirmAt.IsZero() {
+	m.gate.keyed(m.now())
+	if m.gate.waiting() {
 		return m.keyAfterPauseConfirm()
 	}
 	if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste {
@@ -487,75 +507,6 @@ func (m Model) applyRefresh(msg refreshMsg) Model {
 		}
 	}
 	return m.reselect()
-}
-
-// openDecide shows the decide view for the selected session's tickets. It
-// does nothing in the sidebar, which reads no counts, and says why when
-// the session has no open ticket or the dashboard has no factory. The view
-// gets the window size, and its commands are wrapped as child gen.
-func (m Model) openDecide() (Model, tea.Cmd) {
-	r, ok := m.current()
-	if m.mode != ModePopup || !ok {
-		return m, nil
-	}
-	if c := m.counts[r.s.ID]; c.Blocking+c.Assume == 0 {
-		m.notice = "no open decisions"
-		return m, nil
-	}
-	if m.open == nil {
-		m.notice = noticeNoAnswer
-		if m.noAnswer != "" {
-			m.notice = m.noAnswer
-		}
-		return m, nil
-	}
-	return m.showChild(m.open(r.s.ID))
-}
-
-// openReview shows the review view for the selected row's task: on a
-// group row the lead's. It says why not in the sidebar, which reads no
-// reviews, without a factory, and when the last good Reviews read has no
-// pending review for the task. It opens only once the row has been on
-// screen, as it is, for the dwell. An r too soon restarts the wait, now as
-// long as the quiet period, so the repeats of a held r that starts too
-// soon never open the view (a held key's first repeat comes 375 to 660 ms
-// after the press; Rulings 67, 88). From then on every key goes to the
-// view, whose own guards decide what acts.
-func (m Model) openReview() (Model, tea.Cmd) {
-	r, ok := m.current()
-	switch {
-	case m.mode != ModePopup:
-		m.notice = noticeReviewSidebar
-		return m, nil
-	case !ok:
-		return m, nil
-	case m.review == nil:
-		m.notice = cmp.Or(m.noReview, noticeNoReview)
-		return m, nil
-	}
-	if _, pending := m.reviews[r.s.TaskID]; r.s.TaskID == "" || !pending {
-		m.notice = noticeNoReviewWaiting
-		return m, nil
-	}
-	if now := m.now(); now.Sub(m.rowSince) < max(m.rowWait, dwell) {
-		m.rowSince, m.rowWait, m.notice = now, quietPeriod, noticeTooSoon
-		return m, nil
-	}
-	return m.showChild(m.review(r.s.TaskID))
-}
-
-// openBoard shows the task board, with notice on its status line when it
-// is not empty, or says why there is none.
-func (m Model) openBoard(notice string) (Model, tea.Cmd) {
-	if m.board == nil {
-		m.notice = noticeNoBoard
-		return m, nil
-	}
-	child := m.board()
-	if b, ok := child.(BoardModel); ok && notice != "" {
-		child = b.WithNotice(notice)
-	}
-	return m.showChild(child)
 }
 
 // showChild shows child, the decide view, the board or the review view,
@@ -591,7 +542,29 @@ func (m Model) updateChild(msg tea.Msg) (tea.Model, tea.Cmd) {
 		msg = cm.msg
 	}
 	switch msg := msg.(type) {
-	case DecideClosedMsg, BoardClosedMsg, ReviewClosedMsg:
+	case InboxOpenMsg:
+		m.inboxKey, m.inboxAt = msg.Item.Key, msg.Index
+		return m.openFromInbox(msg.Item)
+	case TimelineOpenMsg:
+		return m.openFromTimeline(msg.Event)
+	case InboxClosedMsg:
+		m.child, m.viaInbox, m.chain = nil, false, m.chain+1
+		if msg.Board {
+			return m.openBoard("")
+		}
+		return m, m.refresh()
+	case DecideClosedMsg, ReviewClosedMsg:
+		if m.viaInbox && m.inbox != nil { // back to the list the item came from
+			return m.showChild(m.rebuiltInbox())
+		}
+		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
+		m.chain++
+		return m, m.refresh()
+	case DetailJumpMsg:
+		m.child, m.chain = nil, m.chain+1
+		next, cmd := m.jump()
+		return next, tea.Batch(cmd, next.refresh())
+	case childClosed:
 		m.child, m.notice, m.rowSince, m.rowWait = nil, "", m.now(), dwell
 		m.chain++
 		return m, m.refresh()
@@ -853,12 +826,15 @@ func (m Model) updateRunes(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.notice = ""
 		return m.cancelPause(noticePauseCanceled), nil
 	}
+	if m.killPane != "" { // a y in a read of several keys never kills
+		return m.cancelKill(), nil
+	}
 	var cmds []tea.Cmd
 	for _, r := range msg.Runes {
 		var cmd tea.Cmd
 		m, cmd = m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}, Alt: msg.Alt})
 		cmds = append(cmds, cmd)
-		if m.child != nil || m.pauseAsk != (pauseSuggestion{}) {
+		if m.child != nil || m.pauseAsk != (pauseSuggestion{}) || m.killPane != "" {
 			break
 		}
 	}
@@ -874,7 +850,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.notice = noticePausing
 		return m, nil
 	case m.killPane != "":
-		return m.confirmKill(msg), nil
+		return m.killKey(msg)
 	case m.pauseAsk != (pauseSuggestion{}):
 		return m.pauseKey(msg)
 	case m.filtering:
@@ -882,38 +858,16 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case msg.Paste: // pasted text is never a command
 		return m, nil
 	}
+	if msg.Type == tea.KeyTab {
+		return m.openInbox()
+	}
 	return m.commandKey(msg)
 }
 
-// commandKey handles a key on the table.
+// commandKey handles a key on the table: the command registered for it.
 func (m Model) commandKey(msg tea.KeyMsg) (Model, tea.Cmd) {
-	switch msg.String() {
-	case "q", "esc":
-		return m, tea.Quit
-	case "j", "down":
-		return m.moveTo(m.cursor + 1), nil
-	case "k", "up":
-		return m.moveTo(m.cursor - 1), nil
-	case "enter":
-		return m.jump()
-	case " ":
-		return m.toggleTeam(), nil
-	case "/":
-		m.filtering = true
-	case "x":
-		return m.askKill(), nil
-	case "d":
-		return m.openDecide()
-	case "t":
-		return m.openBoard("")
-	case "n":
-		return m.openBoard(noticePickTask)
-	case "r":
-		return m.openReview()
-	case "b":
-		return m.toggleBurn(), nil
-	case "P":
-		return m.askPause(), nil
+	if c, ok := lookupCommand(msg.String()); ok {
+		return c.run(m)
 	}
 	return m, nil
 }
@@ -992,6 +946,7 @@ func (m Model) askKill() Model {
 	}
 	if m.notice = unreachable(r.s, m.live); m.notice == "" {
 		m.killPane = r.s.Pane
+		m.gate.open(m.now())
 	}
 	return m
 }
@@ -1018,15 +973,33 @@ func unreachable(s model.Session, live []tmux.Pane) string {
 // recorded on another tmux server.
 const noticeOtherServer = "on another tmux server: open the dashboard there"
 
-// confirmKill kills the pane on "y"; any other key cancels. The row
-// disappears or changes on a later refresh; the store is not edited here.
-func (m Model) confirmKill(msg tea.KeyMsg) Model {
-	pane := m.killPane
-	m.killPane = ""
-	if msg.String() != "y" {
-		m.notice = "kill canceled"
-		return m
+// killKey takes a "y" like pauseKey: behind the shared confirmGate (dwell,
+// burst rule, wait after the y), it kills once burstGap has passed with no
+// other key. Any other key and a paste cancel.
+func (m Model) killKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if msg.Paste || msg.String() != "y" {
+		return m.cancelKill(), nil
 	}
+	if now := m.now(); m.gate.soon(now) {
+		m.gate.refuse(now)
+		m.notice = noticeTooSoon
+		return m, nil
+	}
+	seq := m.gate.take(m.now())
+	return m, tea.Tick(burstGap, func(time.Time) tea.Msg { return pauseConfirmMsg{seq: seq} })
+}
+
+// cancelKill closes the kill prompt, and a "y" waiting with it.
+func (m Model) cancelKill() Model {
+	m.killPane, m.gate.confirmAt, m.notice = "", time.Time{}, "kill canceled"
+	return m
+}
+
+// kill kills the pane the prompt named. The row disappears or changes on a
+// later refresh; the store is not edited here.
+func (m Model) kill() Model {
+	pane := m.killPane
+	m.killPane, m.gate.confirmAt = "", time.Time{}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxTimeout)
 	defer cancel()
 	if err := m.tm.KillPane(ctx, pane); err != nil {
@@ -1051,8 +1024,7 @@ func (m Model) updateMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	case m.pauseAsk != (pauseSuggestion{}):
 		return m.cancelPause(noticePauseCanceled), nil
 	case m.killPane != "":
-		m.killPane, m.notice = "", "kill canceled"
-		return m, nil
+		return m.cancelKill(), nil
 	}
 	i := m.offset + msg.Y - 1 // line 0 is the header
 	if msg.Y < 1 || i >= len(m.rows) || (m.visibleRows() > 0 && msg.Y > m.visibleRows()) {
@@ -1071,7 +1043,8 @@ func (m Model) askPause() Model {
 	case m.budget.PauseTask == "" || m.budget.PauseBusy:
 		m.notice = noticeNothingToPause
 	default:
-		m.pauseAsk, m.pauseSince, m.pauseWait = m.budget.suggestion(), m.now(), dwell
+		m.pauseAsk = m.budget.suggestion()
+		m.gate.open(m.now())
 	}
 	return m
 }
@@ -1086,12 +1059,12 @@ func (m Model) pauseKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if msg.Paste || msg.String() != "y" {
 		return m.cancelPause(noticePauseCanceled), nil
 	}
-	if now := m.now(); now.Sub(m.pauseSince) < m.pauseWait || inBurst(now, m.prevKeyAt) {
-		m.pauseSince, m.pauseWait, m.notice = now, quietPeriod, noticeTooSoon
+	if now := m.now(); m.gate.soon(now) {
+		m.gate.refuse(now)
+		m.notice = noticeTooSoon
 		return m, nil
 	}
-	m.confirmAt, m.confirmSeq = m.now(), m.confirmSeq+1
-	seq := m.confirmSeq
+	seq := m.gate.take(m.now())
 	return m, tea.Tick(burstGap, func(time.Time) tea.Msg { return pauseConfirmMsg{seq: seq} })
 }
 
@@ -1101,10 +1074,17 @@ func (m Model) pauseKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 // Later (the wait's message is late) the pause starts and the key is
 // ignored.
 func (m Model) keyAfterPauseConfirm() (Model, tea.Cmd) {
-	if inBurst(m.keyAt, m.confirmAt) {
-		m.confirmAt = time.Time{}
-		m.pauseSince, m.pauseWait, m.notice = m.keyAt, quietPeriod, noticeTooSoon
+	if m.gate.late() {
+		m.notice = noticeTooSoon
 		return m, nil
+	}
+	return m.finishConfirm()
+}
+
+// finishConfirm acts on the taken "y" of whichever prompt is open.
+func (m Model) finishConfirm() (Model, tea.Cmd) {
+	if m.killPane != "" {
+		return m.kill(), nil
 	}
 	return m.startPause()
 }
@@ -1112,10 +1092,10 @@ func (m Model) keyAfterPauseConfirm() (Model, tea.Cmd) {
 // applyPauseConfirm starts the pause of the "y" msg waited for, when it
 // still waits.
 func (m Model) applyPauseConfirm(msg pauseConfirmMsg) (Model, tea.Cmd) {
-	if msg.seq != m.confirmSeq || m.confirmAt.IsZero() {
+	if !m.gate.due(msg.seq) {
 		return m, nil
 	}
-	return m.startPause()
+	return m.finishConfirm()
 }
 
 // startPause closes the prompt and pauses the task it named, off the update
@@ -1123,7 +1103,7 @@ func (m Model) applyPauseConfirm(msg pauseConfirmMsg) (Model, tea.Cmd) {
 // (applyRefresh), and the store's Pause checks it again.
 func (m Model) startPause() (Model, tea.Cmd) {
 	ask := m.pauseAsk
-	m.confirmAt, m.pauseAsk = time.Time{}, pauseSuggestion{}
+	m.gate.confirmAt, m.pauseAsk = time.Time{}, pauseSuggestion{}
 	m.pausing = ask.task
 	src := m.src
 	return m, call(pauseTimeout, func(ctx context.Context) tea.Msg {
@@ -1145,7 +1125,7 @@ func (m Model) applyPaused(msg pausedMsg) Model {
 // cancelPause closes the pause prompt, and a "y" waiting with it, with
 // notice.
 func (m Model) cancelPause(notice string) Model {
-	m.pauseAsk, m.confirmAt, m.notice = pauseSuggestion{}, time.Time{}, notice
+	m.pauseAsk, m.gate.confirmAt, m.notice = pauseSuggestion{}, time.Time{}, notice
 	return m
 }
 

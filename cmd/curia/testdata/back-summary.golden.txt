@@ -1,0 +1,11 @@
+Away 2026-11-20 09:00 to 10:00 (1h0m0s), ended with curia back.
+What each agent did:
+  nothing recorded
+Refused (1 call(s); one line per session, tool and command line, in the order first seen):
+  1x s1abcdef Bash: git push origin main
+Waiting for you:
+  0 blocking ticket(s) raised while away; 0 assumption(s) to confirm (0 of them were blocking and became assumptions): curia decisions ls
+  0 review(s) waiting; 0 message(s) queued
+Spend: cost +$0.00
+Not ready when you left: s1abcdef (cannot be messaged)
+Curia's own mode rows are restored (a saved bypass is dropped; type it again). Claude Code's own permission mode is NOT restored: a session resumed during away or bypass is in Claude Code's default mode now.

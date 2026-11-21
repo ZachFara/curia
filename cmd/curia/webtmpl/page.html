@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{{if ne .Kind "say"}}<meta http-equiv="refresh" content="5">{{end}}
+<title>Curia {{.Title}}</title>
+<link rel="stylesheet" href="/web.css">
+</head>
+<body>
+<nav><a href="/">Board</a><a href="/timeline">Timeline</a><a href="/decisions">Decisions</a><a href="/usage">Usage</a><a href="/settings">Settings</a>{{if .Write}}<a href="/say">Message</a>{{end}}</nav>
+<h1>{{.Title}}</h1>
+{{if .Flash}}<p class="flash">{{.Flash}}</p>{{end}}
+{{if eq .Kind "board"}}
+{{range .Columns}}<h2>{{.Heading}} ({{.Count}})</h2>
+{{if .Cards}}<table><tr><th>Task</th><th>Title</th><th>Repo</th><th>P</th>{{if $.Write}}<th>Move</th>{{end}}</tr>
+{{range .Cards}}<tr><td>{{.ID}}</td><td>{{.Title}}</td><td>{{.Repo}}</td><td>{{.Priority}}</td>{{if $.Write}}<td>{{$id := .ID}}{{range .Moves}}<form method="post" action="/task/move"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{$id}}"><button type="submit" name="to" value="{{.}}">{{.}}</button></form>{{end}}</td>{{end}}</tr>
+{{end}}</table>{{if .More}}<p>and {{.More}} more</p>{{end}}{{else}}<p>none</p>{{end}}
+{{end}}
+{{else if eq .Kind "timeline"}}
+<p>The last 24 hours, newest first. A turn's last line is not shown here.</p>
+<table><tr><th>Time (UTC)</th><th>Who</th><th>Kind</th><th>Line</th></tr>
+{{range .Events}}<tr><td>{{.At}}</td><td>{{.Who}}</td><td>{{.Kind}}</td><td>{{.Line}}</td></tr>
+{{end}}</table>
+{{else if eq .Kind "decisions"}}
+<p>{{.Summary}}</p>
+<table><tr><th>ID</th><th>Status</th><th>Scope</th><th>Date</th><th>Reuse</th><th>Asked</th><th>Question</th><th>Answer</th></tr>
+{{range .Rows}}<tr><td>{{.ID}}</td><td>{{.Status}}</td><td>{{.Scope}}</td><td>{{.Date}}</td><td>{{.Reuse}}</td><td>{{.Asked}}</td><td>{{.Question}}</td><td>{{.Answer}}</td></tr>
+{{end}}</table>
+{{else if eq .Kind "usage"}}
+<pre>{{.Text}}</pre>
+{{else if eq .Kind "say"}}
+<form method="post" action="/say/send">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<p><label>To <select name="target">{{range .Targets}}<option value="{{.Ref}}">{{.Label}}</option>{{end}}</select></label></p>
+<p><label>Message (up to 800 characters)<br><textarea name="text" rows="4" cols="40" maxlength="800"></textarea></label></p>
+<button type="submit">Queue it</button>
+</form>
+<h2>Waiting for your confirmation</h2>
+{{range .Held}}<form method="post" action="/say/confirm"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><p>{{.ID}} to {{.Target}}: {{.Text}} <button type="submit">Send</button></p></form>
+{{else}}<p>none</p>{{end}}
+{{else if eq .Kind "settings"}}
+<p>Read-only. Change settings with curia config on the machine.</p>
+<table><tr><th>Key</th><th>Value</th><th>From</th></tr>
+{{range .Settings}}<tr><td>{{.Key}}</td><td>{{.Value}}</td><td>{{.Source}}{{if .Refused}} (repository value refused: {{.Refused}}){{end}}</td></tr>
+{{end}}</table>
+{{end}}
+</body>
+</html>

@@ -217,7 +217,7 @@ func precedentIDs(t *testing.T, m map[string]any) []string {
 	return ids
 }
 
-func TestToolSurfaceIsExactlySix(t *testing.T) {
+func TestToolSurfaceIsExactlySevenWithFileTaskTheSeventh(t *testing.T) {
 	f := newFixture(t)
 	var names []string
 	for _, tool := range f.tools {
@@ -240,7 +240,7 @@ func TestToolSurfaceIsExactlySix(t *testing.T) {
 			t.Errorf("%s has no Call", tool.Name)
 		}
 	}
-	want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision", "check_messages", "complete_task"}
+	want := []string{"search_decisions", "request_decision", "check_decision", "withdraw_decision", "check_messages", "complete_task", "file_task"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("names = %v, want %v", names, want)
 	}
@@ -251,6 +251,7 @@ func TestToolSurfaceIsExactlySix(t *testing.T) {
 		"withdraw_decision": "Withdraw your own open ticket, giving the reason or the past decision that settles it.",
 		"check_messages":    "Read the messages the user sent to this session. Call it when a message says its wording was simplified, or to see whether anything is waiting. New messages come under messages; the last 5 messages already typed into your prompt come again under typed_earlier, newest first, with their full wording.",
 		"complete_task":     "Tell the user the task is finished and ready for review. Call it once everything is committed, with a short summary and the state of the tests.",
+		"file_task":         fileDescription,
 	}
 	for _, tool := range f.tools {
 		if tool.Description != descs[tool.Name] {
@@ -290,6 +291,7 @@ func TestSchemasAreExact(t *testing.T) {
   "precedent_id":{"type":"string","description":"The past decision that settles this, if one does."}}}`,
 		"check_messages": `{"type":"object","properties":{}}`,
 		"complete_task":  `{"type":"object","required":["summary","tests_status"],"properties":{"summary":{"type":"string","maxLength":2000},"tests_status":{"type":"string","enum":["passed","failed","not_run"]},"tests_detail":{"type":"string","maxLength":200}}}`,
+		"file_task":      fileSchema,
 	}
 	if len(want) != len(f.tools)-1 {
 		t.Fatalf("schemas checked for %d tools, want all but request_decision", len(want))
@@ -1273,5 +1275,38 @@ func TestRuleShownAsRuleInPrecedent(t *testing.T) {
 		default:
 			t.Errorf("unexpected %v", p)
 		}
+	}
+}
+
+// F25: a ticket raised although request_decision returned a near match
+// records it; one with no near match records none.
+func TestRequestRecordsNearMatch(t *testing.T) {
+	f := newFixture(t)
+	f.decided(otherInRepoA, webhookQ)
+	f.mustCall("request_decision", ticket("Use Postgres or Redis to store the webhook events?"))
+	f.mustCall("request_decision", ticket("Which logging library should the exporter use for its output?"))
+	raw, err := sql.Open("sqlite", f.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	got := map[string]string{}
+	rows, err := raw.Query(`SELECT id, COALESCE(near_match, '') FROM decisions`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, near string
+		if err = rows.Scan(&id, &near); err != nil {
+			t.Fatal(err)
+		}
+		got[id] = near
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"D-1": "", "D-2": "D-1", "D-3": ""}; !reflect.DeepEqual(got, want) {
+		t.Errorf("near_match = %v, want %v", got, want)
 	}
 }

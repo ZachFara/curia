@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ZachFara/curia/internal/config"
 )
 
 // hookEvents are the Claude Code hook names Curia registers for.
@@ -91,45 +93,107 @@ func withCurrent(entries []any, bin, ev string) ([]any, bool) {
 	return entries, true
 }
 
-// toolRules are the permission rules that let the six curia MCP tools run
+// toolRules are the permission rules that let the seven curia MCP tools run
 // without a prompt.
 var toolRules = []string{
 	"mcp__curia__search_decisions", "mcp__curia__request_decision",
 	"mcp__curia__check_decision", "mcp__curia__withdraw_decision",
-	"mcp__curia__check_messages", "mcp__curia__complete_task",
+	"mcp__curia__check_messages", "mcp__curia__complete_task", "mcp__curia__file_task",
 }
 
-// AllowTools adds each of the six curia MCP tool rules that is not already
+// AllowTools adds each of the seven curia MCP tool rules that is not already
 // in permissions.allow of the settings file at settingsPath, creating the
 // file, permissions and allow as needed, in one write with the usual backup.
-// When all six are there it writes nothing. A permissions or allow value of
+// When all seven are there it writes nothing. A permissions or allow value of
 // an unexpected type is an error and nothing is written.
 func AllowTools(settingsPath string, now time.Time) error {
+	return addRules(settingsPath, "allow", toolRules, now)
+}
+
+// ownFileDenyRules are the permission deny rules for Curia's own files (spec
+// F28): Claude Code enforces them itself, so they hold when the hook
+// crashes or times out (a hook fails open). An Edit rule covers every file
+// edit tool; Bash is not covered by it.
+var ownFileDenyRules = []string{
+	"Edit(~/.config/curia/**)", "Edit(~/.local/share/curia/**)", "Edit(~/.local/state/curia/**)",
+}
+
+// ownFileRules are ownFileDenyRules plus the directories in use: the XDG
+// ones (config.XDGDir, as the hook's protected roots resolve them) and each
+// of files (a relocated database or log, with its -wal and -shm) that is not
+// inside them. A path under home is written "~/...", any other "//abs" (Claude
+// Code's absolute form).
+func ownFileRules(files []string) []string {
+	rules := slices.Clone(ownFileDenyRules)
+	home, _ := os.UserHomeDir()
+	rule := func(p string) string {
+		if rest, ok := strings.CutPrefix(p, home+"/"); ok && home != "" {
+			return "Edit(~/" + rest + ")"
+		}
+		return "Edit(/" + p + ")"
+	}
+	add := func(r string) {
+		if !slices.Contains(rules, r) {
+			rules = append(rules, r)
+		}
+	}
+	var dirs []string
+	if home != "" {
+		for _, x := range [][2]string{{"XDG_CONFIG_HOME", ".config"}, {"XDG_DATA_HOME", ".local/share"}, {"XDG_STATE_HOME", ".local/state"}} {
+			d := config.XDGDir(x[0], home, x[1])
+			dirs = append(dirs, d+"/")
+			add(rule(d + "/**"))
+		}
+	}
+	for _, f := range files {
+		f = filepath.Clean(f)
+		if !filepath.IsAbs(f) || slices.ContainsFunc(dirs, func(d string) bool { return strings.HasPrefix(f, d) }) {
+			continue
+		}
+		for _, p := range []string{f, f + "-wal", f + "-shm"} {
+			add(rule(p))
+		}
+	}
+	return rules
+}
+
+// DenyOwnFiles adds the deny rules for Curia's files (ownFileRules: the
+// home defaults, the XDG directories in use, and files, a relocated database
+// or log path) to permissions.deny of the settings file as AllowTools adds
+// its rules: additive, one write with a backup, nothing written when they
+// are all there.
+func DenyOwnFiles(settingsPath string, now time.Time, files ...string) error {
+	return addRules(settingsPath, "deny", ownFileRules(files), now)
+}
+
+// addRules adds each of rules missing from permissions[key] of the settings
+// file, in one write.
+func addRules(settingsPath, key string, rules []string, now time.Time) error {
 	settingsPath = filepath.Clean(settingsPath)
 	raw, settings, err := loadSettings(settingsPath)
 	if err != nil {
 		return err
 	}
-	perms, allow, err := allowList(settings)
+	perms, list, err := ruleList(settings, key)
 	if err != nil {
 		return fmt.Errorf("%s: %w", settingsPath, err)
 	}
 	changed := false
-	for _, rule := range toolRules {
-		if !slices.Contains(allow, any(rule)) {
-			allow = append(allow, rule)
+	for _, rule := range rules {
+		if !slices.Contains(list, any(rule)) {
+			list = append(list, rule)
 			changed = true
 		}
 	}
 	if !changed {
 		return nil
 	}
-	perms["allow"] = allow
+	perms[key] = list
 	settings["permissions"] = perms
 	return saveSettings(settingsPath, raw, settings, now)
 }
 
-// ToolsAllowed reports whether all six curia MCP tool rules are already in
+// ToolsAllowed reports whether all seven curia MCP tool rules are already in
 // permissions.allow of the settings file at settingsPath. A file that is
 // missing, unreadable or of an unexpected shape reports false.
 func ToolsAllowed(settingsPath string) bool {
@@ -137,7 +201,7 @@ func ToolsAllowed(settingsPath string) bool {
 	if err != nil {
 		return false
 	}
-	_, allow, err := allowList(settings)
+	_, allow, err := ruleList(settings, "allow")
 	if err != nil {
 		return false
 	}
@@ -149,9 +213,9 @@ func ToolsAllowed(settingsPath string) bool {
 	return true
 }
 
-// allowList returns settings["permissions"] and its "allow" list; an absent
-// one is returned empty and not yet stored in settings.
-func allowList(settings map[string]any) (map[string]any, []any, error) {
+// ruleList returns settings["permissions"] and its list under key ("allow"
+// or "deny"); an absent one is returned empty and not yet stored in settings.
+func ruleList(settings map[string]any, key string) (map[string]any, []any, error) {
 	v, present := settings["permissions"]
 	if !present {
 		return map[string]any{}, nil, nil
@@ -160,24 +224,24 @@ func allowList(settings map[string]any) (map[string]any, []any, error) {
 	if !ok {
 		return nil, nil, fmt.Errorf(`"permissions" must be an object, found %T`, v)
 	}
-	a, present := perms["allow"]
+	a, present := perms[key]
 	if !present {
 		return perms, nil, nil
 	}
-	allow, ok := a.([]any)
+	list, ok := a.([]any)
 	if !ok {
-		return nil, nil, fmt.Errorf(`permissions.allow must be an array, found %T`, a)
+		return nil, nil, fmt.Errorf(`permissions.%s must be an array, found %T`, key, a)
 	}
-	return perms, allow, nil
+	return perms, list, nil
 }
 
-// Unhooks removes the hook commands Curia added, and the six curia MCP tool
-// rules whoever added them, from the settings file at settingsPath, in one
+// Unhooks removes the hook commands Curia added, and the seven curia MCP tool
+// rules and the deny rules of ownFileDenyRules whoever added them, from the settings file at settingsPath, in one
 // write. Hook entries that became empty are dropped; the allow list is kept
 // even when empty, and everything else is kept as it is. A missing file, or
 // one with nothing of ours in it, is left alone. Before rewriting it copies
 // the file to settingsPath+".bak.<unix seconds>".
-func Unhooks(settingsPath, bin string) error {
+func Unhooks(settingsPath, bin string, files ...string) error {
 	settingsPath = filepath.Clean(settingsPath)
 	raw, settings, err := loadSettings(settingsPath)
 	if err != nil {
@@ -190,10 +254,15 @@ func Unhooks(settingsPath, bin string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", settingsPath, err)
 	}
-	rulesChanged, err := removeToolRules(settings)
+	rulesChanged, err := removeRules(settings, "allow", toolRules)
 	if err != nil {
 		return fmt.Errorf("%s: %w", settingsPath, err)
 	}
+	deniesChanged, err := removeRules(settings, "deny", ownFileRules(files))
+	if err != nil {
+		return fmt.Errorf("%s: %w", settingsPath, err)
+	}
+	rulesChanged = rulesChanged || deniesChanged
 	if !hooksChanged && !rulesChanged {
 		return nil
 	}
@@ -230,23 +299,23 @@ func removeOurHooks(settings map[string]any, bin string) (bool, error) {
 	return changed, nil
 }
 
-// removeToolRules drops the six tool rules from permissions.allow and
-// reports whether it removed any.
-func removeToolRules(settings map[string]any) (bool, error) {
-	perms, allow, err := allowList(settings)
+// removeRules drops rules from permissions[key] and reports whether it
+// removed any.
+func removeRules(settings map[string]any, key string, rules []string) (bool, error) {
+	perms, list, err := ruleList(settings, key)
 	if err != nil {
 		return false, err
 	}
-	kept := make([]any, 0, len(allow))
-	for _, rule := range allow {
-		if s, ok := rule.(string); !ok || !slices.Contains(toolRules, s) {
+	kept := make([]any, 0, len(list))
+	for _, rule := range list {
+		if s, ok := rule.(string); !ok || !slices.Contains(rules, s) {
 			kept = append(kept, rule)
 		}
 	}
-	if len(kept) == len(allow) {
+	if len(kept) == len(list) {
 		return false, nil
 	}
-	perms["allow"] = kept
+	perms[key] = kept
 	return true, nil
 }
 
@@ -516,10 +585,13 @@ func writeBackup(path string, original []byte, now time.Time) error {
 	}
 }
 
+// WriteAtomic is writeAtomic for other packages (the user's config file).
+func WriteAtomic(path string, data []byte) error { return writeAtomic(path, data) }
+
 // writeAtomic writes data to path via a temporary file and a rename, creating
 // the parent directory if needed. If path is a symlink the write lands on the
 // file it points to, so the link survives. A file that exists keeps its
-// permission bits; a new one is 0600.
+// permission bits; a new one is 0600. The data is synced before the rename.
 func writeAtomic(path string, data []byte) error {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
@@ -542,6 +614,10 @@ func writeAtomic(path string, data []byte) error {
 		return err
 	}
 	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return err
 	}

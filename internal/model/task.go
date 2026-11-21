@@ -43,4 +43,16 @@ type Task struct {
 	// for claude.
 	Priority int
 	Agent    string
+	// FiledBy is the session that filed the task through file_task, "" for a
+	// task the user wrote; FiledReason is its reason and FiledLineage the
+	// JSON of what Curia saw of its team (display and audit only).
+	FiledBy, FiledReason, FiledLineage string
+	// BudgetUSD is the task's own budget in dollars; 0 means none (the config default applies).
+	BudgetUSD float64
+	// ReadyHash is F29's hash of title and body when the user marked the task ready ("" when none); AutoSpawnedAt is when the monitor started it.
+	ReadyHash     string
+	AutoSpawnedAt time.Time
 }
+
+// MaxBudgetUSD bounds a task budget and cost.task_budget_default, in dollars.
+const MaxBudgetUSD = 1_000_000

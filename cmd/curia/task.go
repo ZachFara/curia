@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +22,7 @@ import (
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
 	"github.com/ZachFara/curia/internal/ui"
+	"github.com/ZachFara/curia/internal/usage"
 )
 
 // Flags of `curia task`; tests reset them.
@@ -36,6 +35,7 @@ var (
 	taskEditTitle, taskEditBody           string
 	taskEditBase, taskEditStatus          string
 	taskEditTags                          []string
+	taskAddBudget, taskEditBudget         float64
 )
 
 // taskEditMax bounds the read of the file the editor leaves: a title, a
@@ -69,6 +69,7 @@ func init() {
 	add.Flags().StringVar(&taskAddBase, "base", "", "the branch the task starts from (default: the checked-out branch)")
 	add.Flags().StringArrayVar(&taskAddTags, "tag", nil, "a tag (repeatable)")
 	add.Flags().StringVar(&taskAddPriority, "priority", "P2", "P1, P2 or P3 (also 1, 2, 3)")
+	add.Flags().Float64Var(&taskAddBudget, "budget", 0, "a budget in dollars (0: none; the default is cost.task_budget_default)")
 	ls := &cobra.Command{
 		Use:   "ls",
 		Short: "List tasks with their derived status",
@@ -98,6 +99,7 @@ func init() {
 	edit.Flags().StringArrayVar(&taskEditTags, "tag", nil, "a tag (repeatable; replaces the tags)")
 	edit.Flags().StringVar(&taskEditStatus, "status", "", "backlog, ready or dropped")
 	edit.Flags().StringVar(&taskEditPriority, "priority", "", "P1, P2 or P3 (also 1, 2, 3)")
+	edit.Flags().Float64Var(&taskEditBudget, "budget", 0, "the new budget in dollars (0: none, the default applies)")
 	ready := &cobra.Command{
 		Use:         "ready <id>",
 		Short:       "Mark a task ready to spawn",
@@ -249,7 +251,7 @@ func runTaskAdd(cmd *cobra.Command, args []string) error {
 	defer closeLog()
 	t := model.Task{
 		Title: args[0], BaseBranch: taskAddBase, Tags: taskAddTags, Priority: priority,
-		Status: model.TaskBacklog, Source: model.SourceLocal, CreatedAt: clock(),
+		Status: model.TaskBacklog, Source: model.SourceLocal, CreatedAt: clock(), BudgetUSD: taskAddBudget,
 	}
 	var early []task.Problem
 	repo, branch, err := taskMainRepo(cmd.Context(), taskAddRepo, logger)
@@ -367,6 +369,9 @@ func runTaskLs(cmd *cobra.Command, _ []string) error {
 			shown = append(shown, c)
 		}
 	}
+	if err = taskBudgets(cmd.Context(), st, cfg, shown); err != nil {
+		return err
+	}
 	if taskLsJSON {
 		return taskPrintJSON(cmd.OutOrStdout(), shown)
 	}
@@ -402,10 +407,20 @@ type taskRow struct {
 	LaunchedAt    *time.Time       `json:"launched_at"`
 	PausedAt      *time.Time       `json:"paused_at"`
 	CleanedAt     *time.Time       `json:"cleaned_at"`
+	FiledBy       string           `json:"filed_by,omitempty"`
+	FiledReason   string           `json:"filed_reason,omitempty"`
+	FilerLineage  string           `json:"filer_lineage,omitempty"`
+	// The budget (F16): the task's own or the default, what its sessions spent
+	// (null while no session's cost is known), the share and the level
+	// none, unknown, ok, warn (from 80%) or over (from 100%).
+	BudgetUSD   *float64 `json:"budget_usd"`
+	SpentUSD    *float64 `json:"spent_usd"`
+	BudgetPct   *int     `json:"budget_pct"`
+	BudgetLevel string   `json:"budget_level"`
 }
 
 func taskToRow(c task.Card) taskRow {
-	t := c.Task
+	t, b := c.Task, c.Budget
 	tags, sessions := t.Tags, make([]string, 0, len(c.Sessions))
 	if tags == nil {
 		tags = []string{}
@@ -420,6 +435,8 @@ func taskToRow(c task.Card) taskRow {
 		ResumeSession: t.ResumeSession, Sessions: sessions,
 		CreatedAt: jsonTime(t.CreatedAt), UpdatedAt: jsonTime(t.UpdatedAt), LaunchedAt: jsonTime(t.LaunchedAt),
 		PausedAt: jsonTime(t.PausedAt), CleanedAt: jsonTime(t.CleanedAt),
+		FiledBy: t.FiledBy, FiledReason: t.FiledReason, FilerLineage: t.FiledLineage,
+		BudgetUSD: budgetLimit(b), SpentUSD: budgetSpent(b), BudgetPct: budgetPct(b), BudgetLevel: b.Level().String(),
 	}
 }
 
@@ -428,15 +445,7 @@ func taskPrintJSON(w io.Writer, cards []task.Card) error {
 	for _, c := range cards {
 		rows = append(rows, taskToRow(c))
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(rows); err != nil {
-		return err
-	}
-	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
-	return err
+	return writeJSON(w, rows, "  ")
 }
 
 // taskCell makes task text, which is untrusted, safe as one table cell.
@@ -452,6 +461,9 @@ func taskStatusText(c task.Card) string {
 	}
 	if c.Task.Worktree != "" && len(c.Sessions) == 0 && taskOnDisk(c.Task.Worktree) {
 		notes = append(notes, "worktree")
+	}
+	if !c.Task.AutoSpawnedAt.IsZero() {
+		notes = append(notes, "auto")
 	}
 	if len(notes) == 0 {
 		return string(c.Status)
@@ -484,10 +496,10 @@ func taskAgentText(c task.Card) string {
 // taskPrintTable prints one row per task, the repo as its basename.
 func taskPrintTable(w io.Writer, cards []task.Card) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "ID\tPRI\tSTATUS\tREPO\tTITLE\tAGENT")
+	_, _ = fmt.Fprintln(tw, "ID\tPRI\tSTATUS\tREPO\tTITLE\tAGENT\tBUDGET")
 	for _, c := range cards {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", taskCell(c.Task.ID), task.PriorityLabel(c.Task.Priority), taskCell(taskStatusText(c)),
-			taskCell(ui.RepoName(c.Task.Repo)), taskCell(c.Task.Title), taskCell(taskAgentText(c)))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", taskCell(c.Task.ID), task.PriorityLabel(c.Task.Priority), taskCell(taskStatusText(c)),
+			taskCell(ui.RepoName(c.Task.Repo)), taskCell(c.Task.Title+taskFiledNote(c.Task)), taskCell(taskAgentText(c)), usage.BudgetCell(c.Budget))
 	}
 	return tw.Flush()
 }
@@ -552,7 +564,7 @@ func runTaskEdit(cmd *cobra.Command, args []string) error {
 			return taskNoEditorError()
 		}
 		if !taskIsTerminal(cmd.InOrStdin()) {
-			return errors.New("nothing to change: give --title, --body, --base, --tag, --status or --priority, or run on a terminal to open the editor")
+			return errors.New("nothing to change: give --title, --body, --base, --tag, --status, --priority or --budget, or run on a terminal to open the editor")
 		}
 		return taskEditInEditor(cmd, cfg, id)
 	}
@@ -580,7 +592,7 @@ func runTaskEdit(cmd *cobra.Command, args []string) error {
 
 // taskEditAnyFlag reports whether any flag that changes a task was given.
 func taskEditAnyFlag(changed func(name string) bool) bool {
-	for _, n := range []string{"title", "body", "base", "tag", "status", "priority"} {
+	for _, n := range []string{"title", "body", "base", "tag", "status", "priority", "budget"} {
 		if changed(n) {
 			return true
 		}
@@ -616,6 +628,9 @@ func taskEditChange(changed func(name string) bool, body string, status model.Ta
 		}
 		if priority != 0 {
 			t.Priority = priority
+		}
+		if changed("budget") {
+			t.BudgetUSD = taskEditBudget
 		}
 	}
 }
@@ -719,9 +734,25 @@ func runTaskReady(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err = taskConfirmFiled(cmd.Context(), cfg, id, cmd.InOrStdin(), cmd.OutOrStdout()); err != nil {
+		return err
+	}
 	if err = taskUpdate(cmd.Context(), cfg, id, nil, func(t *model.Task) { t.Status = model.TaskReady }); err != nil {
+		return err
+	}
+	if err = taskMarkReady(cmd.Context(), cfg, id); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s ready\n", id)
 	return err
+}
+
+// taskMarkReady stores F29's ready_hash: this command is the user marking the task ready.
+func taskMarkReady(ctx context.Context, cfg config.Config, id string) error {
+	st, err := openStore(cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+	return st.MarkReady(ctx, id)
 }

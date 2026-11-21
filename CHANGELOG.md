@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased: Plan 6
+
+Not verified against real Claude Code sessions yet; see `README.md` "Status" and `PROGRESS.md` "Plan 6". By capability:
+
+### What needs you, and what happened
+- The dashboard popup opens on an inbox (blocking decisions, permission prompts, reviews, assumptions to confirm); `Tab` goes to the session list. `curia inbox [--json]` prints the same.
+- `i` (or `curia show <session|T-id|%pane>`) shows what one agent is doing: transcript tail, tickets, messages, diff, cost, activity.
+- `T` and `curia timeline` list what happened across agents; `L` and `curia decisions log` search decisions with how often each was reused.
+- `curia time` shows where agent time goes and how much is waiting on you.
+
+### Settings
+- `curia config list|get|set|edit|doctor|history|rollback` and the dashboard's `S` view; every change is a revision, and the file as it was before the first change is kept as a baseline so `rollback` restores it (`set` drops comments and says so). A repository's `.curia/config.toml` can only tighten. `C!` in the badge marks an edit made outside Curia.
+
+### Resources and Docker
+- `curia monitor` samples CPU and memory per agent (`curia resources`, a dashboard column).
+- Agents Curia launches get a `docker` wrapper that labels containers and refuses `run`, `create` and `compose up` at 3 containers per session, 8 in all or 80% of Docker's memory; each cap is switched off by 0.
+
+### Permissions, modes and budgets
+- `curia mode normal|edits|away|bypass`, `curia away` and `curia back` (`--all` lists every refusal; refusals are counted, never dropped). Bypass means "allow what your Claude Code settings do not forbid".
+- A per-task budget (`--budget`, marks in views) and an optional hard stop (`cost.budget_hard_stop`, off).
+- Curia's hook and `curia install` now protect Curia's own configuration, data and state from Claude Code's edit tools.
+
+### Tasks, messages and automation
+- Agents can file tasks into your backlog with the `file_task` tool (a seventh MCP tool); only you start them.
+- Broadcasts (`@all`, `@<repo>/*`), scheduled messages (`curia schedule`), auto-spawn of ready tasks (`curia auto-spawn`, off) and Remote Control (`curia rc`, never run against a real session).
+
+### Phone
+- An optional web page on `curia serve` (off): board, timeline, decision log, usage, settings; device tokens; with `serve.web_write`, three task moves and confirmed messages.
+
+### Upgrade notes
+- Run `curia install` again: it adds the seventh tool rule and `Edit(...)` deny rules for Curia's directories (the default ones, the `XDG_*_HOME` ones and a relocated database or log), and the tmux snippet gains a `client-attached` line that starts `curia monitor`; then `tmux source-file ~/.tmux.conf`. Restart Claude Code sessions.
+- The database migrates itself. The monitor starts when you attach tmux (`monitor.autostart = false` stops that).
+- Agents Curia launches have the Docker wrapper first on `PATH`; set the three `resources` caps to 0 to turn the caps off (the labels stay).
+- A budget-stopped task can no longer file tasks; away agents still can.
+- Agents may now file tasks into the backlog (`tasks.agent_filed.level = off` stops that).
+- The popup now opens on the inbox.
+
 ## 1.0.0
 
 The first release. Curia is one Go binary that turns tmux into a control plane for parallel coding agents. `README.md` says how to install it and what each part does; `docs/v1-as-built.md` lists where it differs from the spec. What you can do, by area:
@@ -12,7 +49,7 @@ The first release. Curia is one Go binary that turns tmux into a control plane f
 
 ### Decisions and precedent
 
-- Agents raise decision tickets with options and a recommendation through six MCP tools; they can search earlier answers first. You answer in a popup or with `curia decide`; the answer reaches the agent by typing, at its next Stop, or when it asks.
+- Agents raise decision tickets with options and a recommendation through seven MCP tools; they can search earlier answers first. You answer in a popup or with `curia decide`; the answer reaches the agent by typing, at its next Stop, or when it asks.
 - Every decision is stored with its reasoning, searchable, and can be rescoped or superseded (`curia decisions ls`, `edit`). Standing rules are decisions with no options.
 - Decided decisions can be copied to an Obsidian folder (`curia export obsidian`) and a global one printed as an Agent Commons entry (`curia export commons`).
 
@@ -38,7 +75,7 @@ The first release. Curia is one Go binary that turns tmux into a control plane f
 
 ## Upgrading from 0.x
 
-- Run `curia install` again. It adds the six Curia tool rules (the sixth is `complete_task`), the status line when you have none (`--no-statusline` skips it) and the window marker's new value, and rewrites entries that name an old binary path. Then reload tmux (`tmux source-file ~/.tmux.conf`) so the new snippet is read.
+- Run `curia install` again. It adds the seven Curia tool rules (the sixth is `complete_task`, the seventh `file_task`), the status line when you have none (`--no-statusline` skips it) and the window marker's new value, and rewrites entries that name an old binary path. Then reload tmux (`tmux source-file ~/.tmux.conf`) so the new snippet is read.
 - A `curia mcp` started before the upgrade keeps its old tool list and keeps returning a superseded answer as live until its Claude Code session restarts. Restart your sessions.
 - The database migrates itself the first time a new `curia` opens it; nothing to run.
 

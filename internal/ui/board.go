@@ -65,10 +65,9 @@ type BoardModel struct {
 	quietUntil time.Time     // keys but q and Esc before this are ignored
 	quietFor   time.Duration // the length of the running quiet period, which an ignored key restarts
 
-	confirming  bool          // pending waits for "y"
-	pending     task.Card     // the card as it was on screen when n was pressed
-	promptSince time.Time     // when the prompt opened, or last ignored a "y"
-	promptWait  time.Duration // how long after promptSince a "y" counts
+	confirming bool        // pending waits for "y"
+	pending    task.Card   // the card as it was on screen when n was pressed
+	gate       confirmGate // the prompt's wait and burst rule
 
 	busy     bool   // an action is in flight
 	working  string // what the action in flight does, for the status line
@@ -151,7 +150,16 @@ func (m BoardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
+	case boardConfirmMsg:
+		if !m.gate.due(msg.seq) {
+			return m, nil
+		}
+		return m.confirm()
 	case tea.KeyMsg:
+		m.gate.keyed(m.now())
+		if m.gate.waiting() {
+			return m.keyAfterConfirm()
+		}
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste {
 			return m.updateRunes(msg)
 		}
@@ -280,11 +288,16 @@ func (m BoardModel) markShown(before task.Card, had bool) BoardModel {
 }
 
 // updateRunes handles keys typed faster than the program reads them, which
-// arrive as one message with several runes, one rune at a time. A rune
+// arrive as one message with several runes, one rune at a time; into an
+// open prompt such a read cancels it. A rune
 // that opens or closes a prompt, shows or hides done, acts or closes the
 // board drops the rest: the user has not seen what it did. A move restarts
 // the dwell, so a key after it in the burst cannot act.
 func (m BoardModel) updateRunes(msg tea.KeyMsg) (BoardModel, tea.Cmd) {
+	if m.confirming { // a y in a burst of one read never confirms
+		m.confirming, m.pending, m.notice = false, task.Card{}, "spawn canceled"
+		return m, nil
+	}
 	var cmds []tea.Cmd
 	for _, r := range msg.Runes {
 		was, wasDone := m.confirming, m.showDone
@@ -541,7 +554,7 @@ func (m BoardModel) askSpawn() BoardModel {
 		return m
 	}
 	m.confirming, m.pending = true, c
-	m.promptSince, m.promptWait = m.now(), dwell
+	m.gate.open(m.now())
 	return m
 }
 
@@ -560,10 +573,31 @@ func (m BoardModel) confirmKey(msg tea.KeyMsg) (BoardModel, tea.Cmd) {
 		m.notice = "spawn canceled"
 		return m, nil
 	}
-	if now := m.now(); now.Sub(m.promptSince) < m.promptWait {
-		m.promptSince, m.promptWait = now, quietPeriod
+	if now := m.now(); m.gate.soon(now) {
+		m.gate.refuse(now)
 		return m, nil
 	}
+	seq := m.gate.take(m.now())
+	return m, tea.Tick(burstGap, func(time.Time) tea.Msg { return boardConfirmMsg{seq: seq} })
+}
+
+// boardConfirmMsg spawns the task of the y taken as seq once burstGap has
+// passed with no other key.
+type boardConfirmMsg struct{ seq int }
+
+// keyAfterConfirm handles a key that came while a taken y waits out
+// burstGap: within it, the y came in a burst and is refused; later it stands.
+func (m BoardModel) keyAfterConfirm() (BoardModel, tea.Cmd) {
+	if m.gate.late() {
+		m.notice = "too soon: press y again"
+		return m, nil
+	}
+	return m.confirm()
+}
+
+// confirm spawns the pending task, unless it changed meanwhile.
+func (m BoardModel) confirm() (BoardModel, tea.Cmd) {
+	m.gate.confirmAt = time.Time{}
 	p := m.pending
 	m.confirming, m.pending = false, task.Card{}
 	if c, ok := m.current(); !ok || !sameCard(c, p) {
@@ -640,4 +674,33 @@ func statusPhrase(s model.TaskStatus) string {
 	default:
 		return fmt.Sprintf("is %s", s)
 	}
+}
+
+// WithBoard returns m with the t key enabled: t shows the model open builds
+// until it sends BoardClosedMsg, and n shows it with the notice "pick a
+// task, then n". Without it, both say the board is in the popup.
+func (m Model) WithBoard(open func() tea.Model) Model {
+	return m.withView("board", func(string) tea.Model { return open() })
+}
+
+// openBoard shows the task board, with notice on its status line when it
+// is not empty, or says why there is none.
+func (m Model) openBoard(notice string) (Model, tea.Cmd) {
+	open := m.views["board"]
+	if open == nil {
+		m.notice = noticeNoBoard
+		return m, nil
+	}
+	child := open("")
+	if b, ok := child.(BoardModel); ok && notice != "" {
+		child = b.WithNotice(notice)
+	}
+	return m.showChild(child)
+}
+
+func (BoardClosedMsg) closedChild() {}
+
+func init() {
+	registerCommand(command{keys: []string{"t"}, help: "t tasks", order: 50, run: func(m Model) (Model, tea.Cmd) { return m.openBoard("") }})
+	registerCommand(command{keys: []string{"n"}, help: "n spawn", order: 140, run: func(m Model) (Model, tea.Cmd) { return m.openBoard(noticePickTask) }})
 }

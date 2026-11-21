@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -38,12 +39,25 @@ func useFakeProgram(t *testing.T) *dashboardRun {
 	prev := runProgram
 	runProgram = func(m tea.Model, opts ...tea.ProgramOption) error {
 		run.opts = len(opts)
-		m, _ = m.Update(m.Init()())
+		m = uiToSessionList(m)
 		run.view = m.View()
 		return nil
 	}
 	t.Cleanup(func() { runProgram = prev })
 	return run
+}
+
+// uiToSessionList runs the popup's first messages: it opens on the inbox
+// (Ruling 154), so Tab shows the session list and its first refresh.
+func uiToSessionList(m tea.Model) tea.Model {
+	m, _ = m.Update(m.Init()())
+	if !strings.Contains(m.View(), "tab sessions") {
+		return m // the sidebar, or a view without the inbox
+	}
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m, cmd = m.Update(cmd()) // the inbox closes and the list refreshes
+	m, _ = m.Update(cmd())
+	return m
 }
 
 // dashboardSessions: a waiting and a working session in live panes, one
@@ -131,7 +145,7 @@ func uiDriveProgram(t *testing.T, drive func(m tea.Model) tea.Model) *dashboardR
 	prev := runProgram
 	runProgram = func(m tea.Model, opts ...tea.ProgramOption) error {
 		run.opts = len(opts)
-		m, _ = m.Update(m.Init()())
+		m = uiToSessionList(m)
 		run.view = drive(m).View()
 		return nil
 	}
@@ -152,7 +166,11 @@ func uiFeed(m tea.Model, cmd tea.Cmd) tea.Model {
 		}
 	case nil:
 	default:
-		m, _ = m.Update(msg)
+		var next tea.Cmd
+		m, next = m.Update(msg)
+		if strings.Contains(fmt.Sprintf("%#v", msg), "ConfirmMsg") { // the taken y's action after burstGap; a child view wraps the message
+			m = uiFeed(m, next)
+		}
 	}
 	return m
 }
@@ -609,6 +627,11 @@ var uiUserActions = []struct {
 	{"review: a then y approves (merges)", uiReviewWorld, []string{"r", "a", "y"}, uiReviewClosed},
 	{"review: c, a note, Enter requests changes", uiReviewWorld, []string{"r", "c", "fix the tests", "enter"}, uiReviewClosed},
 	{"review: x then y drops", uiReviewWorld, []string{"r", "x", "y"}, uiReviewClosed},
+	{"settings: e, a value, Enter, y changes a setting", uiActionWorld, []string{"S", "e", "20m", "enter", "y"}, func(*spawnFixture) bool {
+		home, _ := os.UserHomeDir()
+		b, _ := os.ReadFile(filepath.Clean(configFile(home)))
+		return strings.Contains(string(b), "20m")
+	}},
 	{"P then y pauses the suggested task", uiPauseWorld, []string{"P", "y"}, func(f *spawnFixture) bool {
 		return !f.get("T-1").PausedAt.IsZero()
 	}},
@@ -651,7 +674,7 @@ func uiRunActions(t *testing.T, f *spawnFixture, keys []string, pump bool) strin
 	var view string
 	prev := runProgram
 	runProgram = func(m tea.Model, _ ...tea.ProgramOption) error {
-		m, _ = m.Update(m.Init()())
+		m = uiToSessionList(m)
 		for _, k := range keys {
 			f.now = f.now.Add(2 * time.Second)
 			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
@@ -789,7 +812,7 @@ func uiBudgetSource(t *testing.T, readings ...uiCost) storeSource {
 
 func TestStoreSourceBudget(t *testing.T) {
 	got, err := uiBudgetSource(t).Budget(context.Background())
-	if err != nil || !reflect.DeepEqual(got, ui.Budget{}) {
+	if err != nil || !reflect.DeepEqual(got, ui.Budget{Res: map[string]string{}}) {
 		t.Errorf("Budget with no samples = %+v, %v, want the zero Budget", got, err)
 	}
 	// The five-hour window goes from 50% to 62% in 16 minutes (45%/h): the
@@ -808,6 +831,7 @@ func TestStoreSourceBudget(t *testing.T) {
 	want := ui.Budget{
 		Status: "5h 62% → limit ~50m (resets 1h50m)",
 		Burn:   map[string]float64{"working": 3, "waiting": 1.5},
+		Res:    map[string]string{},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Budget = %+v, want %+v", got, want)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
@@ -335,6 +336,18 @@ func usageCheckWindow(t *testing.T, windows []map[string]any) {
 	}
 	if limit, _ := windows[0]["limit_at"].(string); !strings.HasPrefix(limit, "2026-11-11T12:43:") {
 		t.Errorf("limit_at = %v", windows[0]["limit_at"])
+	}
+}
+
+// The store only accepts clean ids, so this drives the printer directly.
+func TestUsageJSONEscapesUnprintable(t *testing.T) {
+	var buf bytes.Buffer
+	rep := usageReport{Burn: []usageBurnRow{{SessionID: "s\x1b[31m\u202e\u009b", TaskID: "T-1"}}}
+	if err := usagePrintJSON(&buf, rep); err != nil {
+		t.Fatal(err)
+	}
+	if out := buf.String(); strings.ContainsAny(out, "\x1b\u202e\u009b") || !strings.Contains(out, `"burn":[{`) {
+		t.Errorf("usage --json = %q, want no raw control or bidi characters", out)
 	}
 }
 

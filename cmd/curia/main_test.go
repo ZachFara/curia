@@ -38,6 +38,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	if filepath.Base(os.Args[0]) == "docker" { // the test binary run as the docker wrapper (docker_test.go)
+		dockerWrapperMain(os.Args[1:])
+	}
 	os.Exit(runGuarded(m))
 }
 
