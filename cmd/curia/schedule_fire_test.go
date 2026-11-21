@@ -330,16 +330,14 @@ func TestScheduleDraftBoundsTheTextForTheLabel(t *testing.T) {
 	}
 }
 
-// The cheap, state-changing jobs run before the one that can wait on docker.
-func TestMonitorJobsEndAwayAndFireSchedulesBeforeDockerSampling(t *testing.T) {
+// The state-changing jobs run first, in this order, and the samplers after.
+func TestMonitorJobOrder(t *testing.T) {
 	var names []string
 	for _, j := range monitorJobs {
 		names = append(names, j.name)
 	}
-	idx := func(n string) int { return slices.Index(names, n) }
-	for _, n := range []string{"end away", "fire schedules"} {
-		if idx(n) < 0 || idx(n) > idx("sample containers") {
-			t.Errorf("job order %v: %q must run before sample containers", names, n)
-		}
+	want := []string{"end away", "fire schedules", "auto-spawn", "sample resources", "prune resources", "sample containers"}
+	if !slices.Equal(names, want) {
+		t.Errorf("job order %v, want %v", names, want)
 	}
 }
