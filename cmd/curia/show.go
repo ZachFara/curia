@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -132,8 +133,27 @@ func runShow(cmd *cobra.Command, args []string) error {
 	if showJSON {
 		return writeJSON(cmd.OutOrStdout(), showJSONOf(data, diff), "  ")
 	}
-	_, err = fmt.Fprintln(cmd.OutOrStdout(), ui.RenderDetail(data, diff, clock))
+	_, err = fmt.Fprintln(cmd.OutOrStdout(), showText(data, diff))
 	return err
+}
+
+// showText is the detail view with every transcript line inside a two-cell
+// gutter (the view trims leading space, and the agent's lines would start at
+// column 0 and pass for a heading or a prompt). It renders with no tail and
+// puts the lines where the view says "no transcript lines".
+func showText(d ui.DetailData, diff ui.DetailDiff) string {
+	tail := d.Tail
+	d.Tail = nil
+	lines := strings.Split(ui.RenderDetail(d, diff, clock), "\n")
+	i := slices.Index(lines, "Transcript")
+	if i < 0 || i+1 >= len(lines) || lines[i+1] != "no transcript lines" || len(tail) == 0 {
+		return strings.Join(lines, "\n")
+	}
+	in := make([]string, len(tail))
+	for j, l := range tail {
+		in[j] = "  " + l
+	}
+	return strings.Join(slices.Replace(lines, i+1, i+2, in...), "\n")
 }
 
 type showJSONSession struct {

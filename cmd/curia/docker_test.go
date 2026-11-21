@@ -291,7 +291,7 @@ func dockerMonitorRig(t *testing.T) (*dockerRig, *monitorEnv, *store.Store) {
 	t.Setenv("FAKE_STATS", r.stat)
 	t.Setenv("FAKE_INFO", r.info)
 	old := dockerSampleTimeout
-	dockerSampleTimeout = 400 * time.Millisecond
+	dockerSampleTimeout = time.Minute // a bound for a stuck fake only: each call ends when its script does
 	t.Cleanup(func() { dockerSampleTimeout = old })
 	return r, env, st
 }
@@ -346,6 +346,7 @@ func TestSampleContainersIsQuietWhenDockerCannotAnswer(t *testing.T) {
 	}
 	t.Setenv("FAKE_DOWN", "")
 	t.Setenv("FAKE_HANG", "1") // docker stats hangs: the deadline ends it
+	dockerSampleTimeout = 400 * time.Millisecond
 	began := time.Now()
 	if err := env.sampleContainers(ctx); err != nil || time.Since(began) > 5*time.Second {
 		t.Errorf("hanging stats: %v after %v, want a quiet skip within the deadline", err, time.Since(began))
