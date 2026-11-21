@@ -45,6 +45,7 @@ var monitorJobs = []monitorJob{
 	{"sample resources", (*monitorEnv).sampleResources},
 	{"prune resources", (*monitorEnv).pruneResources},
 	{"fire schedules", (*monitorEnv).fireSchedules},
+	{"sample containers", (*monitorEnv).sampleContainers},
 }
 
 // monitorEnv is what a job may use.

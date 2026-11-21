@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os/exec"
@@ -139,18 +140,13 @@ type ReviewModel struct {
 	pendingID   string // the review the prompt or the note input opened on
 	pendingFace string // and what was on screen then
 	pending     ReviewDetail
-	promptSince time.Time     // when the prompt opened, or a y too early restarted its wait
-	promptWait  time.Duration // dwell, then quietPeriod after a y too early
-	keyAt       time.Time     // when the last key came, acted on or not
-	prevKeyAt   time.Time     // when the key before it came
-	confirmAt   time.Time     // when a "y" was taken, waiting out burstGap before it acts; zero when none
-	confirmSeq  int           // the reviewConfirmMsg the taken "y" waits for
-	inputSince  time.Time     // when the note input opened, or an Enter too early restarted it
-	lastEnter   time.Time     // when the last Enter came, acted on or not
-	burst       time.Time     // when the last burst of several typed runes came into the note
-	buf         []rune        // the note being typed
-	draftID     string        // the review draft was typed for
-	draft       []rune        // a note not sent: canceled by a change, or refused
+	gate        confirmGate // the prompt's wait and burst rule
+	inputSince  time.Time   // when the note input opened, or an Enter too early restarted it
+	lastEnter   time.Time   // when the last Enter came, acted on or not
+	burst       time.Time   // when the last burst of several typed runes came into the note
+	buf         []rune      // the note being typed
+	draftID     string      // the review draft was typed for
+	draft       []rune      // a note not sent: canceled by a change, or refused
 
 	busy       bool // an action is in flight
 	closeAsked bool // a close key came while it was
@@ -276,8 +272,8 @@ func (m ReviewModel) update(msg tea.Msg) (ReviewModel, tea.Cmd) {
 // rule (inBurst), a key while a "y" waits out burstGap is keyAfterConfirm's,
 // and several runes of one read are taken one by one.
 func (m ReviewModel) keyMsg(msg tea.KeyMsg) (ReviewModel, tea.Cmd) {
-	m.prevKeyAt, m.keyAt = m.keyAt, m.now()
-	if !m.confirmAt.IsZero() {
+	m.gate.keyed(m.now())
+	if m.gate.waiting() {
 		return m.keyAfterConfirm()
 	}
 	if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste && m.mode != reviewNote {
@@ -692,7 +688,7 @@ func (m ReviewModel) askDrop() ReviewModel {
 // openPrompt asks to confirm mode's action on d, as it is on screen now.
 func (m ReviewModel) openPrompt(mode reviewMode, d ReviewDetail) ReviewModel {
 	m.mode, m.pending, m.pendingID, m.pendingFace = mode, d, d.Review.ID, m.face()
-	m.promptSince, m.promptWait = m.now(), dwell
+	m.gate.open(m.now())
 	return m
 }
 
@@ -710,22 +706,19 @@ func (m ReviewModel) confirmKey(msg tea.KeyMsg, split bool) (ReviewModel, tea.Cm
 		}
 		return m, nil
 	}
-	if now := m.now(); now.Sub(m.promptSince) < m.promptWait || inBurst(now, m.prevKeyAt) {
-		m.promptSince, m.promptWait = now, quietPeriod
+	if now := m.now(); m.gate.soon(now) {
+		m.gate.refuse(now)
 		m.notice = noticeTooSoon
 		return m, nil
 	}
-	m.confirmAt, m.confirmSeq = m.now(), m.confirmSeq+1
-	return m, m.tick(burstGap, reviewConfirmMsg{seq: m.confirmSeq})
+	return m, m.tick(burstGap, reviewConfirmMsg{seq: m.gate.take(m.now())})
 }
 
 // keyAfterConfirm handles a key that came while a taken "y" waits out burstGap. Within burstGap of the "y"
 // it arrived with it (the burst rule): the "y" is refused and the prompt's wait restarts. Later (the wait's
 // message is late) the "y" acts and the key is ignored, as every key is while an action runs.
 func (m ReviewModel) keyAfterConfirm() (ReviewModel, tea.Cmd) {
-	if inBurst(m.keyAt, m.confirmAt) {
-		m.confirmAt = time.Time{}
-		m.promptSince, m.promptWait = m.keyAt, quietPeriod
+	if m.gate.late() {
 		m.notice = noticeTooSoon
 		return m, nil
 	}
@@ -734,7 +727,7 @@ func (m ReviewModel) keyAfterConfirm() (ReviewModel, tea.Cmd) {
 
 // applyConfirm acts on the "y" msg waited for, when it still waits.
 func (m ReviewModel) applyConfirm(msg reviewConfirmMsg) (ReviewModel, tea.Cmd) {
-	if msg.seq != m.confirmSeq || m.confirmAt.IsZero() {
+	if !m.gate.due(msg.seq) {
 		return m, nil
 	}
 	return m.confirm()
@@ -743,7 +736,7 @@ func (m ReviewModel) applyConfirm(msg reviewConfirmMsg) (ReviewModel, tea.Cmd) {
 // confirm runs the prompt's action on the review it opened on, unless that
 // review changed meanwhile.
 func (m ReviewModel) confirm() (ReviewModel, tea.Cmd) {
-	m.confirmAt = time.Time{}
+	m.gate.confirmAt = time.Time{}
 	if m.selectedID() != m.pendingID || m.face() != m.pendingFace {
 		return m.cancelChanged(), nil
 	}
@@ -950,4 +943,53 @@ func (m ReviewModel) applyDiffDone(msg reviewDiffDoneMsg) ReviewModel {
 	m = m.quiet(quietPeriod)
 	m.toolQuiet, m.shownSince = true, m.now()
 	return m
+}
+
+// WithReview returns m with the r key enabled in the popup: on a row whose
+// task has a pending review, r shows the model open builds for that task's
+// id until it sends ReviewClosedMsg.
+func (m Model) WithReview(open func(taskID string) tea.Model) Model {
+	return m.withView("review", open)
+}
+
+// WithoutReview returns m with the r key disabled, saying why when pressed.
+func (m Model) WithoutReview(why string) Model {
+	m.noReview = why
+	return m.withView("review", nil)
+}
+
+// openReview shows the review view for the selected row's task: on a
+// group row the lead's. It says why not in the sidebar, which reads no
+// reviews, without a factory, and when the last good Reviews read has no
+// pending review for the task. It opens only once the row has been on
+// screen, as it is, for the dwell. An r too soon restarts the wait, now as
+// long as the quiet period, so the repeats of a held r that starts too
+// soon never open the view (a held key's first repeat comes 375 to 660 ms
+// after the press; Rulings 67, 88). From then on every key goes to the
+// view, whose own guards decide what acts.
+func (m Model) openReview() (Model, tea.Cmd) {
+	r, ok := m.current()
+	switch {
+	case m.mode != ModePopup:
+		m.notice = noticeReviewSidebar
+		return m, nil
+	case !ok:
+		return m, nil
+	case m.views["review"] == nil:
+		m.notice = cmp.Or(m.noReview, noticeNoReview)
+		return m, nil
+	}
+	if _, pending := m.reviews[r.s.TaskID]; r.s.TaskID == "" || !pending {
+		m.notice = noticeNoReviewWaiting
+		return m, nil
+	}
+	if now := m.now(); now.Sub(m.rowSince) < max(m.rowWait, dwell) {
+		m.rowSince, m.rowWait, m.notice = now, quietPeriod, noticeTooSoon
+		return m, nil
+	}
+	return m.showChild(m.views["review"](r.s.TaskID))
+}
+
+func init() {
+	registerCommand(command{keys: []string{"r"}, help: "r review", order: 40, run: Model.openReview})
 }

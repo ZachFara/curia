@@ -168,7 +168,7 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Errorf("schema_migrations has %d rows, want %d", n, len(allMigrations))
 	}
 	names := migrationNames(t, rawDB(t, path))
-	if want := []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0017_schedules.sql"}; !reflect.DeepEqual(names, want) {
+	if want := allMigrations; !reflect.DeepEqual(names, want) {
 		t.Errorf("migration names = %v, want %v", names, want)
 	}
 }
@@ -176,9 +176,19 @@ func TestOpenIsIdempotent(t *testing.T) {
 // allMigrations is every migration file in the order Open applies them:
 // file name order, so the two files numbered 0005 (Plan 4's reviews and
 // Plan 3's send limits, merged with their names kept) apply in a fixed order.
-var allMigrations = []string{
-	"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql",
-	"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0017_schedules.sql",
+var allMigrations = migrationFiles()
+
+// migrationFiles lists the files of migrations/ (os.ReadDir sorts by name).
+func migrationFiles() []string {
+	es, err := os.ReadDir("migrations")
+	if err != nil {
+		panic(err)
+	}
+	var names []string
+	for _, e := range es {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 // plan3Applied is what a Plan 3 binary (with the fix wave) applies.
@@ -271,14 +281,14 @@ func TestBothMigrationsNumberedFive(t *testing.T) {
 	}{
 		{"fresh", nil, allMigrations},
 		{"plan 4 database", allMigrations[:5], allMigrations},
-		{"plan 3 database", plan3Applied, append(slices.Clone(plan3Applied), "0005_reviews.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0017_schedules.sql")},
+		{"plan 3 database", plan3Applied, append(append(slices.Clone(plan3Applied), "0005_reviews.sql"), allMigrations[6:]...)},
 		{"plan 4 database with both 0005 files", allMigrations[:6], allMigrations},
 		// 0008 and 0009 each exist twice (plan-5: context_live, checked_cwd;
 		// plan-6: config_revisions, decision_near_match). They touch different
 		// tables or columns, so their order does not matter; a store that ran
 		// either branch's set gets the other branch's two files.
-		{"plan-5 database", plan5Applied, append(slices.Clone(plan5Applied), "0008_config_revisions.sql", "0009_decision_near_match.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0017_schedules.sql")},
-		{"plan-6 database", plan6Applied, append(slices.Clone(plan6Applied), "0008_context_live.sql", "0009_session_checked_cwd.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0017_schedules.sql")},
+		{"plan-5 database", plan5Applied, append(slices.Clone(plan5Applied), "0008_config_revisions.sql", "0009_decision_near_match.sql", "0010_task_pane_socket.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0017_schedules.sql", "0018_container_samples.sql")},
+		{"plan-6 database", plan6Applied, append(slices.Clone(plan6Applied), "0008_context_live.sql", "0009_session_checked_cwd.sql", "0010_task_pane_socket.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0017_schedules.sql", "0018_container_samples.sql")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			path := dbPath(t)

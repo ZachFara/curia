@@ -68,18 +68,24 @@ type activitySession struct {
 	AgentSecs float64            `json:"agent_seconds"`
 	WallSecs  float64            `json:"wall_seconds"`
 	ByClass   map[string]float64 `json:"by_class"`
+	// Background is the lifetime of background commands per class (the agent
+	// may have worked meanwhile); Unfinished counts those with no completion seen.
+	Background map[string]float64 `json:"background_by_class"`
+	Unfinished int                `json:"unfinished_background"`
 }
 
 type activityReport struct {
-	Since     string             `json:"since"`
-	By        string             `json:"by"`
-	AgentSecs float64            `json:"agent_seconds"`
-	WallSecs  float64            `json:"wall_seconds"`
-	WaitShare *float64           `json:"waiting_on_me_share"` // null without agent time
-	Headline  string             `json:"headline"`
-	ByClass   map[string]float64 `json:"by_class"`
-	Rows      []activityRow      `json:"rows"`
-	Sessions  []activitySession  `json:"sessions"`
+	Since      string             `json:"since"`
+	By         string             `json:"by"`
+	AgentSecs  float64            `json:"agent_seconds"`
+	WallSecs   float64            `json:"wall_seconds"`
+	WaitShare  *float64           `json:"waiting_on_me_share"` // null without agent time
+	Headline   string             `json:"headline"`
+	ByClass    map[string]float64 `json:"by_class"`
+	Background map[string]float64 `json:"background_by_class"`
+	Unfinished int                `json:"unfinished_background"`
+	Rows       []activityRow      `json:"rows"`
+	Sessions   []activitySession  `json:"sessions"`
 }
 
 // activityItem is one classified session.
@@ -120,19 +126,24 @@ func activityBuild(ctx context.Context, st *store.Store, now time.Time, rulesFor
 
 // activitySummarize totals the items and groups them by activityBy.
 func activitySummarize(items []activityItem, since time.Time) activityReport {
-	rep := activityReport{Since: since.UTC().Format(time.RFC3339), By: activityBy, ByClass: map[string]float64{}, Rows: []activityRow{}, Sessions: []activitySession{}}
-	byClass := map[string]time.Duration{}
+	rep := activityReport{Since: since.UTC().Format(time.RFC3339), By: activityBy, ByClass: map[string]float64{}, Background: map[string]float64{}, Rows: []activityRow{}, Sessions: []activitySession{}}
+	byClass, bgClass := map[string]time.Duration{}, map[string]time.Duration{}
 	var all []usage.ActivityTime
 	var agent time.Duration
 	for _, it := range items {
 		sec := activitySession{
-			ID: it.s.ID, TaskID: it.s.TaskID, Repo: it.s.Repo, Type: it.typ, ByClass: map[string]float64{},
+			ID: it.s.ID, TaskID: it.s.TaskID, Repo: it.s.Repo, Type: it.typ, ByClass: map[string]float64{}, Background: map[string]float64{}, Unfinished: it.t.Unfinished,
 			AgentSecs: it.agent.Seconds(), WallSecs: usage.WallTime(it.t).Seconds(),
 		}
 		for c, d := range it.t.ByClass {
 			byClass[c] += d
 			sec.ByClass[c] = d.Seconds()
 		}
+		for c, d := range it.t.Background {
+			bgClass[c] += d
+			sec.Background[c] = d.Seconds()
+		}
+		rep.Unfinished += it.t.Unfinished
 		rep.Sessions = append(rep.Sessions, sec)
 		all = append(all, it.t)
 		agent += it.agent
@@ -142,6 +153,9 @@ func activitySummarize(items []activityItem, since time.Time) activityReport {
 	if agent > 0 {
 		share := byClass[usage.ClassWaitingMe].Seconds() / agent.Seconds()
 		rep.WaitShare = &share
+	}
+	for c, d := range bgClass {
+		rep.Background[c] = d.Seconds()
 	}
 	rep.Headline = usage.ActivityHeadline(byClass, wall)
 	for _, c := range usage.ActivityClasses {
@@ -220,6 +234,13 @@ func activityPrint(w io.Writer, rep activityReport) error {
 	_, _ = fmt.Fprintln(w, rep.Headline)
 	if len(rep.Rows) == 0 {
 		return nil
+	}
+	bg := map[string]time.Duration{}
+	for c, sec := range rep.Background {
+		bg[c] = time.Duration(sec * float64(time.Second))
+	}
+	if line := usage.ActivityBackgroundLine(bg, rep.Unfinished); line != "" {
+		_, _ = fmt.Fprintln(w, line)
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintf(tw, "%s\tAGENT\tWALL\tWAITING ON ME\n", map[string]string{"class": "CLASS", "task": "TASK", "type": "TYPE", "repo": "REPO", "session": "SESSION"}[rep.By])

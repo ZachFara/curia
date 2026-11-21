@@ -234,3 +234,50 @@ func TestConfigListShowsActivityKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestActivityCommandShowsUnfinishedBackground(t *testing.T) {
+	db, _ := fleetHome(t, nil, model.Session{ID: "sc", Repo: "/src/web", Branch: "feat/x", TaskID: "T-1", State: model.StateEnded})
+	t.Cleanup(func() {
+		activitySince, activityRepo, activityTask, activityBy, activityJSON = 24*time.Hour, "", "", "class", false
+	})
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := fleetNow.Add(-time.Hour)
+	for i, e := range []struct {
+		k   model.EventKind
+		sec int
+		raw string
+	}{
+		{model.UserPromptSubmit, 0, `{"prompt":"go"}`},
+		{model.PreToolUse, 10, `{"tool_name":"Bash","tool_use_id":"u1","tool_input":{"command":"go test ./...","run_in_background":true}}`},
+		{model.PostToolUse, 10, `{"tool_name":"Bash","tool_use_id":"u1","tool_response":{"backgroundTaskId":"b1"}}`},
+		{model.Stop, 20, `{"background_tasks":[{"id":"b1","type":"shell","status":"running"}]}`},
+		{model.SessionEnd, 620, `{}`},
+	} {
+		if err = st.AppendEvent(context.Background(), model.Event{Kind: e.k, SessionID: "sc", At: base.Add(time.Duration(e.sec) * time.Second)}, []byte(e.raw)); err != nil {
+			t.Fatal(i, err)
+		}
+	}
+	_ = st.Close()
+	out, err := runRoot(t, "time")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 10 minutes in all; the agent's own command is testing, not waiting on me.
+	if !strings.Contains(out, "waiting on me: 0% of 10m") || !strings.Contains(out, "background commands: 10m (testing 10m), 1 unfinished") {
+		t.Errorf("output:\n%s", out)
+	}
+	out, err = runRoot(t, "time", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep struct {
+		Unfinished int                `json:"unfinished_background"`
+		Background map[string]float64 `json:"background_by_class"`
+	}
+	if err = json.Unmarshal([]byte(out), &rep); err != nil || rep.Unfinished != 1 || rep.Background["testing"] != 610 {
+		t.Errorf("json %v, %+v:\n%s", err, rep, out)
+	}
+}

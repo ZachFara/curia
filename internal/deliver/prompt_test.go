@@ -3,6 +3,7 @@ package deliver
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -111,6 +112,17 @@ var promptCases = map[string]promptState{
 	"lc2-busy.txt":                 promptBusy,
 	"lc3-busy-running-turn.txt":    promptBusy,
 	"built-waiting-background.txt": promptSubagents,
+	// Live check 5, defect 1: Curia's own status line sits between the box
+	// and the footer; the footer is still the last row, so the prompt is empty.
+	"lc6-idle-auto-statusline-80col.txt":     promptEmpty,
+	"built-idle-statusline-stophook.txt":     promptEmpty,
+	"built-idle-statusline-two-rows.txt":     promptEmpty,
+	"built-idle-manual-80col-statusline.txt": promptEmpty, // 80 columns cut "· ? for shortcuts"
+	"built-idle-manual-80col.txt":            promptEmpty,
+	// Refused: a status line with no footer after it, a running turn, text after the footer.
+	"built-statusline-no-footer.txt":        promptUnknown,
+	"built-statusline-busy.txt":             promptBusy,
+	"built-statusline-then-prompt-text.txt": promptUnknown,
 	// No Claude Code at its prompt.
 	"lc3-shell-after-kill.txt": promptShell,
 	"lc3-shell-after-exit.txt": promptShell,
@@ -153,6 +165,26 @@ func TestDefects123ReadPrompt(t *testing.T) {
 	} {
 		if promptNotes[state] != want {
 			t.Errorf("note for %d = %q, want %q", state, promptNotes[state], want)
+		}
+	}
+}
+
+// Live check 5, defect 1: a row inserted between the bottom rule and the
+// footer (any status line) must not turn a screen that was refused into an
+// empty prompt.
+func TestStatusLineDoesNotUnrefuseAScreen(t *testing.T) {
+	for name, want := range promptCases {
+		if want == promptEmpty {
+			continue
+		}
+		lines := screenLines(promptFixture(t, name))
+		bottom := lastRule(lines, len(lines))
+		if bottom < 0 {
+			continue
+		}
+		with := append(slices.Clone(lines[:bottom+1]), append([]string{"  Haiku 5.5 · ctx 7% · $0.05"}, lines[bottom+1:]...)...)
+		if got := readPrompt(strings.Join(with, "\n")); got == promptEmpty {
+			t.Errorf("%s with a status line under the box: read as an empty prompt", name)
 		}
 	}
 }
