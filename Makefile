@@ -37,7 +37,7 @@ BOUNDARY_LINTERS   := depguard
 # Every tracked or untracked-but-not-ignored Go file (skips .scratch/ etc.).
 GO_FILES = $$(git ls-files --cached --others --exclude-standard -- '*.go')
 
-.PHONY: check check-fast check-gates check-static latency-names test-unit test-latency test-unit-cmd check-shards test-staged tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test build release-snapshot clean
+.PHONY: shard-matrices test-unit-store test-unit-rest check check-fast check-gates check-static latency-names test-unit test-latency test-unit-cmd check-shards test-staged tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test build release-snapshot clean
 
 ## check: run every gate, in order, under the lock. CI runs this; run it by hand for the full gate.
 check:
@@ -155,6 +155,7 @@ install-script:
 	@sh scripts/install_test.sh
 	@sh scripts/staged_tests_test.sh
 	@sh scripts/ci_retry_once_test.sh >/dev/null
+	@sh scripts/ci_docs_only_test.sh
 
 ## test: all tests under the race detector, in two steps
 # Several packages hold latency gates (the hook's 20 ms budget, the end-to-end
@@ -169,21 +170,34 @@ install-script:
 # "Latency", plus TestReplayFiveSessions: name new ones accordingly
 # (scripts/check-latency-names.sh fails the gate otherwise).
 LATENCY_TESTS := Latency|TestReplayFiveSessions
-# CI-only shard counts (scripts/shard.sh); the matrices in ci.yml must list 0..N-1.
-LATENCY_SHARDS := 3
-CMD_SHARDS     := 4
-export LATENCY_TESTS LATENCY_SHARDS CMD_SHARDS
-# CI runs step 1 as two jobs by overriding UNIT_PKGS with a computed split
-# of `go list ./...`; the default is every package.
+# CI-only shard counts (scripts/shard.sh): the ONE place they are set; ci.yml
+# builds its matrices from `make shard-matrices`. Latency shards are by gate.
+LATENCY_SHARDS := 6
+CMD_SHARDS     := 6
+# CI job `unit-store` runs this package alone; `unit-rest` runs every other
+# package but cmd/curia (scripts/shard.sh list rest).
+STORE_PKG := ./internal/store
+export LATENCY_TESTS LATENCY_SHARDS CMD_SHARDS STORE_PKG
+# `make test-unit` runs every package unless UNIT_PKGS says otherwise.
 UNIT_PKGS ?= ./...
+
+## shard-matrices: the CI matrices as GitHub outputs (read by the `plan` job in ci.yml)
+shard-matrices:
+	@echo "latency=[$$(seq 0 $$(($(LATENCY_SHARDS) - 1)) | paste -sd, -)]"; echo "cmd=[$$(seq 0 $$(($(CMD_SHARDS) - 1)) | paste -sd, -)]"
 
 latency-names:
 	@scripts/check-latency-names.sh
 
-## test-unit: step 1 (CI jobs `unit-cmd` and `unit-rest` pass UNIT_PKGS)
+## test-unit: step 1 (CI jobs `unit-store` and `unit-rest` pass UNIT_PKGS)
 test-unit: latency-names
 	@echo "==> go test -race (all but the latency gates, packages in parallel): $(UNIT_PKGS)"
 	@scripts/with-test-lock.sh go test -race -skip '$(LATENCY_TESTS)' $(UNIT_PKGS)
+
+## test-unit-store, test-unit-rest: step 1 for CI jobs `unit-store` and `unit-rest`
+test-unit-store:
+	@$(MAKE) --no-print-directory test-unit UNIT_PKGS=$(STORE_PKG)
+test-unit-rest:
+	@$(MAKE) --no-print-directory test-unit UNIT_PKGS="$$(scripts/shard.sh list rest | tr '\n' ' ')"
 
 ## test-unit-cmd: step 1 for ./cmd/curia only, shard SHARD of CMD_SHARDS by test name (CI job `unit-cmd`)
 test-unit-cmd: latency-names
@@ -192,26 +206,28 @@ test-unit-cmd: latency-names
 	scripts/with-test-lock.sh go test -race -skip '$(LATENCY_TESTS)' -run "^($$run)$$" ./cmd/curia
 
 ## test-latency: step 2; with SHARD set (CI job `latency`) only shard SHARD of LATENCY_SHARDS
-## of the packages that hold a latency gate, each still run alone with -p 1.
+## of the latency gates (by gate, not by package), each package still run alone with -p 1.
 ## Three passes, each running every gate with ONE batch (so a burst of runner
 ## noise spoils one batch of a gate, not all three); then internal/latency/verdict
 ## applies the median-of-three rule to the results file (docs/decisions/0012).
 ## A pass fails on a non-latency assertion; the p95 is judged by the verdict.
 ## One run only here; CI wraps it in scripts/ci-retry-once.sh (rerun once, D-15).
 test-latency: latency-names
-	@pkgs=./...; \
-	if [ -n "$(SHARD)" ]; then pkgs="$$(scripts/shard.sh list latency | scripts/shard.sh pick $(SHARD) $(LATENCY_SHARDS))"; fi; \
-	dir="$$(mktemp -d)"; rc=0; \
+	@dir="$$(mktemp -d)"; rc=0; \
+	if [ -n "$(SHARD)" ]; then scripts/shard.sh list latency | scripts/shard.sh pick $(SHARD) $(LATENCY_SHARDS) | scripts/shard.sh group >"$$dir/runs"; \
+	else echo './... $(LATENCY_TESTS)' >"$$dir/runs"; fi; \
 	for pass in 1 2 3; do \
-		echo "==> latency pass $$pass of 3: go test -race -p 1 $$pkgs (the latency gates alone, one batch each)"; \
-		CURIA_LATENCY_SPACED=1 scripts/with-test-lock.sh go test -v -race -count=1 -p 1 -timeout 30m -run '$(LATENCY_TESTS)' $$pkgs >"$$dir/$$pass" 2>&1 || { rc=1; cat "$$dir/$$pass"; }; \
+		while read -r pkg re; do \
+			echo "==> latency pass $$pass of 3: go test -race -p 1 -run '$$re' $$pkg (the latency gates alone, one batch each)"; \
+			CURIA_LATENCY_SPACED=1 scripts/with-test-lock.sh go test -v -race -count=1 -p 1 -timeout 30m -run "$$re" $$pkg >>"$$dir/$$pass" 2>&1 || { rc=1; cat "$$dir/$$pass"; }; \
+		done <"$$dir/runs"; \
 		grep -E '^(--- (FAIL|SKIP)|ok |FAIL|panic)' "$$dir/$$pass" || true; \
 	done; \
 	echo "==> latency verdict (median of the three passes per gate)"; \
 	cat "$$dir/1" "$$dir/2" "$$dir/3" | go run ./internal/latency/verdict || rc=1; \
 	exit $$rc
 
-## check-shards: fail unless the CI shards partition the latency packages and cmd/curia tests (part of check-gates and CI job `static`)
+## check-shards: fail unless the CI shards partition the latency gates and cmd/curia tests, and unit-store + unit-rest + cmd/curia are all packages (part of check-gates and CI job `static`)
 check-shards:
 	@echo "==> shard partition check"
 	@scripts/check-shards.sh

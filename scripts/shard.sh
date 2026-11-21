@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # CI-only sharding of the slow test steps; `make check` never uses it.
-#   shard.sh list latency   packages that hold a latency gate (matching $LATENCY_TESTS), sorted
+#   shard.sh list latency   "package test" lines, one per latency gate (matching $LATENCY_TESTS), sorted
+#   shard.sh list rest      packages of job unit-rest: all but cmd/curia and $STORE_PKG, sorted
+#   shard.sh list all       every package (go list ./...), sorted
 #   shard.sh list cmd       top-level tests of ./cmd/curia that are not latency gates, sorted
 #   shard.sh pick I N       from stdin, the lines at sorted position p with p mod N == I
 # Rule: sort (C locale), then item p goes to shard p mod N. Computed from the
@@ -11,9 +13,11 @@ case "${1:-}" in
 list)
 	pat=${LATENCY_TESTS:?LATENCY_TESTS must be set (the Makefile exports it)}
 	case "${2:-}" in
-	latency) go test -list "$pat" ./... | awk '/^ok/ { if (has) print $2; has = 0; next } /^(Test|Example|Fuzz)/ { has = 1 }' ;;
+	latency) go test -list "$pat" ./... | awk '/^ok/ { for (i = 0; i < n; i++) print $2, t[i]; n = 0; next } /^(Test|Example|Fuzz)/ { t[n++] = $1 }' ;;
+	rest) go list ./... | grep -vxF -e "$(go list ./cmd/curia)" -e "$(go list "${STORE_PKG:?STORE_PKG must be set}")" ;;
+	all) go list ./... ;;
 	cmd) go test -list . ./cmd/curia | grep -E '^(Test|Example|Fuzz)' | grep -vE "$pat" || true ;;
-	*) echo "usage: shard.sh list latency|cmd" >&2; exit 2 ;;
+	*) echo "usage: shard.sh list latency|cmd|rest|all" >&2; exit 2 ;;
 	esac | LC_ALL=C sort
 	;;
 pick)
@@ -21,5 +25,9 @@ pick)
 	[ -n "$out" ] || { echo "shard $2 of $3 is empty: too many shards for the list" >&2; exit 1; }
 	echo "$out"
 	;;
-*) echo "usage: shard.sh list|pick" >&2; exit 2 ;;
+group)
+	# "pkg test" lines to "pkg ^(t1|t2)$" lines: one go test run per package.
+	awk '{ a[$1] = a[$1] (a[$1] ? "|" : "") $2 } END { for (p in a) print p, "^(" a[p] ")$" }' | LC_ALL=C sort
+	;;
+*) echo "usage: shard.sh list|pick|group" >&2; exit 2 ;;
 esac
