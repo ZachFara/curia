@@ -200,15 +200,21 @@ func (m DecisionLogModel) typed(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // WithDecisionLog returns m with the L key enabled in the popup: L shows the
 // model open builds until it sends DecisionLogClosedMsg.
 func (m Model) WithDecisionLog(open func() tea.Model) Model {
-	m.decisionlog = open
-	return m
+	return m.withView("decisionlog", func(string) tea.Model { return open() })
 }
 
 // openDecisionLog shows the decision log view, or says it opens in the popup.
 func (m Model) openDecisionLog() (Model, tea.Cmd) {
-	if m.decisionlog == nil {
+	open := m.views["decisionlog"]
+	if open == nil {
 		m.notice = "the decision log opens in the popup (curia ui)"
 		return m, nil
 	}
-	return m.showChild(m.decisionlog())
+	return m.showChild(open(""))
+}
+
+func (DecisionLogClosedMsg) closedChild() {}
+
+func init() {
+	registerCommand(command{keys: []string{"L"}, help: "L log", order: 160, run: Model.openDecisionLog})
 }

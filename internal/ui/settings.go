@@ -42,16 +42,11 @@ type SettingsModel struct {
 	notice string
 	err    error
 
-	typing   bool // typing the new value
-	input    string
-	asking   bool // the value is typed; waiting for y
-	askSince time.Time
-	askWait  time.Duration
-	keyAt    time.Time
-	prevKey  time.Time
-	confirm  time.Time // when a y was taken, waiting out burstGap
-	seq      int
-	busy     bool
+	typing bool // typing the new value
+	input  string
+	asking bool // the value is typed; waiting for y
+	gate   confirmGate
+	busy   bool
 
 	width, height int
 }
@@ -119,11 +114,11 @@ func (m SettingsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.load()
 	case settingsConfirmMsg:
-		if msg.seq == m.seq && !m.confirm.IsZero() {
+		if m.gate.due(msg.seq) {
 			return m.startSet()
 		}
 	case tea.KeyMsg:
-		m.prevKey, m.keyAt = m.keyAt, m.now()
+		m.gate.keyed(m.now())
 		return m.key(msg)
 	}
 	return m, nil
@@ -131,7 +126,7 @@ func (m SettingsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m SettingsModel) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
-	case !m.confirm.IsZero():
+	case m.gate.waiting():
 		return m.keyAfterConfirm()
 	case m.asking:
 		return m.askKey(msg)
@@ -182,7 +177,8 @@ func (m SettingsModel) typed(msg tea.KeyMsg) SettingsModel {
 			m.typing = false
 			break
 		}
-		m.typing, m.asking, m.askSince, m.askWait = false, true, m.now(), dwell
+		m.typing, m.asking = false, true
+		m.gate.open(m.now())
 	case tea.KeyBackspace:
 		if r := []rune(m.input); len(r) > 0 {
 			m.input = string(r[:len(r)-1])
@@ -203,21 +199,20 @@ func (m SettingsModel) askKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.asking, m.notice = false, "canceled"
 		return m, nil
 	}
-	if now := m.now(); now.Sub(m.askSince) < m.askWait || inBurst(now, m.prevKey) {
-		m.askSince, m.askWait, m.notice = now, quietPeriod, noticeTooSoon
+	if now := m.now(); m.gate.soon(now) {
+		m.gate.refuse(now)
+		m.notice = noticeTooSoon
 		return m, nil
 	}
-	m.confirm, m.seq = m.now(), m.seq+1
-	seq := m.seq
+	seq := m.gate.take(m.now())
 	return m, tea.Tick(burstGap, func(time.Time) tea.Msg { return settingsConfirmMsg{seq: seq} })
 }
 
 // keyAfterConfirm: a key within burstGap of the y arrived with it, so the y
 // is refused; a later one means the wait's message is late, and the change goes.
 func (m SettingsModel) keyAfterConfirm() (tea.Model, tea.Cmd) {
-	if inBurst(m.keyAt, m.confirm) {
-		m.confirm = time.Time{}
-		m.askSince, m.askWait, m.notice = m.keyAt, quietPeriod, noticeTooSoon
+	if m.gate.late() {
+		m.notice = noticeTooSoon
 		return m, nil
 	}
 	return m.startSet()
@@ -228,7 +223,7 @@ func (m SettingsModel) startSet() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	m.confirm, m.asking, m.busy = time.Time{}, false, true
+	m.gate.confirmAt, m.asking, m.busy = time.Time{}, false, true
 	src, key, value := m.src, r.Key, m.input
 	return m, call(settingsTimeout, func(ctx context.Context) tea.Msg {
 		line, err := src.Set(ctx, key, value)
@@ -243,4 +238,26 @@ func cleanLine(s string, n int) string {
 		return string(r[:n])
 	}
 	return s
+}
+
+// WithSettings returns m with the S key enabled in the popup: S shows the
+// model open builds until it sends SettingsClosedMsg.
+func (m Model) WithSettings(open func() tea.Model) Model {
+	return m.withView("settings", func(string) tea.Model { return open() })
+}
+
+// openSettings shows the settings view, or says it opens in the popup.
+func (m Model) openSettings() (Model, tea.Cmd) {
+	open := m.views["settings"]
+	if open == nil {
+		m.notice = "the settings open in the popup (curia ui)"
+		return m, nil
+	}
+	return m.showChild(open(""))
+}
+
+func (SettingsClosedMsg) closedChild() {}
+
+func init() {
+	registerCommand(command{keys: []string{"S"}, help: "S settings", order: 170, run: Model.openSettings})
 }

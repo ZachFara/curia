@@ -656,7 +656,7 @@ func (m Model) helpText() string {
 		text = fmt.Sprintf("%d of %d sessions match /%s", m.shownSessions(), len(m.sessions), m.filter)
 	}
 	if m.mode == ModePopup {
-		text += "  enter jump  i detail  d decisions  r review  t tasks  b burn  / filter  x kill  q quit"
+		text += "  " + commandHelp()
 		if m.inbox != nil {
 			text += "  tab inbox"
 		}
