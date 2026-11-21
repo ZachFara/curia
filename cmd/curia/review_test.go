@@ -29,6 +29,7 @@ import (
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
 	"github.com/ZachFara/curia/internal/team"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/ui"
 )
 
@@ -57,7 +58,7 @@ func reviewRunCmd(t *testing.T, stdin string, args ...string) (stdout, stderr st
 // headArg is --head and the branch's head now: the commit a user who has
 // just looked approves.
 func (f *reviewFixture) headArg() []string {
-	f.t.Helper()
+	f.T.Helper()
 	return []string{"--head", f.head(f.wt, "HEAD")}
 }
 
@@ -67,57 +68,57 @@ func (f *reviewFixture) headArg() []string {
 func reviewWithLead(t *testing.T, state model.State) *reviewFixture {
 	t.Helper()
 	f := reviewNew(t)
-	f.fake.Panes[0].WindowID = "@100"
-	f.fake.Screen = decideIdleScreen
-	reviewSession(f, lifecycleLead, "%100", "@100", state, f.now)
+	f.Fake.Panes[0].WindowID = "@100"
+	f.Fake.Screen = decideIdleScreen
+	reviewSession(f, testkit.LifecycleLead, "%100", "@100", state, f.Now)
 	return f
 }
 
 // reviewSession links session id, in pane and window, to T-1.
 func reviewSession(f *reviewFixture, id, pane, window string, state model.State, updated time.Time) {
-	f.t.Helper()
-	if err := f.st.UpsertSession(context.Background(), model.Session{
+	f.T.Helper()
+	if err := f.St.UpsertSession(context.Background(), model.Session{
 		ID: id, Agent: "claude", State: state, Pane: pane, TmuxWindow: window, TmuxSession: "work", TaskID: "T-1",
-		StartedAt: f.start, UpdatedAt: updated,
+		StartedAt: f.Start, UpdatedAt: updated,
 	}); err != nil {
-		f.t.Fatal(err)
+		f.T.Fatal(err)
 	}
 }
 
 // reviewTicket opens a ticket of mode on T-1.
 func reviewTicket(f *reviewFixture, question string, mode model.Mode) model.Decision {
-	f.t.Helper()
+	f.T.Helper()
 	d := model.Decision{
-		SessionID: lifecycleLead, TaskID: "T-1", Repo: f.repo, Question: question,
+		SessionID: testkit.LifecycleLead, TaskID: "T-1", Repo: f.Repo, Question: question,
 		Options: []model.Option{{Key: "A", Label: "Yes"}, {Key: "B", Label: "No"}}, Recommendation: "A",
 		Rationale: "Simple.", Reversibility: model.ReversCostly, Mode: mode, Scope: model.ScopeTask,
-		Status: model.StatusOpen, ArgsHash: "hash-" + question, Delivery: model.DeliveryNone, CreatedAt: f.now,
+		Status: model.StatusOpen, ArgsHash: "hash-" + question, Delivery: model.DeliveryNone, CreatedAt: f.Now,
 	}
 	if mode == model.ModeAssume {
 		d.Assumption = "Yes"
-		d.ExpiresAt = f.now.Add(24 * time.Hour)
+		d.ExpiresAt = f.Now.Add(24 * time.Hour)
 	}
-	stored, _, err := f.st.CreateDecision(context.Background(), d)
+	stored, _, err := f.St.CreateDecision(context.Background(), d)
 	if err != nil {
-		f.t.Fatal(err)
+		f.T.Fatal(err)
 	}
 	return stored
 }
 
 func (f *reviewFixture) decision(id string) model.Decision {
-	f.t.Helper()
-	d, found, err := f.st.GetDecision(context.Background(), id)
+	f.T.Helper()
+	d, found, err := f.St.GetDecision(context.Background(), id)
 	if err != nil || !found {
-		f.t.Fatalf("GetDecision(%s): %v %v", id, found, err)
+		f.T.Fatalf("GetDecision(%s): %v %v", id, found, err)
 	}
 	return d
 }
 
 func (f *reviewFixture) messages() []model.Message {
-	f.t.Helper()
-	ms, err := f.st.ListMessages(context.Background(), store.MessageFilter{})
+	f.T.Helper()
+	ms, err := f.St.ListMessages(context.Background(), store.MessageFilter{})
 	if err != nil {
-		f.t.Fatal(err)
+		f.T.Fatal(err)
 	}
 	return ms
 }
@@ -125,11 +126,11 @@ func (f *reviewFixture) messages() []model.Message {
 // reviewConfig writes the config file with content.
 func reviewConfig(t *testing.T, content string) {
 	t.Helper()
-	worktreeWrite(t, configFile(os.Getenv("HOME")), content)
+	testkit.WorktreeWrite(t, configFile(os.Getenv("HOME")), content)
 }
 
 func TestReviewRefusesInsideAgent(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	t.Setenv("CLAUDECODE", "1")
 	prev := reviewIsTerminal
 	reviewIsTerminal = func() bool { return true }
@@ -179,7 +180,7 @@ func TestReviewApproveMerges(t *testing.T) {
 		r.ClosedVia != model.AnsweredCLI || !strings.Contains(r.DiffStat, "auth.go") {
 		t.Errorf("review = %+v, want merged at %s with its stat, how merge, via cli", r, head)
 	}
-	if got := f.head(f.repo, "main^2"); got != head {
+	if got := f.head(f.Repo, "main^2"); got != head {
 		t.Errorf("main^2 = %s, want %s", got, head)
 	}
 }
@@ -245,7 +246,7 @@ func TestReviewApproveFailureStaysPending(t *testing.T) {
 	f := reviewNew(t)
 	f.commitOnBranch("README", "branch side\n", "branch readme")
 	f.commitOnMain("README", "main side\n", "main readme")
-	before := f.head(f.repo, "HEAD")
+	before := f.head(f.Repo, "HEAD")
 	stdout, stderr, err := reviewRunCmd(t, "", append([]string{"review", "R-1", "--approve"}, f.headArg()...)...)
 	if err == nil || !strings.Contains(stderr, "Nothing was merged") {
 		t.Fatalf("err %v, stderr %q; want the failure", err, stderr)
@@ -254,7 +255,7 @@ func TestReviewApproveFailureStaysPending(t *testing.T) {
 		t.Errorf("stdout = %q, want nothing", stdout)
 	}
 	f.wantPending()
-	if f.head(f.repo, "HEAD") != before || f.status() != "" {
+	if f.head(f.Repo, "HEAD") != before || f.status() != "" {
 		t.Error("the repository changed")
 	}
 	// A working agent: refused before any git that changes something.
@@ -277,8 +278,8 @@ func TestReviewRequestChangesDelivers(t *testing.T) {
 		t.Errorf("review = %+v, want changes_requested with the note and M-1", r)
 	}
 	m := reviewWantNoteMessage(t, f, "add a test\nfor the 401 path")
-	if want := []string{"SendKeys %100 " + message.TypedLine(m)}; !slices.Equal(sendTyped(f.fake), want) {
-		t.Errorf("typed %q, want %q", sendTyped(f.fake), want)
+	if want := []string{"SendKeys %100 " + message.TypedLine(m)}; !slices.Equal(sendTyped(f.Fake), want) {
+		t.Errorf("typed %q, want %q", sendTyped(f.Fake), want)
 	}
 	if stdout != "R-1: changes requested; M-1 delivered (send_keys)\n" {
 		t.Errorf("stdout = %q", stdout)
@@ -295,7 +296,7 @@ func reviewWantNoteMessage(t *testing.T, f *reviewFixture, note string) model.Me
 	}
 	m := ms[0]
 	if m.Kind != model.KindInstruction || m.RoutedBy != model.RoutedAddress || m.Sender != model.SenderUser ||
-		m.TargetSession != lifecycleLead || m.TargetTask != "T-1" || m.TargetRepo != f.repo ||
+		m.TargetSession != testkit.LifecycleLead || m.TargetTask != "T-1" || m.TargetRepo != f.Repo ||
 		m.Text != task.NoteMessage("R-1", "T-1", note) {
 		t.Errorf("message = %+v", m)
 	}
@@ -311,7 +312,7 @@ func TestReviewRequestChangesQueuesForWorkingAgent(t *testing.T) {
 	if !strings.HasPrefix(stdout, "R-1: changes requested; M-1 queued: ") {
 		t.Errorf("stdout = %q, want the queued line", stdout)
 	}
-	if typed := sendTyped(f.fake); len(typed) != 0 {
+	if typed := sendTyped(f.Fake); len(typed) != 0 {
 		t.Errorf("typed %q into a working agent", typed)
 	}
 	if ms := f.messages(); len(ms) != 1 || ms[0].Status != model.MsgQueued {
@@ -321,12 +322,12 @@ func TestReviewRequestChangesQueuesForWorkingAgent(t *testing.T) {
 
 func TestReviewRequestChangesTargetsLeadNotTeammate(t *testing.T) {
 	f := reviewWithLead(t, model.StateIdle)
-	reviewWithTeammate(f, f.now.Add(time.Minute)) // updated last, so listed first
-	line, err := reviewRequestChanges(context.Background(), f.st, f.fake, testLoggerOnly(), "R-1", "add a test", model.AnsweredPopup, f.now)
+	reviewWithTeammate(f, f.Now.Add(time.Minute)) // updated last, so listed first
+	line, err := reviewRequestChanges(context.Background(), f.St, f.Fake, testLoggerOnly(), "R-1", "add a test", model.AnsweredPopup, f.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ms := f.messages(); len(ms) != 1 || ms[0].TargetSession != lifecycleLead {
+	if ms := f.messages(); len(ms) != 1 || ms[0].TargetSession != testkit.LifecycleLead {
 		t.Errorf("messages = %+v, want one to the lead", ms)
 	}
 	if r := f.review(); r.ClosedVia != model.AnsweredPopup {
@@ -338,7 +339,7 @@ func TestReviewRequestChangesTargetsLeadNotTeammate(t *testing.T) {
 }
 
 func testLoggerOnly() *slog.Logger {
-	l, _ := testLogger()
+	l, _ := testkit.TestLogger()
 	return l
 }
 
@@ -349,16 +350,16 @@ func TestReviewRequestChangesWithoutLiveAgent(t *testing.T) {
 		t.Fatalf("%v\n%s", err, stderr)
 	}
 	ms := f.messages()
-	if len(ms) != 1 || ms[0].TargetSession != lifecycleLead || ms[0].Status != model.MsgQueued {
+	if len(ms) != 1 || ms[0].TargetSession != testkit.LifecycleLead || ms[0].Status != model.MsgQueued {
 		t.Errorf("messages = %+v, want one queued for the review's session", ms)
 	}
-	if !strings.HasPrefix(stdout, "R-1: changes requested; M-1 queued") || len(sendTyped(f.fake)) != 0 {
-		t.Errorf("stdout = %q, typed %q", stdout, sendTyped(f.fake))
+	if !strings.HasPrefix(stdout, "R-1: changes requested; M-1 queued") || len(sendTyped(f.Fake)) != 0 {
+		t.Errorf("stdout = %q, typed %q", stdout, sendTyped(f.Fake))
 	}
 
 	g := reviewNew(t)
-	if _, _, err = g.st.CompleteTask(context.Background(), model.Review{
-		TaskID: "T-1", Summary: "Done.", Tests: model.TestsNotRun, CreatedAt: g.now,
+	if _, _, err = g.St.CompleteTask(context.Background(), model.Review{
+		TaskID: "T-1", Summary: "Done.", Tests: model.TestsNotRun, CreatedAt: g.Now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -413,10 +414,10 @@ func TestReviewDrop(t *testing.T) {
 	if r := f.review(); r.Status != model.ReviewDropped || r.ClosedVia != model.AnsweredCLI {
 		t.Errorf("review = %+v", r)
 	}
-	if tk := f.get("T-1"); tk.Status != model.TaskDropped {
+	if tk := f.Get("T-1"); tk.Status != model.TaskDropped {
 		t.Errorf("task is %s, want dropped", tk.Status)
 	}
-	if slices.ContainsFunc(f.fake.Calls, func(c string) bool { return strings.HasPrefix(c, "KillPane") }) {
+	if slices.ContainsFunc(f.Fake.Calls, func(c string) bool { return strings.HasPrefix(c, "KillPane") }) {
 		t.Error("the agent's pane was killed")
 	}
 }
@@ -431,12 +432,12 @@ func TestReviewActionReappliesMarker(t *testing.T) {
 		if args[2] == "--approve" {
 			args = append(args, f.headArg()...)
 		}
-		f.fake.Calls = nil
+		f.Fake.Calls = nil
 		if _, stderr, err := reviewRunCmd(t, "", args...); err != nil {
 			t.Fatalf("%q: %v\n%s", args, err, stderr)
 		}
 		var set []string
-		for _, c := range f.fake.Calls {
+		for _, c := range f.Fake.Calls {
 			if strings.HasPrefix(c, "SetWindowOption @100 @curia_marker") {
 				set = append(set, c)
 			}
@@ -477,7 +478,7 @@ func TestReviewFlagErrors(t *testing.T) {
 	if ms := f.messages(); len(ms) != 0 {
 		t.Errorf("messages = %+v", ms)
 	}
-	if tk := f.get("T-1"); tk.Status == model.TaskDropped {
+	if tk := f.Get("T-1"); tk.Status == model.TaskDropped {
 		t.Error("task dropped")
 	}
 }
@@ -486,21 +487,21 @@ func TestReviewResolveByTaskAndByReview(t *testing.T) {
 	f := reviewNew(t)
 	ctx := context.Background()
 	for _, arg := range []string{"T-1", "R-1"} {
-		r, err := reviewResolve(ctx, f.st, arg)
+		r, err := reviewResolve(ctx, f.St, arg)
 		if err != nil || r.ID != "R-1" {
 			t.Errorf("reviewResolve(%s) = %s, %v; want R-1", arg, r.ID, err)
 		}
 	}
-	if _, err := reviewResolve(ctx, f.st, "R-9"); err == nil || err.Error() != "no review R-9" {
+	if _, err := reviewResolve(ctx, f.St, "R-9"); err == nil || err.Error() != "no review R-9" {
 		t.Errorf("R-9: %v", err)
 	}
 	if _, err := f.approve(model.ApproveMerge, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reviewResolve(ctx, f.st, "R-1"); err == nil || err.Error() != "R-1 is merged" {
+	if _, err := reviewResolve(ctx, f.St, "R-1"); err == nil || err.Error() != "R-1 is merged" {
 		t.Errorf("closed: %v, want \"R-1 is merged\"", err)
 	}
-	if _, err := reviewResolve(ctx, f.st, "T-1"); err == nil || err.Error() != "T-1 has no review waiting" {
+	if _, err := reviewResolve(ctx, f.St, "T-1"); err == nil || err.Error() != "T-1 has no review waiting" {
 		t.Errorf("no pending: %v", err)
 	}
 	if _, stderr, err := reviewRunCmd(t, "", "review", "R-1", "--drop"); err == nil || !strings.Contains(stderr, "R-1 is merged") {
@@ -513,7 +514,7 @@ func TestReviewJSON(t *testing.T) {
 	a := reviewTicket(f, "Assume v2?", model.ModeAssume)
 	b := reviewTicket(f, "Rotate?", model.ModeBlocking)
 	d := reviewTicket(f, "Keep cookie?", model.ModeBlocking)
-	if _, err := f.st.AnswerDecision(context.Background(), d.ID, model.Answer{Key: "A", Via: model.AnsweredCLI}, f.now); err != nil {
+	if _, err := f.St.AnswerDecision(context.Background(), d.ID, model.Answer{Key: "A", Via: model.AnsweredCLI}, f.Now); err != nil {
 		t.Fatal(err)
 	}
 	head, statusBefore := f.head(f.wt, "HEAD"), f.status()
@@ -541,7 +542,7 @@ func TestReviewJSON(t *testing.T) {
 // reviewCostlensTask is T-1 as the store holds it.
 func reviewCostlensTask(t *testing.T, f *reviewFixture) model.Task {
 	t.Helper()
-	tk, found, err := f.st.GetTask(context.Background(), "T-1")
+	tk, found, err := f.St.GetTask(context.Background(), "T-1")
 	if err != nil || !found || tk.Worktree == "" || tk.Worktree == tk.Repo {
 		t.Fatalf("T-1 = %+v %v %v", tk, found, err)
 	}
@@ -551,10 +552,10 @@ func reviewCostlensTask(t *testing.T, f *reviewFixture) model.Task {
 func TestReviewDetailNeverWaits(t *testing.T) {
 	f := reviewWithLead(t, model.StateIdle)
 	cfg, bin := costlensSetup(t)
-	f.cfg.CostLens.Analyzer = cfg.CostLens.Analyzer
+	f.Cfg.CostLens.Analyzer = cfg.CostLens.Analyzer
 	fake := &costlensFake{release: make(chan struct{}), out: costlensSummary(t, reviewBranch)}
 	costlensUse(t, costlensLookIn(bin), fake)
-	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
+	src := newReviewSource(f.St, f.Fake, f.Cfg, testLoggerOnly(), model.AnsweredPopup, nil)
 
 	type result struct {
 		d   ui.ReviewDetail
@@ -666,7 +667,7 @@ func TestReviewJSONHasBranchCost(t *testing.T) {
 func TestReviewWithoutBranchAsksNothing(t *testing.T) {
 	f := reviewWithLead(t, model.StateIdle)
 	cfg, bin := costlensSetup(t)
-	f.cfg.CostLens.Analyzer = cfg.CostLens.Analyzer
+	f.Cfg.CostLens.Analyzer = cfg.CostLens.Analyzer
 	reviewConfig(t, "[costlens]\nanalyzer = "+strconv.Quote(cfg.CostLens.Analyzer)+"\n")
 	fake := &costlensFake{out: costlensSummary(t, reviewBranch)}
 	costlensUse(t, costlensLookIn(bin), fake)
@@ -674,7 +675,7 @@ func TestReviewWithoutBranchAsksNothing(t *testing.T) {
 		`UPDATE tasks SET branch = '' WHERE id = 'T-1'`,
 		`UPDATE tasks SET branch = ?, worktree = '' WHERE id = 'T-1'`,
 	} {
-		raw, err := sql.Open("sqlite", f.db)
+		raw, err := sql.Open("sqlite", f.DB)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -686,7 +687,7 @@ func TestReviewWithoutBranchAsksNothing(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = raw.Close()
-		src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
+		src := newReviewSource(f.St, f.Fake, f.Cfg, testLoggerOnly(), model.AnsweredPopup, nil)
 		if d, err := src.Detail(context.Background(), "R-1"); err != nil || d.BranchCostKnown {
 			t.Errorf("%s: Detail = %v %v", set, d.BranchCostKnown, err)
 		}
@@ -865,7 +866,7 @@ func TestReviewViewApprovesAndPrintsOutcome(t *testing.T) {
 		m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
 		m = reviewPump(t, m, m.Init())
 		for _, k := range []string{"a", "y"} {
-			f.now = f.now.Add(3 * time.Second)
+			f.Now = f.Now.Add(3 * time.Second)
 			var cmd tea.Cmd
 			m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
 			m = reviewPumpActions(t, m, cmd)
@@ -890,7 +891,7 @@ func TestReviewViewApprovesAndPrintsOutcome(t *testing.T) {
 
 func TestReviewOutputIsSanitised(t *testing.T) {
 	f := reviewNew(t)
-	f.update("T-1", func(tk *model.Task) { tk.Title = "evil \x1b]0;pwned\x07 \x1b[31mtitle" })
+	f.Update("T-1", func(tk *model.Task) { tk.Title = "evil \x1b]0;pwned\x07 \x1b[31mtitle" })
 	lifecycleHooks(f.spawnFixture, "commit-msg", "#!/bin/sh\nprintf 'hook \\033[2J\\033]0;x\\007 says no\\n' >&2\nexit 1\n")
 	for _, args := range [][]string{{"review", "R-1", "--json"}, append([]string{"review", "R-1", "--approve"}, f.headArg()...)} {
 		stdout, stderr, _ := reviewRunCmd(t, "", args...)
@@ -908,36 +909,36 @@ func TestReviewOutputIsSanitised(t *testing.T) {
 
 // reviewWithTeammate adds teammate mate-1 to the lead's team, in the lead's window.
 func reviewWithTeammate(f *reviewFixture, updated time.Time) {
-	f.t.Helper()
+	f.T.Helper()
 	reviewSession(f, "mate-1", "%101", "@100", model.StateIdle, updated)
-	if _, err := f.st.SetTeams(context.Background(), map[string]team.Membership{
-		lifecycleLead: {TeamID: "team-1", Role: model.RoleLead, Member: "lead"},
-		"mate-1":      {TeamID: "team-1", Role: model.RoleTeammate, Member: "tester"},
+	if _, err := f.St.SetTeams(context.Background(), map[string]team.Membership{
+		testkit.LifecycleLead: {TeamID: "team-1", Role: model.RoleLead, Member: "lead"},
+		"mate-1":              {TeamID: "team-1", Role: model.RoleTeammate, Member: "tester"},
 	}); err != nil {
-		f.t.Fatal(err)
+		f.T.Fatal(err)
 	}
 }
 
 func TestReviewSourceDetail(t *testing.T) {
 	f := reviewWithLead(t, model.StateIdle)
-	reviewWithTeammate(f, f.now)
+	reviewWithTeammate(f, f.Now)
 	a := reviewTicket(f, "Assume v2?", model.ModeAssume)
 	b := reviewTicket(f, "Rotate?", model.ModeBlocking)
 	d := reviewTicket(f, "Keep cookie?", model.ModeBlocking)
-	if _, err := f.st.AnswerDecision(context.Background(), d.ID, model.Answer{Key: "A", Via: model.AnsweredCLI}, f.now); err != nil {
+	if _, err := f.St.AnswerDecision(context.Background(), d.ID, model.Answer{Key: "A", Via: model.AnsweredCLI}, f.Now); err != nil {
 		t.Fatal(err)
 	}
 	// An assume ticket past its deadline is no longer open, though the sweep has not closed it yet.
 	late := reviewTicket(f, "Assume staging?", model.ModeAssume)
-	reviewSetExpiry(t, f, late.ID, f.now.Add(-time.Minute))
+	reviewSetExpiry(t, f, late.ID, f.Now.Add(-time.Minute))
 	// An earlier session of the task, ended, started 72 minutes before the others.
-	early := f.start.Add(-72 * time.Minute)
-	if err := f.st.UpsertSession(context.Background(), model.Session{
+	early := f.Start.Add(-72 * time.Minute)
+	if err := f.St.UpsertSession(context.Background(), model.Session{
 		ID: "early", Agent: "claude", State: model.StateEnded, TaskID: "T-1", StartedAt: early, UpdatedAt: early,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
+	src := newReviewSource(f.St, f.Fake, f.Cfg, testLoggerOnly(), model.AnsweredPopup, nil)
 	det, err := src.Detail(context.Background(), "R-1")
 	if err != nil {
 		t.Fatal(err)
@@ -960,17 +961,17 @@ func TestReviewSourceDetail(t *testing.T) {
 
 func TestReviewSourceApproveRefusesChangedBranch(t *testing.T) {
 	f := reviewNew(t)
-	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
+	src := newReviewSource(f.St, f.Fake, f.Cfg, testLoggerOnly(), model.AnsweredPopup, nil)
 	det, err := src.Detail(context.Background(), "R-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.commitOnBranch("late.go", "package auth\n", "late commit") // lands after the user looked
-	before := f.head(f.repo, "HEAD")
+	before := f.head(f.Repo, "HEAD")
 	if _, err = src.Approve(context.Background(), "R-1", det.Head); !errors.Is(err, gitops.ErrBranchChanged) {
 		t.Fatalf("Approve with the old head: %v, want the changed-branch refusal", err)
 	}
-	if f.head(f.repo, "HEAD") != before {
+	if f.head(f.Repo, "HEAD") != before {
 		t.Error("main moved")
 	}
 	f.wantPending()
@@ -994,7 +995,7 @@ func TestReviewSourceApproveRefusesChangedBranch(t *testing.T) {
 func TestReviewSourceQueueRunsNoGit(t *testing.T) {
 	f := reviewNew(t)
 	calls := reviewRecordGit(t)
-	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
+	src := newReviewSource(f.St, f.Fake, f.Cfg, testLoggerOnly(), model.AnsweredPopup, nil)
 	rows, err := src.Queue(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1006,7 +1007,7 @@ func TestReviewSourceQueueRunsNoGit(t *testing.T) {
 		t.Errorf("Queue ran git: %q", c)
 	}
 	// A task stored dropped (by curia task) has no review to show.
-	f.update("T-1", func(tk *model.Task) { tk.Status = model.TaskDropped })
+	f.Update("T-1", func(tk *model.Task) { tk.Status = model.TaskDropped })
 	if rows, err = src.Queue(context.Background()); err != nil || len(rows) != 0 {
 		t.Errorf("dropped task: rows %+v, err %v", rows, err)
 	}
@@ -1015,7 +1016,7 @@ func TestReviewSourceQueueRunsNoGit(t *testing.T) {
 // reviewSetExpiry moves ticket id's deadline to at, with a raw UPDATE.
 func reviewSetExpiry(t *testing.T, f *reviewFixture, id string, at time.Time) {
 	t.Helper()
-	raw, err := sql.Open("sqlite", f.db)
+	raw, err := sql.Open("sqlite", f.DB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1029,12 +1030,12 @@ func reviewSetExpiry(t *testing.T, f *reviewFixture, id string, at time.Time) {
 func TestReviewSourceDiffCmd(t *testing.T) {
 	f := reviewNew(t)
 	reviewUseDiffTools(t, func(name string) (string, error) { return filepath.Join("/opt/bin", name), nil })
-	src := newReviewSource(f.st, f.fake, f.cfg, testLoggerOnly(), model.AnsweredPopup, nil)
+	src := newReviewSource(f.St, f.Fake, f.Cfg, testLoggerOnly(), model.AnsweredPopup, nil)
 	cmd, err := src.DiffCmd(context.Background(), "R-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"/opt/bin/git", "-C", f.repo, "diff", "refs/heads/main...refs/heads/" + reviewBranch}; !slices.Equal(append([]string{cmd.Path}, cmd.Args[1:]...), want) {
+	if want := []string{"/opt/bin/git", "-C", f.Repo, "diff", "refs/heads/main...refs/heads/" + reviewBranch}; !slices.Equal(append([]string{cmd.Path}, cmd.Args[1:]...), want) {
 		t.Errorf("argv = %q, want %q", cmd.Args, want)
 	}
 }
@@ -1121,7 +1122,7 @@ func reviewChild(t *testing.T, f *reviewFixture, hook string, args ...string) (c
 	}
 	cmd = exec.Command(self, "-test.run", "^TestReviewChild$", "-test.v")
 	cmd.Env = append(os.Environ(), reviewChildArgs+"="+strings.Join(args, "\x1f"),
-		reviewChildHome+"="+os.Getenv("HOME"), reviewChildDB+"="+f.db)
+		reviewChildHome+"="+os.Getenv("HOME"), reviewChildDB+"="+f.DB)
 	out = &bytes.Buffer{}
 	cmd.Stdout, cmd.Stderr = out, out
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -1150,21 +1151,21 @@ func reviewChildWait(t *testing.T, cmd *exec.Cmd, out *bytes.Buffer) {
 // reviewWantMerged checks that R-1 is recorded merged at head and that the
 // main checkout holds the merge, clean, with no merge under way.
 func (f *reviewFixture) wantMerged(head string) {
-	f.t.Helper()
+	f.T.Helper()
 	if r := f.review(); r.Status != model.ReviewMerged || r.Head != head {
-		f.t.Errorf("R-1 is %s at %q, want merged at %s", r.Status, r.Head, head)
+		f.T.Errorf("R-1 is %s at %q, want merged at %s", r.Status, r.Head, head)
 	}
-	if got := f.head(f.repo, "main^2"); got != head {
-		f.t.Errorf("main^2 = %s, want the approved %s", got, head)
+	if got := f.head(f.Repo, "main^2"); got != head {
+		f.T.Errorf("main^2 = %s, want the approved %s", got, head)
 	}
 	if s := f.status(); s != "" {
-		f.t.Errorf("status = %q, want clean", s)
+		f.T.Errorf("status = %q, want clean", s)
 	}
 	if f.hasMergeHead() {
-		f.t.Error("MERGE_HEAD is left")
+		f.T.Error("MERGE_HEAD is left")
 	}
-	if _, err := os.Stat(filepath.Join(f.repo, ".git", "index.lock")); err == nil {
-		f.t.Error("index.lock is left")
+	if _, err := os.Stat(filepath.Join(f.Repo, ".git", "index.lock")); err == nil {
+		f.T.Error("index.lock is left")
 	}
 }
 
@@ -1227,7 +1228,7 @@ func TestDashboardWaitsForReviewAction(t *testing.T) {
 	runProgram = func(m tea.Model, _ ...tea.ProgramOption) error {
 		m = uiToSessionList(m)
 		for _, k := range []string{"r", "a", "y"} {
-			f.now = f.now.Add(2 * time.Second)
+			f.Now = f.Now.Add(2 * time.Second)
 			var cmd tea.Cmd
 			m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
 			m = reviewPump(t, m, cmd) // drops the approval's command, still running, after 300 ms
@@ -1256,7 +1257,7 @@ func TestApproveRecordsMergeFoundDone(t *testing.T) {
 	reviewChildWait(t, cmd, out)
 	reviewWaitFile(t, marker+".done")
 	// git exits after its hook: wait for it to leave no merge under way.
-	for deadline := time.Now().Add(30 * time.Second); f.hasMergeHead() || f.head(f.repo, "main^2") != head; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(30 * time.Second); f.hasMergeHead() || f.head(f.Repo, "main^2") != head; time.Sleep(20 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("the orphaned git did not finish its merge")
 		}
@@ -1283,24 +1284,24 @@ func TestApproveRecordsMergeFoundDone(t *testing.T) {
 // refused, naming the approval in flight; the first then records its merge.
 func TestSecondApproverRefusedWhileFirstMerges(t *testing.T) {
 	f := reviewNew(t)
-	f.now = time.Now()
+	f.Now = time.Now()
 	head := f.head(f.wt, "HEAD")
 	cmd, out, _ := reviewChild(t, f, "pre-merge-commit", "review", "R-1", "--approve", "--merge", "--head", head)
 	_, err := f.approve(model.ApproveMerge, "")
 	if err == nil || !strings.Contains(err.Error(), "R-1 is being approved (merge at "+head[:7]+") by another curia since ") {
 		t.Errorf("second approve: %v, want the in-flight refusal", err)
 	}
-	if _, err = reviewDrop(context.Background(), f.st, "R-1", model.AnsweredCLI, f.now); err == nil ||
+	if _, err = reviewDrop(context.Background(), f.St, "R-1", model.AnsweredCLI, f.Now); err == nil ||
 		!strings.Contains(err.Error(), "is being approved") || !strings.Contains(err.Error(), "If that curia was killed, drop again after ") {
 		t.Errorf("drop during the approval: %v, want the in-flight refusal", err)
 	}
-	if _, err = reviewRequestChanges(context.Background(), f.st, f.fake, testLoggerOnly(), "R-1", "more", model.AnsweredCLI, f.now); err == nil ||
+	if _, err = reviewRequestChanges(context.Background(), f.St, f.Fake, testLoggerOnly(), "R-1", "more", model.AnsweredCLI, f.Now); err == nil ||
 		!strings.Contains(err.Error(), "is being approved") || !strings.Contains(err.Error(), "If that curia was killed, request changes again after ") {
 		t.Errorf("request changes during the approval: %v, want the in-flight refusal", err)
 	}
 	reviewChildWait(t, cmd, out)
 	f.wantMerged(head)
-	if strings.Count(worktreeGit(t, f.repo, "log", "--merges", "--format=%H"), "\n") != 0 {
+	if strings.Count(testkit.WorktreeGit(t, f.Repo, "log", "--merges", "--format=%H"), "\n") != 0 {
 		t.Error("more than one merge commit")
 	}
 }
@@ -1310,8 +1311,8 @@ func TestSecondApproverRefusedWhileFirstMerges(t *testing.T) {
 func TestStaleIntentDoesNotBlock(t *testing.T) {
 	f := reviewNew(t)
 	head := f.head(f.wt, "HEAD")
-	if _, err := f.st.ClaimReviewIntent(context.Background(), "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head},
-		f.now.Add(-reviewIntentHold), reviewIntentHold); err != nil {
+	if _, err := f.St.ClaimReviewIntent(context.Background(), "R-1", store.ReviewIntent{How: model.ApproveMerge, Head: head},
+		f.Now.Add(-reviewIntentHold), reviewIntentHold); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.approve(model.ApproveMerge, ""); err != nil {
@@ -1354,7 +1355,7 @@ func TestRecordErrorNeverAdvisesDrop(t *testing.T) {
 	head := strings.Repeat("c", 40)
 	r := f.review()
 	for _, err := range []error{errors.New("database is locked"), store.ErrReviewClosed} {
-		msg := reviewRecordError(context.Background(), f.st, r, "merged x into main (ccccccc)", head, err).Error()
+		msg := reviewRecordError(context.Background(), f.St, r, "merged x into main (ccccccc)", head, err).Error()
 		if strings.Contains(msg, "--drop") || strings.Contains(msg, "drop it") {
 			t.Errorf("%v: %q advises dropping", err, msg)
 		}
@@ -1366,13 +1367,13 @@ func TestRecordErrorNeverAdvisesDrop(t *testing.T) {
 		}
 	}
 	// A record that another curia made meanwhile is said so.
-	if _, _, err := f.st.CloseReview(context.Background(), "R-1", store.ReviewClose{
+	if _, _, err := f.St.CloseReview(context.Background(), "R-1", store.ReviewClose{
 		Status: model.ReviewMerged, How: model.ApproveMerge,
 		Head: head, Via: model.AnsweredCLI,
-	}, f.now); err != nil {
+	}, f.Now); err != nil {
 		t.Fatal(err)
 	}
-	if msg := reviewRecordError(context.Background(), f.st, r, "merged", head, store.ErrReviewClosed).Error(); !strings.Contains(msg, "another curia recorded it meanwhile (merged)") {
+	if msg := reviewRecordError(context.Background(), f.St, r, "merged", head, store.ErrReviewClosed).Error(); !strings.Contains(msg, "another curia recorded it meanwhile (merged)") {
 		t.Errorf("closed by another: %q", msg)
 	}
 }
@@ -1382,7 +1383,7 @@ func TestRecordErrorNeverAdvisesDrop(t *testing.T) {
 // approves that commit, and exits 1.
 func TestApproveFlagNeedsHead(t *testing.T) {
 	f := reviewNew(t)
-	head, before := f.head(f.wt, "HEAD"), f.head(f.repo, "HEAD")
+	head, before := f.head(f.wt, "HEAD"), f.head(f.Repo, "HEAD")
 	for _, c := range []struct {
 		args []string
 		flag string
@@ -1404,7 +1405,7 @@ func TestApproveFlagNeedsHead(t *testing.T) {
 			t.Errorf("%q: stderr %q does not show the head", c.args, stderr)
 		}
 	}
-	if f.head(f.repo, "HEAD") != before {
+	if f.head(f.Repo, "HEAD") != before {
 		t.Error("main moved")
 	}
 	if r := f.review(); r.Status != model.ReviewPending || !r.IntentAt.IsZero() {
@@ -1417,7 +1418,7 @@ func TestApproveFlagNeedsHead(t *testing.T) {
 // names the branch's head.
 func TestApproveFlagRefusesMovedBranch(t *testing.T) {
 	f := reviewNew(t)
-	shown, before := f.head(f.wt, "HEAD"), f.head(f.repo, "HEAD")
+	shown, before := f.head(f.wt, "HEAD"), f.head(f.Repo, "HEAD")
 	f.commitOnBranch("evil.go", "package auth // added after the developer looked\n", "sneak")
 	for _, h := range []string{shown} {
 		_, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", h)
@@ -1425,10 +1426,10 @@ func TestApproveFlagRefusesMovedBranch(t *testing.T) {
 			t.Errorf("--head %s: %v, want the changed-branch refusal", h, err)
 		}
 	}
-	if f.head(f.repo, "HEAD") != before {
+	if f.head(f.Repo, "HEAD") != before {
 		t.Error("main moved")
 	}
-	if _, err := os.Stat(filepath.Join(f.repo, "evil.go")); err == nil {
+	if _, err := os.Stat(filepath.Join(f.Repo, "evil.go")); err == nil {
 		t.Error("the unseen commit was merged")
 	}
 	f.wantPending()
@@ -1451,7 +1452,7 @@ func TestApproveFlagRefusesPrefix(t *testing.T) {
 			t.Errorf("--head %q: %v, want the refusal showing the full head", bad, err)
 		}
 	}
-	other := f.head(f.repo, "main")
+	other := f.head(f.Repo, "main")
 	if _, _, err := reviewRunCmd(t, "", "review", "R-1", "--approve", "--head", other); err == nil ||
 		!strings.Contains(err.Error(), "the branch changed since you looked") {
 		t.Errorf("--head of another commit: %v", err)

@@ -29,6 +29,7 @@ import (
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/notify"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -1142,7 +1143,7 @@ func (b *serveBlockingTmux) ListPanes(ctx context.Context) ([]tmux.Pane, error) 
 // returns the database path, which does not exist yet.
 func serveConfig(t *testing.T, public, listen string) string {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	userTerminalAs(t, true) // the user, at a terminal: serve is user-only
 	body := "[serve]\n"
 	if public != "" {

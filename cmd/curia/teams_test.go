@@ -14,6 +14,7 @@ import (
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 // The captured config (probe P5): team directory session-bf9b79ad, lead
@@ -28,7 +29,7 @@ const (
 // created).
 func teamsHome(t *testing.T, sessions ...model.Session) (*store.Store, string) {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	claude := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", claude)
 	st, err := store.Open(db)

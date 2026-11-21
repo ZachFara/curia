@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -57,7 +58,7 @@ func runSetupApprove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	lifecycle.SetupShow(cmd.OutOrStdout(), t, s)
-	if err = lifecycle.SetupConfirmed(s); err != nil {
+	if err = setupConfirmed(s); err != nil {
 		return err
 	}
 	if err = st.ApproveSetup(ctx, t.Repo, s.Sum); err != nil {
@@ -66,4 +67,21 @@ func runSetupApprove(cmd *cobra.Command, args []string) error {
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Approved for %s: curia spawn runs this exact content; any change needs a new approval.\n",
 		sanitize.Line(t.Repo, 300))
 	return err
+}
+
+// setupConfirmLen is how many hex characters of the hash the user types.
+const setupConfirmLen = 8
+
+// setupConfirmed asks the user to type the first setupConfirmLen hex
+// characters of s's SHA-256; anything else approves nothing.
+func setupConfirmed(s lifecycle.SetupScript) error {
+	want := s.Sum[:setupConfirmLen]
+	answer, err := promptTerminal(fmt.Sprintf("To approve it, type the first %d characters of its SHA-256: ", setupConfirmLen))
+	if err != nil {
+		return fmt.Errorf("not approved: %w", err)
+	}
+	if !strings.EqualFold(answer, want) {
+		return fmt.Errorf("not approved: the answer is not the first %d characters of the SHA-256", setupConfirmLen)
+	}
+	return nil
 }

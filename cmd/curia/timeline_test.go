@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 func timelineSeed(t *testing.T) {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	prev := clock
 	clock = func() time.Time { return time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC) }
 	t.Cleanup(func() {

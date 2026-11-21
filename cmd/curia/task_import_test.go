@@ -22,6 +22,7 @@ import (
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 // taskBacklogDir makes <repo>/backlog/tasks and returns it.
@@ -150,11 +151,11 @@ func TestTaskImportRefusals(t *testing.T) {
 	taskWantErr(t, err, out, "--backlog-md")
 	out, err = taskRun(t, nil, "task", "import", "--backlog-md", repo)
 	taskWantErr(t, err, out, "backlog/tasks")
-	out, err = taskRun(t, nil, "task", "import", "--backlog-md", hermeticGit(t))
+	out, err = taskRun(t, nil, "task", "import", "--backlog-md", testkit.HermeticGit(t))
 	taskWantErr(t, err, out, "not inside a git repository")
 	detached := taskRepo(t, "main")
 	taskBacklogDir(t, detached)
-	gitRun(t, detached, "checkout", "-q", "--detach")
+	testkit.GitRun(t, detached, "checkout", "-q", "--detach")
 	out, err = taskRun(t, nil, "task", "import", "--backlog-md", detached)
 	taskWantErr(t, err, out, "HEAD is detached")
 	_, wt := hookLinkedWorktree(t, "feat/x")

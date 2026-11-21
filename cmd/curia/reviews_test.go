@@ -15,6 +15,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 const reviewsNow = "2026-11-14T12:00:00Z"
@@ -33,7 +34,7 @@ const reviewsInsertSQL = `INSERT INTO reviews (task_id, id, session_id, summary,
 // title and then the specs (task is an index into titles, as text).
 func reviewsHome(t *testing.T, titles []string, specs ...reviewsSpec) {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	prev := clock
 	clock = func() time.Time {
 		ts, err := time.Parse(time.RFC3339, reviewsNow)

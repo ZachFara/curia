@@ -22,6 +22,7 @@ import (
 	latgate "github.com/ZachFara/curia/internal/latency"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -30,18 +31,6 @@ type hookResult struct {
 	exitCode, exits int
 	output          string
 	log             []string
-}
-
-// hookHome points HOME (and so the default log and config paths) and
-// CURIA_DB at a temp dir, outside tmux, and returns the database path.
-func hookHome(t *testing.T) string {
-	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("TMUX_PANE", "")
-	db := filepath.Join(home, "curia.db")
-	t.Setenv("CURIA_DB", db)
-	return db
 }
 
 // runHookCmd runs `curia <args>` in-process with stdin and a fake exit func.
@@ -79,7 +68,7 @@ func assertQuietExitZero(t *testing.T, res hookResult) {
 }
 
 func TestMalformedPayloadExitsZero(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	res := runHookCmd(t, strings.NewReader("{"), "hook", "PostToolUse")
 	assertQuietExitZero(t, res)
 	if len(res.log) != 1 {
@@ -93,7 +82,7 @@ func TestMalformedPayloadExitsZero(t *testing.T) {
 // TestHookWatchdogExitsZero: stdin has no deadline, so a payload that never
 // ends must not keep the hook (and Claude Code waiting on it) forever.
 func TestHookWatchdogExitsZero(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	prevDeadline, prevExit := hookDeadline, hookExit
 	hookDeadline = 100 * time.Millisecond
 	exits := make(chan int, 2)
@@ -132,7 +121,7 @@ func TestHookWatchdogExitsZero(t *testing.T) {
 }
 
 func TestHookExitsZeroWhenStoreLocked(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	st, err := store.Open(db) // create the file in WAL mode first
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +158,7 @@ func TestHookExitsZeroWhenStoreLocked(t *testing.T) {
 }
 
 func TestHookRecordsSession(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	body := `{"session_id":"A","transcript_path":"/nonexistent/t.jsonl","cwd":"` + t.TempDir() +
 		`","hook_event_name":"SessionStart","source":"startup"}`
 	res := runHookCmd(t, strings.NewReader(body), "hook", "SessionStart")
@@ -209,7 +198,7 @@ func TestHookBadInvocationsExitZero(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			db := hookHome(t)
+			db := testkit.HookHome(t)
 			res := runHookCmd(t, strings.NewReader(tc.stdin), tc.args...)
 			assertQuietExitZero(t, res)
 			if len(res.log) != 1 {
@@ -230,7 +219,7 @@ func TestHookBadInvocationsExitZero(t *testing.T) {
 }
 
 func TestHookPanicExitsZero(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	prev := hookRun
 	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
 		panic("boom\nforged line")
@@ -245,7 +234,7 @@ func TestHookPanicExitsZero(t *testing.T) {
 }
 
 func TestHookLogCannotBeForged(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	res := runHookCmd(t, strings.NewReader(`{"session_id":"A"}`), "hook", "Bogus\ntime=2026 level=INFO msg=forged")
 	assertQuietExitZero(t, res)
 	if len(res.log) != 1 {
@@ -273,7 +262,7 @@ type markerHook struct {
 
 func newMarkerHook(t *testing.T) *markerHook {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	t.Setenv("TMUX_PANE", "%1")
 	fake := useFakeTmux(t)
 	fake.Panes = []tmux.Pane{{ID: "%1", Session: "s", WindowID: "@7"}}
@@ -463,7 +452,7 @@ func useFakeTmux(t *testing.T) *tmux.Fake {
 }
 
 func TestHookAppliesMarker(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	fake := useFakeTmux(t)
 	prev := hookRun
 	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
@@ -480,7 +469,7 @@ func TestHookAppliesMarker(t *testing.T) {
 }
 
 func TestHookGoneWindowIsNotLogged(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	gone := &goneWindowTmux{}
 	prevClient := newTmuxClient
 	newTmuxClient = func() tmux.Client { return gone }
@@ -497,7 +486,7 @@ func TestHookGoneWindowIsNotLogged(t *testing.T) {
 }
 
 func TestHookWithoutWindowAppliesNothing(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	fake := useFakeTmux(t)
 	res := runHookCmd(t, strings.NewReader(`{"session_id":"A","cwd":"`+t.TempDir()+`"}`), "hook", "SessionStart")
 	assertQuietExitZero(t, res)
@@ -514,7 +503,7 @@ func (f *failingTmux) SetWindowOption(context.Context, string, string, string) e
 }
 
 func TestHookAttentionFailureIsLoggedExitZero(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	prevC := newTmuxClient
 	newTmuxClient = func() tmux.Client { return &failingTmux{} }
 	t.Cleanup(func() { newTmuxClient = prevC })
@@ -548,7 +537,7 @@ func TestHookMovedSessionAppliesBothWindows(t *testing.T) {
 }
 
 func TestHookFailedBeforeReadIsLoggedAndApplies(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	fake := useFakeTmux(t)
 	st, err := store.Open(db)
 	if err != nil {
@@ -680,7 +669,7 @@ func hookDelivery(t *testing.T, db, id string) (model.Delivery, model.DeliveryVi
 }
 
 func TestStdoutOnlyOnBlockedStop(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	body := `{"session_id":"A","cwd":"` + t.TempDir() + `"}`
 	hookWantExitZero(t, hookRunStreams(t, strings.NewReader(body), "hook", "SessionStart"))
 	id := hookQueueAnswer(t, db, "A")
@@ -716,7 +705,7 @@ func TestStdoutOnlyOnBlockedStop(t *testing.T) {
 }
 
 func TestHookExitsZeroAndSilentWhenDecisionQueryFails(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	prev := hookRun
 	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
 		return hook.Result{Session: model.Session{ID: "A", State: model.StateIdle}}, errors.New("count open blocking: boom")
@@ -772,7 +761,7 @@ func hookMessageStatus(t *testing.T, db, id string) (model.MessageStatus, model.
 }
 
 func TestStdoutOnlyOnBlockedStopWithMessages(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	body := `{"session_id":"A","cwd":"` + t.TempDir() + `"}`
 	hookWantExitZero(t, hookRunStreams(t, strings.NewReader(body), "hook", "SessionStart"))
 	ids := hookQueueMessages(t, db, "A", "use pnpm, not npm", "then run the api tests")
@@ -812,7 +801,7 @@ func TestStdoutOnlyOnBlockedStopWithMessages(t *testing.T) {
 // Answers and messages at once: still one line, answers first, and one log
 // line for each kind.
 func TestHookStopPrintsAnswersThenMessages(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	body := `{"session_id":"A","cwd":"` + t.TempDir() + `"}`
 	hookWantExitZero(t, hookRunStreams(t, strings.NewReader(body), "hook", "SessionStart"))
 	answer := hookQueueAnswer(t, db, "A")
@@ -837,7 +826,7 @@ func TestHookExitsZeroAndSilentWhenMessageQueryFails(t *testing.T) {
 		{"read", `ALTER TABLE messages RENAME TO messages_gone`, "no such table: messages"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db := hookHome(t)
+			db := testkit.HookHome(t)
 			body := `{"session_id":"A","cwd":"` + t.TempDir() + `"}`
 			hookWantExitZero(t, hookRunStreams(t, strings.NewReader(body), "hook", "SessionStart"))
 			hookQueueMessages(t, db, "A", "use pnpm")
@@ -867,7 +856,7 @@ func TestHookExitsZeroAndSilentWhenMessageQueryFails(t *testing.T) {
 // A claim that committed is delivered even when Run also reports an error
 // (a transcript it could not read): the answer is no longer queued.
 func TestHookEmitsBlockBesideAnError(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	line := `{"decision":"block","reason":"x"}` + "\n"
 	prev := hookRun
 	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
@@ -886,7 +875,7 @@ func TestHookEmitsBlockBesideAnError(t *testing.T) {
 }
 
 func TestNothingPrintedAfterWatchdog(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	prevDeadline, prev := hookDeadline, hookRun
 	hookDeadline = 10 * time.Millisecond
 	hookRun = func(context.Context, model.EventKind, []byte, hook.Env, *store.Store, config.Config) (hook.Result, error) {
@@ -929,7 +918,7 @@ func (f *hookOrderTmux) SetWindowOption(ctx context.Context, window, name, value
 // The line is written before any tmux call, so a slow tmux cannot widen the
 // gap between claiming an answer and telling Claude.
 func TestHookEmitsBeforeTmux(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	t.Setenv("TMUX_PANE", "%1")
 	fake := useFakeTmux(t)
 	fake.Panes = []tmux.Pane{{ID: "%1", Session: "s", WindowID: "@7"}}
@@ -1083,11 +1072,11 @@ func TestHookClosedStdoutChild(t *testing.T) {
 // resolved).
 func hookLinkedWorktree(t *testing.T, branch string) (repo, worktree string) {
 	t.Helper()
-	dir := hermeticGit(t)
-	gitInit(t, dir, "main")
-	gitRun(t, dir, "commit", "-q", "--allow-empty", "-m", "first")
+	dir := testkit.HermeticGit(t)
+	testkit.GitInit(t, dir, "main")
+	testkit.GitRun(t, dir, "commit", "-q", "--allow-empty", "-m", "first")
 	wt := filepath.Join(t.TempDir(), "wt")
-	gitRun(t, dir, "worktree", "add", "-q", "-b", branch, wt)
+	testkit.GitRun(t, dir, "worktree", "add", "-q", "-b", branch, wt)
 	repo, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -1131,7 +1120,7 @@ func TestHookLatencyUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	logger, buf := testLogger()
+	logger, buf := testkit.TestLogger()
 	env := hookEnv(context.Background(), unreachableTmux{}, logger)
 	tr := filepath.Join(t.TempDir(), "t.jsonl")
 	const line = `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}` + "\n"
@@ -1163,14 +1152,14 @@ func TestHookLatencyUnchanged(t *testing.T) {
 	if s := getSession(t, db, "S0"); s.TaskID != "T-7" || s.Worktree != wt {
 		t.Errorf("S0: task %q worktree %q, want T-7 and %q", s.TaskID, s.Worktree, wt)
 	}
-	if lines := logLines(buf); lines != nil {
+	if lines := testkit.LogLines(buf); lines != nil {
 		t.Errorf("log = %q, want none", lines)
 	}
 }
 
 // CURIA_TASK_ID is untrusted: only a well-formed task id is stored.
 func TestHookReadsTaskFromEnvironment(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	for i, tc := range []struct{ env, want string }{
 		{"T-9", "T-9"},
 		{"T-123456789", "T-123456789"},
@@ -1219,7 +1208,7 @@ func TestHookLatencySocketPane(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	logger, buf := testLogger()
+	logger, buf := testkit.TestLogger()
 	env := hookEnv(context.Background(), fake, logger)
 	cwd, tr := t.TempDir(), filepath.Join(t.TempDir(), "t.jsonl")
 	const line = `{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5,"cache_read_input_tokens":50000},"content":[{"type":"tool_use","id":"t","name":"Edit","input":{}}]}}` + "\n"
@@ -1287,7 +1276,7 @@ func TestHookLatencySocketPane(t *testing.T) {
 	if n := len(fake.Calls); n != runs {
 		t.Errorf("tmux calls = %d (%q...), want %d, one PaneInfo per SessionStart", n, fake.Calls[:min(n, 3)], runs)
 	}
-	if lines := logLines(buf); lines != nil {
+	if lines := testkit.LogLines(buf); lines != nil {
 		t.Errorf("log = %q, want none", lines)
 	}
 }
@@ -1295,7 +1284,7 @@ func TestHookLatencySocketPane(t *testing.T) {
 // TestHookStoresSocketFromFakeTmux: the socket comes from the one PaneInfo
 // call SessionStart already makes, and no later event asks tmux again.
 func TestHookStoresSocketFromFakeTmux(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	t.Setenv("TMUX_PANE", hookSocketPane.ID)
 	fake := useFakeTmux(t)
 	fake.Panes = []tmux.Pane{hookSocketPane}
@@ -1342,7 +1331,7 @@ func TestHookSessionEndReasonDecidesRestore(t *testing.T) {
 		{"no reason", `{"session_id":"sess-1","cwd":"/repo","hook_event_name":"SessionEnd"}`, "other", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db := hookHome(t)
+			db := testkit.HookHome(t)
 			t.Setenv("TMUX_PANE", hookSocketPane.ID)
 			useFakeTmux(t).Panes = []tmux.Pane{hookSocketPane}
 			start := `{"session_id":"sess-1","cwd":"` + t.TempDir() + `","source":"startup"}`
@@ -1397,13 +1386,13 @@ func TestHookArgs(t *testing.T) {
 		{"agent twice", []string{"Stop", "--agent=codex", "--agent=codex"}, "Stop", model.AgentCodex, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			logger, buf := testLogger()
+			logger, buf := testkit.TestLogger()
 			event, agent, err := hookArgs(tc.args, logger)
 			if event != tc.event || agent != tc.agent || (err != nil) != tc.refused {
 				t.Errorf("hookArgs(%q) = %q, %q, %v; want %q, %q, refused %v",
 					tc.args, event, agent, err, tc.event, tc.agent, tc.refused)
 			}
-			lines := logLines(buf)
+			lines := testkit.LogLines(buf)
 			switch {
 			case tc.warn == "" && lines != nil:
 				t.Errorf("log = %q, want none", lines)
@@ -1419,7 +1408,7 @@ func TestHookArgs(t *testing.T) {
 // line; an agent Curia does not know is Claude Code's, with a WARN line.
 func TestHookArgsOnCommandPath(t *testing.T) {
 	for _, args := range [][]string{{"--agent", "codex"}, {"--agent=codex", "SessionStart"}, {"SessionStart", "--agent", "codex", "x"}} {
-		db := hookHome(t)
+		db := testkit.HookHome(t)
 		res := runHookCmd(t, strings.NewReader(`{"session_id":"A","source":"startup"}`), append([]string{"hook"}, args...)...)
 		assertQuietExitZero(t, res)
 		if len(res.log) != 1 || !strings.Contains(res.log[0], "hook failed") {
@@ -1432,7 +1421,7 @@ func TestHookArgsOnCommandPath(t *testing.T) {
 		}
 	}
 
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	body := `{"session_id":"A","cwd":"` + t.TempDir() + `","source":"startup"}`
 	res := runHookCmd(t, strings.NewReader(body), "hook", "SessionStart", "--agent", "gemini")
 	assertQuietExitZero(t, res)
@@ -1464,7 +1453,7 @@ func hookFindSession(t *testing.T, db, id string) (model.Session, bool) {
 // 0 and leaves both queued; the session is Codex's and idle.
 func TestHookCodexPrintsNothingAtStop(t *testing.T) {
 	for _, flag := range [][]string{{"--agent", "codex"}, {"--agent=codex"}} {
-		db := hookHome(t)
+		db := testkit.HookHome(t)
 		body := `{"session_id":"A","cwd":"` + t.TempDir() + `","source":"startup"}`
 		runEvent := func(event string) hookStreams {
 			return hookRunStreams(t, strings.NewReader(body), append([]string{"hook", event}, flag...)...)
@@ -1504,7 +1493,7 @@ func TestHookLatencyUnchangedWithAgentFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	logger, buf := testLogger()
+	logger, buf := testkit.TestLogger()
 	env := hookEnv(context.Background(), unreachableTmux{}, logger)
 	if _, env.Agent, err = hookArgs([]string{"PostToolUse", "--agent", "codex"}, logger); err != nil || env.Agent != model.AgentCodex {
 		t.Fatalf("hookArgs: agent %q, err %v; want codex", env.Agent, err)
@@ -1538,7 +1527,7 @@ func TestHookLatencyUnchangedWithAgentFlag(t *testing.T) {
 	if s := getSession(t, db, "S"); s.Agent != model.AgentCodex || s.TranscriptOffset != 0 || s.State != model.StateIdle {
 		t.Errorf("S: agent %q offset %d state %s, want codex, 0, idle", s.Agent, s.TranscriptOffset, s.State)
 	}
-	if lines := logLines(buf); lines != nil {
+	if lines := testkit.LogLines(buf); lines != nil {
 		t.Errorf("log = %q, want none", lines)
 	}
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -33,7 +34,7 @@ func at(hh, mm int) time.Time {
 // path and the fake.
 func fleetHome(t *testing.T, panes []string, sessions ...model.Session) (string, *tmux.Fake) {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	fake := useFakeTmux(t)
 	for _, id := range panes {
 		fake.Panes = append(fake.Panes, tmux.Pane{ID: id, Session: "work", WindowID: "@1"})

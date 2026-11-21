@@ -19,6 +19,7 @@ import (
 	"github.com/ZachFara/curia/internal/export"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -87,7 +88,7 @@ func decideOpenSpecs() []decisionsSpec { return decisionsSpecs()[:2] }
 
 func TestDecideRefusesInsideAgent(t *testing.T) {
 	// No database yet: refusing must not create one.
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	decideResetFlags(t)
 	t.Setenv("CLAUDECODE", "1")
 	prev := runProgram
@@ -421,7 +422,7 @@ func TestDecideSourceExpiresAndSorts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
-	log, _ := testLogger()
+	log, _ := testkit.TestLogger()
 	src := newDecideSource(st, fake, log)
 	tickets, err := src.Tickets(context.Background())
 	if err != nil {
@@ -448,7 +449,7 @@ func TestDecideSourceAnswerIsNotRedelivered(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
-	log, _ := testLogger()
+	log, _ := testkit.TestLogger()
 	src := newDecideSource(st, fake, log)
 	a := model.Answer{Key: "A", Reasoning: "r", Via: model.AnsweredPopup}
 	out, err := src.Answer(context.Background(), "D-1", a)
@@ -541,7 +542,7 @@ func TestDecidePartialSendTellsTheUser(t *testing.T) {
 }
 
 func TestDecideHelpInsideAgentIsExempt(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	decideResetFlags(t)
 	t.Setenv("CLAUDECODE", "1")
 	t.Cleanup(func() {

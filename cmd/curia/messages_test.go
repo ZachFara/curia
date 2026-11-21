@@ -12,6 +12,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 const messagesNow = "2026-11-11T12:00:00Z"
@@ -30,7 +31,7 @@ type messagesSpec struct {
 func messagesHome(t *testing.T, specs ...messagesSpec) string {
 	t.Helper()
 	userTerminalAs(t, true) // the user, at a terminal
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	now, err := time.Parse(time.RFC3339, messagesNow)
 	if err != nil {
 		t.Fatal(err)
@@ -316,7 +317,7 @@ func TestMessagesCancelRefusesInsideAgent(t *testing.T) {
 }
 
 func TestMessagesCancelRefusesBeforeTheStore(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	t.Setenv("CLAUDECODE", "1")
 	if _, err := runRoot(t, "messages", "cancel", "M-1"); err == nil {
 		t.Fatal("no refusal")

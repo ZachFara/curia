@@ -20,6 +20,7 @@ import (
 	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 	"github.com/ZachFara/curia/internal/ui"
 )
@@ -129,7 +130,7 @@ func TestSidebarCommandShowsNarrowColumns(t *testing.T) {
 }
 
 func TestUIReportsStoreError(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	t.Setenv("CURIA_DB", t.TempDir()) // a directory, not a database file
 	useFakeProgram(t)
 	if _, err := runRoot(t, "ui"); err == nil {
@@ -322,10 +323,10 @@ func TestUISourceSettlesInterruptedSession(t *testing.T) {
 
 func TestStoreSourceTasks(t *testing.T) {
 	f := spawnNewFixture(t)
-	f.task("Auth refactor", "")
-	f.task("Fix login", "")
-	f.update("T-2", func(tk *model.Task) { tk.Status = model.TaskDropped })
-	got, err := storeSource{st: f.st, tm: f.fake, cfg: f.cfg}.Tasks(context.Background())
+	f.Task("Auth refactor", "")
+	f.Task("Fix login", "")
+	f.Update("T-2", func(tk *model.Task) { tk.Status = model.TaskDropped })
+	got, err := storeSource{st: f.St, tm: f.Fake, cfg: f.Cfg}.Tasks(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,12 +337,12 @@ func TestStoreSourceTasks(t *testing.T) {
 
 // uiBoardSource is the dashboard's board source over the fixture's world.
 func uiBoardSource(f *spawnFixture) boardSource {
-	return boardSource{st: f.st, tm: f.fake, cfg: f.cfg}
+	return boardSource{st: f.St, tm: f.Fake, cfg: f.Cfg}
 }
 
 func TestBoardSourceSpawnDoesNotWait(t *testing.T) {
 	f := spawnNewFixture(t)
-	f.task("Now", "")
+	f.Task("Now", "")
 	// The board bounds an action by a few seconds; a spawn (git, an approved
 	// setup script) runs to its own limits instead.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
@@ -351,15 +352,15 @@ func TestBoardSourceSpawnDoesNotWait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
-	if f.sleeps != 0 {
-		t.Errorf("Spawn slept %d times, want it not to wait for the agent", f.sleeps)
+	if f.Sleeps != 0 {
+		t.Errorf("Spawn slept %d times, want it not to wait for the agent", f.Sleeps)
 	}
-	tk := f.get("T-1")
-	i := slices.IndexFunc(f.fake.Panes, func(p tmux.Pane) bool { return p.ID == tk.Pane })
+	tk := f.Get("T-1")
+	i := slices.IndexFunc(f.Fake.Panes, func(p tmux.Pane) bool { return p.ID == tk.Pane })
 	if i < 0 {
-		t.Fatalf("no window for T-1 (pane %q): %+v", tk.Pane, f.fake.Panes)
+		t.Fatalf("no window for T-1 (pane %q): %+v", tk.Pane, f.Fake.Panes)
 	}
-	if want := lifecycle.SpawnLine(lifecycle.SpawnResult{Task: tk, Pane: f.fake.Panes[i]}); line != want {
+	if want := lifecycle.SpawnLine(lifecycle.SpawnResult{Task: tk, Pane: f.Fake.Panes[i]}); line != want {
 		t.Errorf("line = %q, want lifecycle.SpawnLine's %q", line, want)
 	}
 }
@@ -368,7 +369,7 @@ func TestBoardSourceSpawnDoesNotWait(t *testing.T) {
 // limit forecast), on the same one line.
 func TestBoardSourceSpawnShowsNote(t *testing.T) {
 	f := spawnNewFixture(t)
-	f.task("Now", "")
+	f.Task("Now", "")
 	f.spawnWarning()
 	line, err := uiBoardSource(f).Spawn(context.Background(), "T-1")
 	if err != nil {
@@ -384,8 +385,8 @@ func TestBoardSourceSpawnShowsNote(t *testing.T) {
 // line says so.
 func TestBoardSourceSpawnShowsSkippedSetup(t *testing.T) {
 	f := spawnNewFixture(t)
-	f.commitSetup("#!/bin/sh\ntouch ran\n", true)
-	f.task("Now", "")
+	f.CommitSetup("#!/bin/sh\ntouch ran\n", true)
+	f.Task("Now", "")
 	line, err := uiBoardSource(f).Spawn(context.Background(), "T-1")
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -394,20 +395,20 @@ func TestBoardSourceSpawnShowsSkippedSetup(t *testing.T) {
 		!strings.Contains(line, "curia setup approve T-1") || strings.Contains(line, "\n") {
 		t.Errorf("line = %q, want the launch and the skipped setup on one line", line)
 	}
-	if _, err := os.Stat(filepath.Join(f.worktree("T-1"), "ran")); err == nil {
+	if _, err := os.Stat(filepath.Join(f.Worktree("T-1"), "ran")); err == nil {
 		t.Error("the unapproved setup script ran")
 	}
 }
 
 func TestBoardSourceSetStatusOnlyBacklogOrReady(t *testing.T) {
 	f := spawnNewFixture(t)
-	f.task("One", "")
+	f.Task("One", "")
 	src, ctx := uiBoardSource(f), context.Background()
 	for _, to := range []model.TaskStatus{model.TaskReady, model.TaskBacklog, model.TaskReady} {
 		if err := src.SetStatus(ctx, "T-1", to); err != nil {
 			t.Fatalf("SetStatus %s: %v", to, err)
 		}
-		if got := f.get("T-1"); got.Status != to || !got.UpdatedAt.Equal(f.now) {
+		if got := f.Get("T-1"); got.Status != to || !got.UpdatedAt.Equal(f.Now) {
 			t.Errorf("after SetStatus %s: %s at %v", to, got.Status, got.UpdatedAt)
 		}
 	}
@@ -416,15 +417,15 @@ func TestBoardSourceSetStatusOnlyBacklogOrReady(t *testing.T) {
 			t.Errorf("SetStatus %q succeeded, want a refusal", to)
 		}
 	}
-	if got := f.get("T-1").Status; got != model.TaskReady {
+	if got := f.Get("T-1").Status; got != model.TaskReady {
 		t.Errorf("after refusals T-1 is %s, want ready", got)
 	}
 	// A task dropped meanwhile is not brought back.
-	f.update("T-1", func(tk *model.Task) { tk.Status = model.TaskDropped })
+	f.Update("T-1", func(tk *model.Task) { tk.Status = model.TaskDropped })
 	if err := src.SetStatus(ctx, "T-1", model.TaskReady); err == nil || !strings.Contains(err.Error(), "dropped") {
 		t.Errorf("SetStatus on a dropped task = %v, want a refusal naming dropped", err)
 	}
-	if got := f.get("T-1").Status; got != model.TaskDropped {
+	if got := f.Get("T-1").Status; got != model.TaskDropped {
 		t.Errorf("dropped task is now %s", got)
 	}
 	if err := src.SetStatus(ctx, "T-9", model.TaskReady); err == nil || !strings.Contains(err.Error(), "no such task") {
@@ -617,13 +618,13 @@ var uiUserActions = []struct {
 	done  func(f *spawnFixture) bool // whether the action took effect
 }{
 	{"board: r marks a backlog task ready", nil, []string{"t", "r"}, func(f *spawnFixture) bool {
-		return f.get("T-1").Status == model.TaskReady
+		return f.Get("T-1").Status == model.TaskReady
 	}},
 	{"board: n then y spawns a backlog task", nil, []string{"t", "n", "y"}, func(f *spawnFixture) bool {
-		return len(f.windows()) > 0
+		return len(f.Windows()) > 0
 	}},
 	{"x then y kills an agent's pane", nil, []string{"x", "y"}, func(f *spawnFixture) bool {
-		return slices.Contains(f.fake.Calls, "KillPane %5")
+		return slices.Contains(f.Fake.Calls, "KillPane %5")
 	}},
 	{"review: a then y approves (merges)", uiReviewWorld, []string{"r", "a", "y"}, uiReviewClosed},
 	{"review: c, a note, Enter requests changes", uiReviewWorld, []string{"r", "c", "fix the tests", "enter"}, uiReviewClosed},
@@ -634,7 +635,7 @@ var uiUserActions = []struct {
 		return strings.Contains(string(b), "20m")
 	}},
 	{"P then y pauses the suggested task", uiPauseWorld, []string{"P", "y"}, func(f *spawnFixture) bool {
-		return !f.get("T-1").PausedAt.IsZero()
+		return !f.Get("T-1").PausedAt.IsZero()
 	}},
 }
 
@@ -658,9 +659,9 @@ func uiReviewWorld(t *testing.T) *spawnFixture {
 
 // uiReviewClosed reports whether review R-1 is no longer pending.
 func uiReviewClosed(f *spawnFixture) bool {
-	r, found, err := f.st.GetReview(context.Background(), "R-1")
+	r, found, err := f.St.GetReview(context.Background(), "R-1")
 	if err != nil || !found {
-		f.t.Fatalf("GetReview(R-1): found %v, err %v", found, err)
+		f.T.Fatalf("GetReview(R-1): found %v, err %v", found, err)
 	}
 	return r.Status != model.ReviewPending
 }
@@ -677,7 +678,7 @@ func uiRunActions(t *testing.T, f *spawnFixture, keys []string, pump bool) strin
 	runProgram = func(m tea.Model, _ ...tea.ProgramOption) error {
 		m = uiToSessionList(m)
 		for _, k := range keys {
-			f.now = f.now.Add(2 * time.Second)
+			f.Now = f.Now.Add(2 * time.Second)
 			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 			if k == "enter" {
 				msg = tea.KeyMsg{Type: tea.KeyEnter}
@@ -705,12 +706,12 @@ func uiRunActions(t *testing.T, f *spawnFixture, keys []string, pump bool) strin
 func uiActionWorld(t *testing.T) *spawnFixture {
 	t.Helper()
 	f := spawnNewFixture(t)
-	f.task("Backlog one", "")
-	f.task("Backlog two", "")
-	f.fake.Panes = []tmux.Pane{{ID: "%5", Session: "work", WindowID: "@5", ServerStart: f.now.Add(-time.Hour)}}
-	if err := f.st.UpsertSession(context.Background(), model.Session{
+	f.Task("Backlog one", "")
+	f.Task("Backlog two", "")
+	f.Fake.Panes = []tmux.Pane{{ID: "%5", Session: "work", WindowID: "@5", ServerStart: f.Now.Add(-time.Hour)}}
+	if err := f.St.UpsertSession(context.Background(), model.Session{
 		ID: "agent-x", Agent: "claude", State: model.StateIdle, Pane: "%5", TmuxSession: "work", TmuxWindow: "@5",
-		StartedAt: f.now.Add(-time.Minute), UpdatedAt: f.now.Add(-time.Minute),
+		StartedAt: f.Now.Add(-time.Minute), UpdatedAt: f.Now.Add(-time.Minute),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -748,7 +749,7 @@ func TestDashboardActionsNeedTheUser(t *testing.T) {
 				if !strings.Contains(strings.Join(strings.Fields(view), " "), c.why) { // the review view wraps it
 					t.Errorf("view does not give the guard's reason %q:\n%s", c.why, view)
 				}
-				if got := f.get("T-1").Status; a.world == nil && got != model.TaskBacklog {
+				if got := f.Get("T-1").Status; a.world == nil && got != model.TaskBacklog {
 					t.Errorf("T-1 = %s, want backlog", got)
 				}
 			})
@@ -767,14 +768,14 @@ func TestDashboardActionsNeedTheUser(t *testing.T) {
 // is not made, and would be ReadyOnly if it were (Ruling 113).
 func TestBoardSourceRefusesForANonUser(t *testing.T) {
 	f := spawnNewFixture(t)
-	f.task("Backlog", "")
+	f.Task("Backlog", "")
 	b := uiBoardSource(f)
 	b.refused = errors.New("curia ui cannot run inside an agent session (CLAUDECODE is set)")
-	if _, err := b.Spawn(context.Background(), "T-1"); err == nil || len(f.windows()) != 0 {
-		t.Errorf("Spawn = %v, windows %q: want the refusal and nothing spawned", err, f.windows())
+	if _, err := b.Spawn(context.Background(), "T-1"); err == nil || len(f.Windows()) != 0 {
+		t.Errorf("Spawn = %v, windows %q: want the refusal and nothing spawned", err, f.Windows())
 	}
-	if err := b.SetStatus(context.Background(), "T-1", model.TaskReady); err == nil || f.get("T-1").Status != model.TaskBacklog {
-		t.Errorf("SetStatus = %v, T-1 %s: want the refusal and backlog", err, f.get("T-1").Status)
+	if err := b.SetStatus(context.Background(), "T-1", model.TaskReady); err == nil || f.Get("T-1").Status != model.TaskBacklog {
+		t.Errorf("SetStatus = %v, T-1 %s: want the refusal and backlog", err, f.Get("T-1").Status)
 	}
 }
 
@@ -916,7 +917,7 @@ func TestStoreSourceBudgetNoPauseWithoutWarning(t *testing.T) {
 
 func TestStoreSourcePauseRunsPause(t *testing.T) {
 	f := uiPauseWorld(t)
-	src := storeSource{st: f.st, tm: f.fake, cfg: f.cfg}
+	src := storeSource{st: f.St, tm: f.Fake, cfg: f.Cfg}
 	ctx := context.Background()
 	if b, err := src.Budget(ctx); err != nil || b.PauseTask != "T-1" {
 		t.Fatalf("Budget = %+v, %v, want T-1 suggested", b, err)
@@ -935,22 +936,22 @@ func TestStoreSourcePauseRunsPause(t *testing.T) {
 	if got := lifecycleKills(f); len(got) != 0 {
 		t.Fatalf("a refused pause killed %q", got)
 	}
-	wt := f.worktree("T-1")
+	wt := f.Worktree("T-1")
 	line, err := src.Pause(ctx, "T-1")
 	if err != nil {
 		t.Fatalf("Pause(T-1): %v", err)
 	}
-	if want := "Paused T-1: curia resume T-1 brings it back (it continues session " + lifecycle.SpawnShortID(lifecycleLead) + ")"; line != want {
+	if want := "Paused T-1: curia resume T-1 brings it back (it continues session " + lifecycle.SpawnShortID(testkit.LifecycleLead) + ")"; line != want {
 		t.Errorf("line = %q, want the pause's last line %q", line, want)
 	}
-	if worktreeExists(wt) {
+	if testkit.WorktreeExists(wt) {
 		t.Errorf("worktree %s still on disk", wt)
 	}
-	if got := worktreeGit(t, f.repo, "branch", "--list", lifecycleBranch); !strings.Contains(got, lifecycleBranch) {
+	if got := testkit.WorktreeGit(t, f.Repo, "branch", "--list", lifecycleBranch); !strings.Contains(got, lifecycleBranch) {
 		t.Errorf("branch %s is gone: %q", lifecycleBranch, got)
 	}
-	if tk := f.get("T-1"); !tk.PausedAt.Equal(f.now) {
-		t.Errorf("paused_at = %v, want %v", tk.PausedAt, f.now)
+	if tk := f.Get("T-1"); !tk.PausedAt.Equal(f.Now) {
+		t.Errorf("paused_at = %v, want %v", tk.PausedAt, f.Now)
 	}
 	if got := lifecycleKills(f); !slices.Equal(got, []string{"KillPane %100"}) {
 		t.Errorf("kills = %q, want the task's pane", got)
@@ -961,13 +962,13 @@ func TestStoreSourcePauseRunsPause(t *testing.T) {
 // own refusals (a working agent, without --force) come back as the error.
 func TestStoreSourcePauseRefusals(t *testing.T) {
 	f := lifecycleWithLead(t)
-	src := storeSource{st: f.st, tm: f.fake, cfg: f.cfg}
+	src := storeSource{st: f.St, tm: f.Fake, cfg: f.Cfg}
 	if _, err := src.Pause(context.Background(), "T-1"); err == nil || !strings.Contains(err.Error(), "nothing is suggested") {
 		t.Errorf("Pause without a warning = %v, want a refusal", err)
 	}
 	lifecycleWantKept(f)
 	f.spawnWarning()
-	lifecycleSession(f, lifecycleLead, "%100", model.StateWorking, f.now)
+	testkit.LifecycleSession(f.SpawnFixture, testkit.LifecycleLead, "%100", model.StateWorking, f.Now)
 	_, err := src.Pause(context.Background(), "T-1")
 	if err == nil || !strings.Contains(err.Error(), "is working") || !strings.Contains(err.Error(), "--force") {
 		t.Errorf("Pause of a working agent = %v, want pause's refusal", err)

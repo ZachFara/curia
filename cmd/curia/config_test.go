@@ -7,19 +7,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ZachFara/curia/internal/lifecycle"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 // configTestEnv is a home with no files, a terminal the guard accepts and a
 // confirmation that answers yes.
 func configTestEnv(t *testing.T) string {
 	t.Helper()
-	hookHome(t)
+	testkit.HookHome(t)
 	useFakeTmux(t)
 	userTerminalAs(t, true)
-	old := lifecycle.SetupConfirm
-	lifecycle.SetupConfirm = func(string) (string, error) { return "yes", nil }
-	t.Cleanup(func() { lifecycle.SetupConfirm = old })
+	old := promptTerminal
+	promptTerminal = func(string) (string, error) { return "yes", nil }
+	t.Cleanup(func() { promptTerminal = old })
 	home, _ := os.UserHomeDir()
 	return configFile(home)
 }

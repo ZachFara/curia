@@ -22,6 +22,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/install"
 	latgate "github.com/ZachFara/curia/internal/latency"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 // statuslineNow sits inside every status-line fixture's windows.
@@ -54,7 +55,7 @@ func statuslineCheckLine(t *testing.T, out string) {
 }
 
 func TestStatuslinePrintsText(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "built-session-1")
 	ingestFixClock(t, statuslineNow)
 
@@ -83,7 +84,7 @@ func TestStatuslineCapturedPayloads(t *testing.T) {
 		{"statusline-captured-startup.json", "Haiku 5.5 · $0.00\n"},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
-			hookHome(t)
+			testkit.HookHome(t)
 			ingestFixClock(t, statuslineNow)
 			stdout, stderr := ingestExec(t, bytes.NewReader(ingestFixture(t, tc.file)), "statusline")
 			statuslineCheckLine(t, stdout)
@@ -147,7 +148,7 @@ func TestStatuslineAlwaysPrintsOneLine(t *testing.T) {
 		}, nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			hookHome(t)
+			testkit.HookHome(t)
 			ingestFixClock(t, statuslineNow)
 			if tc.setup != nil {
 				tc.setup(t)
@@ -187,7 +188,7 @@ func TestStatuslineUnreachableStoreStillShowsText(t *testing.T) {
 		{"config does not parse", ingestBadConfig},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db := hookHome(t)
+			db := testkit.HookHome(t)
 			ingestFixClock(t, statuslineNow)
 			tc.setup(t, db)
 			stdout, stderr := ingestExec(t, bytes.NewReader(ingestFixture(t, "statusline-built.json")), "statusline")
@@ -205,7 +206,7 @@ func TestStatuslineUnreachableStoreStillShowsText(t *testing.T) {
 // write lock, the status line gives up on the ingest within its budget and
 // still prints.
 func TestStatuslineStoreBusyStillPrints(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "built-session-1")
 	ingestFixClock(t, statuslineNow)
 	raw, err := sql.Open("sqlite", db)
@@ -423,7 +424,7 @@ func TestStatuslineStartsNoProcess(t *testing.T) {
 			}
 		}
 	}
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "built-session-1")
 	ingestFixClock(t, statuslineNow)
 	fake := useFakeTmux(t)
@@ -554,7 +555,7 @@ func TestStatuslineProcessLatency(t *testing.T) {
 // the problem is logged once however many runs repeat it. The first
 // seconds of samples of a new session are lost: that is accepted.
 func TestStatuslineUnknownSessionPrintsStoresNothing(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestSeed(t, db, "other")
 	ingestFixClock(t, statuslineNow)
 	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
@@ -580,7 +581,7 @@ func TestStatuslineUnknownSessionPrintsStoresNothing(t *testing.T) {
 // TestStatuslineLogBoundedWhenStoreBroken: a store that cannot be opened is
 // one log line per interval, not one per run.
 func TestStatuslineLogBoundedWhenStoreBroken(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	ingestFixClock(t, statuslineNow)
 	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	ingestLogAt(t, &now)

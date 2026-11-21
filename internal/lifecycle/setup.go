@@ -1,7 +1,6 @@
 package lifecycle
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -45,7 +44,6 @@ const (
 	setupTailLines  = 20       // setup log lines shown on failure
 	SetupMaxLines   = 300      // lines of a setup script; more are not run
 	SetupLineMax    = 200      // runes of a script line (and of a shown log line)
-	setupConfirmLen = 8        // hex characters of the hash the user types
 )
 
 // setupEnvNames are the variables of this process a setup script gets,
@@ -346,41 +344,4 @@ func SetupShow(out io.Writer, t model.Task, s SetupScript) {
 		_, _ = fmt.Fprintf(out, "%4d  %s\n", i+1, l)
 	}
 	_, _ = fmt.Fprintf(out, "(end of script: %d lines)\n", len(lines))
-}
-
-// SetupConfirm asks on the controlling terminal for the confirmation and
-// returns the answer; tests replace it.
-var SetupConfirm = func(prompt string) (string, error) { return SetupAskTerminal("/dev/tty", prompt) }
-
-// SetupAskTerminal writes prompt to the terminal at path and reads one line
-// from it, never from stdin, so piped input cannot answer. No terminal, or
-// an end of input before a newline, is an error.
-func SetupAskTerminal(path, prompt string) (string, error) {
-	tty, err := os.OpenFile(filepath.Clean(path), os.O_RDWR, 0)
-	if err != nil {
-		return "", fmt.Errorf("no terminal to confirm on: %w", err)
-	}
-	defer func() { _ = tty.Close() }()
-	if _, err = io.WriteString(tty, prompt); err != nil {
-		return "", err
-	}
-	line, err := bufio.NewReader(io.LimitReader(tty, 256)).ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("no answer: %w", err)
-	}
-	return strings.TrimSpace(line), nil
-}
-
-// SetupConfirmed asks the user to type the first setupConfirmLen hex
-// characters of s's SHA-256; anything else approves nothing.
-func SetupConfirmed(s SetupScript) error {
-	want := s.Sum[:setupConfirmLen]
-	answer, err := SetupConfirm(fmt.Sprintf("To approve it, type the first %d characters of its SHA-256: ", setupConfirmLen))
-	if err != nil {
-		return fmt.Errorf("not approved: %w", err)
-	}
-	if !strings.EqualFold(answer, want) {
-		return fmt.Errorf("not approved: the answer is not the first %d characters of the SHA-256", setupConfirmLen)
-	}
-	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 // launchUnexpectedExec is launchExec under test: no test may start the real
@@ -93,7 +94,7 @@ func launchRun(t *testing.T, stdin io.Reader, args ...string) (stdout, stderr st
 // and returns it.
 func launchTask(t *testing.T) model.Task {
 	t.Helper()
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	st, err := store.Open(db)
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +242,7 @@ func TestLaunchFailureWaitsAndExitsOne(t *testing.T) {
 }
 
 func TestLaunchRefusesTaskWithoutBranch(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	st, err := store.Open(db)
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +261,7 @@ func TestLaunchRefusesTaskWithoutBranch(t *testing.T) {
 }
 
 func TestLaunchRejectsBadArguments(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	rec := launchRecord(t)
 	for _, args := range [][]string{
 		{"T-1;x"},

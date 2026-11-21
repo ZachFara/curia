@@ -14,6 +14,7 @@ import (
 	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -37,33 +38,33 @@ func autoUserFile(t *testing.T, body string) {
 
 // autoEnv is a monitor environment on the fixture's store and clock.
 func autoEnv(f *spawnFixture) *monitorEnv {
-	return &monitorEnv{st: f.st, cfg: f.cfg, log: slog.New(slog.NewTextHandler(io.Discard, nil)), now: func() time.Time { return f.now }}
+	return &monitorEnv{st: f.St, cfg: f.Cfg, log: slog.New(slog.NewTextHandler(io.Discard, nil)), now: func() time.Time { return f.Now }}
 }
 
 // autoReady is a task the user marked ready at a terminal (with the hash).
 func autoReady(f *spawnFixture, title string) model.Task {
-	f.t.Helper()
-	tk := f.task(title, "body of "+title)
-	f.update(tk.ID, func(x *model.Task) { x.Status = model.TaskReady })
-	if err := f.st.MarkReady(context.Background(), tk.ID); err != nil {
-		f.t.Fatal(err)
+	f.T.Helper()
+	tk := f.Task(title, "body of "+title)
+	f.Update(tk.ID, func(x *model.Task) { x.Status = model.TaskReady })
+	if err := f.St.MarkReady(context.Background(), tk.ID); err != nil {
+		f.T.Fatal(err)
 	}
-	return f.get(tk.ID)
+	return f.Get(tk.ID)
 }
 
 // autoPass runs one job pass, 31 seconds after the last, and returns the NewWindow calls so far.
 func autoPass(t *testing.T, f *spawnFixture, e *monitorEnv) []string {
 	t.Helper()
-	f.now = f.now.Add(31 * time.Second)
+	f.Now = f.Now.Add(31 * time.Second)
 	if err := e.autoSpawn(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return f.windows()
+	return f.Windows()
 }
 
 func autoRuns(t *testing.T, f *spawnFixture) []store.AutoRun {
 	t.Helper()
-	rs, err := f.st.AutoRuns(context.Background(), 20)
+	rs, err := f.St.AutoRuns(context.Background(), 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,8 +85,8 @@ func TestAutoSpawnDisabledByDefaultDoesNothing(t *testing.T) {
 func TestAutoSpawnRepoFileCannotEnable(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoReady(f, "a")
-	worktreeWrite(t, filepath.Join(f.repo, ".curia", "config.toml"), "[tasks.auto_spawn]\nenabled = true\nmax_agents = 9\n")
-	if got := autoRepoCfg(f.repo); got.Enabled || got.MaxAgents != 3 {
+	testkit.WorktreeWrite(t, filepath.Join(f.Repo, ".curia", "config.toml"), "[tasks.auto_spawn]\nenabled = true\nmax_agents = 9\n")
+	if got := autoRepoCfg(f.Repo); got.Enabled || got.MaxAgents != 3 {
 		t.Fatalf("a repository file changed the setting: %+v", got)
 	}
 	if w := autoPass(t, f, autoEnv(f)); len(w) != 0 {
@@ -98,7 +99,7 @@ func TestAutoSpawnRepoFileMayDisableItsRepo(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "")
 	autoReady(f, "a")
-	worktreeWrite(t, filepath.Join(f.repo, ".curia", "config.toml"), "[tasks.auto_spawn]\nenabled = false\n")
+	testkit.WorktreeWrite(t, filepath.Join(f.Repo, ".curia", "config.toml"), "[tasks.auto_spawn]\nenabled = false\n")
 	if w := autoPass(t, f, autoEnv(f)); len(w) != 0 {
 		t.Fatalf("windows opened in a repository that turned it off: %q", w)
 	}
@@ -108,24 +109,24 @@ func TestAutoSpawnStartsFirstByPriorityThenAgeThroughSpawn(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "")
 	a := autoReady(f, "older normal")
-	f.now = f.now.Add(time.Minute)
+	f.Now = f.Now.Add(time.Minute)
 	b := autoReady(f, "newer urgent")
-	f.update(b.ID, func(x *model.Task) { x.Priority = model.PriorityHigh })
-	if err := f.st.MarkReady(context.Background(), b.ID); err != nil {
+	f.Update(b.ID, func(x *model.Task) { x.Priority = model.PriorityHigh })
+	if err := f.St.MarkReady(context.Background(), b.ID); err != nil {
 		t.Fatal(err)
 	}
-	web := f.task("moved on the web", "x") // ready, no hash
-	f.update(web.ID, func(x *model.Task) { x.Status = model.TaskReady; x.Priority = model.PriorityHigh })
+	web := f.Task("moved on the web", "x") // ready, no hash
+	f.Update(web.ID, func(x *model.Task) { x.Status = model.TaskReady; x.Priority = model.PriorityHigh })
 
 	w := autoPass(t, f, autoEnv(f))
 	if len(w) != 1 || !strings.Contains(w[0], " "+b.ID+" ") {
 		t.Fatalf("windows = %q, want exactly one, for %s", w, b.ID)
 	}
-	got := f.get(b.ID)
+	got := f.Get(b.ID)
 	if got.AutoSpawnedAt.IsZero() || got.Worktree == "" {
 		t.Errorf("task after start = %+v, want auto_spawned_at and a worktree (the spawn path)", got)
 	}
-	if f.get(a.ID).AutoSpawnedAt != (time.Time{}) || f.get(web.ID).AutoSpawnedAt != (time.Time{}) {
+	if f.Get(a.ID).AutoSpawnedAt != (time.Time{}) || f.Get(web.ID).AutoSpawnedAt != (time.Time{}) {
 		t.Error("a task that was not chosen carries auto_spawned_at")
 	}
 	rs := autoRuns(t, f)
@@ -141,18 +142,18 @@ func TestAutoSpawnTwoClaimersStartOnce(t *testing.T) {
 	autoReady(f, "a")
 	e1, e2 := autoEnv(f), autoEnv(f)
 	cfg, _ := loadConfig()
-	f.now = f.now.Add(time.Minute)
-	rows, _, err := autoRows(context.Background(), f.st, cfg, f.now)
+	f.Now = f.Now.Add(time.Minute)
+	rows, _, err := autoRows(context.Background(), f.St, cfg, f.Now)
 	if err != nil || len(rows) != 1 || !rows[0].V.OK {
 		t.Fatalf("rows = %+v, %v", rows, err)
 	}
-	if err = e1.autoStart(context.Background(), cfg, rows[0], f.now); err != nil {
+	if err = e1.autoStart(context.Background(), cfg, rows[0], f.Now); err != nil {
 		t.Fatal(err)
 	}
-	if err = e2.autoStart(context.Background(), cfg, rows[0], f.now); err != nil {
+	if err = e2.autoStart(context.Background(), cfg, rows[0], f.Now); err != nil {
 		t.Fatal(err)
 	}
-	if w := f.windows(); len(w) != 1 {
+	if w := f.Windows(); len(w) != 1 {
 		t.Fatalf("windows = %q, want one start", w)
 	}
 }
@@ -163,16 +164,16 @@ func TestAutoSpawnAgentFiledStartsNewSessionNeverTypesIntoAnotherPane(t *testing
 	autoEnable(t, "max_agents = 5\n")
 	ctx := context.Background()
 	for _, s := range []model.Session{
-		{ID: "filer", Pane: "%1", State: model.StateIdle, Agent: "claude", StartedAt: f.now, UpdatedAt: f.now, Repo: f.repo},
-		{ID: "lead", Pane: "%2", State: model.StateIdle, Agent: "claude", StartedAt: f.now, UpdatedAt: f.now, Repo: f.repo, TeamRole: model.RoleLead},
-		{ID: "mate", Pane: "%3", State: model.StateIdle, Agent: "claude", StartedAt: f.now, UpdatedAt: f.now, Repo: f.repo, TeamRole: model.RoleTeammate},
+		{ID: "filer", Pane: "%1", State: model.StateIdle, Agent: "claude", StartedAt: f.Now, UpdatedAt: f.Now, Repo: f.Repo},
+		{ID: "lead", Pane: "%2", State: model.StateIdle, Agent: "claude", StartedAt: f.Now, UpdatedAt: f.Now, Repo: f.Repo, TeamRole: model.RoleLead},
+		{ID: "mate", Pane: "%3", State: model.StateIdle, Agent: "claude", StartedAt: f.Now, UpdatedAt: f.Now, Repo: f.Repo, TeamRole: model.RoleTeammate},
 	} {
-		if err := f.st.UpsertSession(ctx, s); err != nil {
+		if err := f.St.UpsertSession(ctx, s); err != nil {
 			t.Fatal(err)
 		}
 	}
-	tk := model.Task{Title: "filed ready", Body: "b", Repo: f.repo, BaseBranch: "main", Status: model.TaskReady, CreatedAt: f.now, FiledBy: "filer", FiledReason: "found"}
-	filed, err := f.st.FileTask(ctx, tk, 5)
+	tk := model.Task{Title: "filed ready", Body: "b", Repo: f.Repo, BaseBranch: "main", Status: model.TaskReady, CreatedAt: f.Now, FiledBy: "filer", FiledReason: "found"}
+	filed, err := f.St.FileTask(ctx, tk, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,12 +181,12 @@ func TestAutoSpawnAgentFiledStartsNewSessionNeverTypesIntoAnotherPane(t *testing
 	if len(w) != 1 || !strings.Contains(w[0], " "+filed.ID+" ") {
 		t.Fatalf("windows = %q, want one for %s", w, filed.ID)
 	}
-	for _, c := range f.fake.Calls {
+	for _, c := range f.Fake.Calls {
 		if strings.HasPrefix(c, "SendKeys") {
 			t.Errorf("auto-spawn typed into a pane: %q", c)
 		}
 	}
-	if got := f.get(filed.ID); got.Pane == "%1" || got.Pane == "%2" || got.Pane == "%3" {
+	if got := f.Get(filed.ID); got.Pane == "%1" || got.Pane == "%2" || got.Pane == "%3" {
 		t.Errorf("the task was assigned to an existing pane %s", got.Pane)
 	}
 }
@@ -195,17 +196,17 @@ func TestAutoSpawnWebMovedAndEditedAreSkippedAndNextStarts(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "")
 	ctx := context.Background()
-	web := f.task("web", "x")
-	f.update(web.ID, func(x *model.Task) { x.Status = model.TaskReady })
+	web := f.Task("web", "x")
+	f.Update(web.ID, func(x *model.Task) { x.Status = model.TaskReady })
 	edited := autoReady(f, "edited")
-	f.update(edited.ID, func(x *model.Task) { x.Body = "changed after ready" })
+	f.Update(edited.ID, func(x *model.Task) { x.Body = "changed after ready" })
 	good := autoReady(f, "good")
 	w := autoPass(t, f, autoEnv(f))
 	if len(w) != 1 || !strings.Contains(w[0], " "+good.ID+" ") {
 		t.Fatalf("windows = %q, want only %s", w, good.ID)
 	}
 	cfg, _ := loadConfig()
-	rows, _, err := autoRows(ctx, f.st, cfg, f.now)
+	rows, _, err := autoRows(ctx, f.St, cfg, f.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,20 +222,20 @@ func TestAutoSpawnWebMovedAndEditedAreSkippedAndNextStarts(t *testing.T) {
 func TestAutoSpawnUnapprovedSetupScriptIsSkippedAndNeverRun(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "")
-	f.commitSetup("#!/bin/sh\ntouch RAN\n", true)
-	gitRun(t, f.repo, "checkout", "--", ".curia/setup.sh") // the checkout has the bit the index records
+	f.CommitSetup("#!/bin/sh\ntouch RAN\n", true)
+	testkit.GitRun(t, f.Repo, "checkout", "--", ".curia/setup.sh") // the checkout has the bit the index records
 	tk := autoReady(f, "a")
 	if w := autoPass(t, f, autoEnv(f)); len(w) != 0 {
 		t.Fatalf("windows opened with an unapproved script: %q", w)
 	}
-	if _, err := os.Stat(f.setupLog()); err == nil {
+	if _, err := os.Stat(f.SetupLog()); err == nil {
 		t.Error("a setup log exists: the script ran")
 	}
 	rs := autoRuns(t, f)
 	if len(rs) != 1 || rs[0].Check != "setup_unapproved" || rs[0].TaskID != tk.ID {
 		t.Fatalf("log = %+v, want one refusal naming setup_unapproved", rs)
 	}
-	f.approve("#!/bin/sh\ntouch RAN\n")
+	f.Approve("#!/bin/sh\ntouch RAN\n")
 	if w := autoPass(t, f, autoEnv(f)); len(w) != 1 {
 		t.Fatalf("windows = %q after approval, want the task started", w)
 	}
@@ -260,11 +261,11 @@ func TestAutoSpawnCapsPerTickIntervalAndDay(t *testing.T) {
 	if len(rs) != 2 || rs[0].Check != "interval" || rs[1].Outcome != "fired" {
 		t.Fatalf("log = %+v, want fired then one interval refusal", rs)
 	}
-	f.now = f.now.Add(6 * time.Minute)
+	f.Now = f.Now.Add(6 * time.Minute)
 	if w := autoPass(t, f, e); len(w) != 2 {
 		t.Fatalf("windows = %q after the interval, want the second start", w)
 	}
-	f.now = f.now.Add(6 * time.Minute)
+	f.Now = f.Now.Add(6 * time.Minute)
 	if w := autoPass(t, f, e); len(w) != 2 {
 		t.Fatalf("windows = %q, want no third start at max_per_day = 2", w)
 	}
@@ -277,7 +278,7 @@ func TestAutoSpawnMaxAgentsCountsLiveSessions(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "max_agents = 2\n")
 	for _, id := range []string{"s1", "s2"} {
-		if err := f.st.UpsertSession(context.Background(), model.Session{ID: id, State: model.StateWorking, Agent: "claude", StartedAt: f.now, UpdatedAt: f.now}); err != nil {
+		if err := f.St.UpsertSession(context.Background(), model.Session{ID: id, State: model.StateWorking, Agent: "claude", StartedAt: f.Now, UpdatedAt: f.Now}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -293,13 +294,13 @@ func TestAutoSpawnMaxAgentsCountsLiveSessions(t *testing.T) {
 func TestAutoSpawnBypassBlocks(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "")
-	if err := f.st.UpsertSession(context.Background(), model.Session{ID: "s1", State: model.StateEnded, Agent: "claude", StartedAt: f.now, UpdatedAt: f.now}); err != nil {
+	if err := f.St.UpsertSession(context.Background(), model.Session{ID: "s1", State: model.StateEnded, Agent: "claude", StartedAt: f.Now, UpdatedAt: f.Now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.st.UpsertSession(context.Background(), model.Session{ID: "s2", State: model.StateIdle, Agent: "claude", StartedAt: f.now, UpdatedAt: f.now, Repo: "/other"}); err != nil {
+	if err := f.St.UpsertSession(context.Background(), model.Session{ID: "s2", State: model.StateIdle, Agent: "claude", StartedAt: f.Now, UpdatedAt: f.Now, Repo: "/other"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.st.SetModes(context.Background(), store.ModeScope{Repo: "/other"}, model.ModeBypass, time.Time{}); err != nil {
+	if _, err := f.St.SetModes(context.Background(), store.ModeScope{Repo: "/other"}, model.ModeBypass, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	autoReady(f, "a")
@@ -317,8 +318,8 @@ func TestAutoSpawnForecastAndResourcePressure(t *testing.T) {
 	autoReady(f, "a")
 	e := autoEnv(f)
 	t.Run("a full window", func(t *testing.T) {
-		statusExec(t, f.db, `INSERT INTO usage_samples (at, window, used_pct, resets_at, session_id) VALUES (?, 'five_hour', 100, ?, 'x')`,
-			f.now.Add(-time.Hour).UTC().Format("2006-01-02T15:04:05.000000000Z"), f.now.Add(2*time.Hour).UTC().Format("2006-01-02T15:04:05.000000000Z"))
+		statusExec(t, f.DB, `INSERT INTO usage_samples (at, window, used_pct, resets_at, session_id) VALUES (?, 'five_hour', 100, ?, 'x')`,
+			f.Now.Add(-time.Hour).UTC().Format("2006-01-02T15:04:05.000000000Z"), f.Now.Add(2*time.Hour).UTC().Format("2006-01-02T15:04:05.000000000Z"))
 		if w := autoPass(t, f, e); len(w) != 0 {
 			t.Fatalf("windows = %q with a window at 100%%", w)
 		}
@@ -326,10 +327,10 @@ func TestAutoSpawnForecastAndResourcePressure(t *testing.T) {
 			t.Fatalf("log = %+v, want one forecast refusal", rs)
 		}
 	})
-	statusExec(t, f.db, `DELETE FROM usage_samples`)
+	statusExec(t, f.DB, `DELETE FROM usage_samples`)
 	// The Docker VM reading comes from the store, the threshold from resources.docker_memory_refuse_pct.
 	vm := func(age time.Duration, usedMB int64) {
-		if err := f.st.AddDockerVM(context.Background(), f.now.Add(31*time.Second-age), usedMB, 1000); err != nil {
+		if err := f.St.AddDockerVM(context.Background(), f.Now.Add(31*time.Second-age), usedMB, 1000); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -355,7 +356,7 @@ func TestAutoSpawnStaleDockerSampleSkipsTheCheck(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "")
 	autoReady(f, "a")
-	if err := f.st.AddDockerVM(context.Background(), f.now.Add(-time.Hour), 990, 1000); err != nil {
+	if err := f.St.AddDockerVM(context.Background(), f.Now.Add(-time.Hour), 990, 1000); err != nil {
 		t.Fatal(err)
 	}
 	if w := autoPass(t, f, autoEnv(f)); len(w) != 1 {
@@ -396,14 +397,14 @@ func TestAutoSpawnBudgetSpentIsSkippedAndNextStarts(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "")
 	spent := autoReady(f, "spent")
-	f.update(spent.ID, func(x *model.Task) { x.BudgetUSD = 1 })
-	if err := f.st.MarkReady(context.Background(), spent.ID); err != nil {
+	f.Update(spent.ID, func(x *model.Task) { x.BudgetUSD = 1 })
+	if err := f.St.MarkReady(context.Background(), spent.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.st.UpsertSession(context.Background(), model.Session{ID: "old", State: model.StateEnded, TaskID: spent.ID, Agent: "claude", StartedAt: f.now, UpdatedAt: f.now}); err != nil {
+	if err := f.St.UpsertSession(context.Background(), model.Session{ID: "old", State: model.StateEnded, TaskID: spent.ID, Agent: "claude", StartedAt: f.Now, UpdatedAt: f.Now}); err != nil {
 		t.Fatal(err)
 	}
-	statusExec(t, f.db, `UPDATE sessions SET cost_usd = 2 WHERE id = 'old'`)
+	statusExec(t, f.DB, `UPDATE sessions SET cost_usd = 2 WHERE id = 'old'`)
 	next := autoReady(f, "next")
 	w := autoPass(t, f, autoEnv(f))
 	if len(w) != 1 || !strings.Contains(w[0], " "+next.ID+" ") {
@@ -416,12 +417,12 @@ func TestAutoSpawnKillSwitchAndCleanedOutput(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "")
 	hostile := "evil \x1b]0;pwn\x07\nFORGED: auto-spawn fired T-99"
-	tk := f.task(hostile, "b")
-	f.update(tk.ID, func(x *model.Task) { x.Status = model.TaskReady })
-	if err := f.st.MarkReady(context.Background(), tk.ID); err != nil {
+	tk := f.Task(hostile, "b")
+	f.Update(tk.ID, func(x *model.Task) { x.Status = model.TaskReady })
+	if err := f.St.MarkReady(context.Background(), tk.ID); err != nil {
 		t.Fatal(err)
 	}
-	f.update(tk.ID, func(x *model.Task) { x.Title += " edited" }) // refused as edited: it shows in status
+	f.Update(tk.ID, func(x *model.Task) { x.Title += " edited" }) // refused as edited: it shows in status
 	out, err := runRoot(t, "auto-spawn", "off")
 	if err != nil || !strings.Contains(out, "tasks.auto_spawn.enabled = false") {
 		t.Fatalf("auto-spawn off = %q, %v", out, err)
@@ -448,7 +449,7 @@ func TestAutoSpawnStatusExplainsAndHeaderShowsCounts(t *testing.T) {
 	f := spawnNewFixture(t)
 	autoEnable(t, "")
 	edited := autoReady(f, "edited")
-	f.update(edited.ID, func(x *model.Task) { x.Body = "other" })
+	f.Update(edited.ID, func(x *model.Task) { x.Body = "other" })
 	out, err := runRoot(t, "auto-spawn", "status")
 	if err != nil {
 		t.Fatal(err)
@@ -475,7 +476,7 @@ func TestAutoSpawnFailedSpawnGivesClaimBackAndWaitsTheInterval(t *testing.T) {
 	t.Cleanup(func() { autoSpawnFn = prev })
 	e := autoEnv(f)
 	autoPass(t, f, e)
-	got := f.get(tk.ID)
+	got := f.Get(tk.ID)
 	if calls != 1 || got.ReadyHash != tk.ReadyHash || !got.AutoSpawnedAt.IsZero() {
 		t.Fatalf("after a failed spawn: calls %d, hash %q, auto_spawned_at %v; want the claim given back", calls, got.ReadyHash, got.AutoSpawnedAt)
 	}
@@ -483,7 +484,7 @@ func TestAutoSpawnFailedSpawnGivesClaimBackAndWaitsTheInterval(t *testing.T) {
 	if calls != 1 {
 		t.Errorf("retried inside the interval (%d calls)", calls)
 	}
-	f.now = f.now.Add(6 * time.Minute)
+	f.Now = f.Now.Add(6 * time.Minute)
 	autoPass(t, f, e)
 	if calls != 2 {
 		t.Errorf("calls = %d, want a retry after the interval", calls)
@@ -499,7 +500,7 @@ func TestAutoSpawnAgentCannotEnableMarkReadyOrApproveSetup(t *testing.T) {
 		userOnlyRefused(t, argv, "CLAUDECODE", "only the user may")
 	}
 	f := spawnNewFixture(t)
-	tk := f.task("a", "b")
+	tk := f.Task("a", "b")
 	userTerminalAs(t, false)
 	t.Setenv("CLAUDECODE", "1")
 	for _, argv := range [][]string{{"auto-spawn", "on"}, {"task", "ready", tk.ID}} {
@@ -507,7 +508,7 @@ func TestAutoSpawnAgentCannotEnableMarkReadyOrApproveSetup(t *testing.T) {
 			t.Errorf("%v ran for an agent", argv)
 		}
 	}
-	if got := f.get(tk.ID); got.ReadyHash != "" || got.Status != model.TaskBacklog {
+	if got := f.Get(tk.ID); got.ReadyHash != "" || got.Status != model.TaskBacklog {
 		t.Errorf("an agent changed the task: %+v", got)
 	}
 	if cfg, _ := loadConfig(); cfg.Tasks.AutoSpawn.Enabled {

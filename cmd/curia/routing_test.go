@@ -13,6 +13,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 // routingSeed stores n labels, oldest first; label i is rejected when
@@ -49,7 +50,7 @@ func routingSeed(t *testing.T, db string, n int, rejected func(i int) bool) {
 func routingHome(t *testing.T) string {
 	t.Helper()
 	userTerminalAs(t, true) // the user, at a terminal
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	t.Cleanup(func() { routingJSON = false })
 	return db
 }
@@ -157,7 +158,7 @@ func TestRoutingReset(t *testing.T) {
 }
 
 func TestRoutingResetRefusesBeforeTheStore(t *testing.T) {
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	t.Setenv("CLAUDECODE", "1")
 	if _, err := runRoot(t, "routing", "reset"); err == nil {
 		t.Fatal("no refusal")

@@ -9,12 +9,13 @@ import (
 	"testing"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/testkit"
 )
 
 // A store that cannot be opened still lets the hook deny an edit of
 // Curia's own files, and prints nothing for any other call.
 func TestHookDenyNeedsNoStore(t *testing.T) {
-	hookHome(t)
+	testkit.HookHome(t)
 	blocker := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
 		t.Fatal(err)

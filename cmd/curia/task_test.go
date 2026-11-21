@@ -21,6 +21,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/testkit"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -44,7 +45,7 @@ const taskNow = "2026-11-13T12:00:00Z"
 func taskHome(t *testing.T) string {
 	t.Helper()
 	userTerminalAs(t, true) // the user, at a terminal
-	db := hookHome(t)
+	db := testkit.HookHome(t)
 	prevClock := clock
 	now := decisionsParse(t, taskNow)
 	clock = func() time.Time { return now }
@@ -103,9 +104,9 @@ func taskSetEditor(t *testing.T, value string) {
 // git and returns its top level as git prints it (symlinks resolved).
 func taskRepo(t *testing.T, branch string) string {
 	t.Helper()
-	dir := hermeticGit(t)
-	gitInit(t, dir, branch)
-	gitRun(t, dir, "commit", "-q", "--allow-empty", "-m", "first")
+	dir := testkit.HermeticGit(t)
+	testkit.GitInit(t, dir, branch)
+	testkit.GitRun(t, dir, "commit", "-q", "--allow-empty", "-m", "first")
 	repo, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +261,7 @@ func TestTaskAddRefusesLinkedWorktreeAndNonRepo(t *testing.T) {
 	_, wt := hookLinkedWorktree(t, "feat/wt")
 	out, err := taskRun(t, nil, "task", "add", "In a worktree", "--repo", wt)
 	taskWantErr(t, err, out, "repo", "linked worktree")
-	out, err = taskRun(t, nil, "task", "add", "Nowhere", "--repo", hermeticGit(t))
+	out, err = taskRun(t, nil, "task", "add", "Nowhere", "--repo", testkit.HermeticGit(t))
 	taskWantErr(t, err, out, "repo", "not inside a git repository")
 	out, err = taskRun(t, nil, "task", "add", "Missing", "--repo", filepath.Join(t.TempDir(), "missing"))
 	taskWantErr(t, err, out, "repo")
@@ -272,7 +273,7 @@ func TestTaskAddRefusesLinkedWorktreeAndNonRepo(t *testing.T) {
 func TestTaskAddDetachedHeadNeedsBase(t *testing.T) {
 	db := taskHome(t)
 	repo := taskRepo(t, "main")
-	gitRun(t, repo, "checkout", "-q", "--detach")
+	testkit.GitRun(t, repo, "checkout", "-q", "--detach")
 	out, err := taskRun(t, nil, "task", "add", "Detached", "--repo", repo)
 	taskWantErr(t, err, out, "base_branch", "--base")
 	if n := taskCount(t, db); n != 0 {
@@ -327,7 +328,7 @@ func TestTaskAddBodyFromFileAndStdin(t *testing.T) {
 
 func TestTaskAddReportsEveryProblem(t *testing.T) {
 	db := taskHome(t)
-	out, err := taskRun(t, nil, "task", "add", "", "--repo", hermeticGit(t), "--base", "-bad", "--tag", "Bad Tag!")
+	out, err := taskRun(t, nil, "task", "add", "", "--repo", testkit.HermeticGit(t), "--base", "-bad", "--tag", "Bad Tag!")
 	taskWantErr(t, err, out, "title: is required", "repo:", "base_branch:", "tags:")
 	repo := taskRepo(t, "main")
 	out, err = taskRun(t, nil, "task", "add", strings.Repeat("t", 121), "--repo", repo, "--tag", "ok", "--tag", "-no")

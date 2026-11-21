@@ -2,51 +2,36 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ZachFara/curia/internal/lifecycle"
+	"github.com/ZachFara/curia/internal/testkit"
 )
-
-// setupSum is the hex SHA-256 of content.
-func setupSum(content string) string {
-	sum := sha256.Sum256([]byte(content))
-	return hex.EncodeToString(sum[:])
-}
-
-// setupMarker is the file the test scripts create in the worktree.
-func setupMarker(f *spawnFixture) string {
-	return filepath.Join(f.worktree("T-1"), "made-by-setup")
-}
 
 // setupApproval is the approval stored for the fixture's repository.
 func setupApproval(f *spawnFixture) string {
-	f.t.Helper()
-	sum, err := f.st.SetupApproval(context.Background(), f.repo)
+	f.T.Helper()
+	sum, err := f.St.SetupApproval(context.Background(), f.Repo)
 	if err != nil {
-		f.t.Fatal(err)
+		f.T.Fatal(err)
 	}
 	return sum
 }
 
-const setupTouch = "#!/bin/sh\ntouch made-by-setup\n"
-
-// setupUnexpectedConfirm is lifecycle.SetupConfirm under test: no test may read the
+// setupUnexpectedConfirm is promptTerminal under test: no test may read the
 // real terminal, so a test that reaches the question without setupAnswer
 // fails.
 func setupUnexpectedConfirm(prompt string) (string, error) {
-	panic("lifecycle.SetupConfirm called without setupAnswer: " + prompt)
+	panic("promptTerminal called without setupAnswer: " + prompt)
 }
 
 func init() {
-	lifecycle.SetupConfirm = setupUnexpectedConfirm
+	promptTerminal = setupUnexpectedConfirm
 }
 
 // setupAnswer makes the terminal question answer answer (or fail with err)
@@ -54,32 +39,13 @@ func init() {
 func setupAnswer(t *testing.T, answer string, err error) *[]string {
 	t.Helper()
 	var prompts []string
-	prev := lifecycle.SetupConfirm
-	lifecycle.SetupConfirm = func(p string) (string, error) {
+	prev := promptTerminal
+	promptTerminal = func(p string) (string, error) {
 		prompts = append(prompts, p)
 		return answer, err
 	}
-	t.Cleanup(func() { lifecycle.SetupConfirm = prev })
+	t.Cleanup(func() { promptTerminal = prev })
 	return &prompts
-}
-
-func TestSetupUnapprovedScriptNotRun(t *testing.T) {
-	f := spawnNewFixture(t)
-	f.commitSetup(setupTouch, true)
-	f.task("Setup", "")
-	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
-	if err != nil {
-		t.Fatalf("spawn: %v\n%s", err, out)
-	}
-	if worktreeExists(setupMarker(f)) || worktreeExists(f.setupLog()) {
-		t.Error("an unapproved setup script ran")
-	}
-	if !strings.Contains(out, "not approved") || !strings.Contains(out, "curia setup approve T-1\n") {
-		t.Errorf("output does not say how to approve the script:\n%s", out)
-	}
-	if w := f.windows(); len(w) != 1 {
-		t.Errorf("windows = %q, want the spawn to go on", w)
-	}
 }
 
 func TestSetupApproveShowsAndApproves(t *testing.T) {
@@ -89,21 +55,21 @@ func TestSetupApproveShowsAndApproves(t *testing.T) {
 		lines = append(lines, fmt.Sprintf("echo line %d", i))
 	}
 	content := strings.Join(lines, "\n") + "\n"
-	f.commitSetup(content, true)
-	f.task("Setup", "")
-	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil || worktreeExists(setupMarker(f)) {
-		t.Fatalf("first spawn: %v, marker %v\n%s", err, worktreeExists(setupMarker(f)), out)
+	f.CommitSetup(content, true)
+	f.Task("Setup", "")
+	if _, out, err := f.Spawn("T-1", lifecycle.SpawnOptions{}); err != nil || testkit.WorktreeExists(testkit.SetupMarker(f.SpawnFixture)) {
+		t.Fatalf("first spawn: %v, marker %v\n%s", err, testkit.WorktreeExists(testkit.SetupMarker(f.SpawnFixture)), out)
 	}
 
-	prompts := setupAnswer(t, setupSum(content)[:8], nil)
+	prompts := setupAnswer(t, testkit.SetupSum(content)[:8], nil)
 	out, err := runRoot(t, "setup", "approve", "T-1")
 	if err != nil {
 		t.Fatalf("setup approve: %v\n%s", err, out)
 	}
-	want := "Repository: " + f.repo + "\n" +
-		"Script: " + filepath.Join(f.worktree("T-1"), ".curia", "setup.sh") + "\n" +
+	want := "Repository: " + f.Repo + "\n" +
+		"Script: " + filepath.Join(f.Worktree("T-1"), ".curia", "setup.sh") + "\n" +
 		fmt.Sprintf("Size: 50 lines, %d bytes\n", len(content)) +
-		"SHA-256: " + setupSum(content) + "\n"
+		"SHA-256: " + testkit.SetupSum(content) + "\n"
 	for i, l := range lines {
 		want += fmt.Sprintf("%4d  %s\n", i+1, l)
 	}
@@ -114,18 +80,18 @@ func TestSetupApproveShowsAndApproves(t *testing.T) {
 	if len(*prompts) != 1 || !strings.Contains((*prompts)[0], "first 8 characters") {
 		t.Errorf("prompts = %q, want one asking for the first 8 characters", *prompts)
 	}
-	if got := setupApproval(f); got != setupSum(content) {
-		t.Fatalf("approval = %q, want %q", got, setupSum(content))
+	if got := setupApproval(f); got != testkit.SetupSum(content) {
+		t.Fatalf("approval = %q, want %q", got, testkit.SetupSum(content))
 	}
 
 	// The approved script runs at the next spawn (the first window is gone
 	// and its launch claim has lapsed).
-	f.fake.Panes = nil
-	f.now = f.now.Add(lifecycle.SpawnSetupLimit + time.Minute)
-	if _, out, err = f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
+	f.Fake.Panes = nil
+	f.Now = f.Now.Add(lifecycle.SpawnSetupLimit + time.Minute)
+	if _, out, err = f.Spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
 		t.Fatalf("second spawn: %v\n%s", err, out)
 	}
-	if !worktreeExists(setupMarker(f)) {
+	if !testkit.WorktreeExists(testkit.SetupMarker(f.SpawnFixture)) {
 		t.Errorf("the approved script did not run:\n%s", out)
 	}
 }
@@ -149,14 +115,14 @@ func TestSetupApproveRefusesWhatTheDisplayWouldHide(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := spawnNewFixture(t)
-			content := setupTouch + c.body
-			f.commitSetup(content, true)
-			f.task("Setup", "")
-			_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
-			if err != nil || !strings.Contains(out, c.want) || worktreeExists(setupMarker(f)) {
-				t.Errorf("spawn = %v, marker %v, want the script skipped (%q):\n%s", err, worktreeExists(setupMarker(f)), c.want, out)
+			content := testkit.SetupTouch + c.body
+			f.CommitSetup(content, true)
+			f.Task("Setup", "")
+			_, out, err := f.Spawn("T-1", lifecycle.SpawnOptions{})
+			if err != nil || !strings.Contains(out, c.want) || testkit.WorktreeExists(testkit.SetupMarker(f.SpawnFixture)) {
+				t.Errorf("spawn = %v, marker %v, want the script skipped (%q):\n%s", err, testkit.WorktreeExists(testkit.SetupMarker(f.SpawnFixture)), c.want, out)
 			}
-			prompts := setupAnswer(t, setupSum(content)[:8], nil)
+			prompts := setupAnswer(t, testkit.SetupSum(content)[:8], nil)
 			out, err = runRoot(t, "setup", "approve", "T-1")
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Errorf("setup approve = %v, want a refusal naming %q\n%s", err, c.want, out)
@@ -170,18 +136,18 @@ func TestSetupApproveRefusesWhatTheDisplayWouldHide(t *testing.T) {
 
 func TestSetupApproveNeedsTerminalConfirmation(t *testing.T) {
 	f := spawnNewFixture(t)
-	f.commitSetup(setupTouch, true)
-	f.task("Setup", "")
-	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
+	f.CommitSetup(testkit.SetupTouch, true)
+	f.Task("Setup", "")
+	if _, out, err := f.Spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
-	prefix := setupSum(setupTouch)[:8]
+	prefix := testkit.SetupSum(testkit.SetupTouch)[:8]
 	noTTY := filepath.Join(t.TempDir(), "no-tty")
 	cases := []struct {
 		name   string
 		answer string
 		err    error
-		real   bool // use lifecycle.SetupAskTerminal on a path that is no terminal
+		real   bool // use promptTerminalAt on a path that is no terminal
 	}{
 		{name: "wrong prefix", answer: "00000000"},
 		{name: "longer than the prefix", answer: prefix + "0"},
@@ -191,12 +157,12 @@ func TestSetupApproveNeedsTerminalConfirmation(t *testing.T) {
 	}
 	for _, c := range cases {
 		if c.real {
-			prev := lifecycle.SetupConfirm
-			lifecycle.SetupConfirm = func(p string) (string, error) { return lifecycle.SetupAskTerminal(noTTY, p) }
+			prev := promptTerminal
+			promptTerminal = func(p string) (string, error) { return promptTerminalAt(noTTY, p) }
 			// Piped stdin holding the right answer must not approve.
 			rootCmd.SetIn(strings.NewReader(prefix + "\n"))
 			out, err := runRoot(t, "setup", "approve", "T-1")
-			lifecycle.SetupConfirm = prev
+			promptTerminal = prev
 			rootCmd.SetIn(nil)
 			if err == nil || !strings.Contains(err.Error(), "no terminal") {
 				t.Errorf("%s: setup approve = %v\n%s", c.name, err, out)
@@ -215,34 +181,16 @@ func TestSetupApproveNeedsTerminalConfirmation(t *testing.T) {
 	if out, err := runRoot(t, "setup", "approve", "T-1"); err != nil {
 		t.Fatalf("setup approve with the right prefix: %v\n%s", err, out)
 	}
-	if got := setupApproval(f); got != setupSum(setupTouch) {
+	if got := setupApproval(f); got != testkit.SetupSum(testkit.SetupTouch) {
 		t.Errorf("approval = %q, want the script's hash", got)
-	}
-}
-
-func TestSetupChangedAfterApprovalNotRun(t *testing.T) {
-	f := spawnNewFixture(t)
-	f.approve(setupTouch)
-	changed := setupTouch + "echo one more line\n"
-	f.commitSetup(changed, true)
-	f.task("Setup", "")
-	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
-	if err != nil {
-		t.Fatalf("spawn: %v\n%s", err, out)
-	}
-	if worktreeExists(setupMarker(f)) {
-		t.Error("a script changed since its approval ran")
-	}
-	if !strings.Contains(out, "not approved") {
-		t.Errorf("output does not say the script was skipped:\n%s", out)
 	}
 }
 
 func TestSetupApproveRefusedInsideAgent(t *testing.T) {
 	f := spawnNewFixture(t)
-	f.commitSetup(setupTouch, true)
-	f.task("Setup", "")
-	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
+	f.CommitSetup(testkit.SetupTouch, true)
+	f.Task("Setup", "")
+	if _, out, err := f.Spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
 	t.Setenv("CLAUDECODE", "1")
@@ -255,45 +203,16 @@ func TestSetupApproveRefusedInsideAgent(t *testing.T) {
 	}
 }
 
-func TestSetupSwapBetweenCheckAndExecRunsCheckedContent(t *testing.T) {
-	f := spawnNewFixture(t)
-	approved := "#!/bin/sh\necho approved > who-ran\n"
-	f.setupScript(approved, true)
-	f.task("Setup", "")
-	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
-		t.Fatalf("spawn: %v\n%s", err, out)
-	}
-	wt := f.worktree("T-1")
-	whoRan := filepath.Join(wt, "who-ran")
-	if err := os.Remove(whoRan); err != nil {
-		t.Fatalf("the approved script did not run: %v", err)
-	}
-
-	s, err := lifecycle.SetupRead(wt)
-	if err != nil || s.Sum != setupSum(approved) {
-		t.Fatalf("lifecycle.SetupRead = %+v, %v", s, err)
-	}
-	// The file is swapped after the check: what runs is what was checked.
-	worktreeWrite(t, filepath.Join(wt, ".curia", "setup.sh"), "#!/bin/sh\necho swapped > who-ran\n")
-	runErr, err := lifecycle.SetupExec(context.Background(), f.get("T-1"), s, f.setupLog())
-	if err != nil || runErr != nil {
-		t.Fatalf("lifecycle.SetupExec: %v, %v", runErr, err)
-	}
-	if b, _ := os.ReadFile(filepath.Clean(whoRan)); string(b) != "approved\n" {
-		t.Errorf("who-ran = %q, want the checked content to have run", b)
-	}
-}
-
 func TestSetupSizeBound(t *testing.T) {
 	f := spawnNewFixture(t)
-	big := setupTouch + "# " + strings.Repeat("x", lifecycle.SetupMaxBytes) + "\n"
-	f.setupScript(big, true)
-	f.task("Setup", "")
-	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
+	big := testkit.SetupTouch + "# " + strings.Repeat("x", lifecycle.SetupMaxBytes) + "\n"
+	f.SetupScript(big, true)
+	f.Task("Setup", "")
+	_, out, err := f.Spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
-	if worktreeExists(setupMarker(f)) {
+	if testkit.WorktreeExists(testkit.SetupMarker(f.SpawnFixture)) {
 		t.Error("a setup script over the size bound ran")
 	}
 	if !strings.Contains(out, "larger than 64 KiB") {
@@ -301,42 +220,5 @@ func TestSetupSizeBound(t *testing.T) {
 	}
 	if out, err = runRoot(t, "setup", "approve", "T-1"); err == nil || !strings.Contains(err.Error(), "larger than") {
 		t.Errorf("setup approve of a script over the bound = %v\n%s", err, out)
-	}
-}
-
-func TestSetupNeedsShebang(t *testing.T) {
-	f := spawnNewFixture(t)
-	f.setupScript("touch made-by-setup\n", true)
-	f.task("Setup", "")
-	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
-	if err != nil || !strings.Contains(out, "has no #! line") || worktreeExists(setupMarker(f)) {
-		t.Errorf("spawn = %v, marker %v, output:\n%s", err, worktreeExists(setupMarker(f)), out)
-	}
-}
-
-func TestSetupEnvironmentIsMinimal(t *testing.T) {
-	f := spawnNewFixture(t)
-	t.Setenv("ANTHROPIC_API_KEY", "sk-secret-1")
-	t.Setenv("GITHUB_TOKEN", "ghp-secret-2")
-	t.Setenv("CURIA_SETUP_TEST_EXTRA", "extra")
-	f.setupScript("#!/bin/sh\nenv\n", true)
-	f.task("Setup", "")
-	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
-		t.Fatalf("spawn: %v\n%s", err, out)
-	}
-	b, err := os.ReadFile(f.setupLog())
-	if err != nil {
-		t.Fatal(err)
-	}
-	env := string(b)
-	for _, bad := range []string{"secret", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "CURIA_SETUP_TEST_EXTRA"} {
-		if strings.Contains(env, bad) {
-			t.Errorf("the setup environment holds %q:\n%s", bad, env)
-		}
-	}
-	for _, want := range []string{"CURIA_TASK_ID=T-1\n", "CURIA_REPO=" + f.repo + "\n", "PATH=", "HOME="} {
-		if !strings.Contains(env, want) {
-			t.Errorf("the setup environment lacks %q:\n%s", want, env)
-		}
 	}
 }
