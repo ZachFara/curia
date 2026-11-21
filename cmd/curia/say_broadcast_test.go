@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -292,5 +294,48 @@ func sayBcSay(t *testing.T, c *decideClock, text string, keys ...tea.KeyMsg) {
 	sayDriveView(t, c, keys...)
 	if _, _, err := sayRun(t, strings.NewReader(""), strings.Fields(text)...); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Review C2: between the proposal and the confirmation a session may become a
+// teammate, move to another tmux server, end or go stale; the send re-reads
+// each and leaves it out.
+func TestSendBroadcastRechecksEachTargetAtSendTime(t *testing.T) {
+	sessions := []model.Session{
+		sayBcSession("K1", "%1", "/work/web", sendSockA),
+		sayBcSession("T1", "%2", "/work/web", sendSockA),
+		sayBcSession("O1", "%3", "/work/web", sendSockA),
+		sayBcSession("E1", "%4", "/work/web", sendSockA),
+		sayBcSession("S1", "%5", "/work/web", sendSockA),
+	}
+	db, _, c := sayBcWorld(t, sessions...)
+	sayUseRouter(t, sayRouterNever(t))
+	prevProgram, prevTerminal := runProgram, sayIsTerminal
+	sayIsTerminal = func() bool { return true }
+	runProgram = func(m tea.Model, _ ...tea.ProgramOption) error {
+		m = sayPump(t, m, m.Init()) // the proposal lists all five
+		raw, err := sql.Open("sqlite", db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = raw.Close() }()
+		if _, err = raw.Exec(`UPDATE sessions SET team_role = 'teammate' WHERE id = 'T1'`); err != nil { // upsert leaves the team columns alone
+			t.Fatal(err)
+		}
+		sessions[2].Socket = sendSockB
+		sessions[3].State = model.StateEnded
+		sessions[4].State = model.StateStale
+		seedSessions(t, db, sessions[2:]...)
+		c.advance(time.Second)
+		m, cmd := m.Update(sayEnter)
+		sayPump(t, m, cmd)
+		return nil
+	}
+	t.Cleanup(func() { runProgram, sayIsTerminal = prevProgram, prevTerminal })
+	if _, _, err := sayRun(t, strings.NewReader(""), "@all", "continue"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sayBcTargets(t, db); len(got) != 1 || got[0] != "K1" {
+		t.Errorf("targets = %v, want [K1] only", got)
 	}
 }
