@@ -291,3 +291,41 @@ func openTestStore(t *testing.T, db string) *store.Store {
 	t.Cleanup(func() { _ = st.Close() })
 	return st
 }
+
+func TestLoadConfigHonoursXDGConfigHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CURIA_DB", "")
+	write := func(p, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(home, ".config", "curia", "config.toml"), "default_context_max = 1234\n")
+	xdg := t.TempDir()
+	write(filepath.Join(xdg, "curia", "config.toml"), "default_context_max = 42\n")
+
+	for _, tc := range []struct {
+		name, value string
+		want        int
+	}{
+		{"absolute", xdg, 42},
+		{"unset", "", 1234},
+		{"relative is invalid and ignored", "relative/dir", 1234},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", tc.value)
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.DefaultContextMax != tc.want {
+				t.Errorf("DefaultContextMax = %d, want %d with XDG_CONFIG_HOME=%q", cfg.DefaultContextMax, tc.want, tc.value)
+			}
+		})
+	}
+}

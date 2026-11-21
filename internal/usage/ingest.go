@@ -154,6 +154,9 @@ func (r *reader) statusCost(d *Doc, top map[string]json.RawMessage) {
 	}
 }
 
+// statusContext reads the context window. A null or missing used_percentage
+// (right after a start or a compaction) is no reading: the session keeps its
+// last known value until the next payload, and no number is invented.
 func (r *reader) statusContext(d *Doc, top map[string]json.RawMessage) {
 	cw := r.sub(top, "context_window")
 	if v, ok := r.num(cw, "used_percentage", "context_window.used_percentage", 100); ok {

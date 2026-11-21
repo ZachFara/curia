@@ -105,26 +105,47 @@ var toolRules = []string{
 // When all seven are there it writes nothing. A permissions or allow value of
 // an unexpected type is an error and nothing is written.
 func AllowTools(settingsPath string, now time.Time) error {
+	return addRules(settingsPath, "allow", toolRules, now)
+}
+
+// ownFileDenyRules are the permission deny rules for Curia's own files (spec
+// F28): Claude Code enforces them itself, so they hold when the hook
+// crashes or times out (a hook fails open). An Edit rule covers every file
+// edit tool; Bash is not covered by it.
+var ownFileDenyRules = []string{
+	"Edit(~/.config/curia/**)", "Edit(~/.local/share/curia/**)", "Edit(~/.local/state/curia/**)",
+}
+
+// DenyOwnFiles adds ownFileDenyRules to permissions.deny of the settings
+// file as AllowTools adds its rules: additive, one write with a backup,
+// nothing written when they are all there.
+func DenyOwnFiles(settingsPath string, now time.Time) error {
+	return addRules(settingsPath, "deny", ownFileDenyRules, now)
+}
+
+// addRules adds each of rules missing from permissions[key] of the settings
+// file, in one write.
+func addRules(settingsPath, key string, rules []string, now time.Time) error {
 	settingsPath = filepath.Clean(settingsPath)
 	raw, settings, err := loadSettings(settingsPath)
 	if err != nil {
 		return err
 	}
-	perms, allow, err := allowList(settings)
+	perms, list, err := ruleList(settings, key)
 	if err != nil {
 		return fmt.Errorf("%s: %w", settingsPath, err)
 	}
 	changed := false
-	for _, rule := range toolRules {
-		if !slices.Contains(allow, any(rule)) {
-			allow = append(allow, rule)
+	for _, rule := range rules {
+		if !slices.Contains(list, any(rule)) {
+			list = append(list, rule)
 			changed = true
 		}
 	}
 	if !changed {
 		return nil
 	}
-	perms["allow"] = allow
+	perms[key] = list
 	settings["permissions"] = perms
 	return saveSettings(settingsPath, raw, settings, now)
 }
@@ -137,7 +158,7 @@ func ToolsAllowed(settingsPath string) bool {
 	if err != nil {
 		return false
 	}
-	_, allow, err := allowList(settings)
+	_, allow, err := ruleList(settings, "allow")
 	if err != nil {
 		return false
 	}
@@ -149,9 +170,9 @@ func ToolsAllowed(settingsPath string) bool {
 	return true
 }
 
-// allowList returns settings["permissions"] and its "allow" list; an absent
-// one is returned empty and not yet stored in settings.
-func allowList(settings map[string]any) (map[string]any, []any, error) {
+// ruleList returns settings["permissions"] and its list under key ("allow"
+// or "deny"); an absent one is returned empty and not yet stored in settings.
+func ruleList(settings map[string]any, key string) (map[string]any, []any, error) {
 	v, present := settings["permissions"]
 	if !present {
 		return map[string]any{}, nil, nil
@@ -160,19 +181,19 @@ func allowList(settings map[string]any) (map[string]any, []any, error) {
 	if !ok {
 		return nil, nil, fmt.Errorf(`"permissions" must be an object, found %T`, v)
 	}
-	a, present := perms["allow"]
+	a, present := perms[key]
 	if !present {
 		return perms, nil, nil
 	}
-	allow, ok := a.([]any)
+	list, ok := a.([]any)
 	if !ok {
-		return nil, nil, fmt.Errorf(`permissions.allow must be an array, found %T`, a)
+		return nil, nil, fmt.Errorf(`permissions.%s must be an array, found %T`, key, a)
 	}
-	return perms, allow, nil
+	return perms, list, nil
 }
 
 // Unhooks removes the hook commands Curia added, and the seven curia MCP tool
-// rules whoever added them, from the settings file at settingsPath, in one
+// rules and the deny rules of ownFileDenyRules whoever added them, from the settings file at settingsPath, in one
 // write. Hook entries that became empty are dropped; the allow list is kept
 // even when empty, and everything else is kept as it is. A missing file, or
 // one with nothing of ours in it, is left alone. Before rewriting it copies
@@ -190,10 +211,15 @@ func Unhooks(settingsPath, bin string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", settingsPath, err)
 	}
-	rulesChanged, err := removeToolRules(settings)
+	rulesChanged, err := removeRules(settings, "allow", toolRules)
 	if err != nil {
 		return fmt.Errorf("%s: %w", settingsPath, err)
 	}
+	deniesChanged, err := removeRules(settings, "deny", ownFileDenyRules)
+	if err != nil {
+		return fmt.Errorf("%s: %w", settingsPath, err)
+	}
+	rulesChanged = rulesChanged || deniesChanged
 	if !hooksChanged && !rulesChanged {
 		return nil
 	}
@@ -230,23 +256,23 @@ func removeOurHooks(settings map[string]any, bin string) (bool, error) {
 	return changed, nil
 }
 
-// removeToolRules drops the seven tool rules from permissions.allow and
-// reports whether it removed any.
-func removeToolRules(settings map[string]any) (bool, error) {
-	perms, allow, err := allowList(settings)
+// removeRules drops rules from permissions[key] and reports whether it
+// removed any.
+func removeRules(settings map[string]any, key string, rules []string) (bool, error) {
+	perms, list, err := ruleList(settings, key)
 	if err != nil {
 		return false, err
 	}
-	kept := make([]any, 0, len(allow))
-	for _, rule := range allow {
-		if s, ok := rule.(string); !ok || !slices.Contains(toolRules, s) {
+	kept := make([]any, 0, len(list))
+	for _, rule := range list {
+		if s, ok := rule.(string); !ok || !slices.Contains(rules, s) {
 			kept = append(kept, rule)
 		}
 	}
-	if len(kept) == len(allow) {
+	if len(kept) == len(list) {
 		return false, nil
 	}
-	perms["allow"] = kept
+	perms[key] = kept
 	return true, nil
 }
 
