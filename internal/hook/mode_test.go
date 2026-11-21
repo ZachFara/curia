@@ -272,7 +272,7 @@ func TestModeNeverAllowsGitInternals(t *testing.T) {
 	}
 	paths := []string{
 		".git/config", ".git/hooks/pre-commit", "sub/.git/config", ".claude/settings.json", ".curia/setup.sh",
-		".gitattributes", ".gitmodules", "wt/.git", "wt/gd/config", ".GIT/config",
+		".gitattributes", ".gitmodules", ".mcp.json", ".envrc", ".vscode/tasks.json", ".idea/x", ".pre-commit-config.yaml", ".githooks/pre-commit", "lefthook.yml", ".lefthook.yml", ".lefthook/x", "wt/.git", "wt/gd/config", ".GIT/config",
 	}
 	for _, mode := range []string{"edits", "away"} {
 		st := openStore(t)
@@ -321,6 +321,10 @@ func TestModeAwayGlobGrep(t *testing.T) {
 		{"Glob", `{"path":` + p + `,"pattern":"../*"}`},
 		{"Glob", `{"path":` + p + `,"pattern":"a/../../*"}`},
 		{"Glob", `{"path":` + p + `,"pattern":"~/x"}`},
+		{"Glob", `{"path":` + p + `,"pattern":"{../secret,a}"}`},
+		{"Glob", `{"path":` + p + `,"pattern":"@(..)/x"}`},
+		{"Glob", `{"path":` + p + `,"pattern":"**/../x"}`},
+		{"Glob", `{"path":` + p + `,"pattern":"[a-z]*"}`},
 		{"Grep", `{"path":` + p + `,"pattern":"x","glob":"../**"}`},
 		{"Grep", `{"pattern":"x"}`},
 		{"Grep", `{"path":"/etc","pattern":"x"}`},

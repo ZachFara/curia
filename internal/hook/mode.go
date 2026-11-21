@@ -49,8 +49,15 @@ var (
 
 // autoExecNames are path components whose files Git or the tooling runs
 // later (hooks, config, filters, settings): an edit inside one is never
-// allowed by a mode. .git covers a repository's config and hooks.
-var autoExecNames = []string{".git", ".claude", ".curia", ".gitattributes", ".gitmodules", ".gitconfig", ".husky"}
+// allowed by a mode. .git covers a repository's config and hooks. Best
+// effort: build files (Makefile, package scripts) that a later command runs
+// stay editable, the documented residual risk of edits mode.
+// shortcut: a core.hooksPath pointing elsewhere is not read (that needs the
+// gitdir config parsed on the hook path); add it if a repo uses one.
+var autoExecNames = []string{
+	".git", ".claude", ".curia", ".gitattributes", ".gitmodules", ".gitconfig", ".husky",
+	".mcp.json", ".envrc", ".vscode", ".idea", ".pre-commit-config.yaml", ".githooks", "lefthook.yml", ".lefthook.yml", ".lefthook",
+}
 
 // askTools need the user; bypass gives no opinion on them.
 var askTools = []string{"AskUserQuestion", "ExitPlanMode"}
@@ -232,6 +239,15 @@ func autoExec(p, root string) bool {
 	return false
 }
 
+// globSafe: only letters, digits and * ? . _ - /, no "..", and not starting
+// with "/" or "~" (an allow rule: brace and extended-glob forms are out).
+func globSafe(p string) bool {
+	return !strings.Contains(p, "..") && !strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "~") &&
+		!strings.ContainsFunc(p, func(r rune) bool {
+			return r >= 128 || (!unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune("*?._-/", r))
+		})
+}
+
 // readAllowed: a read tool whose paths are inside root; Read, LS, Glob and
 // Grep must name one, and Glob and Grep also a pattern that is not absolute,
 // not "~..." and has no ".." segment.
@@ -245,8 +261,7 @@ func readAllowed(ev model.Event, in map[string]json.RawMessage, root string) boo
 		if raw, has := in[key]; has && json.Unmarshal(raw, &pat) != nil {
 			return false
 		}
-		if strings.HasPrefix(pat, "/") || strings.HasPrefix(pat, "~") || strings.ContainsRune(pat, 0) ||
-			slices.Contains(strings.FieldsFunc(pat, func(r rune) bool { return r == '/' || r == '\\' }), "..") {
+		if !globSafe(pat) {
 			return false
 		}
 	}
