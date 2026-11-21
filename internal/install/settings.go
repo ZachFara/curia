@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ZachFara/curia/internal/config"
 )
 
 // hookEvents are the Claude Code hook names Curia registers for.
@@ -116,11 +118,52 @@ var ownFileDenyRules = []string{
 	"Edit(~/.config/curia/**)", "Edit(~/.local/share/curia/**)", "Edit(~/.local/state/curia/**)",
 }
 
-// DenyOwnFiles adds ownFileDenyRules to permissions.deny of the settings
-// file as AllowTools adds its rules: additive, one write with a backup,
-// nothing written when they are all there.
-func DenyOwnFiles(settingsPath string, now time.Time) error {
-	return addRules(settingsPath, "deny", ownFileDenyRules, now)
+// ownFileRules are ownFileDenyRules plus the directories in use: the XDG
+// ones (config.XDGDir, as the hook's protected roots resolve them) and each
+// of files (a relocated database or log, with its -wal and -shm) that is not
+// inside them. A path under home is written "~/...", any other "//abs" (Claude
+// Code's absolute form).
+func ownFileRules(files []string) []string {
+	rules := slices.Clone(ownFileDenyRules)
+	home, _ := os.UserHomeDir()
+	rule := func(p string) string {
+		if rest, ok := strings.CutPrefix(p, home+"/"); ok && home != "" {
+			return "Edit(~/" + rest + ")"
+		}
+		return "Edit(/" + p + ")"
+	}
+	add := func(r string) {
+		if !slices.Contains(rules, r) {
+			rules = append(rules, r)
+		}
+	}
+	var dirs []string
+	if home != "" {
+		for _, x := range [][2]string{{"XDG_CONFIG_HOME", ".config"}, {"XDG_DATA_HOME", ".local/share"}, {"XDG_STATE_HOME", ".local/state"}} {
+			d := config.XDGDir(x[0], home, x[1])
+			dirs = append(dirs, d+"/")
+			add(rule(d + "/**"))
+		}
+	}
+	for _, f := range files {
+		f = filepath.Clean(f)
+		if !filepath.IsAbs(f) || slices.ContainsFunc(dirs, func(d string) bool { return strings.HasPrefix(f, d) }) {
+			continue
+		}
+		for _, p := range []string{f, f + "-wal", f + "-shm"} {
+			add(rule(p))
+		}
+	}
+	return rules
+}
+
+// DenyOwnFiles adds the deny rules for Curia's files (ownFileRules: the
+// home defaults, the XDG directories in use, and files, a relocated database
+// or log path) to permissions.deny of the settings file as AllowTools adds
+// its rules: additive, one write with a backup, nothing written when they
+// are all there.
+func DenyOwnFiles(settingsPath string, now time.Time, files ...string) error {
+	return addRules(settingsPath, "deny", ownFileRules(files), now)
 }
 
 // addRules adds each of rules missing from permissions[key] of the settings
@@ -198,7 +241,7 @@ func ruleList(settings map[string]any, key string) (map[string]any, []any, error
 // even when empty, and everything else is kept as it is. A missing file, or
 // one with nothing of ours in it, is left alone. Before rewriting it copies
 // the file to settingsPath+".bak.<unix seconds>".
-func Unhooks(settingsPath, bin string) error {
+func Unhooks(settingsPath, bin string, files ...string) error {
 	settingsPath = filepath.Clean(settingsPath)
 	raw, settings, err := loadSettings(settingsPath)
 	if err != nil {
@@ -215,7 +258,7 @@ func Unhooks(settingsPath, bin string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", settingsPath, err)
 	}
-	deniesChanged, err := removeRules(settings, "deny", ownFileDenyRules)
+	deniesChanged, err := removeRules(settings, "deny", ownFileRules(files))
 	if err != nil {
 		return fmt.Errorf("%s: %w", settingsPath, err)
 	}
