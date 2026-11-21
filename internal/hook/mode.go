@@ -211,7 +211,7 @@ func editAllowed(ev model.Event, in map[string]json.RawMessage, root string) boo
 // gitdir it names auto-executed too; one that cannot be read counts as yes.
 func autoExec(p, root string) bool {
 	for _, c := range strings.Split(strings.ToLower(p), string(filepath.Separator)) {
-		if slices.Contains(autoExecNames, c) {
+		if slices.Contains(autoExecNames, c) || strings.HasPrefix(strings.TrimPrefix(c, "."), "lefthook") {
 			return true
 		}
 	}

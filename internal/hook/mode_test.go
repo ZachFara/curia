@@ -272,7 +272,7 @@ func TestModeNeverAllowsGitInternals(t *testing.T) {
 	}
 	paths := []string{
 		".git/config", ".git/hooks/pre-commit", "sub/.git/config", ".claude/settings.json", ".curia/setup.sh",
-		".gitattributes", ".gitmodules", ".mcp.json", ".envrc", ".vscode/tasks.json", ".idea/x", ".pre-commit-config.yaml", ".githooks/pre-commit", "lefthook.yml", ".lefthook.yml", ".lefthook/x", "wt/.git", "wt/gd/config", ".GIT/config",
+		".gitattributes", ".gitmodules", ".mcp.json", ".envrc", ".vscode/tasks.json", ".idea/x", ".pre-commit-config.yaml", ".githooks/pre-commit", "lefthook.yml", ".lefthook.yml", "lefthook.yaml", "lefthook-local.yml", ".lefthook.toml", ".devcontainer/devcontainer.json", ".lefthook/x", "wt/.git", "wt/gd/config", ".GIT/config",
 	}
 	for _, mode := range []string{"edits", "away"} {
 		st := openStore(t)
