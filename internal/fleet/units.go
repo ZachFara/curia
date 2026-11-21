@@ -1,6 +1,10 @@
 package fleet
 
-import "github.com/ZachFara/curia/internal/model"
+import (
+	"time"
+
+	"github.com/ZachFara/curia/internal/model"
+)
 
 // Unit is one dashboard group: a solo session, or a team's lead with its teammates.
 type Unit struct {
@@ -56,4 +60,52 @@ func teamUnit(worst model.Session, members []model.Session) Unit {
 		u.Teammates = append(u.Teammates, m)
 	}
 	return u
+}
+
+// members lists the lead and then the teammates.
+func (u Unit) members() []model.Session {
+	return append([]model.Session{u.Lead}, u.Teammates...)
+}
+
+// Cost is the sum of the unit's members' known costs; known is false when no
+// member has one.
+func (u Unit) Cost() (usd float64, known bool) {
+	for _, m := range u.members() {
+		if m.CostKnown {
+			usd += m.CostUSD
+			known = true
+		}
+	}
+	return usd, known
+}
+
+// CacheOf returns the member whose prompt cache stands for the unit at now:
+// among members that are idle, waiting or needs_decision and have a known
+// cache state, the one whose warm cache expires soonest, else one whose cache
+// is cold (a known expiry at or before now, in any state). An unknown cache
+// state is a zero CacheExpiresAt. Ties go to the earlier member, the lead first.
+func (u Unit) CacheOf(now time.Time) (model.Session, bool) {
+	var warm, cold model.Session
+	haveWarm, haveCold := false, false
+	for _, m := range u.members() {
+		if m.CacheExpiresAt.IsZero() {
+			continue
+		}
+		if !m.CacheExpiresAt.After(now) {
+			if !haveCold {
+				cold, haveCold = m, true
+			}
+			continue
+		}
+		if m.State != model.StateIdle && m.State != model.StateWaiting && m.State != model.StateNeedsDecision {
+			continue
+		}
+		if !haveWarm || m.CacheExpiresAt.Before(warm.CacheExpiresAt) {
+			warm, haveWarm = m, true
+		}
+	}
+	if haveWarm {
+		return warm, true
+	}
+	return cold, haveCold
 }

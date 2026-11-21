@@ -57,7 +57,33 @@ func Normalize(t model.Task) model.Task {
 	t.Title = sanitize.Line(t.Title, MaxTitle+1)
 	t.Body = sanitize.Block(t.Body, MaxBody)
 	t.Tags = normTags(t.Tags)
+	if t.Priority == 0 {
+		t.Priority = model.PriorityNormal
+	}
+	if t.Agent == "" {
+		t.Agent = model.AgentClaude
+	}
 	return t
+}
+
+// ParsePriority reads "P1", "p2" or "3" as a priority, 1 to 3. Anything
+// else, whitespace and non-ASCII digits included, is refused.
+func ParsePriority(s string) (int, bool) {
+	if len(s) == 2 && (s[0] == 'P' || s[0] == 'p') {
+		s = s[1:]
+	}
+	if len(s) != 1 || s[0] < '1' || s[0] > '3' {
+		return 0, false
+	}
+	return int(s[0] - '0'), true
+}
+
+// PriorityLabel is "P1" to "P3"; a zero or unknown value reads "P2".
+func PriorityLabel(p int) string {
+	if p < model.PriorityHigh || p > model.PriorityLow {
+		p = model.PriorityNormal
+	}
+	return "P" + string(rune('0'+p))
 }
 
 func normTags(raw []string) []string {
@@ -86,7 +112,7 @@ func normTags(raw []string) []string {
 func Validate(t model.Task) []Problem {
 	var ps []Problem
 	for _, check := range []func(model.Task) []Problem{
-		checkTitle, checkBody, checkRepo, checkBase, checkTags, checkModel,
+		checkTitle, checkBody, checkRepo, checkBase, checkTags, checkModel, checkPriority, checkAgent,
 	} {
 		ps = append(ps, check(t)...)
 	}
@@ -145,6 +171,20 @@ func checkTags(t model.Task) []Problem {
 func checkModel(t model.Task) []Problem {
 	if t.AgentModel != "" && !ValidModel(t.AgentModel) {
 		return one("agent_model", "must be 1 to 64 of A-Z, a-z, 0-9, ., _, [, ] and -")
+	}
+	return nil
+}
+
+func checkPriority(t model.Task) []Problem {
+	if t.Priority < model.PriorityHigh || t.Priority > model.PriorityLow {
+		return one("priority", "must be P1, P2 or P3")
+	}
+	return nil
+}
+
+func checkAgent(t model.Task) []Problem {
+	if t.Agent != model.AgentClaude && t.Agent != model.AgentCodex {
+		return one("agent", "must be claude or codex")
 	}
 	return nil
 }

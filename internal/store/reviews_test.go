@@ -146,8 +146,8 @@ func TestMigrationAddsReviewsAndPushes(t *testing.T) {
 			t.Errorf("sessions.%s = %s notnull=%d, want nullable TEXT", col, typ, notNull)
 		}
 	}
-	if n := countMigrations(t, path); n != 6 {
-		t.Errorf("schema_migrations has %d rows, want 6", n)
+	if n := countMigrations(t, path); n != len(allMigrations) {
+		t.Errorf("schema_migrations has %d rows, want %d", n, len(allMigrations))
 	}
 }
 
@@ -288,11 +288,8 @@ func TestMigrationOnPlan3Database(t *testing.T) {
 	db := plan3Database(t, path, at)
 
 	s := open(t, path)
-	if names := migrationNames(t, db); !reflect.DeepEqual(names, []string{
-		"0001_init.sql", "0002_decisions.sql",
-		"0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql",
-	}) {
-		t.Errorf("migrations = %v, want 0001 to 0005 (both 0005 files)", names)
+	if names := migrationNames(t, db); !reflect.DeepEqual(names, allMigrations) {
+		t.Errorf("migrations = %v, want every migration file (both 0005 files)", names)
 	}
 	lead := get(t, s, "lead")
 	want := model.Session{

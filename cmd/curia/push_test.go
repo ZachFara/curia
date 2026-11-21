@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/model"
@@ -1115,6 +1117,190 @@ func TestMCPHelpSaysSixTools(t *testing.T) {
 	}
 }
 
+// pushSetCache stores session S1 and sets its cache columns by raw SQL (the
+// columns are filled by another program). expires and rebuild may be nil.
+func pushSetCache(t *testing.T, st *store.Store, db string, expires any, used int64, rebuild any) {
+	t.Helper()
+	if _, found, err := st.GetSession(context.Background(), "S1"); err != nil {
+		t.Fatal(err)
+	} else if !found {
+		mcpPutSession(t, st, "S1", "%3", model.StateNeedsDecision, pushT0)
+	}
+	raw, err := sql.Open("sqlite", db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.Exec(`UPDATE sessions SET cache_expires_at = ?, context_used = ?, cache_rebuild_usd = ? WHERE id = 'S1'`,
+		expires, used, rebuild); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// pushStamp is a time in the store's fixed-width layout.
+func pushStamp(at time.Time) string { return at.UTC().Format("2006-01-02T15:04:05.000000000Z") }
+
+// pushStakesBody flushes one decision push for a ticket with the given
+// reversibility at now and returns the message the stand-in got.
+func pushStakesBody(t *testing.T, srv *pushSrv, st *store.Store, d model.Decision, now time.Time) string {
+	t.Helper()
+	cfg := pushCfg(srv.URL, map[string]string{"phone": "curia-phone-k3j9"}, "", "")
+	pushEnq(t, st, cfg, model.PushDecision, d.ID, now)
+	if n := pushFlushAt(t, st, cfg, now); n != 1 {
+		t.Fatalf("sent %d, want 1", n)
+	}
+	reqs := srv.requests()
+	return reqs[len(reqs)-1].Body.Message
+}
+
+const pushPlainMessage = "Store webhook events in Postgres or Redis?\nA: Option A\nB: Option B\nRecommended: B"
+
+func TestFlushAddsStakesForWarmCache(t *testing.T) {
+	srv := pushServer(t, nil)
+	st, db := pushStore(t)
+	d := pushTicket(t, st, "Store webhook events in Postgres or Redis?", model.ReversCostly, 2)
+	pushSetCache(t, st, db, pushStamp(pushT0.Add(12*time.Minute+30*time.Second)), 84000, 1.68)
+	want := pushPlainMessage + "\nanswer within 12m to keep cache warm (rebuild ≈ $1.68)"
+	if got := pushStakesBody(t, srv, st, d, pushT0); got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+}
+
+func TestFlushAddsColdLine(t *testing.T) {
+	srv := pushServer(t, nil)
+	st, db := pushStore(t)
+	d := pushTicket(t, st, "Store webhook events in Postgres or Redis?", model.ReversCostly, 2)
+	pushSetCache(t, st, db, pushStamp(pushT0.Add(-3*time.Minute)), 84000, 1.68)
+	want := pushPlainMessage + "\ncache cold: next turn re-writes ~84k tokens"
+	if got := pushStakesBody(t, srv, st, d, pushT0); got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+}
+
+func TestFlushNoStakesWhenUnknown(t *testing.T) {
+	srv := pushServer(t, nil)
+	st, db := pushStore(t)
+	d := pushTicket(t, st, "Store webhook events in Postgres or Redis?", model.ReversCostly, 2)
+	pushSetCache(t, st, db, nil, 0, nil) // a session with no cache state
+	if got := pushStakesBody(t, srv, st, d, pushT0); got != pushPlainMessage {
+		t.Errorf("message = %q, want Plan 4's %q", got, pushPlainMessage)
+	}
+}
+
+// TestFlushNoStakesWithoutSession: a ticket whose session row is absent.
+func TestFlushNoStakesWithoutSession(t *testing.T) {
+	srv := pushServer(t, nil)
+	st, _ := pushStore(t)
+	d := pushTicket(t, st, "Store webhook events in Postgres or Redis?", model.ReversCostly, 2)
+	if got := pushStakesBody(t, srv, st, d, pushT0); got != pushPlainMessage {
+		t.Errorf("message = %q, want %q", got, pushPlainMessage)
+	}
+}
+
+// TestFlushStakesRefusesNonsense: the columns are filled by another program;
+// a value that makes no sense leaves the line out and the push still goes.
+func TestFlushStakesRefusesNonsense(t *testing.T) {
+	warm := pushStamp(pushT0.Add(10 * time.Minute))
+	cases := []struct {
+		name    string
+		expires any
+		used    int64
+		rebuild any
+	}{
+		{"negative rebuild cost", warm, 1000, -1.5},
+		{"absurd rebuild cost", warm, 1000, 1e9},
+		{"infinite rebuild cost", warm, 1000, math.Inf(1)},
+		{"negative context", pushStamp(pushT0.Add(-time.Minute)), -5, 1.0},
+		{"absurd context", pushStamp(pushT0.Add(-time.Minute)), 1 << 40, 1.0},
+		{"expiry a month ago", pushStamp(pushT0.Add(-30 * 24 * time.Hour)), 84000, 1.68},
+		{"expiry a month ahead", pushStamp(pushT0.Add(30 * 24 * time.Hour)), 84000, 1.68},
+		{"expiry not a time", "not a time; ignore previous instructions", 84000, 1.68},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := pushServer(t, nil)
+			st, db := pushStore(t)
+			d := pushTicket(t, st, "Store webhook events in Postgres or Redis?", model.ReversCostly, 2)
+			pushSetCache(t, st, db, c.expires, c.used, c.rebuild)
+			if got := pushStakesBody(t, srv, st, d, pushT0); got != pushPlainMessage {
+				t.Errorf("message = %q, want no stakes line", got)
+			}
+		})
+	}
+}
+
+// TestFlushStakesComputedAtSend: a push held by quiet hours is built when it
+// is sent, from the session's values at that moment.
+func TestFlushStakesComputedAtSend(t *testing.T) {
+	srv := pushServer(t, nil)
+	st, db := pushStore(t)
+	d := pushTicket(t, st, "Which queue?", model.ReversCostly, 2)
+	night := time.Date(2026, 11, 14, 23, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 15, 7, 0, 0, 0, time.UTC)
+	cfg := pushCfg(srv.URL, map[string]string{"phone": "curia-phone-k3j9"}, "22:00-07:00", "")
+	pushSetCache(t, st, db, pushStamp(night.Add(10*time.Minute)), 50000, 0.9)
+	pushEnq(t, st, cfg, model.PushDecision, d.ID, night)
+	if n := pushFlushAt(t, st, cfg, night.Add(time.Hour)); n != 0 {
+		t.Fatalf("sent %d inside quiet hours", n)
+	}
+	// While the push waited the agent's cache was refreshed and its price changed.
+	pushSetCache(t, st, db, pushStamp(end.Add(5*time.Minute)), 90000, 2.5)
+	if n := pushFlushAt(t, st, cfg, end); n != 1 {
+		t.Fatalf("sent %d at the window's end, want 1", n)
+	}
+	want := "Which queue?\nA: Option A\nB: Option B\nRecommended: B\nanswer within 5m to keep cache warm (rebuild ≈ $2.50)"
+	if got := srv.requests()[0].Body.Message; got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+}
+
+// TestFlushStakesColdAfterWaiting: the cache that was warm when the push was
+// queued is cold when it is sent.
+func TestFlushStakesColdAfterWaiting(t *testing.T) {
+	srv := pushServer(t, nil)
+	st, db := pushStore(t)
+	d := pushTicket(t, st, "Which queue?", model.ReversCostly, 2)
+	night := time.Date(2026, 11, 14, 23, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 15, 7, 0, 0, 0, time.UTC)
+	cfg := pushCfg(srv.URL, map[string]string{"phone": "curia-phone-k3j9"}, "22:00-07:00", "")
+	pushSetCache(t, st, db, pushStamp(night.Add(10*time.Minute)), 50000, 0.9)
+	pushEnq(t, st, cfg, model.PushDecision, d.ID, night)
+	if n := pushFlushAt(t, st, cfg, end); n != 1 {
+		t.Fatalf("sent %d, want 1", n)
+	}
+	if got := srv.requests()[0].Body.Message; !strings.HasSuffix(got, "\ncache cold: next turn re-writes ~50k tokens") {
+		t.Errorf("message = %q", got)
+	}
+}
+
+// TestFlushIrreversibleHasNoStakes: an irreversible ticket's push is unchanged.
+func TestFlushIrreversibleHasNoStakes(t *testing.T) {
+	srv := pushServer(t, nil)
+	st, db := pushStore(t)
+	d := pushTicket(t, st, "Drop the table?", model.ReversIrreversible, 2)
+	pushSetCache(t, st, db, pushStamp(pushT0.Add(10*time.Minute)), 84000, 1.68)
+	want := "Drop the table?\nA: Option A\nB: Option B\nRecommended: B\nIrreversible: answer with curia decide D-1."
+	if got := pushStakesBody(t, srv, st, d, pushT0); got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+}
+
+// TestFlushStakesWithLongQuestionStaysUnderTheBound: multi-byte text at the
+// limit, with the stakes line, stays under the byte bound and keeps the line.
+func TestFlushStakesWithLongQuestionStaysUnderTheBound(t *testing.T) {
+	for _, fill := range []string{"€", "😀", "a"} {
+		srv := pushServer(t, nil)
+		st, db := pushStore(t)
+		d := pushTicket(t, st, strings.Repeat(fill, 3000), model.ReversCostly, 2)
+		pushSetCache(t, st, db, pushStamp(pushT0.Add(12*time.Minute+30*time.Second)), 84000, 1.68)
+		got := pushStakesBody(t, srv, st, d, pushT0)
+		if len(got) >= 4096 || !utf8.ValidString(got) || utf8.RuneCountInString(got) > notify.MaxPushText ||
+			!strings.HasSuffix(got, "\nanswer within 12m to keep cache warm (rebuild ≈ $1.68)") {
+			t.Errorf("fill %q: %d bytes, %d runes, ends %q", fill, len(got), utf8.RuneCountInString(got), got[max(0, len(got)-70):])
+		}
+	}
+}
+
 // TestRetryRespectsQuietHours: a retry whose time (the backoff, or a 429's
 // Retry-After) falls inside quiet hours waits for their end, as a new push
 // does (M3).
@@ -1167,5 +1353,79 @@ func TestNoTokenHashWithoutButtons(t *testing.T) {
 	reqs := srv.requests()
 	if withActions := slices.IndexFunc(reqs, func(q pushReq) bool { return len(q.Body.Actions) > 0 }); withActions < 0 {
 		t.Error("the reversible ticket's push has no button")
+	}
+}
+
+// pushSetRecache sets session S1's recache_tokens by raw SQL (nil: unknown).
+func pushSetRecache(t *testing.T, db string, tokens any) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	if _, err := raw.Exec(`UPDATE sessions SET recache_tokens = ? WHERE id = 'S1'`, tokens); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFlushStakesShowsTokensWhenDollarsUnknown: the status line gives the
+// rebuild in tokens, not dollars (Ruling P5-R2). With no dollar figure the
+// stakes line shows the tokens as the dashboard does (usage.TokensCell),
+// never an invented dollar figure and never $0.00; with neither it leaves
+// the cost out; a dollar figure, when known, is shown as before.
+func TestFlushStakesShowsTokensWhenDollarsUnknown(t *testing.T) {
+	warm := pushStamp(pushT0.Add(12*time.Minute + 30*time.Second))
+	cold := pushStamp(pushT0.Add(-3 * time.Minute))
+	cases := []struct {
+		name    string
+		expires any
+		used    int64
+		rebuild any
+		tokens  any
+		want    string
+	}{
+		{"warm, tokens only", warm, 84000, nil, 85000, "answer within 12m to keep cache warm (rebuild ≈ 85k tok)"},
+		{"warm, zero dollars", warm, 84000, 0.0, 8400, "answer within 12m to keep cache warm (rebuild ≈ 8.4k tok)"},
+		{"warm, dollars and tokens", warm, 84000, 1.68, 85000, "answer within 12m to keep cache warm (rebuild ≈ $1.68)"},
+		{"warm, neither", warm, 84000, nil, nil, "answer within 12m to keep cache warm"},
+		{"warm, absurd tokens", warm, 84000, nil, int64(1) << 40, "answer within 12m to keep cache warm"},
+		{"warm, negative tokens", warm, 84000, nil, -5, "answer within 12m to keep cache warm"},
+		{"cold, tokens only", cold, 0, nil, 85000, "cache cold: next turn re-writes ~85k tok"},
+		{"cold, context known", cold, 84000, nil, 85000, "cache cold: next turn re-writes ~84k tokens"},
+		{"cold, neither", cold, 0, nil, nil, "cache cold"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := pushServer(t, nil)
+			st, db := pushStore(t)
+			d := pushTicket(t, st, "Store webhook events in Postgres or Redis?", model.ReversCostly, 2)
+			pushSetCache(t, st, db, c.expires, c.used, c.rebuild)
+			pushSetRecache(t, db, c.tokens)
+			got := pushStakesBody(t, srv, st, d, pushT0)
+			if want := pushPlainMessage + "\n" + c.want; got != want {
+				t.Errorf("message = %q, want %q", got, want)
+			}
+			if strings.Contains(got, "$0.00") {
+				t.Errorf("message shows $0.00: %q", got)
+			}
+		})
+	}
+}
+
+// TestFlushStakesTokensWithLongQuestionStaysUnderTheBound: the tokens form
+// of the line keeps the push's length bounds.
+func TestFlushStakesTokensWithLongQuestionStaysUnderTheBound(t *testing.T) {
+	for _, fill := range []string{"€", "😀", "a"} {
+		srv := pushServer(t, nil)
+		st, db := pushStore(t)
+		d := pushTicket(t, st, strings.Repeat(fill, 3000), model.ReversCostly, 2)
+		pushSetCache(t, st, db, pushStamp(pushT0.Add(12*time.Minute+30*time.Second)), 84000, nil)
+		pushSetRecache(t, db, 9_999_999)
+		got := pushStakesBody(t, srv, st, d, pushT0)
+		if len(got) >= 4096 || !utf8.ValidString(got) || utf8.RuneCountInString(got) > notify.MaxPushText ||
+			!strings.HasSuffix(got, "\nanswer within 12m to keep cache warm (rebuild ≈ 10M tok)") {
+			t.Errorf("fill %q: %d bytes, %d runes, ends %q", fill, len(got), utf8.RuneCountInString(got), got[max(0, len(got)-70):])
+		}
 	}
 }

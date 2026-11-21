@@ -59,10 +59,11 @@ func Open(path string) (*Store, error) {
 	if err = os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
 		return nil, fmt.Errorf("store: create directory for %s: %w", abs, err)
 	}
-	db, err := sql.Open("sqlite", dsn(abs))
+	conn, err := sqlite.NewConnector(dsn(abs))
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", abs, err)
 	}
+	db := sql.OpenDB(newWriterConnector(conn, abs)) // writes take the writer lock, see writelock.go
 	s := &Store{db: db}
 	ctx := context.Background()
 	if err = s.enableWAL(ctx); err != nil {
@@ -101,9 +102,15 @@ func (s *Store) enableWAL(ctx context.Context) error {
 	deadline := time.Now().Add(busyTimeout)
 	for {
 		var mode string
-		err := s.db.QueryRowContext(ctx, `PRAGMA journal_mode = WAL`).Scan(&mode)
+		// A SELECT first: an already-WAL file needs no write, so Open must
+		// not wait in the writer queue (the status line and the badge open
+		// the store under a tight budget).
+		err := s.db.QueryRowContext(ctx, `SELECT journal_mode FROM pragma_journal_mode`).Scan(&mode)
 		if err == nil && mode != "wal" {
-			return fmt.Errorf("journal_mode is %q, want wal", mode)
+			err = s.db.QueryRowContext(ctx, `PRAGMA journal_mode = WAL`).Scan(&mode)
+			if err == nil && mode != "wal" {
+				return fmt.Errorf("journal_mode is %q, want wal", mode)
+			}
 		}
 		if !isBusy(err) || time.Now().After(deadline) {
 			return err
@@ -239,33 +246,35 @@ func (s *Store) UpdateSession(ctx context.Context, id string, fn func(s model.Se
 
 // upsert is the single INSERT ... ON CONFLICT statement behind UpsertSession
 // and UpdateSession. It names the columns it writes, so the team columns
-// (written only by SetTeams) and Plan 2's cache columns survive it, and an
-// older binary's upsert, which names neither tmux_socket nor end_reason,
-// leaves those columns alone. An empty task id, worktree or socket is
-// stored as NULL, like the pane; the end reason as endReason says.
+// (written only by SetTeams) and the cost and cache columns (written only
+// by Ingest) survive it, and an older binary's upsert, which names neither
+// tmux_socket nor end_reason, leaves those columns alone. An empty task id,
+// worktree or socket is stored as NULL, like the pane; the end reason as
+// endReason says.
 func upsert(ctx context.Context, e dbtx, sess model.Session) error {
 	_, err := e.ExecContext(ctx, `
 INSERT INTO sessions (
   id, agent, tmux_pane, tmux_session, tmux_window, cwd, repo, branch, state, model,
   context_used, context_max, subagents_active, last_update, seen_at, transcript_path,
-  started_at, updated_at, transcript_offset, task_id, worktree, tmux_socket, end_reason
-) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)
+  started_at, updated_at, transcript_offset, task_id, worktree, tmux_socket, end_reason, checked_cwd
+) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''))
 ON CONFLICT(id) DO UPDATE SET
   agent = excluded.agent, tmux_pane = excluded.tmux_pane,
   tmux_session = excluded.tmux_session, tmux_window = excluded.tmux_window,
   cwd = excluded.cwd, repo = excluded.repo, branch = excluded.branch,
   state = excluded.state, model = excluded.model,
-  context_used = excluded.context_used, context_max = excluded.context_max,
+  context_used = CASE WHEN sessions.context_live = 1 THEN sessions.context_used ELSE excluded.context_used END,
+  context_max = CASE WHEN sessions.context_live = 1 THEN sessions.context_max ELSE excluded.context_max END,
   subagents_active = excluded.subagents_active, last_update = excluded.last_update,
   seen_at = excluded.seen_at, transcript_path = excluded.transcript_path,
   started_at = excluded.started_at, updated_at = excluded.updated_at,
   transcript_offset = excluded.transcript_offset,
   task_id = excluded.task_id, worktree = excluded.worktree, tmux_socket = excluded.tmux_socket,
-  end_reason = excluded.end_reason`,
+  end_reason = excluded.end_reason, checked_cwd = excluded.checked_cwd`,
 		sess.ID, sess.Agent, sess.Pane, sess.TmuxSession, sess.TmuxWindow, sess.Cwd, sess.Repo, sess.Branch,
 		sess.State, sess.Model, sess.ContextUsed, sess.ContextMax, sess.SubagentsActive, sess.LastUpdate,
 		formatTime(sess.SeenAt), sess.TranscriptPath, formatTime(sess.StartedAt), formatTime(sess.UpdatedAt),
-		sess.TranscriptOffset, sess.TaskID, sess.Worktree, sess.Socket, endReason(sess))
+		sess.TranscriptOffset, sess.TaskID, sess.Worktree, sess.Socket, endReason(sess), sess.CheckedCwd)
 	return err
 }
 
@@ -291,8 +300,10 @@ func endReason(sess model.Session) any {
 }
 
 // selectSessions reads every column Session maps to. Each nullable column is
-// COALESCEd (times are scanned as NullString), so a row written by something
-// other than Store with NULLs in it cannot break a whole list.
+// COALESCEd (times are scanned as NullString, cost_usd as NullFloat64 for
+// CostKnown), so a row written by something other than Store with NULLs in
+// it cannot break a whole list. The four cost columns are written only by
+// Ingest; upsert names none of them.
 const selectSessions = `
 SELECT COALESCE(id, ''), COALESCE(agent, ''), COALESCE(tmux_pane, ''), COALESCE(tmux_session, ''),
   COALESCE(tmux_window, ''), COALESCE(cwd, ''), COALESCE(repo, ''), COALESCE(branch, ''),
@@ -300,7 +311,8 @@ SELECT COALESCE(id, ''), COALESCE(agent, ''), COALESCE(tmux_pane, ''), COALESCE(
   COALESCE(subagents_active, 0), COALESCE(last_update, ''), seen_at, COALESCE(transcript_path, ''),
   started_at, updated_at, transcript_offset, COALESCE(task_id, ''), COALESCE(worktree, ''),
   COALESCE(team_id, ''), COALESCE(team_role, ''), COALESCE(team_member, ''), COALESCE(tmux_socket, ''),
-  COALESCE(end_reason, '')
+  COALESCE(end_reason, ''), cost_usd, cache_expires_at, COALESCE(cache_rebuild_usd, 0),
+  COALESCE(recache_tokens, 0), COALESCE(checked_cwd, '')
 FROM sessions`
 
 // GetSession returns the session with the given id, and false if there is none.
@@ -356,13 +368,18 @@ type scanner interface {
 
 func scanSession(sc scanner) (model.Session, error) {
 	var sess model.Session
-	var seen, started, updated sql.NullString
+	var seen, started, updated, cache sql.NullString
+	var cost sql.NullFloat64
 	err := sc.Scan(&sess.ID, &sess.Agent, &sess.Pane, &sess.TmuxSession, &sess.TmuxWindow, &sess.Cwd,
 		&sess.Repo, &sess.Branch, &sess.State, &sess.Model, &sess.ContextUsed, &sess.ContextMax,
 		&sess.SubagentsActive, &sess.LastUpdate, &seen, &sess.TranscriptPath, &started, &updated,
 		&sess.TranscriptOffset, &sess.TaskID, &sess.Worktree, &sess.TeamID, &sess.TeamRole, &sess.TeamMember,
-		&sess.Socket, &sess.EndReason)
+		&sess.Socket, &sess.EndReason, &cost, &cache, &sess.CacheRebuildUSD, &sess.CacheRecacheTokens, &sess.CheckedCwd)
 	if err != nil {
+		return model.Session{}, err
+	}
+	sess.CostUSD, sess.CostKnown = cost.Float64, cost.Valid
+	if sess.CacheExpiresAt, err = parseTime(cache); err != nil {
 		return model.Session{}, err
 	}
 	if sess.SeenAt, err = parseTime(seen); err != nil {

@@ -45,6 +45,7 @@ func spawnNewFixture(t *testing.T) *spawnFixture {
 	t.Helper()
 	userTerminalAs(t, true) // the user, at a terminal
 	f := &spawnFixture{t: t, db: hookHome(t), fake: useFakeTmux(t)}
+	f.fake.Socket = "/tmp/tmux-501/first" // the server the task's windows open on
 	f.start = time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	f.now = f.start
 	f.repo = worktreeRepo(t, "api-server")
@@ -58,7 +59,8 @@ func spawnNewFixture(t *testing.T) *spawnFixture {
 		t.Fatal(err)
 	}
 	f.st = st
-	prevClock, prevSleep, prevBin, prevLimit := clock, spawnSleep, spawnBin, spawnSetupLimit
+	prevClock, prevSleep, prevBin, prevLimit, prevLook := clock, spawnSleep, spawnBin, spawnSetupLimit, launchLookPath
+	launchLookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil } // every agent is installed
 	clock = func() time.Time { return f.now }
 	spawnSleep = func(d time.Duration) {
 		f.now = f.now.Add(d)
@@ -69,7 +71,7 @@ func spawnNewFixture(t *testing.T) *spawnFixture {
 	}
 	spawnBin = func() (string, error) { return spawnTestBin, nil }
 	t.Cleanup(func() {
-		clock, spawnSleep, spawnBin, spawnSetupLimit = prevClock, prevSleep, prevBin, prevLimit
+		clock, spawnSleep, spawnBin, spawnSetupLimit, launchLookPath = prevClock, prevSleep, prevBin, prevLimit, prevLook
 		_ = st.Close()
 	})
 	return f
@@ -176,7 +178,7 @@ func (f *spawnFixture) wantNothingStarted(id string) {
 // spawnRun runs `curia spawn args...` in-process and returns its output.
 func spawnRun(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	defer func() { spawnAgent, spawnModel, spawnTeam = "claude", "", false }()
+	defer func() { spawnAgent, spawnFlagModel, spawnTeam = "", "", false }()
 	return runRoot(t, append([]string{"spawn"}, args...)...)
 }
 
@@ -290,7 +292,7 @@ func TestSpawnRefusals(t *testing.T) {
 		{[]string{"T-1;x"}, "T-1;x", "not a task id"},
 		{[]string{"T-1"}, "T-1", "dropped"},
 		{[]string{"T-2"}, "T-2", "use curia resume"},
-		{[]string{"T-3", "--agent", "codex"}, "T-3", "only claude"},
+		{[]string{"T-3", "--agent", "gemini"}, "T-3", "claude or codex"},
 		{[]string{"T-4"}, "T-4", "does not resolve"},
 	}
 	for _, c := range cases {
@@ -907,4 +909,587 @@ func spawnReviewedCase(t *testing.T, status model.ReviewStatus, want string) {
 		t.Fatalf("agent spawn = %v (%q), want the refusal", err, out)
 	}
 	f.wantNothingStarted("T-1")
+}
+
+// spawnResets is the reset of the five-hour window in the forecast tests:
+// 1h50m after the fixture's start.
+const spawnResets = time.Hour + 50*time.Minute
+
+// spawnIngest stores one five-hour usage sample at, used pct, the window
+// resetting spawnResets after the fixture's start.
+func (f *spawnFixture) spawnIngest(at time.Time, pct float64) {
+	f.t.Helper()
+	usageFeedSession(f.t, f.st, "usage-feed")
+	if _, err := f.st.Ingest(context.Background(), store.Reading{
+		SessionID: "usage-feed", At: at,
+		Limits: []model.UsageSample{{Window: model.WindowFiveHour, UsedPct: pct, ResetsAt: f.start.Add(spawnResets)}},
+	}, f.now); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// spawnWarning ingests a burn that reaches the limit before the reset: 50%
+// ten minutes ago, 62% now (72 points an hour, the limit in about 31
+// minutes, the reset in 1h50m).
+func (f *spawnFixture) spawnWarning() {
+	f.t.Helper()
+	f.spawnIngest(f.now.Add(-10*time.Minute), 50)
+	f.spawnIngest(f.now, 62)
+}
+
+// spawnWarningNote is the note of section 4.4 for spawnWarning and task id.
+func spawnWarningNote(id string) string {
+	return "limit forecast (5h 62% → limit ~31m (resets 1h50m)): starting " + id + " on sonnet; pass --model to choose"
+}
+
+// spawnWindowOf is the expected NewWindow call of a spawn of id with the
+// launch arguments extra.
+func (f *spawnFixture) spawnWindowOf(id string, extra ...string) string {
+	return strings.Join(append([]string{
+		"NewWindow api-server " + id + " " + f.worktree(id) + " CURIA_TASK_ID=" + id,
+		spawnTestBin, "launch", id,
+	}, extra...), " ")
+}
+
+func TestSpawnDefaultsToCheaperModelUnderWarning(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Cheap", "")
+	f.spawnWarning()
+	out, err := spawnRun(t, "T-1")
+	if err != nil {
+		t.Fatalf("spawn: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1", "--model", "sonnet")}) {
+		t.Errorf("windows = %q, want --model sonnet", got)
+	}
+	// The cheaper model is this spawn's only (Ruling P5-R7): not stored.
+	if got := f.get("T-1").AgentModel; got != "" {
+		t.Errorf("agent_model = %q, want none stored", got)
+	}
+	if first, _, _ := strings.Cut(out, "\n"); first != spawnWarningNote("T-1") {
+		t.Errorf("first line = %q, want %q\n%s", first, spawnWarningNote("T-1"), out)
+	}
+	if strings.Count(out, "limit forecast") != 1 {
+		t.Errorf("the note is not printed exactly once:\n%s", out)
+	}
+
+	// spawnTask itself returns the note for callers that show no output
+	// (the clock back where the CLI spawn's 20 s wait started).
+	f.now = f.start
+	f.task("Cheap too", "")
+	r, _, err := f.spawn("T-2", spawnOptions{})
+	if err != nil || r.Note != spawnWarningNote("T-2") {
+		t.Errorf("spawnTask: note %q, err %v; want %q", r.Note, err, spawnWarningNote("T-2"))
+	}
+}
+
+func TestSpawnModelFlagBeatsForecast(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Mine", "")
+	f.spawnWarning()
+	out, err := spawnRun(t, "T-1", "--model", "opus")
+	if err != nil {
+		t.Fatalf("spawn: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1", "--model", "opus")}) {
+		t.Errorf("windows = %q, want --model opus", got)
+	}
+	if strings.Contains(out, "limit forecast") || f.get("T-1").AgentModel != "opus" {
+		t.Errorf("model %q, output:\n%s\nwant opus and no note", f.get("T-1").AgentModel, out)
+	}
+}
+
+func TestSpawnKeepsTaskModelUnderWarning(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Kept", "")
+	if _, out, err := f.spawn("T-1", spawnOptions{Model: "opus"}); err != nil {
+		t.Fatalf("first spawn: %v\n%s", err, out)
+	}
+	f.fake.Panes, f.fake.Calls = nil, nil // the agent exited, its window closed
+	f.now = f.now.Add(time.Minute)
+	f.spawnWarning()
+	r, out, err := f.spawn("T-1", spawnOptions{})
+	if err != nil {
+		t.Fatalf("second spawn: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1", "--model", "opus")}) {
+		t.Errorf("windows = %q, want the task's opus", got)
+	}
+	if r.Note != "" || strings.Contains(out, "limit forecast") || f.get("T-1").AgentModel != "opus" {
+		t.Errorf("note %q, model %q, output:\n%s", r.Note, f.get("T-1").AgentModel, out)
+	}
+}
+
+func TestSpawnNoCheaperModelWithoutWarning(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		feed func(f *spawnFixture)
+	}{
+		{"no samples", func(*spawnFixture) {}},
+		{"steady", func(f *spawnFixture) {
+			f.spawnIngest(f.now.Add(-15*time.Minute), 62)
+			f.spawnIngest(f.now.Add(-5*time.Minute), 62)
+			f.spawnIngest(f.now, 62)
+		}},
+		// 6 points an hour: the limit is about 6 hours away, after the reset.
+		{"limit after the reset", func(f *spawnFixture) {
+			f.spawnIngest(f.now.Add(-10*time.Minute), 61)
+			f.spawnIngest(f.now, 62)
+		}},
+		// A warning burn that is older than the burn window.
+		{"old burn", func(f *spawnFixture) {
+			f.spawnIngest(f.now.Add(-40*time.Minute), 50)
+			f.spawnIngest(f.now.Add(-30*time.Minute), 62)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := spawnNewFixture(t)
+			f.task("Plain", "")
+			c.feed(f)
+			r, out, err := f.spawn("T-1", spawnOptions{})
+			if err != nil {
+				t.Fatalf("spawn: %v\n%s", err, out)
+			}
+			if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1")}) {
+				t.Errorf("windows = %q, want no --model", got)
+			}
+			if r.Note != "" || strings.Contains(out, "limit forecast") || f.get("T-1").AgentModel != "" {
+				t.Errorf("note %q, model %q, output:\n%s", r.Note, f.get("T-1").AgentModel, out)
+			}
+		})
+	}
+}
+
+func TestSpawnCheaperModelOff(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Off", "")
+	f.spawnWarning()
+	f.cfg.Usage.CheaperModel = ""
+	r, out, err := f.spawn("T-1", spawnOptions{})
+	if err != nil {
+		t.Fatalf("spawn: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1")}) || r.Note != "" {
+		t.Errorf("windows = %q, note %q; want no --model and no note", got, r.Note)
+	}
+	if log := strings.Join(readLog(t), "\n"); strings.Contains(log, "cheaper_model") || strings.Contains(log, "limit forecast") {
+		t.Errorf("an empty cheaper_model is a choice, not a fault, yet it was logged:\n%s", log)
+	}
+
+	// The same through the config file.
+	// The fixture's store is in its HOME.
+	worktreeWrite(t, filepath.Join(filepath.Dir(f.db), ".config", "curia", "config.toml"), "[usage]\ncheaper_model = \"\"\n")
+	f.fake.Panes, f.fake.Calls = nil, nil
+	f.task("Off too", "")
+	out, err = spawnRun(t, "T-2")
+	if err != nil {
+		t.Fatalf("spawn T-2: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-2")}) || strings.Contains(out, "limit forecast") {
+		t.Errorf("windows = %q, output:\n%s\nwant no --model and no note", got, out)
+	}
+}
+
+// TestSpawnHostileCheaperModelIgnored: a cheaper model that is not a valid
+// model name, or would read as an option, never reaches the window (the
+// config loader refuses it too; this is the second line).
+func TestSpawnHostileCheaperModelIgnored(t *testing.T) {
+	for _, bad := range []string{"x;rm -rf ~", "--dangerously-skip-permissions", "-s", "$(id)", "a b"} {
+		t.Run(bad, func(t *testing.T) {
+			f := spawnNewFixture(t)
+			f.task("Hostile", "")
+			f.spawnWarning()
+			f.cfg.Usage.CheaperModel = bad
+			r, out, err := f.spawn("T-1", spawnOptions{})
+			if err != nil {
+				t.Fatalf("spawn: %v\n%s", err, out)
+			}
+			if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1")}) || r.Note != "" {
+				t.Errorf("windows = %q, note %q; want no --model and no note", got, r.Note)
+			}
+			if f.get("T-1").AgentModel != "" {
+				t.Errorf("agent_model = %q", f.get("T-1").AgentModel)
+			}
+		})
+	}
+}
+
+func TestSpawnResumeIgnoresForecast(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Resumed", "")
+	f.spawnWarning()
+	r, out, err := f.spawn("T-1", spawnOptions{Resume: launchUUID})
+	if err != nil {
+		t.Fatalf("spawn: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1", "--resume", launchUUID)}) || r.Note != "" {
+		t.Errorf("windows = %q, note %q; want no --model and no note", got, r.Note)
+	}
+
+	// The task's stored model still applies on a resume.
+	f.task("Resumed with a model", "")
+	f.update("T-2", func(tk *model.Task) { tk.AgentModel = "opus" })
+	f.fake.Calls = nil
+	if r, out, err = f.spawn("T-2", spawnOptions{Resume: launchUUID}); err != nil {
+		t.Fatalf("spawn T-2: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-2", "--model", "opus", "--resume", launchUUID)}) || r.Note != "" {
+		t.Errorf("windows = %q, note %q; want the stored opus and no note", got, r.Note)
+	}
+}
+
+func TestSpawnUsageReadFailureDoesNotBlock(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Broken usage", "")
+	f.spawnWarning()
+	statusExec(t, f.db, "DROP TABLE usage_samples")
+	r, out, err := f.spawn("T-1", spawnOptions{})
+	if err != nil {
+		t.Fatalf("spawn: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1")}) || r.Note != "" {
+		t.Errorf("windows = %q, note %q; want no --model and no note", got, r.Note)
+	}
+	if log := strings.Join(readLog(t), "\n"); !strings.Contains(log, "limit forecast") || !strings.Contains(log, "T-1") {
+		t.Errorf("the failed read is not logged:\n%s", log)
+	}
+}
+
+func TestSpawnAgentCodexIsStored(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Codex", "")
+	out, err := spawnRun(t, "T-1", "--agent", "codex")
+	if err != nil {
+		t.Fatalf("spawn: %v\n%s", err, out)
+	}
+	if got := f.get("T-1").Agent; got != model.AgentCodex {
+		t.Errorf("tasks.agent = %q, want codex", got)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1")}) {
+		t.Errorf("windows = %q, want [<bin> launch T-1]", got)
+	}
+
+	// Without --agent the task's own agent is used; --agent claude switches.
+	again := func(o spawnOptions, want string) {
+		t.Helper()
+		f.fake.Panes, f.fake.Calls = nil, nil
+		f.now = f.now.Add(time.Minute)
+		if _, out, err := f.spawn("T-1", o); err != nil {
+			t.Fatalf("spawn %+v: %v\n%s", o, err, out)
+		}
+		if got := f.get("T-1").Agent; got != want {
+			t.Errorf("spawn %+v: tasks.agent = %q, want %q", o, got, want)
+		}
+	}
+	again(spawnOptions{}, model.AgentCodex)
+	again(spawnOptions{Agent: model.AgentClaude}, model.AgentClaude)
+	again(spawnOptions{Agent: model.AgentCodex}, model.AgentCodex)
+	// A resume keeps the stored agent whatever the option says.
+	again(spawnOptions{Agent: model.AgentClaude, Resume: launchUUID}, model.AgentCodex)
+
+	// A task never spawned is claude.
+	f.task("Default", "")
+	f.fake.Panes = nil
+	if _, out, err := f.spawn("T-2", spawnOptions{}); err != nil {
+		t.Fatalf("spawn T-2: %v\n%s", err, out)
+	}
+	if got := f.get("T-2").Agent; got != model.AgentClaude {
+		t.Errorf("T-2 agent = %q, want claude", got)
+	}
+}
+
+// spawnAgentProbe is a tmux client that reads the task's stored agent at
+// the moment the window opens: curia launch reads it from the store as
+// soon as the window runs, so it must be stored by then.
+type spawnAgentProbe struct {
+	*tmux.Fake
+	st     *store.Store
+	seen   []string
+	models []string // the stored model at the same moment
+}
+
+func (p *spawnAgentProbe) NewWindow(ctx context.Context, w tmux.WindowSpec) (tmux.Pane, error) {
+	tk, _, err := p.st.GetTask(ctx, w.Name)
+	if err != nil {
+		return tmux.Pane{}, err
+	}
+	p.seen = append(p.seen, tk.Agent)
+	p.models = append(p.models, tk.AgentModel)
+	return p.Fake.NewWindow(ctx, w)
+}
+
+func TestSpawnStoresAgentBeforeWindow(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Racy", "")
+	probe := &spawnAgentProbe{Fake: f.fake, st: f.st}
+	if _, err := spawnTask(context.Background(), f.st, probe, f.cfg, "T-1", spawnOptions{Agent: model.AgentCodex}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if !slices.Equal(probe.seen, []string{model.AgentCodex}) {
+		t.Errorf("agent stored when the window opened = %q, want codex", probe.seen)
+	}
+}
+
+func TestSpawnAgentRefusals(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Refused", "")
+	f.task("Codex task", "")
+	f.update("T-2", func(tk *model.Task) { tk.Agent = model.AgentCodex })
+	cases := []struct {
+		id   string
+		args []string
+		want string
+	}{
+		{"T-1", []string{"--agent", "gemini"}, `--agent "gemini" is not supported: claude or codex`},
+		{"T-1", []string{"--agent", "codex; rm -rf ~"}, "is not supported"},
+		{"T-1", []string{"--agent", "$(touch x)"}, "is not supported"},
+		{"T-1", []string{"--agent", "CODEX"}, "is not supported"},
+		{"T-1", []string{"--agent", "codex\n--dangerously-bypass-approvals-and-sandbox"}, "is not supported"},
+		{"T-1", []string{"--agent", "codex", "--team"}, "agent teams are Claude Code's; spawn T-1 without --team or without --agent codex"},
+		// A task stored as codex, spawned with --team and no --agent.
+		{"T-2", []string{"--team"}, "agent teams are Claude Code's; spawn T-2 without --team or without --agent codex"},
+	}
+	for _, c := range cases {
+		out, err := spawnRun(t, append([]string{c.id}, c.args...)...)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("spawn %s %q = %v, want an error containing %q\n%s", c.id, c.args, err, c.want, out)
+		}
+		if err != nil && strings.ContainsFunc(err.Error(), func(r rune) bool { return r < 0x20 }) {
+			t.Errorf("spawn %s %q: error not cleaned: %q", c.id, c.args, err)
+		}
+		f.wantNothingStarted(c.id)
+	}
+	if got := f.get("T-1").Agent; got != model.AgentClaude {
+		t.Errorf("T-1 agent = %q after refusals, want claude", got)
+	}
+}
+
+// TestSpawnRefusesOptionLikeValues: a model or session id that starts with
+// a dash would reach the agent's argument list as an option.
+func TestSpawnRefusesOptionLikeValues(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Flags", "")
+	for _, o := range []spawnOptions{
+		{Model: "--dangerously-bypass-approvals-and-sandbox"},
+		{Model: "-s", Agent: model.AgentCodex},
+		{Model: "--sandbox", Agent: model.AgentCodex},
+		{Resume: "------------------------------------"},
+		{Resume: "-0f8fad5b-d9cb-469f-a165-70867728950"},
+	} {
+		if _, out, err := f.spawn("T-1", o); err == nil {
+			t.Errorf("spawn %+v succeeded:\n%s", o, out)
+		}
+		f.wantNothingStarted("T-1")
+	}
+	// A task whose stored model starts with a dash is refused too.
+	f.update("T-1", func(tk *model.Task) { tk.AgentModel = "-s" })
+	if _, out, err := f.spawn("T-1", spawnOptions{}); err == nil {
+		t.Errorf("spawn with a stored model -s succeeded:\n%s", out)
+	}
+	f.wantNothingStarted("T-1")
+}
+
+func TestSpawnCodexNeverGetsCheaperModel(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Codex under a warning", "")
+	f.spawnWarning()
+	out, err := spawnRun(t, "T-1", "--agent", "codex")
+	if err != nil {
+		t.Fatalf("spawn: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1")}) {
+		t.Errorf("windows = %q, want no --model", got)
+	}
+	if strings.Contains(out, "limit forecast") || f.get("T-1").AgentModel != "" {
+		t.Errorf("model %q, output:\n%s", f.get("T-1").AgentModel, out)
+	}
+
+	// A task stored as codex, spawned again with no --agent: the same.
+	f.fake.Panes, f.fake.Calls = nil, nil
+	f.now = f.now.Add(time.Minute)
+	r, out, err := f.spawn("T-1", spawnOptions{})
+	if err != nil {
+		t.Fatalf("second spawn: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1")}) || r.Note != "" {
+		t.Errorf("windows = %q, note %q", got, r.Note)
+	}
+}
+
+// TestSpawnCheaperModelOnlyForThatSpawn: the cheaper model chosen under a
+// limit warning reaches that spawn's window and is not stored, so the next
+// spawn after the warning lifted starts on no model (Ruling P5-R7).
+func TestSpawnCheaperModelOnlyForThatSpawn(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Cheap once", "")
+	f.spawnWarning()
+	r, out, err := f.spawn("T-1", spawnOptions{})
+	if err != nil {
+		t.Fatalf("spawn under the warning: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1", "--model", "sonnet")}) || r.Note != spawnWarningNote("T-1") {
+		t.Fatalf("windows = %q, note %q; want --model sonnet and the note", got, r.Note)
+	}
+	if got := f.get("T-1").AgentModel; got != "" {
+		t.Errorf("agent_model = %q after a spawn on the cheaper model, want none stored", got)
+	}
+	// The window closed and the warning lifted: the burn is outside the window.
+	f.fake.Panes, f.fake.Calls = nil, nil
+	f.now = f.now.Add(45 * time.Minute)
+	r, out, err = f.spawn("T-1", spawnOptions{})
+	if err != nil {
+		t.Fatalf("spawn after the warning: %v\n%s", err, out)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1")}) || r.Note != "" {
+		t.Errorf("windows = %q, note %q; want no --model once the warning lifted", got, r.Note)
+	}
+}
+
+// spawnOtherAgentNote is the line a spawn prints when the task's stored
+// model was stored for another agent.
+func spawnOtherAgentNote(id, modelName, storedFor, agent string) string {
+	return id + "'s stored model " + modelName + " was chosen for " + storedFor + "; " + agent +
+		" starts without it (pass --model to choose)"
+}
+
+// TestSpawnStoredModelOnlyWithItsAgent: a stored model is used only with the
+// agent it was stored for. Switching agent prints one line, passes no
+// --model and clears the stored model before the window opens (Ruling P5-R7).
+func TestSpawnStoredModelOnlyWithItsAgent(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Switch", "")
+	if _, out, err := f.spawn("T-1", spawnOptions{Model: "sonnet"}); err != nil {
+		t.Fatalf("first spawn: %v\n%s", err, out)
+	}
+	if tk := f.get("T-1"); tk.AgentModel != "sonnet" || tk.Agent != model.AgentClaude {
+		t.Fatalf("stored %q/%q, want claude/sonnet (a model the user chose is stored)", tk.Agent, tk.AgentModel)
+	}
+	f.fake.Panes, f.fake.Calls = nil, nil
+	f.now = f.now.Add(time.Minute)
+	probe := &spawnAgentProbe{Fake: f.fake, st: f.st}
+	var out bytes.Buffer
+	r, err := spawnTask(context.Background(), f.st, probe, f.cfg, "T-1", spawnOptions{Agent: model.AgentCodex, Out: &out})
+	if err != nil {
+		t.Fatalf("codex spawn: %v\n%s", err, out.String())
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1")}) {
+		t.Errorf("windows = %q, want no --model for codex", got)
+	}
+	note := spawnOtherAgentNote("T-1", "sonnet", "claude", "codex")
+	if r.Note != note || strings.Count(out.String(), note) != 1 {
+		t.Errorf("note %q, output:\n%s\nwant %q once", r.Note, out.String(), note)
+	}
+	if !slices.Equal(probe.seen, []string{model.AgentCodex}) || !slices.Equal(probe.models, []string{""}) {
+		t.Errorf("stored when the window opened: agent %q model %q; want codex and no model", probe.seen, probe.models)
+	}
+	if tk := f.get("T-1"); tk.Agent != model.AgentCodex || tk.AgentModel != "" {
+		t.Errorf("stored %q/%q, want codex and no model", tk.Agent, tk.AgentModel)
+	}
+}
+
+// TestSpawnCodexModelNeverReachesClaude: a model the user chose for codex is
+// stored for codex, and a later claude spawn under a warning gets the
+// cheaper model, not codex's, and stores none.
+func TestSpawnCodexModelNeverReachesClaude(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Switch back", "")
+	if _, out, err := f.spawn("T-1", spawnOptions{Agent: model.AgentCodex}); err != nil {
+		t.Fatalf("codex spawn: %v\n%s", err, out)
+	}
+	f.fake.Panes, f.fake.Calls = nil, nil
+	f.now = f.now.Add(time.Minute)
+	if _, out, err := f.spawn("T-1", spawnOptions{Model: "gpt-5"}); err != nil {
+		t.Fatalf("codex spawn with a model: %v\n%s", err, out)
+	}
+	if tk := f.get("T-1"); tk.Agent != model.AgentCodex || tk.AgentModel != "gpt-5" {
+		t.Fatalf("stored %q/%q, want codex/gpt-5", tk.Agent, tk.AgentModel)
+	}
+	f.fake.Panes, f.fake.Calls = nil, nil
+	f.now = f.now.Add(time.Minute)
+	f.spawnWarning()
+	r, outText, err := f.spawn("T-1", spawnOptions{Agent: model.AgentClaude})
+	if err != nil {
+		t.Fatalf("claude spawn: %v\n%s", err, outText)
+	}
+	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1", "--model", "sonnet")}) {
+		t.Errorf("windows = %q, want the cheaper sonnet and never gpt-5", got)
+	}
+	// Two lines: the stored model not used, then the forecast's (its reset
+	// is two minutes nearer than spawnWarningNote's).
+	want := spawnOtherAgentNote("T-1", "gpt-5", "codex", "claude") + "\n" +
+		"limit forecast (5h 62% → limit ~31m (resets 1h48m)): starting T-1 on sonnet; pass --model to choose"
+	if r.Note != want || !strings.HasPrefix(outText, want+"\n") {
+		t.Errorf("note %q, output:\n%s\nwant %q", r.Note, outText, want)
+	}
+	if tk := f.get("T-1"); tk.Agent != model.AgentClaude || tk.AgentModel != "" {
+		t.Errorf("stored %q/%q, want claude and no model (the cheaper one is not stored)", tk.Agent, tk.AgentModel)
+	}
+}
+
+// TestSpawnHostileStoredModelOfOtherAgent: a stored model for the other
+// agent never reaches the window, whatever it holds, and the line that
+// names it is cleaned.
+func TestSpawnHostileStoredModelOfOtherAgent(t *testing.T) {
+	for _, bad := range []string{"-s", "--dangerously-bypass-approvals-and-sandbox", "\x1b[31mopus\nnext", "x;rm -rf ~", "sonnet"} {
+		t.Run(bad, func(t *testing.T) {
+			f := spawnNewFixture(t)
+			f.task("Mixed", "")
+			f.update("T-1", func(tk *model.Task) { tk.Agent, tk.AgentModel = model.AgentClaude, bad })
+			r, out, err := f.spawn("T-1", spawnOptions{Agent: model.AgentCodex})
+			if err != nil {
+				t.Fatalf("codex spawn: %v\n%s", err, out)
+			}
+			if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-1")}) {
+				t.Errorf("windows = %q, want [<bin> launch T-1] and nothing of the stored model", got)
+			}
+			if strings.ContainsFunc(out+r.Note, func(c rune) bool { return c < 0x20 && c != '\n' }) || strings.Contains(r.Note, "\n") {
+				t.Errorf("note not cleaned: %q", r.Note)
+			}
+			if tk := f.get("T-1"); tk.Agent != model.AgentCodex || tk.AgentModel != "" {
+				t.Errorf("stored %q/%q, want codex and no model", tk.Agent, tk.AgentModel)
+			}
+		})
+	}
+}
+
+// An agent may spawn a ready task but not choose how it runs (Ruling 113).
+func TestSpawnByAgentRefusesHowItRuns(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Fix", "Body")
+	f.update("T-1", func(tk *model.Task) { tk.Status = model.TaskReady })
+	before := f.get("T-1")
+	for opt, o := range map[string]spawnOptions{
+		"--agent":  {Agent: model.AgentCodex},
+		"--model":  {Model: "gpt-expensive"},
+		"--team":   {Team: true},
+		"--resume": {Resume: "0b9a2c1e-0000-4000-8000-000000000000"},
+	} {
+		o.ReadyOnly = true
+		f.fake.Calls = nil
+		_, _, err := f.spawn("T-1", o)
+		if err == nil || !strings.Contains(err.Error(), opt+" is the user's choice") || !strings.Contains(err.Error(), "stored values apply") {
+			t.Errorf("%s: err = %v, want a refusal naming it and the stored values", opt, err)
+		}
+		f.wantNothingStarted("T-1")
+	}
+	if tk := f.get("T-1"); tk.Agent != before.Agent || tk.AgentModel != before.AgentModel {
+		t.Errorf("stored agent %q model %q, want unchanged", tk.Agent, tk.AgentModel)
+	}
+}
+
+// --agent codex without codex on PATH is refused before anything is stored:
+// the task keeps its agent and its model.
+func TestSpawnCodexNotInstalledStoresNothing(t *testing.T) {
+	f := spawnNewFixture(t)
+	f.task("Fix", "Body")
+	f.update("T-1", func(tk *model.Task) { tk.AgentModel = "opus" })
+	launchLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	_, _, err := f.spawn("T-1", spawnOptions{Agent: model.AgentCodex})
+	if err == nil || !strings.Contains(err.Error(), "codex is not installed") || !strings.Contains(err.Error(), "--agent claude") {
+		t.Fatalf("err = %v, want codex is not installed, with --agent claude", err)
+	}
+	f.wantNothingStarted("T-1")
+	if tk := f.get("T-1"); tk.Agent == model.AgentCodex || tk.AgentModel != "opus" {
+		t.Errorf("stored agent %q model %q, want unchanged", tk.Agent, tk.AgentModel)
+	}
 }

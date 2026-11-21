@@ -89,10 +89,10 @@ linters:
       # may import the standard library, the third-party modules it needs, and
       # only the internal packages ABOVE it in the table. Every rule is strict
       # (fail closed): an import not on the allow list is rejected.
-      # Order of the table (docs/decisions/0015): model, config, sanitize,
-      # decision, precedent, task, message, route, team, store, state,
-      # transcript, hook, tmux, fleet, attention, notify, deliver, mcp, ui,
-      # install, cmd/curia.
+      # Order of the table (docs/decisions/0015, 0027): model, config, sanitize,
+      # decision, precedent, task, message, route, team, usage, export, linear,
+      # store, state, transcript, hook, tmux, fleet, attention, notify, deliver,
+      # mcp, ui, install, cmd/curia.
       rules:
         model:
           list-mode: strict
@@ -230,6 +230,68 @@ linters:
             - pkg: github.com/ZachFara/curia
               desc: "internal/team may import only internal packages above it: model to route (docs/decisions/0015)"
 
+        usage:
+          list-mode: strict
+          files:
+            - "**/internal/usage/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/usage may import only internal packages above it: model to team (docs/decisions/0027)"
+
+        export:
+          list-mode: strict
+          files:
+            - "**/internal/export/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/export may import only internal packages above it: model to team, usage (docs/decisions/0027)"
+
+        linear:
+          list-mode: strict
+          files:
+            - "**/internal/linear/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/decision$
+            - github.com/ZachFara/curia/internal/precedent$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/message$
+            - github.com/ZachFara/curia/internal/route$
+            - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/linear may import only internal packages above it: model to team, export (docs/decisions/0027)"
+
         store:
           list-mode: strict
           files:
@@ -246,6 +308,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
           deny:
             - pkg: github.com/ZachFara/curia
@@ -266,6 +331,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
           deny:
@@ -287,6 +355,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -309,13 +380,30 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
             - github.com/ZachFara/curia/internal/hook$
+            - github.com/ZachFara/curia/internal/latency$
           deny:
             - pkg: github.com/ZachFara/curia
-              desc: "internal/hook may import only internal packages above it: model to transcript (docs/decisions/0003)"
+              desc: "internal/hook may import only internal packages above it: model to transcript, and latency in tests (docs/decisions/0003)"
+
+        # Test support: the median-of-three latency gate helper (docs/decisions/0012).
+        latency:
+          list-mode: strict
+          files:
+            - "**/internal/latency/**"
+          allow:
+            - $gostd
+            - modernc.org/sqlite
+            - github.com/ZachFara/curia/internal/latency$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/latency imports the standard library and the SQLite driver (the reference workload), no internal package (docs/decisions/0012)"
 
         tmux:
           list-mode: strict
@@ -332,6 +420,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -356,6 +447,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -381,6 +475,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -407,6 +504,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -434,6 +534,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -462,6 +565,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -493,6 +599,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -523,6 +632,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -558,6 +670,9 @@ linters:
             - github.com/ZachFara/curia/internal/message$
             - github.com/ZachFara/curia/internal/route$
             - github.com/ZachFara/curia/internal/team$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/export$
+            - github.com/ZachFara/curia/internal/linear$
             - github.com/ZachFara/curia/internal/store$
             - github.com/ZachFara/curia/internal/state$
             - github.com/ZachFara/curia/internal/transcript$
@@ -570,6 +685,7 @@ linters:
             - github.com/ZachFara/curia/internal/mcp$
             - github.com/ZachFara/curia/internal/ui$
             - github.com/ZachFara/curia/internal/install$
+            - github.com/ZachFara/curia/internal/latency$
           deny:
             - pkg: github.com/ZachFara/curia
               desc: "cmd/curia may import only the internal packages in the plan's File structure table (docs/decisions/0003)"
@@ -580,6 +696,7 @@ linters:
             - "**/e2e/**"
           allow:
             - $gostd
+            - modernc.org/sqlite
           deny:
             - pkg: github.com/ZachFara/curia
               desc: "e2e drives the built binary only and imports no internal package (docs/decisions/0003)"
@@ -593,12 +710,16 @@ linters:
             - "!**/internal/model/**"
             - "!**/internal/config/**"
             - "!**/internal/sanitize/**"
+            - "!**/internal/latency/**"
             - "!**/internal/decision/**"
             - "!**/internal/precedent/**"
             - "!**/internal/task/**"
             - "!**/internal/message/**"
             - "!**/internal/route/**"
             - "!**/internal/team/**"
+            - "!**/internal/usage/**"
+            - "!**/internal/export/**"
+            - "!**/internal/linear/**"
             - "!**/internal/store/**"
             - "!**/internal/state/**"
             - "!**/internal/transcript/**"

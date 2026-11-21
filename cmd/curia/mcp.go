@@ -196,8 +196,8 @@ func mcpSession(ctx context.Context, st *store.Store, logger *slog.Logger) (mode
 	return model.Session{}, ""
 }
 
-// mcpPaneSession is the most recently updated session in pane that is not
-// ended.
+// mcpPaneSession is the most recently updated session in pane, on the
+// caller's tmux server, that is not ended.
 func mcpPaneSession(ctx context.Context, st *store.Store, pane string, logger *slog.Logger) (model.Session, bool) {
 	live, err := st.ListSessions(ctx, store.ListFilter{})
 	if err != nil {
@@ -206,10 +206,11 @@ func mcpPaneSession(ctx context.Context, st *store.Store, pane string, logger *s
 	}
 	var best model.Session
 	found := false
+	socket := seenSocket(os.Getenv("TMUX")) // "" when TMUX is unset: matches only a session with no recorded server
 	// live is in id order and only a strictly later UpdatedAt replaces
 	// best, so a tie resolves to the lowest id.
 	for _, s := range live {
-		if s.Pane == pane && (!found || s.UpdatedAt.After(best.UpdatedAt)) {
+		if s.Pane == pane && (s.Socket == "" || s.Socket == socket) && (!found || s.UpdatedAt.After(best.UpdatedAt)) {
 			best, found = s, true
 		}
 	}

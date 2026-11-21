@@ -20,6 +20,7 @@ import (
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/hook"
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/state"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
@@ -45,9 +46,11 @@ var hookDeadline = 5 * time.Second
 
 func init() {
 	rootCmd.AddCommand(&cobra.Command{
-		Use:   "hook <event>",
+		Use:   "hook <event> [--agent codex]",
 		Short: "Record one Claude Code hook event (run by Claude Code's hooks)",
 		Long: "Reads the hook payload on stdin and $TMUX_PANE, and records the event.\n" +
+			"--agent codex marks a Codex session: its transcript is not read and its Stop\n" +
+			"claims and prints nothing.\n" +
 			"Always exits 0 and prints nothing, except that a Stop which claims queued\n" +
 			"decision answers or messages prints one JSON line blocking the stop with them;\n" +
 			"errors go to the log file.",
@@ -167,8 +170,9 @@ func (h *hookEnd) finish(last func(*slog.Logger)) {
 func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config.Config, logger *slog.Logger,
 	emit func([]byte) error,
 ) error {
-	if len(args) != 1 {
-		return fmt.Errorf("want one event name, got %d arguments", len(args))
+	event, agent, err := hookArgs(args, logger)
+	if err != nil {
+		return err
 	}
 	payload, err := readPayload(stdin)
 	if err != nil {
@@ -180,9 +184,11 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	}
 	defer func() { _ = st.Close() }()
 	client := newTmuxClient()
-	kind := model.EventKind(args[0])
+	kind := model.EventKind(event)
 	before := snapshotBefore(ctx, st, kind, payload, logger)
-	res, err := hookRun(ctx, kind, payload, hookEnv(ctx, client, logger), st, cfg)
+	env := hookEnv(ctx, client, logger)
+	env.Agent = agent
+	res, err := hookRun(ctx, kind, payload, env, st, cfg)
 	if len(res.Stdout) > 0 {
 		if eerr := emit(res.Stdout); eerr != nil {
 			logger.Error("hook output", "event", string(kind), "err", eerr.Error())
@@ -206,6 +212,49 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 		cancel()
 	}
 	return err
+}
+
+// hookAgentFlag is the flag that names the agent after the event.
+const hookAgentFlag = "--agent"
+
+// hookAgentNameRunes bounds the agent name a WARN line quotes: it is
+// untrusted.
+const hookAgentNameRunes = 32
+
+// hookArgs reads the hook's arguments, `<Event> [--agent <name>]` or
+// `<Event> --agent=<name>` (flag parsing is off for hook, so they are read
+// by hand). event is the first argument, whatever it is, so a leading flag
+// is an event Curia does not know. codex is the only agent name taken; any
+// other, an empty one included, is logged at WARN and read as "", Claude
+// Code. An invocation with no event or with anything else after it is
+// refused with an error, as before the flag was added.
+func hookArgs(args []string, logger *slog.Logger) (event, agent string, err error) {
+	if len(args) == 0 {
+		return "", "", errors.New("want one event name, got none")
+	}
+	event, rest := args[0], args[1:]
+	name, named := "", false
+	switch {
+	case len(rest) == 0:
+	case rest[0] == hookAgentFlag:
+		named, rest = true, rest[1:]
+		if len(rest) > 0 {
+			name, rest = rest[0], rest[1:]
+		}
+	case strings.HasPrefix(rest[0], hookAgentFlag+"="):
+		named, name, rest = true, strings.TrimPrefix(rest[0], hookAgentFlag+"="), rest[1:]
+	}
+	switch {
+	case name == model.AgentCodex:
+		agent = name
+	case named:
+		logger.Warn("hook agent not known, read as claude", "event", sanitize.Line(event, hookAgentNameRunes),
+			"agent", sanitize.Line(name, hookAgentNameRunes))
+	}
+	if len(rest) > 0 {
+		return event, agent, fmt.Errorf("want one event name and an optional %s, got %d more arguments", hookAgentFlag, len(rest))
+	}
+	return event, agent, nil
 }
 
 // hookLogDelivered logs, at INFO, the ids of the answers and of the

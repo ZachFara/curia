@@ -127,3 +127,87 @@ func TestUnitsDoesNotMutateInput(t *testing.T) {
 		t.Fatal("Units changed its input")
 	}
 }
+
+func withCost(s model.Session, usd float64) model.Session {
+	s.CostUSD, s.CostKnown = usd, true
+	return s
+}
+
+func withCache(s model.Session, expires time.Time) model.Session {
+	s.CacheExpiresAt = expires
+	return s
+}
+
+func TestUnitCost(t *testing.T) {
+	base := time.Unix(5000, 0)
+	lead := withCost(member("l", model.StateIdle, base, "tm", model.RoleLead), 1.50)
+	t1 := withCost(member("a", model.StateIdle, base, "tm", "member"), 2.00)
+	t2 := member("b", model.StateIdle, base, "tm", "member")
+	if usd, known := (fleet.Unit{Lead: lead, Teammates: []model.Session{t1, t2}}).Cost(); !known || usd != 3.50 {
+		t.Errorf("team Cost = %v, %v; want 3.5, true", usd, known)
+	}
+	if usd, known := (fleet.Unit{Lead: member("l", model.StateIdle, base, "tm", model.RoleLead), Teammates: []model.Session{t2}}).Cost(); known || usd != 0 {
+		t.Errorf("none known Cost = %v, %v; want 0, false", usd, known)
+	}
+	solo := withCost(sess("s", model.StateWorking, "%1", base), 0.25)
+	if usd, known := (fleet.Unit{Lead: solo}).Cost(); !known || usd != 0.25 {
+		t.Errorf("solo Cost = %v, %v; want 0.25, true", usd, known)
+	}
+	zero := withCost(sess("z", model.StateWorking, "%1", base), 0)
+	if usd, known := (fleet.Unit{Lead: zero}).Cost(); !known || usd != 0 {
+		t.Errorf("known zero Cost = %v, %v; want 0, true", usd, known)
+	}
+}
+
+func TestUnitCacheOf(t *testing.T) {
+	now := time.Unix(5000, 0)
+	at, base := now.Add, now
+	lead := withCache(member("l", model.StateIdle, base, "tm", model.RoleLead), at(12*time.Minute))
+	waiting := withCache(member("w", model.StateWaiting, base, "tm", "member"), at(4*time.Minute))
+	working := withCache(member("k", model.StateWorking, base, "tm", "member"), at(time.Minute))
+	got, ok := (fleet.Unit{Lead: lead, Teammates: []model.Session{waiting, working}}).CacheOf(now)
+	if !ok || got.ID != "w" {
+		t.Errorf("CacheOf = %q, %v; want the 4m teammate w", got.ID, ok)
+	}
+
+	decision := withCache(member("d", model.StateNeedsDecision, base, "tm", "member"), at(2*time.Minute))
+	got, ok = (fleet.Unit{Lead: lead, Teammates: []model.Session{waiting, decision}}).CacheOf(now)
+	if !ok || got.ID != "d" {
+		t.Errorf("needs_decision member: got %q, %v; want d", got.ID, ok)
+	}
+
+	// A warm idle member wins over a cold one.
+	cold := withCache(member("c", model.StateIdle, base, "tm", "member"), at(-time.Minute))
+	got, ok = (fleet.Unit{Lead: lead, Teammates: []model.Session{cold}}).CacheOf(now)
+	if !ok || got.ID != "l" {
+		t.Errorf("warm beats cold: got %q, %v; want l", got.ID, ok)
+	}
+
+	// Only cold members: a cold one. Expiring exactly now is cold.
+	edge := withCache(member("e", model.StateIdle, base, "tm", "member"), now)
+	got, ok = (fleet.Unit{
+		Lead:      withCache(member("l", model.StateIdle, base, "tm", model.RoleLead), at(-time.Hour)),
+		Teammates: []model.Session{edge},
+	}).CacheOf(now)
+	if !ok || !got.CacheExpiresAt.Before(now.Add(time.Nanosecond)) {
+		t.Errorf("only cold: got %q, %v; want a cold member", got.ID, ok)
+	}
+
+	// Idle members all unknown: false.
+	unk := member("u", model.StateIdle, base, "tm", "member")
+	if _, ok := (fleet.Unit{Lead: member("l", model.StateIdle, base, "tm", model.RoleLead), Teammates: []model.Session{unk}}).CacheOf(now); ok {
+		t.Error("all unknown: want false")
+	}
+
+	// A solo working session with a warm cache: false.
+	solo := withCache(sess("s", model.StateWorking, "%1", base), at(10*time.Minute))
+	if _, ok := (fleet.Unit{Lead: solo}).CacheOf(now); ok {
+		t.Error("solo working: want false")
+	}
+
+	// A solo idle session is its own.
+	idle := withCache(sess("i", model.StateIdle, "%1", base), at(10*time.Minute))
+	if got, ok := (fleet.Unit{Lead: idle}).CacheOf(now); !ok || got.ID != "i" {
+		t.Errorf("solo idle: got %q, %v", got.ID, ok)
+	}
+}

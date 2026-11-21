@@ -7,6 +7,8 @@
     "base_branch": "main",
     "status": "done",
     "stored_status": "ready",
+    "priority": 2,
+    "agent": "claude",
     "source": "local",
     "source_ref": "",
     "tags": [],

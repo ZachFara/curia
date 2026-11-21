@@ -63,7 +63,8 @@ const decisionColumns = `
   d.recommendation, d.rationale, d.reversibility, d.mode, d.assumption, d.scope, d.tags, d.status,
   d.answer_key, d.answer, d.answer_reasoning, d.answered_via, d.precedent_of, d.differs_from,
   d.differs_why, d.withdraw_reason, d.superseded_by, d.args_hash, d.delivery, d.delivered_via,
-  d.created_at, d.expires_at, d.answered_at, d.closed_at, d.superseded_at, d.delivered_at, d.confirmed_at`
+  d.created_at, d.expires_at, d.answered_at, d.closed_at, d.superseded_at, d.delivered_at, d.confirmed_at,
+  d.exported_at`
 
 // selectDecisions is the column list every reader of decisions uses. A
 // query adds "FROM decisions d" after it, or first the columns of a join,
@@ -84,13 +85,13 @@ const decided = `d.status IN ('answered', 'confirmed', 'overridden')`
 func scanDecision(sc scanner, extra ...any) (model.Decision, error) {
 	var d model.Decision
 	var options, tags string
-	var created, expires, answered, closed, superseded, delivered, confirmed sql.NullString
+	var created, expires, answered, closed, superseded, delivered, confirmed, exported sql.NullString
 	dest := append([]any{
 		&d.N, &d.ID, &d.SessionID, &d.TaskID, &d.Repo, &d.Question, &d.Context, &options,
 		&d.Recommendation, &d.Rationale, &d.Reversibility, &d.Mode, &d.Assumption, &d.Scope, &tags, &d.Status,
 		&d.AnswerKey, &d.Answer, &d.AnswerReasoning, &d.AnsweredVia, &d.PrecedentOf, &d.DiffersFrom,
 		&d.DiffersWhy, &d.WithdrawReason, &d.SupersededBy, &d.ArgsHash, &d.Delivery, &d.DeliveredVia,
-		&created, &expires, &answered, &closed, &superseded, &delivered, &confirmed,
+		&created, &expires, &answered, &closed, &superseded, &delivered, &confirmed, &exported,
 	}, extra...)
 	if err := sc.Scan(dest...); err != nil {
 		return model.Decision{}, err
@@ -110,6 +111,7 @@ func scanDecision(sc scanner, extra ...any) (model.Decision, error) {
 		{&d.SupersededAt, superseded},
 		{&d.DeliveredAt, delivered},
 		{&d.ConfirmedAt, confirmed},
+		{&d.ExportedAt, exported},
 	} {
 		t, err := parseTime(f.src)
 		if err != nil {
@@ -308,7 +310,7 @@ func (s *Store) OpenTickets(ctx context.Context, now time.Time) ([]model.Ticket,
 	rows, err := s.db.QueryContext(ctx, selectDecisions+`,
   COALESCE(s.state, ''), COALESCE(s.tmux_pane, ''), COALESCE(s.tmux_session, ''),
   COALESCE(s.tmux_window, ''), COALESCE(s.branch, ''), COALESCE(s.context_used, 0),
-  s.cache_expires_at, COALESCE(s.cache_rebuild_usd, 0)
+  s.cache_expires_at, COALESCE(s.cache_rebuild_usd, 0), COALESCE(s.recache_tokens, 0)
 FROM decisions d LEFT JOIN sessions s ON s.id = d.session_id
 WHERE `+openAt+`
 ORDER BY d.n`, formatTime(now))
@@ -321,7 +323,7 @@ ORDER BY d.n`, formatTime(now))
 		var t model.Ticket
 		var cache sql.NullString
 		t.Decision, err = scanDecision(rows, &t.SessionState, &t.Pane, &t.TmuxSession, &t.TmuxWindow,
-			&t.Branch, &t.ContextUsed, &cache, &t.CacheRebuildUSD)
+			&t.Branch, &t.ContextUsed, &cache, &t.CacheRebuildUSD, &t.CacheRecacheTokens)
 		if err != nil {
 			return nil, fail("open tickets", "", err)
 		}
@@ -563,8 +565,10 @@ func sessionLive(ctx context.Context, q dbtx, id string) (bool, error) {
 // clears it). On the first supersession of an answer already delivered to a
 // session that still exists and is neither ended nor stale, the delivery is
 // queued again, so the retraction reaches the agent by the usual paths
-// (Ruling 82); a session that has gone could never collect it (re-review N3). The status never changes. It
-// returns the stored row.
+// (Ruling 82); a session that has gone could never collect it (re-review N3). The status never changes. A
+// rescope that changes the scope also clears exported_at, since the note
+// shows the scope: the decision is due for export again (a rescope has no
+// timestamp of its own). It returns the stored row.
 func (s *Store) EditDecision(ctx context.Context, id string, e model.DecisionEdit, now time.Time) (model.Decision, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -589,10 +593,12 @@ func (s *Store) EditDecision(ctx context.Context, id string, e model.DecisionEdi
 		next := edited(cur, e, now, live)
 		_, err = tx.ExecContext(ctx, `
 UPDATE decisions SET scope = ?, superseded_at = ?, superseded_by = ?, delivery = ?, delivered_via = ?,
-  delivered_at = ?, confirmed_at = ?
+  delivered_at = ?, confirmed_at = ?,
+  exported_at = CASE WHEN ? THEN NULL ELSE exported_at END
 WHERE n = ?`,
 			next.Scope, formatTime(next.SupersededAt), next.SupersededBy,
-			next.Delivery, next.DeliveredVia, formatTime(next.DeliveredAt), formatTime(next.ConfirmedAt), cur.N)
+			next.Delivery, next.DeliveredVia, formatTime(next.DeliveredAt), formatTime(next.ConfirmedAt),
+			next.Scope != cur.Scope, cur.N)
 	}
 	if err != nil {
 		return model.Decision{}, fail("edit decision", id, err)
@@ -602,4 +608,66 @@ WHERE n = ?`,
 		return model.Decision{}, fail("edit decision", id, err)
 	}
 	return stored, nil
+}
+
+// ExportQueue returns decided decisions whose note is due, in id order: never
+// exported, or exported before their answer or supersession, and not skipped
+// for a foreign note (see ExportQueueWith). With all set it returns every
+// decided decision that is not skipped. A positive limit caps the count (the
+// lowest ids); zero or less means no limit. Withdrawn, expired and open
+// tickets are never returned.
+func (s *Store) ExportQueue(ctx context.Context, all bool, limit int) ([]model.Decision, error) {
+	return s.ExportQueueWith(ctx, all, false, limit)
+}
+
+// ExportQueueWith is ExportQueue; with retrySkipped it also returns the
+// decisions skipped because a foreign file holds their note's path. A skip
+// lapses by itself when the decision is answered or superseded again after
+// it, or rescoped.
+func (s *Store) ExportQueueWith(ctx context.Context, all, retrySkipped bool, limit int) ([]model.Decision, error) {
+	if limit <= 0 {
+		limit = -1
+	}
+	rows, err := s.db.QueryContext(ctx, selectDecisions+`
+FROM decisions d
+WHERE `+decided+` AND (? OR d.exported_at IS NULL OR d.exported_at < d.answered_at OR d.exported_at < d.superseded_at)
+  AND (? OR NOT EXISTS (SELECT 1 FROM meta k WHERE k.key = '`+exportSkipPrefix+`' || d.id
+    AND substr(k.value, 32) = d.scope
+    AND substr(k.value, 1, 30) >= COALESCE(d.answered_at, '') AND substr(k.value, 1, 30) >= COALESCE(d.superseded_at, '')))
+ORDER BY d.n LIMIT ?`, all, retrySkipped, limit)
+	if err != nil {
+		return nil, fail("export queue", "", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []model.Decision
+	for rows.Next() {
+		d, err := scanDecision(rows)
+		if err != nil {
+			return nil, fail("export queue", "", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fail("export queue", "", err)
+	}
+	return out, nil
+}
+
+// MarkExported records that the decision's note was written at at: one
+// UPDATE of exported_at alone, so the full-text index is not touched.
+// ErrNotFound for an unknown id. Only the export path calls it, once per
+// successful write.
+func (s *Store) MarkExported(ctx context.Context, id string, at time.Time) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE decisions SET exported_at = ? WHERE id = ?`, formatTime(at), id)
+	if err != nil {
+		return fail("mark exported", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fail("mark exported", id, err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

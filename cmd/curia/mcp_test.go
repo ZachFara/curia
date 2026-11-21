@@ -358,6 +358,48 @@ func TestCallerFromTmuxPane(t *testing.T) {
 	}
 }
 
+// A pane id names a pane only on its own tmux server (Ruling 133): the
+// caller in %3 on server A is not the newer session in %3 on server B.
+func TestCallerFromTmuxPaneIgnoresOtherServer(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	now := time.Now()
+	mcpPutSession(t, st, "ONA", "%3", model.StateIdle, now.Add(-time.Minute))
+	mcpPutSession(t, st, "ONB", "%3", model.StateWorking, now)
+	for id, sock := range map[string]string{"ONA": sendSockA, "ONB": sendSockB} {
+		if err := st.UpdateSession(context.Background(), id, func(cur model.Session, _ bool) model.Session {
+			cur.Socket = sock
+			return cur
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TMUX_PANE", "%3")
+	t.Setenv("TMUX", sendSockA+",1,0")
+	if s, _ := mcpCallerOf(t, st, "Which queue?"); s != "ONA" {
+		t.Errorf("session = %q, want ONA", s)
+	}
+}
+
+// With TMUX_PANE but no TMUX the caller's server is unknown: a session with a
+// recorded server is not matched by the pane id alone.
+func TestCallerByPaneNeedsKnownServer(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	mcpPutSession(t, st, "ONB", "%3", model.StateWorking, time.Now())
+	if err := st.UpdateSession(context.Background(), "ONB", func(cur model.Session, _ bool) model.Session {
+		cur.Socket = sendSockB
+		return cur
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMUX_PANE", "%3")
+	t.Setenv("TMUX", "")
+	if s, _ := mcpCallerOf(t, st, "Which queue?"); s != "" {
+		t.Errorf("session = %q, want none", s)
+	}
+}
+
 func TestCallerFromClaudeCodeSessionID(t *testing.T) {
 	db := mcpEnv(t)
 	st := mcpOpenStore(t, db)

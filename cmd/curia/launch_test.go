@@ -285,3 +285,203 @@ func TestLaunchRejectsBadArguments(t *testing.T) {
 		t.Errorf("exec called %d times", rec.calls)
 	}
 }
+
+// launchCodexStub is the path launchLookPath returns for codex under
+// launchRecordCodex.
+const launchCodexStub = "/stub/bin/codex"
+
+// launchRecordCodex makes launch find codex at launchCodexStub (and no
+// other binary) and record its exec, which then returns nil.
+func launchRecordCodex(t *testing.T) *launchRecorder {
+	t.Helper()
+	rec := launchRecord(t)
+	launchLookPath = func(file string) (string, error) {
+		if file != "codex" {
+			return "", errors.New("unexpected lookup of " + file)
+		}
+		return launchCodexStub, nil
+	}
+	return rec
+}
+
+// launchCodexTask stores task T-1 as a spawn with --agent codex leaves it,
+// with a hostile title and body, and returns it.
+func launchCodexTask(t *testing.T) model.Task {
+	t.Helper()
+	tk := launchTask(t)
+	st, err := store.Open(os.Getenv("CURIA_DB"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	tk, err = st.UpdateTask(context.Background(), tk.ID, func(cur model.Task) (model.Task, error) {
+		cur.Agent = model.AgentCodex
+		cur.Title = "--dangerously-bypass-approvals-and-sandbox ; $(rm -rf ~)"
+		cur.Body = "-s danger-full-access\n--sandbox none\n`id` ; kill-server ;\n#{pane_id}"
+		return cur, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tk
+}
+
+// launchTaskIDs is every CURIA_TASK_ID value in env.
+func launchTaskIDs(env []string) []string {
+	var ids []string
+	for _, kv := range env {
+		if name, v, _ := strings.Cut(kv, "="); name == "CURIA_TASK_ID" {
+			ids = append(ids, v)
+		}
+	}
+	return ids
+}
+
+func TestLaunchCodexPassesBriefByExec(t *testing.T) {
+	tk := launchCodexTask(t)
+	rec := launchRecordCodex(t)
+	t.Setenv("CURIA_TASK_ID", "T-99")
+	t.Setenv(launchTeamVar, "")
+	if _, stderr, err := launchRun(t, &launchEnter{}, "T-1"); err != nil {
+		t.Fatalf("launch: %v\n%s", err, stderr)
+	}
+	if rec.calls != 1 || rec.path != launchCodexStub {
+		t.Fatalf("exec calls %d of %q, want one of %q", rec.calls, rec.path, launchCodexStub)
+	}
+	brief := task.Brief(tk, false)
+	if !slices.Equal(rec.argv, []string{"codex", brief}) {
+		t.Errorf("argv = %q, want [codex <brief>]", rec.argv)
+	}
+	if len(rec.argv) == 2 && rec.argv[1] != brief {
+		t.Errorf("the brief is not byte-equal to task.Brief")
+	}
+	if !strings.Contains(brief, tk.Title) || !strings.Contains(brief, tk.Body) {
+		t.Fatalf("test setup: the brief lacks the hostile title or body")
+	}
+	if ids := launchTaskIDs(rec.envv); !slices.Equal(ids, []string{"T-1"}) {
+		t.Errorf("CURIA_TASK_ID entries = %q, want exactly T-1", ids)
+	}
+	if slices.Contains(rec.envv, launchTeamVar+"=1") {
+		t.Error("the team switch is set for codex")
+	}
+}
+
+func TestLaunchCodexModelAndResume(t *testing.T) {
+	tk := launchCodexTask(t)
+	brief := task.Brief(tk, false)
+	cases := []struct {
+		args, want []string
+	}{
+		{[]string{"T-1", "--model", "o3"}, []string{"codex", "--model", "o3", brief}},
+		{[]string{"T-1", "--resume", launchUUID}, []string{"codex", "resume", launchUUID}},
+		// codex resume takes no model here (section 4.10: codex resume <uuid>).
+		{[]string{"T-1", "--resume", launchUUID, "--model", "o3"}, []string{"codex", "resume", launchUUID}},
+		// After a pause the agent is told its work is in the WIP commit.
+		{[]string{"T-1", "--resume", launchUUID, "--after-pause"}, []string{"codex", "resume", launchUUID, launchAfterPauseNote("T-1")}},
+		{[]string{"T-1", "--after-pause"}, []string{"codex", brief + "\n\n" + launchAfterPauseNote("T-1")}},
+	}
+	for _, c := range cases {
+		rec := launchRecordCodex(t)
+		if _, stderr, err := launchRun(t, &launchEnter{}, c.args...); err != nil {
+			t.Fatalf("launch %q: %v\n%s", c.args, err, stderr)
+		}
+		if rec.path != launchCodexStub || !slices.Equal(rec.argv, c.want) {
+			t.Errorf("launch %q: exec %q argv %q, want %q", c.args, rec.path, rec.argv, c.want)
+		}
+		if ids := launchTaskIDs(rec.envv); !slices.Equal(ids, []string{"T-1"}) {
+			t.Errorf("launch %q: CURIA_TASK_ID entries = %q", c.args, ids)
+		}
+	}
+
+	// --team is refused for a codex task: agent teams are Claude Code's.
+	rec := launchRecordCodex(t)
+	stdin := &launchEnter{}
+	_, stderr, err := launchRun(t, stdin, "T-1", "--team")
+	if err == nil || rec.calls != 0 || !strings.Contains(stderr, "agent teams are Claude Code's") || !stdin.read {
+		t.Errorf("launch --team of a codex task: err %v, %d execs, stderr %q, waited %v", err, rec.calls, stderr, stdin.read)
+	}
+}
+
+func TestLaunchCodexNeverAddsSandboxOrApprovalFlags(t *testing.T) {
+	launchCodexTask(t)
+	for _, args := range [][]string{
+		{"T-1"},
+		{"T-1", "--model", "o3"},
+		{"T-1", "--resume", launchUUID},
+		{"T-1", "--after-pause"},
+		{"T-1", "--resume", launchUUID, "--after-pause", "--model", "o3"},
+	} {
+		rec := launchRecordCodex(t)
+		if _, stderr, err := launchRun(t, &launchEnter{}, args...); err != nil {
+			t.Fatalf("launch %q: %v\n%s", args, err, stderr)
+		}
+		for _, a := range rec.argv {
+			for _, bad := range []string{"--dangerously", "--approve", "-s", "--sandbox", "-a", "--ask-for-approval", "--full-auto", "--yolo"} {
+				if strings.HasPrefix(a, bad) {
+					t.Errorf("launch %q passes %q", args, a)
+				}
+			}
+		}
+	}
+	// A model or session id that reads as an option never reaches codex.
+	for _, args := range [][]string{
+		{"T-1", "--model", "--dangerously-bypass-approvals-and-sandbox"},
+		{"T-1", "--model=-s"},
+		{"T-1", "--model=--sandbox"},
+		{"T-1", "--resume", "------------------------------------"},
+	} {
+		rec := launchRecordCodex(t)
+		if _, _, err := launchRun(t, &launchEnter{}, args...); err == nil || rec.calls != 0 {
+			t.Errorf("launch %q: err %v, %d execs; want a refusal", args, err, rec.calls)
+		}
+	}
+}
+
+func TestLaunchCodexMissing(t *testing.T) {
+	launchCodexTask(t)
+	rec := launchRecordCodex(t)
+	launchLookPath = func(file string) (string, error) {
+		return "", errors.New("exec: \"" + file + "\": \x1b[31mexecutable file not found\x1b[0m in $PATH")
+	}
+	stdin := &launchEnter{}
+	stdout, stderr, err := launchRun(t, stdin, "T-1")
+	if err == nil || rec.calls != 0 {
+		t.Fatalf("launch with codex missing: err %v, %d execs", err, rec.calls)
+	}
+	if stdout != "" || strings.Count(stderr, "\n") != 1 || !strings.HasPrefix(stderr, "curia launch: codex not found") {
+		t.Errorf("stdout %q, stderr %q; want one line saying codex is not found", stdout, stderr)
+	}
+	if strings.ContainsFunc(strings.TrimSuffix(stderr, "\n"), func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		t.Errorf("stderr not cleaned: %q", stderr)
+	}
+	if !stdin.read {
+		t.Error("launch did not wait for Enter")
+	}
+	if log := strings.Join(readLog(t), "\n"); !strings.Contains(log, "codex not found") {
+		t.Errorf("log lacks the failure:\n%s", log)
+	}
+}
+
+func TestLaunchClaudeUnchanged(t *testing.T) {
+	tk := launchTask(t)
+	if tk.Agent != model.AgentClaude {
+		t.Fatalf("a task never spawned has agent %q, want claude", tk.Agent)
+	}
+	cases := []struct {
+		args, want []string
+	}{
+		{[]string{"T-1"}, []string{"claude", task.Brief(tk, false)}},
+		{[]string{"T-1", "--model", "opus"}, []string{"claude", "--model", "opus", task.Brief(tk, false)}},
+		{[]string{"T-1", "--team"}, []string{"claude", "--teammate-mode", "tmux", task.Brief(tk, true)}},
+		{[]string{"T-1", "--resume", launchUUID, "--model", "opus"}, []string{"claude", "--model", "opus", "--resume", launchUUID}},
+	}
+	for _, c := range cases {
+		rec := launchRecord(t)
+		if _, stderr, err := launchRun(t, &launchEnter{}, c.args...); err != nil {
+			t.Fatalf("launch %q: %v\n%s", c.args, err, stderr)
+		}
+		if rec.path != launchStub || !slices.Equal(rec.argv, c.want) {
+			t.Errorf("launch %q: exec %q argv %q, want %q at %q", c.args, rec.path, rec.argv, c.want, launchStub)
+		}
+	}
+}

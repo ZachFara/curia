@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -13,10 +14,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/decision"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/notify"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/usage"
 )
 
 // The push outbox's timing (plan section 4.7).
@@ -44,6 +47,20 @@ const (
 	pushMaxAccess = 512
 	// pushMaxReason bounds a failure reason as stored and logged, in runes.
 	pushMaxReason = 200
+)
+
+// The values a push's stakes line is built from come from session columns
+// that another program fills, so only sane ones are used (the line is left
+// out otherwise).
+const (
+	// pushStakesPast and pushStakesFuture bound a cache expiry's distance
+	// from now. A prompt cache lives at most an hour.
+	pushStakesPast   = 24 * time.Hour
+	pushStakesFuture = 2 * time.Hour
+	// pushStakesMaxTokens and pushStakesMaxUSD bound the context size and
+	// the rebuild cost.
+	pushStakesMaxTokens = 10_000_000
+	pushStakesMaxUSD    = 1000.0
 )
 
 // pushEvery is how often pushLoop flushes without a kick; tests shorten it.
@@ -245,7 +262,59 @@ func (f pushFlusher) build(ctx context.Context, p model.Push, token string) (n n
 	if token != "" {
 		answerURL = strings.TrimRight(f.cfg.Serve.PublicURL, "/") + "/v1/answer"
 	}
-	return notify.DecisionPush(d, topic, answerURL, token), "", nil
+	return notify.DecisionPush(d, topic, answerURL, token, f.stakes(ctx, d)), "", nil
+}
+
+// stakes is the stakes line for decision d, worked out now from its
+// session's stored cache state, or "" when that is unknown, makes no sense,
+// or d is not among the open tickets. A failure to read the tickets is
+// logged and leaves the line out: the push is not held back for it. It is
+// not used for an irreversible ticket's push, which stays as it was.
+func (f pushFlusher) stakes(ctx context.Context, d model.Decision) string {
+	if d.Reversibility == model.ReversIrreversible {
+		return ""
+	}
+	now := f.now()
+	tickets, err := f.st.OpenTickets(ctx, now)
+	if err != nil {
+		f.log.Warn("push: stakes left out", "ref", d.ID, "err", sanitize.Line(err.Error(), pushMaxReason))
+		return ""
+	}
+	for _, t := range tickets {
+		if t.ID == d.ID {
+			return pushStakes(t, now)
+		}
+	}
+	return ""
+}
+
+// pushStakes is decision.Stakes(t, now) when t's cache values are sane, else
+// "". When the rebuild's dollar figure is unknown (Ruling P5-R2: the status
+// line gives tokens only) but its tokens are known, the line shows the
+// tokens as the dashboard does (usage.TokensCell) where it would show the
+// dollars, or the cold line's size where the context size is unknown; with
+// neither the line names no cost.
+func pushStakes(t model.Ticket, now time.Time) string {
+	switch {
+	case t.CacheExpiresAt.IsZero(),
+		t.CacheExpiresAt.Before(now.Add(-pushStakesPast)), t.CacheExpiresAt.After(now.Add(pushStakesFuture)),
+		t.ContextUsed < 0, t.ContextUsed > pushStakesMaxTokens,
+		math.IsNaN(t.CacheRebuildUSD), t.CacheRebuildUSD < 0, t.CacheRebuildUSD > pushStakesMaxUSD:
+		return ""
+	}
+	line := decision.Stakes(t, now)
+	known := t.CacheRecacheTokens > 0 && t.CacheRecacheTokens <= pushStakesMaxTokens
+	if !known || math.Round(t.CacheRebuildUSD*100) > 0 {
+		return line
+	}
+	tokens := usage.TokensCell(int(t.CacheRecacheTokens), true)
+	switch {
+	case t.CacheExpiresAt.After(now): // warm: decision.Stakes left the unknown dollars out
+		return line + " (rebuild ≈ " + tokens + ")"
+	case t.ContextUsed == 0: // cold, and no context size to name
+		return "cache cold: next turn re-writes ~" + tokens
+	}
+	return line
 }
 
 // buildReview is build for a review push.

@@ -526,10 +526,37 @@ func userTerminalAs(t *testing.T, at bool) {
 	t.Cleanup(func() { userTerminalOpen = userTerminalUnset })
 }
 
+// fakePID is a process id no real process has (Linux pids stop at 4194304),
+// so a made-up parent can never equal the test's own real parent.
+const fakePID = 1 << 30
+
 // userShellTable is the user's own terminal: curia's parent is a login
 // shell under a terminal application under launchd.
 func userShellTable() map[int]userProc {
-	return map[int]userProc{os.Getppid(): {9001, "-zsh", ""}, 9001: {9002, "login", ""}, 9002: {1, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal", ""}}
+	return map[int]userProc{os.Getppid(): {fakePID + 1, "-zsh", ""}, fakePID + 1: {fakePID + 2, "login", ""}, fakePID + 2: {1, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal", ""}}
+}
+
+// TestUserShellTableHasNoCycle: the made-up pids cannot collide with the
+// test's real parent, so the walk up from it ends at launchd.
+func TestUserShellTableHasNoCycle(t *testing.T) {
+	table := userShellTable()
+	if len(table) != 3 {
+		t.Fatalf("userShellTable has %d entries, want 3 (a collision overwrote one)", len(table))
+	}
+	pid := os.Getppid()
+	for range 8 {
+		if pid <= 1 {
+			return
+		}
+		p, ok := table[pid]
+		if !ok {
+			t.Fatalf("pid %d is not in userShellTable", pid)
+		}
+		pid = p.PPID
+	}
+	if pid > 1 {
+		t.Errorf("walk from the test's parent did not reach pid 1 within 8 steps (stopped at %d)", pid)
+	}
 }
 
 // userProcessesAs makes table the process table for the test: a pid not
@@ -746,12 +773,12 @@ func TestUserAncestry(t *testing.T) {
 		{"direct child of claude", map[int]userProc{me: {1, claude, ""}}, "runs under Claude Code"},
 		{"claude by base name", map[int]userProc{me: {1, "claude", ""}}, "runs under Claude Code"},
 		{"through sh, env and script", map[int]userProc{
-			me: {10, "env", ""}, 10: {11, "script", ""}, 11: {12, "/bin/zsh", ""}, 12: {13, "claude", ""}, 13: {1, "/sbin/launchd", ""},
-		}, "runs under Claude Code (process 12)"},
+			me: {fakePID + 1, "env", ""}, fakePID + 1: {fakePID + 2, "script", ""}, fakePID + 2: {fakePID + 3, "/bin/zsh", ""}, fakePID + 3: {fakePID + 4, "claude", ""}, fakePID + 4: {1, "/sbin/launchd", ""},
+		}, "runs under Claude Code (process 1073741827)"},
 		{"the user's terminal", userShellTable(), ""},
-		{"a tmux popup or run-shell job", map[int]userProc{me: {40, "sh", ""}, 40: {1, "tmux", ""}}, ""},
-		{"the Claude desktop app is not Claude Code", map[int]userProc{me: {50, "-zsh", ""}, 50: {1, "/Applications/Claude.app/Contents/MacOS/Claude", ""}}, ""},
-		{"a name that only holds claude", map[int]userProc{me: {60, "claude-wrapper", ""}, 60: {1, "launchd", ""}}, ""},
+		{"a tmux popup or run-shell job", map[int]userProc{me: {fakePID + 1, "sh", ""}, fakePID + 1: {1, "tmux", ""}}, ""},
+		{"the Claude desktop app is not Claude Code", map[int]userProc{me: {fakePID + 1, "-zsh", ""}, fakePID + 1: {1, "/Applications/Claude.app/Contents/MacOS/Claude", ""}}, ""},
+		{"a name that only holds claude", map[int]userProc{me: {fakePID + 1, "claude-wrapper", ""}, fakePID + 1: {1, "launchd", ""}}, ""},
 		// Claude Code from npm runs as node or bun with its script.
 		{"node through npm's link", map[int]userProc{me: {1, "node", "node /usr/local/bin/claude --continue"}}, "runs under Claude Code"},
 		{"node on the cli script", map[int]userProc{me: {
@@ -761,8 +788,8 @@ func TestUserAncestry(t *testing.T) {
 		{"bun on the cli script", map[int]userProc{me: {1, "bun", "bun /x/node_modules/@anthropic-ai/claude-code/cli.mjs"}}, "runs under Claude Code"},
 		{"node running something else", map[int]userProc{me: {1, "node", "node /srv/claude-notes/server.js --name claude"}}, ""},
 		{"node with another cli.js", map[int]userProc{me: {1, "node", "node /x/tools/cli.js claude"}}, ""},
-		{"unreadable", map[int]userProc{me: {70, "sh", ""}}, "cannot be read"},
-		{"a loop", map[int]userProc{me: {80, "sh", ""}, 80: {me, "sh", ""}}, "more than 64 deep"},
+		{"unreadable", map[int]userProc{me: {fakePID + 1, "sh", ""}}, "cannot be read"},
+		{"a loop", map[int]userProc{me: {fakePID + 1, "sh", ""}, fakePID + 1: {me, "sh", ""}}, "more than 64 deep"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			hookHome(t)
@@ -775,13 +802,13 @@ func TestUserAncestry(t *testing.T) {
 	}
 	t.Run("the pane of a live agent", func(t *testing.T) {
 		_, fake := readHome(t, []string{"%1", "%2"}, readSession("agent-1", model.StateIdle, "%1"))
-		fake.Panes[0].PID = 4242 // %1's shell, in which the agent runs
-		userProcessesAs(t, map[int]userProc{me: {4242, "bash", ""}, 4242: {1, "tmux", ""}})
-		if got := agentAncestor(); !strings.Contains(got, "pane of agent session agent-1 (process 4242)") {
+		fake.Panes[0].PID = fakePID + 1 // %1's shell, in which the agent runs
+		userProcessesAs(t, map[int]userProc{me: {fakePID + 1, "bash", ""}, fakePID + 1: {1, "tmux", ""}})
+		if got := agentAncestor(); !strings.Contains(got, "pane of agent session agent-1 (process 1073741825)") {
 			t.Errorf("agentAncestor = %q, want the agent's pane", got)
 		}
 		// The same chain through a pane with no live session is the user's.
-		fake.Panes[0].PID, fake.Panes[1].PID = 1111, 4242
+		fake.Panes[0].PID, fake.Panes[1].PID = 1111, fakePID+1
 		if got := agentAncestor(); got != "" {
 			t.Errorf("agentAncestor = %q, want none for another pane", got)
 		}
@@ -796,7 +823,7 @@ func TestUserAncestry(t *testing.T) {
 func TestUserAncestryWithoutPaneList(t *testing.T) {
 	me := os.Getppid()
 	shell := map[int]userProc{me: {1, "-zsh", ""}}
-	underClaude := map[int]userProc{me: {600, "/bin/zsh", ""}, 600: {601, "claude", ""}, 601: {1, "tmux", ""}} // 600 is claude
+	underClaude := map[int]userProc{me: {fakePID + 1, "/bin/zsh", ""}, fakePID + 1: {fakePID + 2, "claude", ""}, fakePID + 2: {1, "tmux", ""}} // fakePID + 1 is claude
 	unreachable := func(t *testing.T) {
 		t.Helper()
 		db := hookHome(t) // the guard's tmux: unreachable
@@ -814,10 +841,10 @@ func TestUserAncestryWithoutPaneList(t *testing.T) {
 		want  string // "" is the user
 	}{
 		{"tmux unreachable, the user's terminal", unreachable, shell, ""},
-		{"tmux unreachable, under Claude Code", unreachable, underClaude, "runs under Claude Code (process 600)"},
+		{"tmux unreachable, under Claude Code", unreachable, underClaude, "runs under Claude Code (process 1073741825)"},
 		{"another server, the user's terminal", otherServer, shell, ""},
-		{"another server, under Claude Code", otherServer, underClaude, "runs under Claude Code (process 600)"},
-		{"process table unreadable", unreachable, map[int]userProc{me: {610, "sh", ""}}, "cannot be read"},
+		{"another server, under Claude Code", otherServer, underClaude, "runs under Claude Code (process 1073741825)"},
+		{"process table unreadable", unreachable, map[int]userProc{me: {fakePID + 1, "sh", ""}}, "cannot be read"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			c.world(t)
@@ -874,7 +901,7 @@ func TestUserAncestryWithoutPaneList(t *testing.T) {
 func TestSecondServerPaneIDCollision(t *testing.T) {
 	const agents, mine = "/tmp/tmux-501/agents", "/tmp/tmux-501/mine"
 	me := os.Getppid()
-	shell := map[int]userProc{me: {4242, "-zsh", ""}, 4242: {1, "tmux", ""}}
+	shell := map[int]userProc{me: {fakePID + 1, "-zsh", ""}, fakePID + 1: {1, "tmux", ""}}
 	on := func(s model.Session, socket string) model.Session {
 		s.Socket = socket
 		return s
@@ -924,7 +951,7 @@ func TestSecondServerPaneIDCollision(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			db, fake := readHome(t, []string{"%1"}, c.sessions...)
 			fake.Panes[0].ServerStart = c.serverStart
-			fake.Panes[0].PID = 4242 // the user's shell in the second server's %1
+			fake.Panes[0].PID = fakePID + 1 // the user's shell in the second server's %1
 			fake.Panes[0].Socket = mine
 			userProcessesAs(t, shell)
 			t.Setenv("TMUX_PANE", "%1")
@@ -999,7 +1026,7 @@ func TestScriptWrappedSendIsNeverFromUser(t *testing.T) {
 	userTerminalAs(t, true) // script's pty: /dev/tty opens
 	me := os.Getppid()      // curia's parent, env
 	userProcessesAs(t, map[int]userProc{
-		me: {500, "env", ""}, 500: {501, "script", ""}, 501: {502, "/bin/zsh", ""}, 502: {503, "claude", ""}, 503: {1, "launchd", ""},
+		me: {fakePID + 1, "env", ""}, fakePID + 1: {fakePID + 2, "script", ""}, fakePID + 2: {fakePID + 3, "/bin/zsh", ""}, fakePID + 3: {fakePID + 4, "claude", ""}, fakePID + 4: {1, "launchd", ""},
 	})
 	if _, err := readRun(t, "", "send", "%1", "reply with only LABEL-TWO"); err != nil {
 		t.Fatal(err)
@@ -1013,7 +1040,7 @@ func TestScriptWrappedSendIsNeverFromUser(t *testing.T) {
 	}
 	for _, argv := range [][]string{{"say", "T-1:", "hello"}, {"pause", "T-1"}, {"clean", "T-1"}, {"decide", "D-1", "--option", "A"}} {
 		_, err := runRoot(t, argv...)
-		if err == nil || !strings.Contains(err.Error(), "runs under Claude Code (process 502)") {
+		if err == nil || !strings.Contains(err.Error(), "runs under Claude Code (process 1073741827)") {
 			t.Errorf("%v = %v, want the ancestry refusal", argv, err)
 		}
 	}
@@ -1041,6 +1068,8 @@ var userOnlyCommands = map[string][]string{
 	"curia review":          {"R-1", "--drop"},
 	"curia restore":         {"--dry-run"},
 	"curia serve":           {},
+	"curia export obsidian": {},
+	"curia export commons":  {"D-1"},
 }
 
 // userNotOnlyCommands are the leaf commands anyone, an agent included, may
@@ -1050,6 +1079,7 @@ var userOnlyCommands = map[string][]string{
 var userNotOnlyCommands = map[string]string{
 	"curia decisions ls":          "reads the tickets only",
 	"curia hook":                  "run by Claude Code's hooks; records the calling session's own event",
+	"curia ingest":                "run by cost-lens and status lines inside agent sessions; writes only cost, cache and usage readings, which nothing automatic depends on",
 	"curia launch":                "runs the agent in the caller's own process; spawn decides what is started",
 	"curia ls":                    "reads the sessions only",
 	"curia mcp":                   "run by Claude Code; its tools cannot decide, send, spawn or pause; complete_task only files the caller's own task for review",
@@ -1060,11 +1090,13 @@ var userNotOnlyCommands = map[string]string{
 	"curia routing stats":         "reads the routing counts only",
 	"curia seen":                  "attention bookkeeping, run by tmux on pane focus",
 	"curia send":                  "agents may send; labeled, limited and never from the user (Rulings 112, 113)",
+	"curia statusline":            "run by Claude Code as the status line inside agent sessions; prints numbers and writes only cost, cache and usage readings",
 	"curia sidebar":               "a view; its user actions go through the guard (uiUserActions)",
 	"curia spawn":                 "agents may spawn ready tasks only (Ruling 113)",
 	"curia status":                "prints the badge",
 	"curia task ls":               "reads the tasks only",
 	"curia ui":                    "a view; its user actions go through the guard (uiUserActions)",
+	"curia usage":                 "reads the samples and tasks and prints numbers; it pauses nothing, and the pause it suggests is typed by the user",
 	"curia version":               "prints the version",
 	"curia help":                  "cobra's help",
 	"curia completion":            "cobra's shell completion scripts",
@@ -1166,6 +1198,8 @@ func userOnlyRefused(t *testing.T, argv []string, env, want string) {
 // above, and run with no controlling terminal, and again with CLAUDECODE set,
 // each is refused by userOnly before it opens the store or calls tmux.
 func TestUserOnlyCommandsGoThroughTheGuard(t *testing.T) {
+	// Running "review R-1 --drop" leaves the flag set, and would fail the next review test run in this process.
+	t.Cleanup(func() { reviewDropFlag = false })
 	marked := userOnlyMarked(t)
 	for path := range userOnlyCommands {
 		if !marked[path] {

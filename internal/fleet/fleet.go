@@ -218,6 +218,8 @@ func unseen(s model.Session) bool {
 type Counts struct {
 	Decisions, Undelivered, Waiting, Reviews int
 	AutoOff                                  bool
+	// Forecast is the usage warning, already rendered; empty when there is none.
+	Forecast string
 }
 
 // Count counts the sessions waiting for input, whether or not they have
@@ -238,8 +240,9 @@ func Count(s []model.Session, openBlocking, undelivered int) Counts {
 
 // Badge renders c as "D<n> Q<n> W<n> R<n>", leaving out zero parts; it is
 // the empty string when every count is zero. Q counts the answers and
-// instructions not yet delivered to their agent (Ruling 89). When AutoOff is
-// set the last part is "auto-off", alone when every count is zero.
+// instructions not yet delivered to their agent (Ruling 89). A non-empty
+// Forecast follows the counts. When AutoOff is set the last part is
+// "auto-off", alone when nothing else is shown.
 func Badge(c Counts) string {
 	var parts []string
 	for _, p := range []struct {
@@ -249,6 +252,9 @@ func Badge(c Counts) string {
 		if p.n != 0 {
 			parts = append(parts, fmt.Sprintf("%s%d", p.letter, p.n))
 		}
+	}
+	if c.Forecast != "" {
+		parts = append(parts, c.Forecast)
 	}
 	if c.AutoOff {
 		parts = append(parts, "auto-off")

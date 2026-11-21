@@ -59,7 +59,7 @@ const reviewIntentHold = 10 * time.Minute
 const reviewFlightWait = 7 * time.Minute
 
 // reviewFlight counts the review actions (approve, request changes, drop)
-// in flight in this process, so that curia review and curia ui wait for
+// and the dashboard's pauses in flight in this process, so that curia review and curia ui wait for
 // them to finish and be recorded before they exit, whatever ended the view.
 var reviewFlight = &reviewInFlight{}
 
@@ -67,17 +67,25 @@ var reviewFlight = &reviewInFlight{}
 type reviewInFlight struct {
 	mu   sync.Mutex
 	n    int
+	p    int           // of n, the pauses
 	idle chan struct{} // closed when n drops to 0; nil while nobody waits
 }
 
 // begin counts one more action in flight; the func it returns ends it.
-func (f *reviewInFlight) begin() (end func()) {
+func (f *reviewInFlight) begin() (end func()) { return f.count(0) }
+
+// beginPause counts one more pause in flight; the func it returns ends it.
+func (f *reviewInFlight) beginPause() (end func()) { return f.count(1) }
+
+func (f *reviewInFlight) count(pause int) (end func()) {
 	f.mu.Lock()
 	f.n++
+	f.p += pause
 	f.mu.Unlock()
 	return func() {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.p -= pause
 		if f.n--; f.n == 0 && f.idle != nil {
 			close(f.idle)
 			f.idle = nil
@@ -90,6 +98,19 @@ func (f *reviewInFlight) busy() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.n > 0
+}
+
+// words says what is in flight and which command shows its outcome.
+func (f *reviewInFlight) words() (what, follow string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch f.p {
+	case 0:
+		return "a review action", "curia reviews ls"
+	case f.n:
+		return "a pause", "curia task ls"
+	}
+	return "a pause and a review action", "curia task ls and curia reviews ls"
 }
 
 // wait waits until no action is in flight, at most limit, and reports
@@ -118,8 +139,9 @@ func (f *reviewInFlight) wait(limit time.Duration) bool {
 // reviewWaitFlight waits for the review actions in flight (reviewFlight)
 // once a view has ended, whatever ended it.
 func reviewWaitFlight() error {
+	what, follow := reviewFlight.words() // before the wait: the action ends it
 	if !reviewFlight.wait(reviewFlightWait) {
-		return fmt.Errorf("a review action was still running after %s; check it with curia reviews ls", reviewFlightWait)
+		return fmt.Errorf("%s was still running after %s; check it with %s", what, reviewFlightWait, follow)
 	}
 	return nil
 }
@@ -136,9 +158,12 @@ func reviewHoldSignals(interrupt bool) (ctx context.Context, stop context.Cancel
 	return signal.NotifyContext(context.Background(), sigs...)
 }
 
-// reviewWaitingLine is what curia prints when a held signal came while a
-// review action was in flight (M-2).
-const reviewWaitingLine = "curia: a review action is still running; waiting for it to finish and be recorded (its own limits bound it)"
+// reviewWaitingLine is what curia prints when a held signal came while an
+// action was in flight (M-2).
+func reviewWaitingLine() string {
+	what, _ := reviewFlight.words()
+	return "curia: " + what + " is still running; waiting for it to finish and be recorded (its own limits bound it)"
+}
 
 // reviewSayWaiting prints reviewWaitingLine on w once, when sig ends before the returned func is called (the
 // flag form's action ends).
@@ -149,7 +174,7 @@ func reviewSayWaiting(sig context.Context, w io.Writer) (done func()) {
 		defer close(finished)
 		select {
 		case <-sig.Done():
-			_, _ = fmt.Fprintln(w, reviewWaitingLine)
+			_, _ = fmt.Fprintln(w, reviewWaitingLine())
 		case <-end:
 		}
 	}()
@@ -160,7 +185,7 @@ func reviewSayWaiting(sig context.Context, w io.Writer) (done func()) {
 // w when a held signal ended it while one runs.
 func reviewAfterProgram(sig context.Context, w io.Writer) error {
 	if sig.Err() != nil && reviewFlight.busy() {
-		_, _ = fmt.Fprintln(w, reviewWaitingLine)
+		_, _ = fmt.Fprintln(w, reviewWaitingLine())
 	}
 	return reviewWaitFlight()
 }
@@ -1046,7 +1071,11 @@ func (s reviewSource) Detail(ctx context.Context, id string) (ui.ReviewDetail, e
 	if err != nil {
 		return ui.ReviewDetail{}, err
 	}
-	return reviewDetail(ctx, s.st, s.cfg, r, t)
+	d, err := reviewDetail(ctx, s.st, s.cfg, r, t)
+	if err == nil { // the branch cost never waits: the first ask starts the analyzer (costlens.go)
+		d.BranchCostUSD, d.BranchCostKnown = costlensTaskCost(s.cfg, t)
+	}
+	return d, err
 }
 
 // Approve approves review id at head, the branch head that was shown, as
@@ -1157,6 +1186,7 @@ type reviewJSON struct {
 	Teammates       int            `json:"teammates"`
 	DurationSeconds int64          `json:"duration_seconds"`
 	CostUSD         *float64       `json:"cost_usd"`
+	BranchCostUSD   *float64       `json:"branch_cost_usd"`
 }
 
 // reviewIDs is the ids of ds, never nil, cleaned.
@@ -1198,6 +1228,9 @@ func reviewPrintJSON(ctx context.Context, w io.Writer, st *store.Store, cfg conf
 	}
 	if d.CostKnown {
 		j.CostUSD = &d.CostUSD
+	}
+	if usd, ok := costlensTaskCostWait(ctx, cfg, t); ok {
+		j.BranchCostUSD = &usd
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

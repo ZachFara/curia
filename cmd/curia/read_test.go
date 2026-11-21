@@ -31,6 +31,7 @@ func readHome(t *testing.T, panes []string, sessions ...model.Session) (string, 
 	t.Helper()
 	db := hookHome(t)
 	userTerminalAs(t, true)
+	t.Setenv("TMUX", sendSockA+",1,0") // a pane id is matched on the caller's server
 	prevClock := clock
 	clock = func() time.Time { return at(12, 0) }
 	t.Cleanup(func() { clock = prevClock; readLines = readDefaultLines })

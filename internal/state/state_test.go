@@ -498,3 +498,57 @@ func TestCompactSessionStartRevivesEnded(t *testing.T) {
 		t.Errorf("compact on an ended session: %+v, want idle, seen and started at %v, no subagents", got, t1)
 	}
 }
+
+// A session that starts takes the event's agent, Claude Code when the event
+// names none: a SessionStart, a session first seen mid-run, and a
+// compaction's SessionStart for a session with no row.
+func TestStartTakesAgentFromEvent(t *testing.T) {
+	for _, ev := range []model.Event{
+		{Kind: model.SessionStart, SessionID: "s1", At: t1},
+		{Kind: model.PreToolUse, SessionID: "s1", ToolName: "Bash", At: t1},
+		{Kind: model.SessionStart, Source: "compact", SessionID: "s1", At: t1},
+	} {
+		for _, tc := range []struct{ agent, want string }{
+			{model.AgentCodex, model.AgentCodex},
+			{"", model.AgentClaude},
+		} {
+			ev.Agent = tc.agent
+			if got := state.Apply(model.Session{}, ev, false); got.Agent != tc.want {
+				t.Errorf("%s (source %q) with agent %q: session agent %q, want %q",
+					ev.Kind, ev.Source, tc.agent, got.Agent, tc.want)
+			}
+		}
+	}
+}
+
+// A stored session's agent never changes: not on a restart, a compaction,
+// a revival from ended or any other event, whichever agent the event names.
+func TestAgentNeverChangesAfterStart(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		prev model.State
+		ev   model.Event
+	}{
+		{"restart", model.StateWorking, model.Event{Kind: model.SessionStart, Source: "startup", SessionID: "s1", At: t1}},
+		{"clear", model.StateIdle, model.Event{Kind: model.SessionStart, Source: "clear", SessionID: "s1", At: t1}},
+		{"compact", model.StateWorking, model.Event{Kind: model.SessionStart, Source: "compact", SessionID: "s1", At: t1}},
+		{"revived", model.StateEnded, model.Event{Kind: model.SessionStart, Source: "compact", SessionID: "s1", At: t1}},
+		{"prompt", model.StateIdle, model.Event{Kind: model.UserPromptSubmit, SessionID: "s1", At: t1}},
+		{"tool", model.StateWorking, model.Event{Kind: model.PreToolUse, SessionID: "s1", ToolName: "Bash", At: t1}},
+		{"stop", model.StateWorking, model.Event{Kind: model.Stop, SessionID: "s1", At: t1}},
+		{"end", model.StateWorking, model.Event{Kind: model.SessionEnd, SessionID: "s1", At: t1}},
+	} {
+		for _, from := range []struct{ stored, other string }{
+			{model.AgentClaude, model.AgentCodex},
+			{model.AgentCodex, ""},
+		} {
+			s := base()
+			s.State, s.Agent = tc.prev, from.stored
+			ev := tc.ev
+			ev.Agent = from.other
+			if got := state.Apply(s, ev, false); got.Agent != from.stored {
+				t.Errorf("%s: a %s session given agent %q became %q", tc.name, from.stored, from.other, got.Agent)
+			}
+		}
+	}
+}

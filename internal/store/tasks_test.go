@@ -125,8 +125,8 @@ func TestMigrationAddsTasksAndMessages(t *testing.T) {
 			t.Errorf("sessions.%s = %s notnull=%d, want nullable TEXT", col, typ, notNull)
 		}
 	}
-	if n := countMigrations(t, path); n != 6 {
-		t.Errorf("schema_migrations has %d rows, want 6", n)
+	if n := countMigrations(t, path); n != len(allMigrations) {
+		t.Errorf("schema_migrations has %d rows, want %d", n, len(allMigrations))
 	}
 }
 
@@ -271,8 +271,8 @@ func TestMigrationOnPlan2Database(t *testing.T) {
 
 	s := open(t, path)
 	if names := migrationNames(t, db); !reflect.DeepEqual(names,
-		[]string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql"}) {
-		t.Errorf("migrations = %v, want 0001 to 0005 (both 0005 files)", names)
+		allMigrations) {
+		t.Errorf("migrations = %v, want every migration file (both 0005 files)", names)
 	}
 	sess := get(t, s, "old")
 	want := model.Session{
@@ -421,7 +421,7 @@ func TestTaskRoundTrip(t *testing.T) {
 		BaseBranch: "plan-3", Status: model.TaskReady, Source: model.SourceBacklogMD,
 		SourceRef: "backlog/tasks/task-8.md", Tags: []string{"store", "plan-3"},
 		Branch: "curia/T-1-store-tasks", Worktree: "/src/curia/.worktrees/T-1", AgentModel: "opus",
-		Pane: "%12", ResumeSession: "1a2b3c4d", Team: true,
+		Pane: "%12", ResumeSession: "1a2b3c4d", Team: true, Priority: model.PriorityNormal, Agent: model.AgentClaude,
 		CreatedAt:  time.Date(2026, 11, 13, 4, 0, 0, 1, est),
 		UpdatedAt:  time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), // replaced by CreatedAt
 		LaunchedAt: time.Date(2026, 11, 13, 9, 1, 0, 999_999_999, time.UTC),
@@ -439,6 +439,7 @@ func TestTaskRoundTrip(t *testing.T) {
 		Title: "Store: tasks, renamed", Body: "", Repo: "/src/other", BaseBranch: "main",
 		Status: model.TaskDropped, Source: model.SourceLocal, SourceRef: "", Tags: []string{"x"},
 		Branch: "b", Worktree: "", AgentModel: "", Pane: "%1", ResumeSession: "", Team: false,
+		Priority: model.PriorityNormal, Agent: model.AgentClaude,
 		UpdatedAt: time.Date(2026, 11, 14, 1, 2, 3, 4, est),
 		PausedAt:  time.Date(2026, 11, 14, 1, 2, 3, 5, time.UTC),
 	}
@@ -834,5 +835,172 @@ func TestListTasksFilters(t *testing.T) {
 		if !reflect.DeepEqual(taskIDs(got), c.want) {
 			t.Errorf("ListTasks(%+v) = %v, want %v", c.f, taskIDs(got), c.want)
 		}
+	}
+}
+
+func TestTaskPriorityAndAgentRoundTrip(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	in := newTask("Urgent")
+	in.Priority, in.Agent = model.PriorityHigh+2, model.AgentCodex
+	hi := createTask(t, s, in)
+	lo := createTask(t, s, newTask("Defaults"))
+	if hi.Priority != 3 || hi.Agent != "codex" {
+		t.Errorf("created = priority %d agent %q, want 3 codex", hi.Priority, hi.Agent)
+	}
+	if lo.Priority != 2 || lo.Agent != "claude" {
+		t.Errorf("zero values stored as priority %d agent %q, want 2 claude", lo.Priority, lo.Agent)
+	}
+	assertTask(t, getTask(t, s, hi.ID), hi)
+	all, err := s.ListTasks(ctx, store.TaskFilter{})
+	if err != nil || len(all) != 2 {
+		t.Fatalf("ListTasks = %d, %v", len(all), err)
+	}
+	if all[0].Priority != 3 || all[0].Agent != "codex" || all[1].Priority != 2 || all[1].Agent != "claude" {
+		t.Errorf("ListTasks = %d/%s and %d/%s", all[0].Priority, all[0].Agent, all[1].Priority, all[1].Agent)
+	}
+	imp := newTask("From outside")
+	imp.Source, imp.SourceRef, imp.Priority = model.SourceLinear, "ENG-1", 1
+	got, created, err := s.ImportTask(ctx, imp)
+	if err != nil || !created || got.Priority != 1 || got.Agent != "claude" {
+		t.Errorf("ImportTask creating = priority %d agent %q created %v, %v; want 1 claude true", got.Priority, got.Agent, created, err)
+	}
+}
+
+func TestUpdateTaskWritesPriorityAndAgent(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	created := createTask(t, s, newTask("Changes"))
+	got, err := s.UpdateTask(ctx, created.ID, func(cur model.Task) (model.Task, error) {
+		if cur.Priority != 2 || cur.Agent != "claude" {
+			t.Errorf("loaded priority %d agent %q, want 2 claude", cur.Priority, cur.Agent)
+		}
+		cur.Priority, cur.Agent = 1, model.AgentCodex
+		return cur, nil
+	})
+	if err != nil || got.Priority != 1 || got.Agent != "codex" {
+		t.Fatalf("UpdateTask = priority %d agent %q, %v; want 1 codex", got.Priority, got.Agent, err)
+	}
+	assertTask(t, getTask(t, s, created.ID), got)
+	// A function that returns a task with the zero values keeps what is stored.
+	got, err = s.UpdateTask(ctx, created.ID, func(cur model.Task) (model.Task, error) {
+		cur.Priority, cur.Agent = 0, ""
+		return cur, nil
+	})
+	if err != nil || got.Priority != 1 || got.Agent != "codex" {
+		t.Errorf("UpdateTask zero values = priority %d agent %q, %v; want 1 codex", got.Priority, got.Agent, err)
+	}
+}
+
+func TestImportKeepsMyPriority(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	imp := newTask("First title")
+	imp.Source, imp.SourceRef, imp.Priority, imp.Body, imp.Tags = model.SourceLinear, "ENG-7", 1, "first", []string{"a"}
+	first, created, err := s.ImportTask(ctx, imp)
+	if err != nil || !created || first.Priority != 1 {
+		t.Fatalf("first import = priority %d created %v, %v", first.Priority, created, err)
+	}
+	if _, err = s.UpdateTask(ctx, first.ID, func(cur model.Task) (model.Task, error) {
+		cur.Priority, cur.Status, cur.Agent = 3, model.TaskReady, model.AgentCodex
+		return cur, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	imp.Title, imp.Body, imp.Tags = "Second title", "second", []string{"b"}
+	imp.Status, imp.Agent = model.TaskDropped, model.AgentClaude // what the outside tracker would say
+	got, created, err := s.ImportTask(ctx, imp)
+	if err != nil || created {
+		t.Fatalf("re-import = created %v, %v", created, err)
+	}
+	if got.Priority != 3 || got.Status != model.TaskReady || got.Agent != "codex" {
+		t.Errorf("after re-import priority %d status %s agent %q, want 3 ready codex", got.Priority, got.Status, got.Agent)
+	}
+	if got.Title != "Second title" || got.Body != "second" || !slices.Equal(got.Tags, []string{"b"}) {
+		t.Errorf("re-import did not update title, body and tags: %+v", got)
+	}
+}
+
+func TestOldTaskUpdateKeepsPriority(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	in := newTask("Older binary")
+	in.Priority, in.Agent = 3, model.AgentCodex
+	created := createTask(t, s, in)
+	// The UPDATE of Plan 3's UpdateTask: only the columns of migrations 0004 and 0005.
+	rawExec(t, path, `
+UPDATE tasks SET title = 'Renamed', body = ?, repo = repo, base_branch = base_branch, status = 'ready',
+  source = source, source_ref = source_ref, tags = tags, branch = branch, worktree = worktree, team = team,
+  agent_model = agent_model, pane = pane, resume_session = resume_session, updated_at = updated_at,
+  launched_at = launched_at, paused_at = paused_at, cleaned_at = cleaned_at
+WHERE n = ?`, "new body", created.N)
+	got := getTask(t, s, created.ID)
+	if got.Title != "Renamed" || got.Status != model.TaskReady {
+		t.Errorf("old update did not apply: %+v", got)
+	}
+	if got.Priority != 3 || got.Agent != "codex" {
+		t.Errorf("after the old update priority %d agent %q, want 3 codex", got.Priority, got.Agent)
+	}
+}
+
+func TestStoreRejectsBadPriorityAndAgent(t *testing.T) {
+	path := dbPath(t)
+	s := open(t, path)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		edit func(*model.Task)
+	}{
+		{"priority 4", func(x *model.Task) { x.Priority = 4 }},
+		{"priority -1", func(x *model.Task) { x.Priority = -1 }},
+		{"agent gemini", func(x *model.Task) { x.Agent = "gemini" }},
+	} {
+		bad := newTask("Bad")
+		tc.edit(&bad)
+		if got, err := s.CreateTask(ctx, bad); err == nil {
+			t.Errorf("CreateTask(%s) = %s, want an error", tc.name, got.ID)
+		}
+		imp := bad
+		imp.Source, imp.SourceRef = model.SourceLinear, "ENG-9"
+		if got, _, err := s.ImportTask(ctx, imp); err == nil {
+			t.Errorf("ImportTask(%s) = %s, want an error", tc.name, got.ID)
+		}
+	}
+	if n := countTasks(t, path); n != 0 {
+		t.Errorf("tasks = %d, want 0", n)
+	}
+	good := createTask(t, s, newTask("Good"))
+	for _, tc := range []struct {
+		name string
+		edit func(*model.Task)
+	}{
+		{"priority 4", func(x *model.Task) { x.Priority = 4 }},
+		{"agent gemini", func(x *model.Task) { x.Agent = "gemini" }},
+	} {
+		if _, err := s.UpdateTask(ctx, good.ID, func(cur model.Task) (model.Task, error) {
+			cur.Title = "Changed"
+			tc.edit(&cur)
+			return cur, nil
+		}); err == nil {
+			t.Errorf("UpdateTask(%s): nil error", tc.name)
+		}
+	}
+	assertTask(t, getTask(t, s, good.ID), good)
+}
+
+func TestTaskPaneSocketIsStored(t *testing.T) {
+	s := open(t, dbPath(t))
+	created := createTask(t, s, newTask("Socket"))
+	if created.PaneSocket != "" {
+		t.Fatalf("new task pane_socket = %q, want unknown", created.PaneSocket)
+	}
+	if _, err := s.UpdateTask(context.Background(), created.ID, func(tk model.Task) (model.Task, error) {
+		tk.Pane, tk.PaneSocket = "%100", "/tmp/tmux-501/first"
+		return tk, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := getTask(t, s, created.ID); got.PaneSocket != "/tmp/tmux-501/first" {
+		t.Errorf("pane_socket = %q, want the stored socket", got.PaneSocket)
 	}
 }

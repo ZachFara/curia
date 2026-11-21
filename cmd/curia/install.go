@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -20,6 +21,9 @@ import (
 // installNoAllowMCPTools is curia install's --no-allow-mcp-tools flag.
 var installNoAllowMCPTools bool
 
+// installNoStatusLine is curia install's --no-statusline flag.
+var installNoStatusLine bool
+
 // claudeRunner runs the claude CLI for curia install and uninstall; tests
 // replace it, and no test runs the real claude.
 var claudeRunner install.Runner = installRunClaude
@@ -30,7 +34,29 @@ const (
 	// installClaudeWaitDelay bounds the wait for claude's output after the
 	// timeout kills it, should a child it started keep the pipe open.
 	installClaudeWaitDelay = 3 * time.Second
+	// installTmuxTimeout bounds one tmux command of install or uninstall.
+	installTmuxTimeout = 5 * time.Second
 )
+
+// installRunTmux runs plain tmux with args, so it reaches the server that
+// `tmux source-file ~/.tmux.conf` (install's next step) reaches: the one
+// named by TMUX, else the default one. Its error carries tmux's message;
+// tmux missing from PATH is an error like any other.
+func installRunTmux(ctx context.Context, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, installTmuxTimeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, "tmux", args...)
+	var stdout, stderr bytes.Buffer
+	c.Stdout, c.Stderr = &stdout, &stderr
+	c.WaitDelay = installClaudeWaitDelay
+	if err := c.Run(); err != nil {
+		if msg := bytes.TrimSpace(stderr.Bytes()); len(msg) > 0 {
+			return "", errors.New(string(msg))
+		}
+		return "", err
+	}
+	return stdout.String(), nil
+}
 
 // installRunClaude runs claude from PATH with args and returns its combined
 // output.
@@ -172,7 +198,10 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	if err = installTools(out, p.settings); err != nil {
 		return err
 	}
-	if err = installTmux(out, p, bin); err != nil {
+	if err = installStatusLine(out, p.settings, bin); err != nil {
+		return err
+	}
+	if err = installTmux(cmd.Context(), out, p, bin); err != nil {
 		return err
 	}
 	if err = installSkill(out, p.skills); err != nil {
@@ -184,7 +213,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	_, err = fmt.Fprintln(out, "Curia is installed.\n"+
 		"Next steps:\n"+
 		"  1. Restart any running Claude Code sessions so they pick up the hooks, skill and MCP server.\n"+
-		"  2. Run: tmux source-file ~/.tmux.conf")
+		"  2. Run: tmux source-file ~/.tmux.conf\n"+
+		"     (install writes the tmux config but does not load it into a running tmux: until you run this or restart tmux,\n"+
+		"     the key bindings, the badge and focus-events are not active.)")
 	return err
 }
 
@@ -198,8 +229,9 @@ func tmuxKeys() (install.TmuxKeys, error) {
 }
 
 // installTmux writes the snippet and says, per key, whether the snippet binds
-// it or leaves it to the user, and that the curia block must stay last.
-func installTmux(out io.Writer, p installPaths, bin string) error {
+// it or leaves it to the user, and that the curia block must stay last; then
+// it points what an earlier install left in the running server at bin.
+func installTmux(ctx context.Context, out io.Writer, p installPaths, bin string) error {
 	keys, err := tmuxKeys()
 	if err != nil {
 		return err
@@ -232,6 +264,9 @@ func installTmux(out io.Writer, p installPaths, bin string) error {
 		installSay(out, "  The previous snippet replaced your window formats with plain ones; a running tmux keeps them "+
 			"until it restarts or your theme sets them again.")
 	}
+	for _, line := range install.RefreshTmux(ctx, installRunTmux, p.tmuxConf, bin, keys) {
+		installSay(out, "%s", line)
+	}
 	return nil
 }
 
@@ -256,6 +291,33 @@ func installTools(out io.Writer, settings string) error {
 	}
 	installSay(out, "MCP tools: the six curia tools are allowed without a prompt in %s; "+
 		"to skip this step, run curia install --no-allow-mcp-tools", settings)
+	return nil
+}
+
+// installStatusLine registers Curia's status-line command unless
+// --no-statusline was given, and says what it found; a status line of the
+// user's own is left as it is, with the command that would feed Curia from it.
+func installStatusLine(out io.Writer, settings, bin string) error {
+	if installNoStatusLine {
+		installSay(out, "status line: not registered (--no-statusline); cost and usage numbers are missing without it; "+
+			"to register it, run curia install without --no-statusline")
+		return nil
+	}
+	state, err := install.StatusLine(settings, bin, time.Now())
+	if err != nil {
+		return err
+	}
+	switch state {
+	case install.StatusLineAdded:
+		installSay(out, "status line: registered curia statusline (cost and usage for the badge; skip with --no-statusline)")
+	case install.StatusLineOurs:
+		installSay(out, "status line: already registered")
+	case install.StatusLineUpdated:
+		installSay(out, "status line: re-registered curia statusline with %s (the entry named another path for this binary)", bin)
+	case install.StatusLineForeign:
+		installSay(out, "status line: you have your own, left as it is; to feed Curia from it, make its command: %s "+
+			"(until then, cost and usage numbers are missing)", install.StatusLineChain(bin))
+	}
 	return nil
 }
 
@@ -306,11 +368,21 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	if err = install.Unhooks(p.settings, bin); err != nil {
 		return err
 	}
+	removed, err := install.RemoveStatusLine(p.settings, bin)
+	if err != nil {
+		return err
+	}
+	if removed {
+		installSay(cmd.OutOrStdout(), "status line: removed")
+	}
 	if err = install.RemoveTmux(p.tmuxConf); err != nil {
 		return err
 	}
 	if err = os.Remove(p.snippet); err != nil && !os.IsNotExist(err) {
 		return err
+	}
+	for _, line := range install.UnloadTmux(cmd.Context(), installRunTmux, p.tmuxConf, bin, uninstallKeys(), uninstallDefaultKeys()) {
+		installSay(cmd.OutOrStdout(), "%s", line)
 	}
 	if err = uninstallSkill(cmd.OutOrStdout(), p.skills); err != nil {
 		return err
@@ -318,46 +390,25 @@ func runUninstall(cmd *cobra.Command, _ []string) error {
 	if err = uninstallMCP(cmd.Context(), cmd.OutOrStdout(), p.claudeConfig, bin); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(cmd.OutOrStdout(), "Curia is uninstalled.\n"+
-		"Restart running Claude Code sessions.\n"+uninstallTmuxHint())
+	_, err = fmt.Fprintln(cmd.OutOrStdout(), "Curia is uninstalled.\nRestart running Claude Code sessions.")
 	return err
 }
 
-// uninstallTmuxHint says how to undo the snippet in a running server, since
-// re-sourcing ~/.tmux.conf unsets nothing: unset the hook, unset the option
-// the window formats refer to (the marker fragment left in them then shows
-// nothing) and unbind each of Curia's keys that is still Curia's. Keys come
-// from the configuration, or its defaults when it does not load.
-func uninstallTmuxHint() string {
+// uninstallDefaultKeys are the keys of Curia's default configuration, which
+// an earlier install may have bound.
+func uninstallDefaultKeys() install.TmuxKeys {
+	d := config.Default()
+	return install.TmuxKeys{Dashboard: d.KeyDashboard, Decisions: d.KeyDecisions, Next: d.KeyNext, Message: d.KeyMessage}
+}
+
+// uninstallKeys are the configured keys, or the defaults when the
+// configuration does not load.
+func uninstallKeys() install.TmuxKeys {
 	keys, err := tmuxKeys()
 	if err != nil {
-		d := config.Default()
-		keys = install.TmuxKeys{Dashboard: d.KeyDashboard, Decisions: d.KeyDecisions, Next: d.KeyNext, Message: d.KeyMessage}
+		return uninstallDefaultKeys()
 	}
-	var names []string
-	for _, k := range []string{keys.Dashboard, keys.Decisions, keys.Next} {
-		if install.ValidKey(k) {
-			names = append(names, k)
-		}
-	}
-	// Unlike the others, tmux binds the message key by default (marking a
-	// pane): while it is still Curia's, uninstall gives that binding back.
-	restore := keys.Message == install.MessageDefaultKey
-	if !restore && install.ValidKey(keys.Message) {
-		names = append(names, keys.Message)
-	}
-	hint := "Restart tmux to drop Curia's key bindings, hook and window marker, or run:\n" +
-		"  tmux set-hook -gu pane-focus-in; tmux set -gu @curia_marker_format"
-	if len(names) > 0 {
-		hint += "\n  for k in " + strings.Join(names, " ") + "; do " +
-			`tmux list-keys -T prefix "$k" 2>/dev/null | grep -q curia && tmux unbind "$k"; done`
-	}
-	if restore {
-		hint += "\n  tmux list-keys -T prefix " + keys.Message + " 2>/dev/null | grep -q curia && tmux bind " +
-			keys.Message + " " + install.MessageDefaultCommand +
-			"\n  (the last line gives prefix " + keys.Message + " back to tmux's own binding, which marks a pane)"
-	}
-	return hint
+	return keys
 }
 
 // uninstallSkill removes the skill if it is ours and says what it found; a
@@ -411,6 +462,8 @@ func init() {
 	}
 	installCmd.Flags().BoolVar(&installNoAllowMCPTools, "no-allow-mcp-tools", false,
 		"do not add the six curia MCP tools to Claude's permissions.allow (they are allowed by default)")
+	installCmd.Flags().BoolVar(&installNoStatusLine, "no-statusline", false,
+		"do not register curia statusline as Claude Code's status line (it is registered by default when you have none)")
 	rootCmd.AddCommand(
 		installCmd,
 		&cobra.Command{
