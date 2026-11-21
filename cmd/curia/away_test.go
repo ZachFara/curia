@@ -349,3 +349,17 @@ func TestSessionResumedDuringAwayIsAwayAndRestoredAtBack(t *testing.T) {
 	modeIs(t, st, "r2", "")
 	modeIs(t, st, "r3", "")
 }
+
+// A session with no worktree and no repository gets no root, so no path allow: the list names it.
+func TestAwayListsSessionsWithNoRoot(t *testing.T) {
+	bare := awaySess("bare9abcdef", "idle", "")
+	bare.Repo = ""
+	st, _ := awayEnv(t, awaySess("ok1", "idle", ""), bare)
+	out, err := runRoot(t, "away", "2h")
+	if err != nil || !strings.Contains(out, "No folder to allow edits in: bare9abc") || strings.Contains(out, "bare9abc, ok1") {
+		t.Fatalf("away: %q, %v", out, err)
+	}
+	if s, _, _ := st.GetSession(context.Background(), "bare9abcdef"); s.Mode != "away" || s.ModeRoot != "" {
+		t.Errorf("bare session mode %q root %q, want away and no root", s.Mode, s.ModeRoot)
+	}
+}
