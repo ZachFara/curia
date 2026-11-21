@@ -49,6 +49,9 @@ type Task struct {
 	FiledBy, FiledReason, FiledLineage string
 	// BudgetUSD is the task's own budget in dollars; 0 means none (the config default applies).
 	BudgetUSD float64
+	// ReadyHash is F29's hash of title and body when the user marked the task ready ("" when none); AutoSpawnedAt is when the monitor started it.
+	ReadyHash     string
+	AutoSpawnedAt time.Time
 }
 
 // MaxBudgetUSD bounds a task budget and cost.task_budget_default, in dollars.

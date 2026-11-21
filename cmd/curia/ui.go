@@ -360,6 +360,9 @@ func (b boardSource) SetStatus(ctx context.Context, id string, to model.TaskStat
 		cur.Status, cur.UpdatedAt = to, clock()
 		return cur, nil
 	})
+	if err == nil && to == model.TaskReady {
+		err = b.st.MarkReady(ctx, id) // the user's own key: F29's ready_hash
+	}
 	if errors.Is(err, store.ErrNoTask) {
 		return fmt.Errorf("%s: no such task", sanitize.Line(id, 40))
 	}
