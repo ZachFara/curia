@@ -1077,13 +1077,18 @@ var userOnlyCommands = map[string][]string{
 	"curia uninstall":       {},
 	"curia review":          {"R-1", "--drop"},
 	"curia restore":         {"--dry-run"},
+	"curia rc":              {"--all"},
 	"curia serve":           {},
 	"curia serve token":     {"phone"},
 	"curia serve revoke":    {"phone"},
 	"curia serve devices":   {},
 	"curia export obsidian": {},
 	"curia export commons":  {"D-1"},
-	"curia monitor stop":    {}, // ends a process the user runs
+	"curia monitor stop":    {},                             // ends a process the user runs
+	"curia schedule":        {"go", "--at", "+1h", "--all"}, // types into agents later: only the user schedules
+	"curia schedule cancel": {"S-1"},
+	"curia schedule pause":  {"S-1"},
+	"curia schedule resume": {"S-1"},
 }
 
 // userNotOnlyCommands are the leaf commands anyone, an agent included, may
@@ -1121,6 +1126,8 @@ var userNotOnlyCommands = map[string]string{
 	"curia monitor start":         "run by tmux's run-shell with no terminal; starts the one instance the lock allows, and nothing depends on the monitor",
 	"curia resources":             "reads the monitor's samples and prints numbers by session id; changes nothing",
 	"curia monitor status":        "reads whether the lock is held; changes nothing",
+	"curia schedule ls":           "reads the schedules only and prints cleaned, bounded text; changes nothing",
+	"curia schedule show":         "reads one schedule and its runs and prints cleaned, bounded text; changes nothing",
 	"curia time":                  "reads the stored hook events and prints numbers; writes nothing and calls no model",
 	"curia usage":                 "reads the samples and tasks and prints numbers; it pauses nothing, and the pause it suggests is typed by the user",
 	"curia version":               "prints the version",

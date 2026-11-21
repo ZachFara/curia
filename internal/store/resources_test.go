@@ -52,11 +52,10 @@ func TestPruneResources(t *testing.T) {
 	if n := resourceRows(t, path); n != 1 {
 		t.Errorf("rows = %d, want the fresh one", n)
 	}
-	var batch []store.ResourceSample
-	for range store.ResourceMaxRows + 30 {
-		batch = append(batch, store.ResourceSample{SessionID: "b", At: now})
-	}
-	if err := s.AddResourceSamples(ctx, batch); err != nil {
+	// One bulk statement: 100 000 single-row inserts take ~20 s under -race.
+	if _, err := rawDB(t, path).Exec(`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < ?)
+INSERT INTO resource_samples (at, session_id, cpu_pct, rss_mb) SELECT ?, 'b', 0, 0 FROM c`,
+		store.ResourceMaxRows+30, now.UTC().Format("2006-01-02T15:04:05.000000000Z")); err != nil {
 		t.Fatal(err)
 	}
 	for range 3 {
@@ -76,4 +75,42 @@ func resourceRows(t *testing.T, path string) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+func TestContainersReplacedWholeAndVMKept(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	at := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	if err := s.ReplaceContainers(ctx, []store.ContainerRow{
+		{ID: "aaaaaaaaaaaa", SessionID: "S1", Name: "web", By: "label", CPU: 1.5, MemMB: 100},
+		{ID: "bbbbbbbbbbbb", Name: "db", By: "none", MemMB: 5},
+	}, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceContainers(ctx, []store.ContainerRow{{ID: "cccccccccccc", SessionID: "S1", Name: "x", By: "compose"}}, at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, seen, err := s.LatestContainers(ctx)
+	if err != nil || len(got) != 1 || got[0].ID != "cccccccccccc" || got[0].SessionID != "S1" || !seen.Equal(at.Add(time.Minute)) {
+		t.Errorf("containers = %+v %v %v, want only the second set", got, seen, err)
+	}
+}
+
+func TestDockerVMKeptOffTheSessionSamples(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	at := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	if _, ok, _ := s.LatestDockerVM(ctx); ok {
+		t.Error("a VM reading before any was stored")
+	}
+	if err := s.AddDockerVM(ctx, at, 300, 8000); err != nil {
+		t.Fatal(err)
+	}
+	vm, ok, err := s.LatestDockerVM(ctx)
+	if err != nil || !ok || vm.UsedMB != 300 || vm.LimitMB != 8000 || !vm.At.Equal(at) {
+		t.Errorf("vm = %+v %v %v", vm, ok, err)
+	}
+	if latest, _ := s.LatestResources(ctx); len(latest) != 0 {
+		t.Errorf("the VM row leaked into the per-session samples: %+v", latest)
+	}
 }

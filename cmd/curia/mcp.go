@@ -15,7 +15,6 @@ import (
 
 	"github.com/ZachFara/curia/internal/attention"
 	"github.com/ZachFara/curia/internal/config"
-	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/mcp"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/notify"
@@ -207,11 +206,11 @@ func mcpPaneSession(ctx context.Context, st *store.Store, pane string, logger *s
 	}
 	var best model.Session
 	found := false
-	socket := seenSocket(os.Getenv("TMUX")) // "" outside tmux: no server to tell apart
+	socket := seenSocket(os.Getenv("TMUX")) // "" when TMUX is unset: matches only a session with no recorded server
 	// live is in id order and only a strictly later UpdatedAt replaces
 	// best, so a tie resolves to the lowest id.
 	for _, s := range live {
-		if s.Pane == pane && !fleet.OtherSocket(socket, s) && (!found || s.UpdatedAt.After(best.UpdatedAt)) {
+		if s.Pane == pane && (s.Socket == "" || s.Socket == socket) && (!found || s.UpdatedAt.After(best.UpdatedAt)) {
 			best, found = s, true
 		}
 	}

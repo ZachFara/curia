@@ -7,7 +7,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main, plan-1, plan-2, plan-3, plan-4, plan-5]
+    branches: [main, "plan-*"]
 
 permissions:
   contents: read
@@ -17,6 +17,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # First job: decides docs_only from the pull request's changed files
+  # (scripts/ci-docs-only.sh) and publishes the shard matrices from the
+  # Makefile's counts. Not a workflow-level paths filter: that would leave the
+  # required `check` pending on a docs-only pull request. A push, or a diff
+  # that cannot be computed, is NOT docs-only.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.docs.outputs.docs_only }}
+      latency: ${{ steps.shards.outputs.latency }}
+      cmd: ${{ steps.shards.outputs.cmd }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: shards
+        run: make -s shard-matrices >> "$GITHUB_OUTPUT"
+      - id: docs
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          docs_only=false
+          if [ "$EVENT" = pull_request ] && files=$(git diff --name-only --no-renames "$BASE_SHA" HEAD); then
+            docs_only=$(printf '%s\n' "$files" | scripts/ci-docs-only.sh)
+          fi
+          echo "docs_only=$docs_only" | tee -a "$GITHUB_OUTPUT"
+
   static:
     runs-on: ubuntu-latest
     steps:
@@ -36,17 +64,30 @@ jobs:
 
       - run: make check-static check-shards
 
+      # Report only: sizes and duplication go in the job summary and never fail the job.
+      - name: size report
+        continue-on-error: true
+        run: |
+          {
+            echo '```text'
+            make -s size-report
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Step 1 of the tests, in jobs: cmd/curia (the slowest package) sharded by
-  # test name, every other package (computed, so a new package is never
-  # forgotten). Shard counts live in the Makefile; `make check-shards` fails
-  # if a matrix below does not list 0..N-1 or a shard set is not a partition.
-  # tmux is installed so the real-tmux tests run instead of skipping.
+  # test name, internal/store alone, every other package (computed, so a new
+  # package is never forgotten). Shard counts live in the Makefile only;
+  # `make check-shards` fails if a shard set is not a partition or the unit
+  # jobs miss a package. tmux is installed so the real-tmux tests run instead
+  # of skipping. The test jobs are skipped on a docs-only pull request.
   unit-cmd:
+    needs: plan
+    if: needs.plan.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3] # cmd-shards
+        shard: ${{ fromJSON(needs.plan.outputs.cmd) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -56,7 +97,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
       - run: make test-unit-cmd SHARD=${{ matrix.shard }}
 
-  unit-rest:
+  unit-store:
+    needs: plan
+    if: needs.plan.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,16 +108,31 @@ jobs:
           go-version-file: go.mod
       - name: install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
-      - run: make test-unit UNIT_PKGS="$(go list ./... | grep -v '/cmd/curia$' | tr '\n' ' ')"
+      - run: make test-unit-store
 
-  # Step 2: the latency gates, one shard of packages per runner, each package
-  # run alone with -p 1 (D-1).
+  unit-rest:
+    needs: plan
+    if: needs.plan.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: make test-unit-rest
+
+  # Step 2: the latency gates, one shard of gates per runner (count in the
+  # Makefile), each package run alone with -p 1 (D-1).
   latency:
+    needs: plan
+    if: needs.plan.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2] # latency-shards
+        shard: ${{ fromJSON(needs.plan.outputs.latency) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -82,14 +140,32 @@ jobs:
           go-version-file: go.mod
       - name: install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
-      - run: make test-latency SHARD=${{ matrix.shard }}
+      # D-15: a failed first attempt is rerun once on a fresh runner by ci-rerun.yml.
+      - if: github.run_attempt > 1
+        run: echo "::warning::latency shard ${{ matrix.shard }} is an automatic rerun (attempt ${{ github.run_attempt }}) after a failed first attempt (ci-rerun.yml, D-15)"
+      # "Could not measure" (machine too slow for a gate; the verdict's last line) also fails the job, so
+      # nothing unmeasured merges as a pass; it is rerun once like a failure and says what it is.
+      - env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set +e
+          make test-latency SHARD="$SHARD" 2>&1 | tee latency.out
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ] && grep -q '^LATENCY-COULD-NOT-MEASURE' latency.out; then
+            echo "::error::latency shard $SHARD was never measured: the runner was too slow for a gate. Rerun the job; this is not a code failure."
+            printf '### Latency shard %s: could not measure\nNo gate failed, but the machine was too slow to measure one. Needs a manual rerun, not a code fix.\n' "$SHARD" >>"$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
 
   # The required status check. Passes only if every job above succeeded:
   # failed, cancelled and skipped all fail it (if: always() so it still runs).
+  # One exception: when plan says docs_only, the four test jobs must all be
+  # skipped (and nothing else is), while plan and static must still succeed.
   check:
     name: check
     if: always()
-    needs: [static, unit-cmd, unit-rest, latency]
+    needs: [plan, static, unit-cmd, unit-store, unit-rest, latency]
     runs-on: ubuntu-latest
     steps:
       # A matrix job's result is success only if every shard succeeded.
@@ -97,4 +173,10 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           echo "$NEEDS"
-          test "$(echo "$NEEDS" | jq -r '[.[].result] | unique | join(",")')" = success
+          results() { echo "$NEEDS" | jq -r "[$1 | .result] | unique | join(\",\")"; }
+          if [ "$(echo "$NEEDS" | jq -r .plan.outputs.docs_only)" = true ]; then
+            test "$(results '.plan, .static')" = success
+            test "$(results '.["unit-cmd"], .["unit-store"], .["unit-rest"], .latency')" = skipped
+          else
+            test "$(results '.[]')" = success
+          fi

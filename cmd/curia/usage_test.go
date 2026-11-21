@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
+	"github.com/ZachFara/curia/internal/tmux"
 )
 
 // usageSeries stores five_hour samples (the spec example when pcts is
@@ -70,6 +72,11 @@ func usageCost(t *testing.T, db, id string, cost1 float64) {
 // session sid (tmux window win) to it, so the task derives as running.
 func usageTask(t *testing.T, db, repo string, priority int, sid, win string) string {
 	t.Helper()
+	return usageTaskState(t, db, repo, priority, sid, win, model.StateIdle)
+}
+
+func usageTaskState(t *testing.T, db, repo string, priority int, sid, win string, state model.State) string {
+	t.Helper()
 	st, err := store.Open(db)
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +89,7 @@ func usageTask(t *testing.T, db, repo string, priority int, sid, win string) str
 		t.Fatal(err)
 	}
 	seedSessions(t, db, model.Session{
-		ID: sid, Agent: "claude", State: model.StateWorking, Pane: "%1", TmuxWindow: win, TaskID: tk.ID,
+		ID: sid, Agent: "claude", State: state, Pane: "%1", TmuxWindow: win, TaskID: tk.ID,
 		Repo: repo, UpdatedAt: fleetNow.Add(-time.Minute),
 	})
 	return tk.ID
@@ -341,5 +348,53 @@ func TestUsageJSONEscapesUnprintable(t *testing.T) {
 	}
 	if out := buf.String(); strings.ContainsAny(out, "\x1b\u202e\u009b") || !strings.Contains(out, `"burn":[{`) {
 		t.Errorf("usage --json = %q, want no raw control or bidi characters", out)
+	}
+}
+
+// The suggestion names a task pause can act on now (not mid-turn) among the
+// lowest-priority candidates; when none can be paused yet it still names the
+// one it would suggest, marked busy, and P and the pause command are not
+// offered. A stale id is still refused as before.
+func TestUsagePauseSuggestionNeedsIdleAgent(t *testing.T) {
+	db := usageWarningHome(t)
+	usageTaskState(t, db, "/src/web", 3, "sa", "w1", model.StateIdle)
+	usageTaskState(t, db, "/src/api", 3, "sb", "w2", model.StateWorking)
+	usageCost(t, db, "sa", 10.3)
+	usageCost(t, db, "sb", 11.5) // the higher burn, but mid-turn
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	rep, err := usageBuild(ctx, st, clock())
+	if err != nil || rep.PauseTask != "T-1" || rep.PauseBusy {
+		t.Fatalf("suggestion = %q busy %v, %v; want the idle T-1", rep.PauseTask, rep.PauseBusy, err)
+	}
+	src := storeSource{st: st, tm: &tmux.Fake{}, cfg: config.Default()}
+	if _, err = src.Pause(ctx, "T-2"); err == nil || !strings.Contains(err.Error(), "suggestion changed") {
+		t.Errorf("Pause of a task no longer suggested = %v, want the refusal", err)
+	}
+
+	db = usageWarningHome(t)
+	usageTaskState(t, db, "/src/web", 3, "sa", "w1", model.StateWorking)
+	usageTaskState(t, db, "/src/api", 3, "sb", "w2", model.StateWorking)
+	usageCost(t, db, "sa", 10.3)
+	usageCost(t, db, "sb", 11.5)
+	out, err := runRoot(t, "usage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "T-2 (P3) api") || !strings.Contains(out, "when its agent is idle") || strings.Contains(out, "curia pause") {
+		t.Errorf("usage with every candidate mid-turn:\n%s\nwant the would-be T-2, the idle wait and no pause command", out)
+	}
+	st2, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st2.Close() }()
+	b, err := storeSource{st: st2, tm: &tmux.Fake{}, cfg: config.Default()}.Budget(ctx)
+	if err != nil || b.PauseTask != "T-2" || !b.PauseBusy {
+		t.Errorf("Budget = %+v, %v; want T-2 marked busy", b, err)
 	}
 }

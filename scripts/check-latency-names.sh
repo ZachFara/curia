@@ -4,15 +4,15 @@
 # selects them by name ("Latency" in the name, or TestReplayFiveSessions).
 # A percentile assertion in a test with another name would run beside the
 # other packages and measure their load. This check finds test functions
-# whose body mentions p95 and whose name the selector would miss.
+# whose body mentions p95 or calls the shared gate (latency.Gate, latencyGate) and whose name the selector would miss.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 bad=0
 while IFS= read -r f; do
-	# Print "file:TestName" for each test function whose body mentions p95.
+	# Print "file:TestName" for each test function whose body mentions p95 or calls a gate helper.
 	awk -v file="$f" '
 		/^func Test[A-Za-z0-9_]*\(/ { name=$2; sub(/\(.*/, "", name); seen=0 }
-		/p95/ { if (name != "" && !seen) { print file ":" name; seen=1 } }
+		/p95|latency\.Gate\(|latencyGate\(/ { if (name != "" && !seen) { print file ":" name; seen=1 } }
 		/^}/ { name="" }
 	' "$f"
 done < <(git ls-files '*_test.go') | while IFS=: read -r file name; do

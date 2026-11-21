@@ -89,7 +89,7 @@ func homePaths() (installPaths, error) {
 	claudeDir := install.ClaudeDir(home, configDir)
 	return installPaths{
 		settings:     filepath.Join(claudeDir, "settings.json"),
-		snippet:      filepath.Join(home, ".config", "curia", "curia.tmux"),
+		snippet:      filepath.Join(config.XDGDir("XDG_CONFIG_HOME", home, ".config"), "curia.tmux"),
 		tmuxConf:     filepath.Join(home, ".tmux.conf"),
 		skills:       filepath.Join(claudeDir, "skills"),
 		claudeConfig: install.ClaudeConfigPath(home, configDir),
@@ -216,7 +216,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	_, err = fmt.Fprintln(out, "Curia is installed.\n"+
 		"Next steps:\n"+
 		"  1. Restart any running Claude Code sessions so they pick up the hooks, skill and MCP server.\n"+
-		"  2. Run: tmux source-file ~/.tmux.conf")
+		"  2. Run: tmux source-file ~/.tmux.conf\n"+
+		"     (install writes the tmux config but does not load it into a running tmux: until you run this or restart tmux,\n"+
+		"     the key bindings, the badge and focus-events are not active.)")
 	return err
 }
 

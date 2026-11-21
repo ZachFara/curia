@@ -1,0 +1,22 @@
+# Rough seconds per pass of each latency gate, for scripts/shard.sh pickw (greedy: heaviest
+# first, onto the lightest shard). Measured from the run of PR #198 (a pass of every gate is ~300 s).
+# Only the balance matters; a missing gate counts as 15 and `make check-shards` warns.
+TestStopLatencyWithMessages 65
+TestIngestLatency 35
+TestStatusLatencyCostOfTheExtraRead 20
+TestHookLatencySocketPane 19
+TestStatuslineProcessLatency 19
+TestStopLatencyWithDecisions 18
+TestStopHookLatencyWithTickets 18
+TestHookLatencyUnchanged 15
+TestHookLatency 15
+TestStopHookLatencyWithMessages 15
+TestReplayFiveSessions 14
+TestIngestProcessLatency 13
+TestHookLatencyUnchangedWithAgentFlag 12
+TestStopHookLatencyWithReviews 12
+TestLatencyVerdictScale 1
+TestLatencyVerdictBelowNominalKeepsTheAbsoluteThreshold 1
+TestLatencyVerdictInflatedReferenceTailStillCatchesAProductSleep 1
+TestLatencyVerdictOverTwiceNominalFailsEvenWhenFast 1
+TestLatencyVerdictProductOverThresholdTimesScaleFails 1
