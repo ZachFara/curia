@@ -21,6 +21,9 @@ import (
 func modeSession(t *testing.T, st *store.Store, env hook.Env, cfg config.Config, proj, mode string, until time.Time) {
 	t.Helper()
 	pre(t, st, env, cfg, preBody("Bash", `{"command":"ls"}`, proj, "")) // creates the row
+	if err := st.UpdateSession(context.Background(), "A", func(s model.Session, _ bool) model.Session { s.Worktree = proj; return s }); err != nil {
+		t.Fatal(err)
+	}
 	if mode == "" {
 		return
 	}
@@ -242,4 +245,118 @@ func TestPreToolUseWithModeLatency(t *testing.T) {
 		t.Logf("PreToolUse under away over %d runs: p50 %v, p95 %v", len(d), d[len(d)/2], d[len(d)*95/100])
 		return d[len(d)*95/100]
 	})
+}
+
+func notAllowed(t *testing.T, res hook.Result, what string) {
+	t.Helper()
+	if strings.Contains(string(res.Stdout), `"allow"`) {
+		t.Errorf("%s: allowed: %s", what, res.Stdout)
+	}
+}
+
+// Finding 1: no allowed edit inside a .git directory, a .git file's gitdir,
+// or another auto-executed config at the root.
+func TestModeNeverAllowsGitInternals(t *testing.T) {
+	_, proj, cfg := denyHome(t)
+	for _, d := range []string{".git/hooks", "sub/.git", ".claude", ".curia", "wt/gd"} {
+		if err := os.MkdirAll(filepath.Join(proj, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A worktree-style pointer file one level down, to a gitdir without ".git" in its name.
+	if err := os.MkdirAll(filepath.Join(proj, "wt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, "wt", ".git"), []byte("gitdir: "+filepath.Join(proj, "wt", "gd")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{
+		".git/config", ".git/hooks/pre-commit", "sub/.git/config", ".claude/settings.json", ".curia/setup.sh",
+		".gitattributes", ".gitmodules", "wt/.git", "wt/gd/config", ".GIT/config",
+	}
+	for _, mode := range []string{"edits", "away"} {
+		st := openStore(t)
+		env := (&fakeEnv{}).env("%3")
+		modeSession(t, st, env, cfg, proj, mode, time.Time{})
+		for _, p := range paths {
+			notAllowed(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(filepath.Join(proj, p))+`}`, proj, "")), mode+" "+p)
+		}
+	}
+}
+
+// Finding 2: an allow-list entry matches by whole words, and every other
+// argument is a plain word, inside the root when it looks like a path.
+func TestModeAwayCommandWords(t *testing.T) {
+	_, proj, cfg := denyHome(t)
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	modeSession(t, st, env, cfg, proj, "away", time.Time{})
+	ok := []string{"git status", "git diff", "git diff HEAD~1", "git log", "git add src/a.go", "git add .", "git diff main..feat"}
+	bad := []string{
+		"git diff --output=/tmp/x", "git diff --no-index /etc/a /etc/b", "git diff --ext-diff", "git log --exec-path", "git -c core.pager=x log",
+		"git diff /etc/passwd", "git add ../x", "git add *", "git add \"a b\"", "git statusx", "git commit -m x", "git diff ~/x", "git add $HOME", "git status --porcelain",
+	}
+	for _, c := range ok {
+		wantAllow(t, pre(t, st, env, cfg, preBody("Bash", `{"command":`+quote(c)+`}`, proj, "")), c)
+	}
+	for _, c := range bad {
+		wantDeny(t, pre(t, st, env, cfg, preBody("Bash", `{"command":`+quote(c)+`}`, proj, "")), c)
+	}
+}
+
+// Finding 3: Glob and Grep only with an explicit path inside the root and a
+// pattern that cannot leave it.
+func TestModeAwayGlobGrep(t *testing.T) {
+	_, proj, cfg := denyHome(t)
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	modeSession(t, st, env, cfg, proj, "away", time.Time{})
+	p := quote(proj)
+	for _, c := range [][2]string{{"Glob", `{"path":` + p + `,"pattern":"**/*.go"}`}, {"Grep", `{"path":` + p + `,"pattern":"x","glob":"*.go"}`}, {"Grep", `{"path":` + p + `,"pattern":"x"}`}} {
+		wantAllow(t, pre(t, st, env, cfg, preBody(c[0], c[1], proj, "")), c[0]+c[1])
+	}
+	for _, c := range [][2]string{
+		{"Glob", `{"pattern":"**/*.go"}`},
+		{"Glob", `{"path":` + p + `,"pattern":"/etc/*"}`},
+		{"Glob", `{"path":` + p + `,"pattern":"../*"}`},
+		{"Glob", `{"path":` + p + `,"pattern":"a/../../*"}`},
+		{"Glob", `{"path":` + p + `,"pattern":"~/x"}`},
+		{"Grep", `{"path":` + p + `,"pattern":"x","glob":"../**"}`},
+		{"Grep", `{"pattern":"x"}`},
+		{"Grep", `{"path":"/etc","pattern":"x"}`},
+	} {
+		wantDeny(t, pre(t, st, env, cfg, preBody(c[0], c[1], proj, "")), c[0]+c[1])
+	}
+}
+
+// Finding 4: the root comes from the stored session, never the event's cwd,
+// and never the home directory, a parent of it, or "/".
+func TestModeRootFromTheStoredSession(t *testing.T) {
+	home, proj, cfg := denyHome(t)
+	for _, mode := range []string{"edits", "away"} {
+		st := openStore(t)
+		env := (&fakeEnv{}).env("%3")
+		modeSession(t, st, env, cfg, proj, mode, time.Time{})
+		// An event whose cwd is elsewhere does not move the root.
+		other := filepath.Join(home, "other")
+		if err := os.MkdirAll(other, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		notAllowed(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":"x.go"}`, other, "")), mode+" event cwd outside the stored root")
+		for _, root := range []string{home, filepath.Dir(home), "/"} {
+			if err := st.UpdateSession(context.Background(), "A", func(s model.Session, _ bool) model.Session { s.Worktree = root; return s }); err != nil {
+				t.Fatal(err)
+			}
+			res := pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/a.go")+`}`, proj, ""))
+			notAllowed(t, res, mode+" root "+root)
+		}
+	}
+	// No worktree: the stored repo is the root, not the event's cwd.
+	st := openStore(t)
+	env := (&fakeEnv{}).env("%3")
+	pre(t, st, env, cfg, preBody("Bash", `{"command":"ls"}`, proj, ""))
+	if _, err := st.SetModes(context.Background(), store.ModeScope{All: true}, "edits", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	notAllowed(t, pre(t, st, env, cfg, preBody("Write", `{"file_path":`+quote(proj+"/a.go")+`}`, proj, "")), "repo /src/curia is not the cwd")
 }

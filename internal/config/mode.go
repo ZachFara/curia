@@ -11,7 +11,10 @@ import (
 // repository file cannot change any of these keys).
 type Mode struct {
 	Default string `toml:"default"`
-	// AwayAllow are globs a Bash command may match in away mode (spec F20).
+	// AwayAllow are command prefixes (words) a Bash command may start with in
+	// away mode: the rest must be plain, option-free arguments (spec F20, but
+	// not its globs: a glob let "git diff --output=..." through). Commands that
+	// run repository hooks (git commit) are the user's to add.
 	AwayAllow []string `toml:"away_allow"`
 	// BypassFor is the expiry bypass gets when --for is not given.
 	BypassFor time.Duration `toml:"bypass_for"`
@@ -20,7 +23,7 @@ type Mode struct {
 func defaultMode() Mode {
 	return Mode{
 		Default:   "normal",
-		AwayAllow: []string{"git status*", "git diff*", "git log*", "git add *", "git commit *"},
+		AwayAllow: []string{"git status", "git diff", "git log", "git add"},
 		BypassFor: 2 * time.Hour,
 	}
 }

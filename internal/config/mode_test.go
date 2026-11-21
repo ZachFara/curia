@@ -18,7 +18,7 @@ func modeWrite(t *testing.T, body string) string {
 func TestRepoCannotRaiseAMode(t *testing.T) {
 	o := layerRepo(t, "", "[mode]\ndefault = \"edits\"\naway_allow = [\"*\"]\nbypass_for = \"24h\"\n")
 	c, r, err := Resolve(o)
-	if err != nil || c.Mode.Default != "normal" || c.Mode.BypassFor != Default().Mode.BypassFor || len(c.Mode.AwayAllow) != 5 {
+	if err != nil || c.Mode.Default != "normal" || c.Mode.BypassFor != Default().Mode.BypassFor || len(c.Mode.AwayAllow) != 4 {
 		t.Errorf("repository changed the mode config: %v %+v", err, c.Mode)
 	}
 	for _, k := range []string{"mode.default", "mode.away_allow", "mode.bypass_for"} {
