@@ -213,3 +213,41 @@ func TestAutoRunsOnTimeline(t *testing.T) {
 		t.Errorf("no auto_spawn event in the timeline: %+v", evs)
 	}
 }
+
+// Review A-4: a task that left ready between claim and release gets no hash back.
+func TestAutoReleaseSkipsATaskThatLeftReady(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	tk := readyTask(t, s, "a")
+	if ok, _ := s.AutoClaim(ctx, tk.ID, tk.ReadyHash, autoT, autoLim); !ok {
+		t.Fatal("claim refused")
+	}
+	if _, err := s.UpdateTask(ctx, tk.ID, func(x model.Task) (model.Task, error) { x.Status = model.TaskBacklog; return x, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AutoRelease(ctx, tk.ID, autoT, time.Time{}, tk.ReadyHash); err != nil {
+		t.Fatal(err)
+	}
+	if got := getTask(t, s, tk.ID); got.ReadyHash != "" {
+		t.Errorf("a task that left ready has hash %q after release, want none", got.ReadyHash)
+	}
+}
+
+// Review A-5: failed spawns count toward max_per_day, so a broken task is not retried without end.
+func TestAutoClaimCountsFailedAttemptsTowardTheDailyCap(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	tk := readyTask(t, s, "a")
+	for i := range 2 {
+		if _, err := s.LogAuto(ctx, store.AutoRun{At: autoT.Add(time.Duration(i) * time.Minute), Outcome: "refused", Check: "spawn_failed", TaskID: tk.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lim := store.AutoLimits{MaxPerDay: 2, Interval: time.Minute}
+	if ok, _ := s.AutoClaim(ctx, tk.ID, tk.ReadyHash, autoT.Add(time.Hour), lim); ok {
+		t.Error("a claim after two failed attempts won with max_per_day 2")
+	}
+	if ok, _ := s.AutoClaim(ctx, tk.ID, tk.ReadyHash, autoT.Add(25*time.Hour), lim); !ok {
+		t.Error("a claim a day after the failures was refused")
+	}
+}

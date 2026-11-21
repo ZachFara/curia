@@ -247,7 +247,7 @@ func TestBudgetHardStop(t *testing.T) {
 		}
 		for _, tool := range []string{
 			"mcp__curia2__x", "mcp__curiaX__request_decision", "mcp__curia__request_decision2",
-			"mcp__curia__", "mcp__curia__request_decision ", "MCP__curia__request_decision", "mcp__other__curia__request_decision", "Read", "",
+			"mcp__curia__file_task", "mcp__curia__", "mcp__curia__request_decision ", "MCP__curia__request_decision", "mcp__other__curia__request_decision", "Read", "",
 		} {
 			wantDeny(t, pre(t, st, env, cfg, preBody(tool, `{}`, proj, "")), "tool "+tool)
 		}

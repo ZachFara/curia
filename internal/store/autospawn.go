@@ -47,7 +47,8 @@ func (s *Store) MarkReady(ctx context.Context, id string) error {
 // AutoClaim is the one UPDATE that lets the monitor start task id: it needs
 // the stored hash to be hash (the caller's eligibility check read it), no
 // auto-spawn or failed attempt within the interval, and fewer than
-// MaxPerDay in 24 hours. It sets auto_spawned_at and clears the hash (the
+// MaxPerDay in 24 hours (failed spawn attempts count, so a task that keeps
+// failing is not retried without end). It sets auto_spawned_at and clears the hash (the
 // readiness is consumed), so a second claimer, or a restart, finds nothing
 // to claim. ok is false when it lost.
 func (s *Store) AutoClaim(ctx context.Context, id, hash string, now time.Time, lim AutoLimits) (ok bool, err error) {
@@ -56,7 +57,8 @@ UPDATE tasks SET auto_spawned_at = ?1, ready_hash = NULL
 WHERE id = ?2 AND status = 'ready' AND ready_hash = ?3
   AND NOT EXISTS (SELECT 1 FROM tasks WHERE auto_spawned_at > ?4)
   AND NOT EXISTS (SELECT 1 FROM auto_spawn_runs WHERE at > ?4 AND check_ = 'spawn_failed')
-  AND (SELECT count(*) FROM tasks WHERE auto_spawned_at > ?5) < ?6`,
+  AND (SELECT count(*) FROM tasks WHERE auto_spawned_at > ?5)
+    + (SELECT count(*) FROM auto_spawn_runs WHERE at > ?5 AND check_ = 'spawn_failed') < ?6`,
 		formatTime(now), id, hash, formatTime(now.Add(-lim.Interval)), formatTime(now.Add(-24*time.Hour)), lim.MaxPerDay)
 	if err != nil {
 		return false, fail("auto claim", id, err)
@@ -67,9 +69,9 @@ WHERE id = ?2 AND status = 'ready' AND ready_hash = ?3
 
 // AutoRelease undoes AutoClaim's claim made at claimedAt after a failed
 // spawn: the hash and the previous auto_spawned_at come back, unless
-// something else changed the task since.
+// something else changed the task since (it left ready: no hash returns).
 func (s *Store) AutoRelease(ctx context.Context, id string, claimedAt, prevAt time.Time, hash string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET auto_spawned_at = ?, ready_hash = ? WHERE id = ? AND auto_spawned_at = ? AND ready_hash IS NULL`,
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET auto_spawned_at = ?, ready_hash = ? WHERE id = ? AND auto_spawned_at = ? AND ready_hash IS NULL AND status = 'ready'`,
 		formatTime(prevAt), hash, id, formatTime(claimedAt))
 	if err != nil {
 		return fail("auto release", id, err)
@@ -125,12 +127,12 @@ func (s *Store) AutoRuns(ctx context.Context, n int) ([]AutoRun, error) {
 	return out, rows.Err()
 }
 
-// AutoStats is the number of auto-spawns in the 24 hours before now and the
+// AutoStats is the number of auto-spawns and failed attempts in the 24 hours before now and the
 // time of the newest start or failed attempt (zero: none).
 func (s *Store) AutoStats(ctx context.Context, now time.Time) (today int, last time.Time, err error) {
 	var l sql.NullString
 	err = s.db.QueryRowContext(ctx, `
-SELECT (SELECT count(*) FROM tasks WHERE auto_spawned_at > ?1),
+SELECT (SELECT count(*) FROM tasks WHERE auto_spawned_at > ?1) + (SELECT count(*) FROM auto_spawn_runs WHERE at > ?1 AND check_ = 'spawn_failed'),
   (SELECT max(a) FROM (SELECT max(auto_spawned_at) AS a FROM tasks UNION ALL SELECT max(at) FROM auto_spawn_runs WHERE check_ = 'spawn_failed'))`,
 		formatTime(now.Add(-24*time.Hour))).Scan(&today, &l)
 	if err == nil {

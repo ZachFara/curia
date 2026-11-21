@@ -56,6 +56,7 @@ var (
 var autoExecNames = []string{
 	".git", ".claude", ".curia", ".gitattributes", ".gitmodules", ".gitconfig", ".husky",
 	".mcp.json", ".envrc", ".vscode", ".idea", ".pre-commit-config.yaml", ".githooks", ".devcontainer",
+	".yarnrc.yml", ".cargo", // yarnPath and cargo config run code; ".cargo" matches the directory component
 }
 
 // askTools need the user; bypass gives no opinion on them.
@@ -104,7 +105,7 @@ func modeLine(ctx context.Context, ev model.Event, payload []byte, cfg config.Co
 	switch {
 	case editOK,
 		slices.Contains(readTools, ev.ToolName) && readAllowed(ev, in, root),
-		IsCuriaTool(ev.ToolName) || ev.ToolName == "mcp__curia__file_task",
+		IsCuriaTool(ev.ToolName) || ev.ToolName == "mcp__curia__file_task", // away may file a task: a backlog row for the user, and the level/auto-spawn caps bound the rest
 		ev.ToolName == "Bash" && awayCommand(ev, in, root, cfg.Mode.AwayAllow):
 		return decisionLine("allow", reasonAway)
 	}
@@ -285,6 +286,9 @@ func awayCommand(ev model.Event, in map[string]json.RawMessage, root string, ent
 		return false
 	}
 	if strings.ContainsFunc(cmd, func(r rune) bool { return unicode.IsControl(r) || strings.ContainsRune(shellMeta, r) }) {
+		return false
+	}
+	if _, inRoot := pathsInRoot(ev, nil, root); !inRoot { // git reads where it runs: needs a root and a cwd inside it
 		return false
 	}
 	words := strings.Fields(cmd)

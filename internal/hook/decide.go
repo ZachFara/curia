@@ -30,15 +30,17 @@ const (
 	undecidedFiles  = "files"  // the home directory is unknown, so only configured paths are protected
 )
 
-// curiaTools are Curia's own MCP tools, by exact name: the one thing a
-// stopped task may still call. A prefix would let another MCP server named
-// like Curia imitate them.
+// curiaTools are Curia's own MCP tools that a budget-stopped task may still
+// call, by exact name. A prefix would let another MCP server named like Curia
+// imitate them. file_task is NOT here: a stopped agent must not file work that
+// auto-spawn could start as a new session past the stop (review A-6); it is
+// registered and allowed in away (mode.go) but is not a tool a stopped task may call.
 var curiaTools = []string{
 	"mcp__curia__search_decisions", "mcp__curia__request_decision", "mcp__curia__check_decision",
-	"mcp__curia__withdraw_decision", "mcp__curia__check_messages", "mcp__curia__complete_task", "mcp__curia__file_task",
+	"mcp__curia__withdraw_decision", "mcp__curia__check_messages", "mcp__curia__complete_task",
 }
 
-// IsCuriaTool reports whether name is exactly one of Curia's seven MCP tools.
+// IsCuriaTool reports whether name is exactly one of the six Curia MCP tools a stopped task may call.
 func IsCuriaTool(name string) bool { return slices.Contains(curiaTools, name) }
 
 // editTools are the tools whose target path decides file protection. Bash
