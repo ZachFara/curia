@@ -37,7 +37,7 @@ BOUNDARY_LINTERS   := depguard
 # Every tracked or untracked-but-not-ignored Go file (skips .scratch/ etc.).
 GO_FILES = $$(git ls-files --cached --others --exclude-standard -- '*.go')
 
-.PHONY: check check-fast check-gates check-static latency-names test-unit test-latency test-unit-cmd check-shards test-staged tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test build release-snapshot clean
+.PHONY: check check-fast check-gates check-static size-report latency-names test-unit test-latency test-unit-cmd check-shards test-staged tools fmt fmt-check lint complexity boundaries suppressions vet staticcheck deadcode layout install-script test build release-snapshot clean
 
 ## check: run every gate, in order, under the lock. CI runs this; run it by hand for the full gate.
 check:
@@ -154,6 +154,7 @@ install-script:
 	@echo "==> install.sh tests"
 	@sh scripts/install_test.sh
 	@sh scripts/staged_tests_test.sh
+	@sh scripts/ci_retry_once_test.sh >/dev/null
 
 ## test: all tests under the race detector, in two steps
 # Several packages hold latency gates (the hook's 20 ms budget, the end-to-end
@@ -196,6 +197,7 @@ test-unit-cmd: latency-names
 ## noise spoils one batch of a gate, not all three); then internal/latency/verdict
 ## applies the median-of-three rule to the results file (docs/decisions/0012).
 ## A pass fails on a non-latency assertion; the p95 is judged by the verdict.
+## One run only here; CI wraps it in scripts/ci-retry-once.sh (rerun once, D-15).
 test-latency: latency-names
 	@pkgs=./...; \
 	if [ -n "$(SHARD)" ]; then pkgs="$$(scripts/shard.sh list latency | scripts/shard.sh pick $(SHARD) $(LATENCY_SHARDS))"; fi; \
@@ -215,6 +217,10 @@ check-shards:
 	@scripts/check-shards.sh
 
 test: test-unit test-latency
+
+## size-report: print file, package and duplication sizes (report only, never fails)
+size-report:
+	@scripts/size-report.sh
 
 ## build: build the curia binary into ./curia
 build:

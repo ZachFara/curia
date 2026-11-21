@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/model"
+	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
 )
 
@@ -853,6 +854,29 @@ func TestCleanRemovesMergedBranchAndWorktree(t *testing.T) {
 		"Deleted branch "+lifecycleBranch, "Cleaned T-1")
 }
 
+// Live check, D4: cleaning a task that is done says its worktree was cleaned,
+// not that the task was marked dropped as if it had been abandoned.
+func TestCleanDoneTaskSaysCleaned(t *testing.T) {
+	f := lifecycleWithLead(t)
+	lifecycleCommitOnBranch(f, "the fix")
+	gitRun(t, f.repo, "merge", "-q", "--no-ff", "--no-edit", lifecycleBranch)
+	ctx := context.Background()
+	if _, _, err := f.st.CompleteTask(ctx, model.Review{TaskID: "T-1", SessionID: "s1", Summary: "done", Tests: model.TestsPassed, CreatedAt: f.now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.st.CloseReview(ctx, "R-1", store.ReviewClose{Status: model.ReviewMerged, How: model.ApproveMerge}, f.now); err != nil {
+		t.Fatal(err)
+	}
+	lifecycleEnded(f)
+	out, err := lifecycleRun(t, "clean", "T-1")
+	if err != nil {
+		t.Fatalf("clean: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "marked dropped") || !strings.Contains(out, "Cleaned T-1 (done: its worktree and branch are removed") {
+		t.Errorf("clean of a done task printed:\n%s\nwant it to say the done task's worktree was cleaned", out)
+	}
+}
+
 func TestCleanRefusesUnmerged(t *testing.T) {
 	f := lifecycleWithLead(t)
 	lifecycleCommitOnBranch(f, "unmerged work")
@@ -1086,5 +1110,34 @@ func TestPauseNeverKillsOtherServersPane(t *testing.T) {
 	out, _ := lifecycleRun(t, "pause", "T-1", "--force")
 	if got := lifecycleKills(f); len(got) != 0 {
 		t.Errorf("--force: kills = %q, want none\n%s", got, out)
+	}
+}
+
+// The same with no live session yet: the task's own record of its window's
+// server tells the panes apart. A task with no recorded server (an older
+// row) is unknown, never "the same".
+func TestPauseNeverKillsOtherServersPaneWithoutSession(t *testing.T) {
+	for _, c := range []struct{ name, recorded, want string }{
+		{"recorded", "", "of another tmux server (first)"},
+		{"older row", "-", "may still be open on another server"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := lifecycleSpawned(t, spawnOptions{})
+			if c.recorded == "-" {
+				f.update("T-1", func(tk *model.Task) { tk.PaneSocket = "" })
+			}
+			for i := range f.fake.Panes {
+				f.fake.Panes[i].Socket = "/tmp/tmux-501/second"
+			}
+			f.now = f.now.Add(time.Hour) // the launch claim has run out
+			_, err := lifecycleRun(t, "pause", "T-1")
+			if err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "Nothing was done") {
+				t.Fatalf("pause = %v, want a refusal with %q", err, c.want)
+			}
+			out, _ := lifecycleRun(t, "pause", "T-1", "--force")
+			if got := lifecycleKills(f); len(got) != 0 {
+				t.Errorf("kills = %q, want none\n%s", got, out)
+			}
+		})
 	}
 }

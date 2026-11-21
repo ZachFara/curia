@@ -90,6 +90,11 @@ var timelineSources = []timelineSource{
 		ref: "CAST(e.id AS TEXT)", at: "e.at", session: "''", task: "COALESCE(json_extract(e.payload, '$.task'), '')", repo: "''",
 		kind: "'web_action'", line: "COALESCE(json_extract(e.payload, '$.device'), '') || ': ' || COALESCE(json_extract(e.payload, '$.action'), '')",
 	},
+	{
+		from: "schedule_runs r", where: "1", // F22: one line per fire or skipped fire
+		ref: "CAST(r.id AS TEXT)", at: "r.ran_at", session: "''", task: "''", repo: "''",
+		kind: "'schedule_run'", line: "r.schedule_id || ' ' || r.outcome",
+	},
 }
 
 // timelineSQL is the union: per source the newest ?5 rows in [?1, ?2] that

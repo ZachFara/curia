@@ -523,6 +523,31 @@ func TestLinearImportMapsFields(t *testing.T) {
 	}
 }
 
+// An import says so when it replaces text that differs from Linear's (it
+// cannot tell a local edit from a change in Linear: no copy of the last
+// import is stored).
+func TestLinearImportSaysWhatItReplaces(t *testing.T) {
+	db := linearHome(t)
+	repo := taskRepo(t, "main")
+	srv := linearServer(t, linearStandardPage(t))
+	linearUseServer(t, db, srv)
+	linearMust(t, "task", "import", "--linear", "--repo", repo)
+	byRef := taskImportedByRef(t, db, 2)
+	st := taskOpen(t, db)
+	if _, err := st.UpdateTask(t.Context(), byRef["ENG-12"].ID, func(tk model.Task) (model.Task, error) {
+		tk.Title = "My own title"
+		return tk, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	srv.setPages(linearStandardPage(t))
+	out := linearMust(t, "task", "import", "--linear", "--repo", repo)
+	want := byRef["ENG-12"].ID + ": the local title, body or tags differ from Linear's and were replaced by Linear's"
+	if !strings.Contains(out, want) || strings.Contains(out, byRef["ENG-13"].ID+": the local") {
+		t.Errorf("import output lacks %q (and only for the edited task):\n%s", want, out)
+	}
+}
+
 func TestLinearImportAgainUpdatesOnly(t *testing.T) {
 	db := linearHome(t)
 	repo := taskRepo(t, "main")

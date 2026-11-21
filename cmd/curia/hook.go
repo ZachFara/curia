@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -53,7 +54,9 @@ func init() {
 			"--agent codex marks a Codex session: its transcript is not read and its Stop\n" +
 			"claims and prints nothing.\n" +
 			"Always exits 0 and prints nothing, except that a Stop which claims queued\n" +
-			"decision answers or messages prints one JSON line blocking the stop with them;\n" +
+			"decision answers or messages prints one JSON line blocking the stop with them,\n" +
+			"and a PreToolUse that Curia denies (its own files, a spent task budget) prints\n" +
+			"one JSON line with the reason;\n" +
 			"errors go to the log file.",
 		Args: cobra.ArbitraryArgs,
 		// Every argument reaches runHook, so a bad one is logged, not printed.
@@ -181,6 +184,11 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 	}
 	st, err := openStore(cfg)
 	if err != nil {
+		if event == string(model.PreToolUse) { // the protection of Curia's files needs no store
+			if line := hook.PreToolUseNoStore(payload, cfg); line != nil {
+				_ = emit(line)
+			}
+		}
 		return err
 	}
 	defer func() { _ = st.Close() }()
@@ -197,6 +205,7 @@ func recordEvent(ctx context.Context, args []string, stdin io.Reader, cfg config
 			hookLogDelivered(logger, res)
 		}
 	}
+	hookLogUndecided(cfg, logger, res.Undecided)
 	sess := res.Session
 	if err != nil && sess.ID == "" {
 		return err // nothing was written
@@ -221,6 +230,19 @@ const hookAgentFlag = "--agent"
 // hookAgentNameRunes bounds the agent name a WARN line quotes: it is
 // untrusted.
 const hookAgentNameRunes = 32
+
+// hookLogUndecided logs one line for each kind of PreToolUse check that could
+// not be made, at most once per interval and kind, as the status line's log
+// does (ingestThrottle).
+func hookLogUndecided(cfg config.Config, logger *slog.Logger, kinds []string) {
+	var ps []ingestProblem
+	for _, k := range kinds {
+		ps = append(ps, ingestProblem{"undecided_" + k, "hook undecided: a PreToolUse check could not be made", []any{"check", k}})
+	}
+	for _, p := range ingestThrottle(filepath.Clean(cfg.LogPath)+ingestThrottleFile, ps, ingestLogNow()) {
+		logger.Warn(p.msg, p.attrs...)
+	}
+}
 
 // hookArgs reads the hook's arguments, `<Event> [--agent <name>]` or
 // `<Event> --agent=<name>` (flag parsing is off for hook, so they are read

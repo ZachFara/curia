@@ -27,6 +27,7 @@ var guardUnset = []string{
 	"CLAUDE_PROJECT_DIR", "CLAUDE_CONFIG_DIR", "CURIA_SESSION_ID", "SSH_CONNECTION",
 	"CURIA_TASK_ID", "CURIA_ROUTER", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "EDITOR", "VISUAL",
 	"CURIA_NTFY_TOKEN", "CURIA_LINEAR_API_KEY", "CODEX_HOME",
+	"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
 }
 
 var (
@@ -37,6 +38,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	if filepath.Base(os.Args[0]) == "docker" { // the test binary run as the docker wrapper (docker_test.go)
+		dockerWrapperMain(os.Args[1:])
+	}
 	os.Exit(runGuarded(m))
 }
 

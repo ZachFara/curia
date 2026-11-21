@@ -381,6 +381,25 @@ func TestCallerFromTmuxPaneIgnoresOtherServer(t *testing.T) {
 	}
 }
 
+// With TMUX_PANE but no TMUX the caller's server is unknown: a session with a
+// recorded server is not matched by the pane id alone.
+func TestCallerByPaneNeedsKnownServer(t *testing.T) {
+	db := mcpEnv(t)
+	st := mcpOpenStore(t, db)
+	mcpPutSession(t, st, "ONB", "%3", model.StateWorking, time.Now())
+	if err := st.UpdateSession(context.Background(), "ONB", func(cur model.Session, _ bool) model.Session {
+		cur.Socket = sendSockB
+		return cur
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMUX_PANE", "%3")
+	t.Setenv("TMUX", "")
+	if s, _ := mcpCallerOf(t, st, "Which queue?"); s != "" {
+		t.Errorf("session = %q, want none", s)
+	}
+}
+
 func TestCallerFromClaudeCodeSessionID(t *testing.T) {
 	db := mcpEnv(t)
 	st := mcpOpenStore(t, db)
