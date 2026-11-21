@@ -78,4 +78,5 @@ var keyPolicy = map[string]Policy{
 	"mode.default":                         PolicyNone, // a repository can never raise a mode (F20)
 	"mode.away_allow":                      PolicyNone, // a list of allowed commands is a grant
 	"mode.bypass_for":                      PolicyNone,
+	"away.prepare_wait":                    PolicyNone, // a repository cannot change how an away period starts
 }
