@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/gitops"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -63,7 +64,7 @@ func reviewDiffStat(ctx context.Context, t model.Task, width int) (stat, note, h
 	if t.Branch == "" {
 		return "", "the task has no branch (never spawned, or cleaned)", ""
 	}
-	path, onDisk, err := lifecycleWorktree(ctx, t)
+	path, onDisk, err := lifecycle.Worktree(ctx, t)
 	if err == nil {
 		head, err = gitops.BranchHead(ctx, t)
 	}
@@ -107,7 +108,7 @@ func reviewCheck(ctx context.Context, st *store.Store, t model.Task) (stat, head
 	if t.Branch == "" {
 		return "", "", fmt.Errorf("%s has no branch: nothing to approve (never spawned, or cleaned)", t.ID)
 	}
-	path, onDisk, err := lifecycleWorktree(ctx, t)
+	path, onDisk, err := lifecycle.Worktree(ctx, t)
 	if err != nil {
 		return "", "", err
 	}
@@ -384,7 +385,7 @@ func reviewDiffCmd(t model.Task, tool string) (*exec.Cmd, error) {
 // reviewDiffDir is where lazygit opens: the task's worktree when it is on
 // disk as a directory, else the main repository.
 func reviewDiffDir(t model.Task) string {
-	path, err := spawnWorktreePath(t.Repo, t.ID)
+	path, err := lifecycle.SpawnWorktreePath(t.Repo, t.ID)
 	if err != nil {
 		return t.Repo
 	}

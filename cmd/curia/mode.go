@@ -16,6 +16,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/gitops"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -79,7 +80,7 @@ func runModeShow(cmd *cobra.Command, _ []string) error {
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintf(out, "default mode: %s\n", cfg.Mode.Default)
 	for _, s := range list {
-		_, _ = fmt.Fprintf(out, "%s  %s  %s\n", spawnShortID(s.ID), modeText(s, cfg, clock()), sanitize.Line(s.Repo, 80))
+		_, _ = fmt.Fprintf(out, "%s  %s  %s\n", lifecycle.SpawnShortID(s.ID), modeText(s, cfg, clock()), sanitize.Line(s.Repo, 80))
 	}
 	return nil
 }
@@ -216,7 +217,7 @@ func modeConfirmBypass(out io.Writer, label string, until time.Time, native bool
 		"Still prompting: AskUserQuestion and tools that need you, rm and rmdir on critical paths, ask rules, edits in plan mode.\n"+
 		"Curia's own files and the task budget stop stay protected. Any prompt injection that reaches an agent runs unprompted.\n",
 		label, modeUntilText(until))
-	answer, err := setupConfirm("To turn it on, type the word " + modeBypassWord + ": ")
+	answer, err := lifecycle.SetupConfirm("To turn it on, type the word " + modeBypassWord + ": ")
 	if err != nil || strings.TrimSpace(answer) != modeBypassWord {
 		return errors.New("not turned on: bypass needs the word " + modeBypassWord + " typed on the terminal; nothing changed")
 	}
@@ -240,9 +241,9 @@ func modeNativeReport(out io.Writer, sessions []model.Session) {
 		dir := modeDir(s)
 		switch {
 		case s.State != model.StateIdle:
-			_, _ = fmt.Fprintf(out, "  skipped %s: not idle (%s)\n", spawnShortID(s.ID), s.State)
+			_, _ = fmt.Fprintf(out, "  skipped %s: not idle (%s)\n", lifecycle.SpawnShortID(s.ID), s.State)
 		case !filepath.IsAbs(dir) || strings.ContainsFunc(dir, unicode.IsControl) || s.Agent == model.AgentCodex || !modeSafeID(s.ID):
-			_, _ = fmt.Fprintf(out, "  skipped %s: not a Claude Code session with a usable directory\n", spawnShortID(s.ID))
+			_, _ = fmt.Fprintf(out, "  skipped %s: not a Claude Code session with a usable directory\n", lifecycle.SpawnShortID(s.ID))
 		default:
 			_, _ = fmt.Fprintf(out, "  %s\n", modeNativeCommand(s.ID, dir))
 		}
@@ -272,7 +273,7 @@ func modeSayNoRoot(out io.Writer, sessions []model.Session) {
 	}
 	ids := make([]string, 0, len(noRoot))
 	for _, s := range noRoot {
-		ids = append(ids, spawnShortID(s.ID))
+		ids = append(ids, lifecycle.SpawnShortID(s.ID))
 	}
 	_, _ = fmt.Fprintf(out, "%d session(s) have no repository or worktree (%s), so they have no path to allow in: edits allows nothing for them and away denies.\n",
 		len(noRoot), sanitize.Line(strings.Join(ids, ", "), 120))

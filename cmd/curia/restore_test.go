@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
@@ -1453,7 +1454,7 @@ func TestRestoreWindowFailurePutsRowBack(t *testing.T) {
 	}
 	f.tm.failOn = nil
 	out, err := f.run(nil, "--dry-run")
-	if err != nil || !strings.Contains(out, spawnShortID(s.ID)) || !strings.Contains(out, "restore\n") {
+	if err != nil || !strings.Contains(out, lifecycle.SpawnShortID(s.ID)) || !strings.Contains(out, "restore\n") {
 		t.Errorf("not offered again: %v\n%s", err, out)
 	}
 }

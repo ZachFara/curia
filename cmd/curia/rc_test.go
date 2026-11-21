@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/mcp"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
@@ -334,14 +335,14 @@ func TestRCStaysOutOfTheMCPToolList(t *testing.T) {
 
 func TestLaunchAddsTheRemoteControlFlagOnlyWithTheKeyOn(t *testing.T) {
 	argv := []string{"claude", "--model", "opus", "the brief"}
-	if got := launchWithRC(argv, false, "T-1 title"); strings.Join(got, "|") != strings.Join(argv, "|") {
+	if got := lifecycle.LaunchWithRC(argv, false, "T-1 title"); strings.Join(got, "|") != strings.Join(argv, "|") {
 		t.Errorf("key off: argv = %q, want it unchanged", got)
 	}
-	got := launchWithRC(argv, true, "T-1 title")
+	got := lifecycle.LaunchWithRC(argv, true, "T-1 title")
 	if len(got) != 6 || got[0] != "claude" || got[1] != "--remote-control" || got[2] != "T-1 title" || got[5] != "the brief" {
 		t.Errorf("key on: argv = %q, want --remote-control with an explicit name right after claude", got)
 	}
-	if got = launchWithRC([]string{"codex", "x"}, true, "n"); got[0] != "codex" || len(got) != 2 {
+	if got = lifecycle.LaunchWithRC([]string{"codex", "x"}, true, "n"); got[0] != "codex" || len(got) != 2 {
 		t.Errorf("codex argv = %q, want it unchanged", got)
 	}
 }

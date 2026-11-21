@@ -16,7 +16,7 @@ package main
 //     and what the first /rc shows (a one-time dialog or panel would read as
 //     "not confirmed" and block more typing until `curia rc --check`).
 //  4. That `--remote-control <name>` takes the name as its own argument and
-//     leaves the brief positional (launchWithRC, key rc.launch).
+//     leaves the brief positional (lifecycle.LaunchWithRC, key rc.launch).
 //  5. That a second /rc into a session Curia could not see as on is harmless.
 
 import (

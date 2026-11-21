@@ -19,6 +19,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/decision"
 	"github.com/ZachFara/curia/internal/fleet"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -266,7 +267,7 @@ func agentAncestor() string {
 		case isClaudeCode(p):
 			return fmt.Sprintf("it runs under Claude Code (process %d)", pid)
 		case panes[pid] != "":
-			return fmt.Sprintf("it runs under the pane of agent session %s (process %d)", spawnShortID(panes[pid]), pid)
+			return fmt.Sprintf("it runs under the pane of agent session %s (process %d)", lifecycle.SpawnShortID(panes[pid]), pid)
 		}
 		pid = p.PPID
 	}
@@ -434,7 +435,7 @@ func agentSign() string {
 	}
 	for _, s := range sessions {
 		if decisionsOnServer(panes, s) {
-			return "this is pane " + sanitize.Line(pane, 20) + " of agent session " + spawnShortID(s.ID) +
+			return "this is pane " + sanitize.Line(pane, 20) + " of agent session " + lifecycle.SpawnShortID(s.ID) +
 				"; if no agent runs here any more, run curia ls, which marks a session whose pane is gone, or end it"
 		}
 	}

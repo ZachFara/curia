@@ -508,11 +508,6 @@ func reviewLogOutcome(logger *slog.Logger, id, line string, err error) {
 	logger.Info("review action done", "review", sanitize.Line(id, 20), "outcome", sanitize.Line(line, reviewLineMax))
 }
 
-// reviewStatusWord is a review status as a sentence says it.
-func reviewStatusWord(s model.ReviewStatus) string {
-	return strings.ReplaceAll(sanitize.Line(string(s), 30), "_", " ")
-}
-
 // reviewResolve turns a task id or a review id into the pending review it names.
 func reviewResolve(ctx context.Context, st *store.Store, arg string) (model.Review, error) {
 	switch {
@@ -545,7 +540,7 @@ func reviewPending(ctx context.Context, st *store.Store, id string) (model.Revie
 	case !found:
 		return model.Review{}, model.Task{}, fmt.Errorf("no review %s", id)
 	case r.Status != model.ReviewPending:
-		return model.Review{}, model.Task{}, fmt.Errorf("%s is %s", id, reviewStatusWord(r.Status))
+		return model.Review{}, model.Task{}, fmt.Errorf("%s is %s", id, task.ReviewStatusWord(r.Status))
 	case !task.ValidID(r.TaskID):
 		return model.Review{}, model.Task{}, fmt.Errorf("%s names task %q, which is not a task id", id, sanitize.Line(r.TaskID, 40))
 	}
@@ -853,7 +848,7 @@ func reviewRecordError(ctx context.Context, st *store.Store, r model.Review, wha
 	if errors.Is(err, store.ErrReviewClosed) {
 		now, found, gerr := st.GetReview(context.WithoutCancel(ctx), r.ID)
 		if gerr == nil && found && (now.Status == model.ReviewMerged || now.Status == model.ReviewApproved) && now.Head == head {
-			return fmt.Errorf("%s: %s, and another curia recorded it meanwhile (%s)", r.ID, what, reviewStatusWord(now.Status))
+			return fmt.Errorf("%s: %s, and another curia recorded it meanwhile (%s)", r.ID, what, task.ReviewStatusWord(now.Status))
 		}
 		return fmt.Errorf("%s: %s, but the review was closed by someone else meanwhile, so it is not recorded as approved",
 			r.ID, what)

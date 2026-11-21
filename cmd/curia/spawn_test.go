@@ -17,6 +17,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/gitops"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
@@ -27,8 +28,8 @@ import (
 const spawnTestBin = "/opt/curia/bin/curia"
 
 // spawnFixture is one spawn test's world: a git repository named
-// api-server, a store, a fake tmux, a fake clock that spawnSleep advances,
-// and spawnBin fixed at spawnTestBin.
+// api-server, a store, a fake tmux, a fake clock that lifecycle.SpawnSleep advances,
+// and lifecycle.SpawnBin fixed at spawnTestBin.
 type spawnFixture struct {
 	t       *testing.T
 	db      string
@@ -60,19 +61,19 @@ func spawnNewFixture(t *testing.T) *spawnFixture {
 		t.Fatal(err)
 	}
 	f.st = st
-	prevClock, prevSleep, prevBin, prevLimit, prevLook := clock, spawnSleep, spawnBin, spawnSetupLimit, launchLookPath
-	launchLookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil } // every agent is installed
+	prevClock, prevSleep, prevBin, prevLimit, prevLook := clock, lifecycle.SpawnSleep, lifecycle.SpawnBin, lifecycle.SpawnSetupLimit, lifecycle.LaunchLookPath
+	lifecycle.LaunchLookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil } // every agent is installed
 	clock = func() time.Time { return f.now }
-	spawnSleep = func(d time.Duration) {
+	lifecycle.SpawnSleep = func(d time.Duration) {
 		f.now = f.now.Add(d)
 		f.sleeps++
 		if f.onSleep != nil {
 			f.onSleep(f.sleeps)
 		}
 	}
-	spawnBin = func() (string, error) { return spawnTestBin, nil }
+	lifecycle.SpawnBin = func() (string, error) { return spawnTestBin, nil }
 	t.Cleanup(func() {
-		clock, spawnSleep, spawnBin, spawnSetupLimit, launchLookPath = prevClock, prevSleep, prevBin, prevLimit, prevLook
+		clock, lifecycle.SpawnSleep, lifecycle.SpawnBin, lifecycle.SpawnSetupLimit, lifecycle.LaunchLookPath = prevClock, prevSleep, prevBin, prevLimit, prevLook
 		_ = st.Close()
 	})
 	return f
@@ -110,12 +111,12 @@ func (f *spawnFixture) get(id string) model.Task {
 	return tk
 }
 
-// spawn runs spawnTask and returns its result, what it printed and its error.
-func (f *spawnFixture) spawn(id string, o spawnOptions) (spawnResult, string, error) {
+// spawn runs lifecycle.SpawnTask and returns its result, what it printed and its error.
+func (f *spawnFixture) spawn(id string, o lifecycle.SpawnOptions) (lifecycle.SpawnResult, string, error) {
 	f.t.Helper()
 	var out bytes.Buffer
 	o.Out = &out
-	r, err := spawnTask(context.Background(), f.st, f.fake, f.cfg, id, o)
+	r, err := lifecycle.SpawnTask(context.Background(), f.st, f.fake, f.cfg, id, o)
 	return r, out.String(), err
 }
 
@@ -214,15 +215,15 @@ func TestSpawnCreatesWorktreeWindowAndRecords(t *testing.T) {
 			t.Errorf("output lacks %q:\n%s", line, out)
 		}
 	}
-	if f.sleeps != int(spawnWait/spawnPoll) {
-		t.Errorf("waited %d polls, want %d (20 s)", f.sleeps, spawnWait/spawnPoll)
+	if f.sleeps != int(lifecycle.SpawnWait/lifecycle.SpawnPoll) {
+		t.Errorf("waited %d polls, want %d (20 s)", f.sleeps, lifecycle.SpawnWait/lifecycle.SpawnPoll)
 	}
 }
 
 func TestSpawnNeverPassesTaskTextToTmux(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("kill ; $(touch x) ;", "a;\n$(rm -rf ~) `id` ;\nkill-server ;\n#{pane_id} %H")
-	if _, out, err := f.spawn("T-1", spawnOptions{}); err != nil {
+	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
 	w := f.windows()
@@ -263,7 +264,7 @@ func TestSpawnModelAndTeamFlags(t *testing.T) {
 
 	// A model stored on the task is used when no --model is given.
 	f.update("T-2", func(tk *model.Task) { tk.AgentModel = "sonnet" })
-	if _, out, err := f.spawn("T-2", spawnOptions{}); err != nil {
+	if _, out, err := f.spawn("T-2", lifecycle.SpawnOptions{}); err != nil {
 		t.Fatalf("spawn T-2: %v\n%s", err, out)
 	}
 	if w := f.windows(); len(w) != 1 || !strings.HasSuffix(w[0], " launch T-2 --model sonnet") {
@@ -321,7 +322,7 @@ func TestSpawnRefusesWhenRunning(t *testing.T) {
 	if err := f.st.UpsertSession(context.Background(), sess); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := f.spawn("T-1", spawnOptions{})
+	_, _, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err == nil || !strings.Contains(err.Error(), "api-server:T-1") {
 		t.Fatalf("spawn with a live session = %v, want a refusal naming api-server:T-1", err)
 	}
@@ -333,7 +334,7 @@ func TestSpawnRefusesWhenRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.update("T-1", func(tk *model.Task) { tk.Pane = "%5" })
-	_, _, err = f.spawn("T-1", spawnOptions{})
+	_, _, err = f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err == nil || !strings.Contains(err.Error(), "api-server:T-1") {
 		t.Fatalf("spawn with the recorded pane open = %v, want a refusal naming api-server:T-1", err)
 	}
@@ -341,7 +342,7 @@ func TestSpawnRefusesWhenRunning(t *testing.T) {
 
 	// Once the pane is gone, the task spawns.
 	f.fake.Panes = nil
-	if _, out, err := f.spawn("T-1", spawnOptions{}); err != nil {
+	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
 		t.Fatalf("spawn after the pane closed: %v\n%s", err, out)
 	}
 }
@@ -353,7 +354,7 @@ func TestSpawnSecondClaimRefused(t *testing.T) {
 	if _, err := f.st.ClaimLaunch(context.Background(), "T-1", "", first, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := f.spawn("T-1", spawnOptions{})
+	_, _, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err == nil || !strings.Contains(err.Error(), "another spawn of T-1 started at "+first.Local().Format(time.TimeOnly)) {
 		t.Fatalf("spawn under another claim = %v", err)
 	}
@@ -368,8 +369,8 @@ func TestSpawnSecondClaimRefused(t *testing.T) {
 	}
 
 	// Eleven minutes on, the claim is taken as dead.
-	f.now = first.Add(spawnSetupLimit + time.Minute)
-	if _, out, err := f.spawn("T-1", spawnOptions{}); err != nil {
+	f.now = first.Add(lifecycle.SpawnSetupLimit + time.Minute)
+	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
 		t.Fatalf("spawn after the hold: %v\n%s", err, out)
 	}
 }
@@ -378,7 +379,7 @@ func TestSpawnReusesWorktreeOnRetry(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Retry me", "")
 	f.fake.NewWindowErr = errors.New("tmux broke")
-	_, _, err := f.spawn("T-1", spawnOptions{})
+	_, _, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err == nil || !strings.Contains(err.Error(), "tmux broke") {
 		t.Fatalf("spawn with a failing NewWindow = %v", err)
 	}
@@ -392,7 +393,7 @@ func TestSpawnReusesWorktreeOnRetry(t *testing.T) {
 	worktreeWrite(t, filepath.Join(wt, "work.txt"), "kept\n")
 
 	f.fake.NewWindowErr = nil
-	_, out, err := f.spawn("T-1", spawnOptions{})
+	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("retry: %v\n%s", err, out)
 	}
@@ -415,7 +416,7 @@ func TestSpawnRefusesForeignPath(t *testing.T) {
 	f.task("Foreign", "")
 	wt := f.worktree("T-1")
 	worktreeWrite(t, filepath.Join(wt, "mine.txt"), "the user's\n")
-	_, _, err := f.spawn("T-1", spawnOptions{})
+	_, _, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err == nil || !strings.Contains(err.Error(), "leaves it alone") {
 		t.Fatalf("spawn onto an existing directory = %v", err)
 	}
@@ -455,7 +456,7 @@ func spawnSetupExecutable(t *testing.T) {
 		"read line && echo stdin-had-data\n"+
 		"touch made-by-setup\n", true)
 	f.task("Setup", "")
-	_, out, err := f.spawn("T-1", spawnOptions{})
+	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
@@ -486,7 +487,7 @@ func spawnSetupNotExecutable(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.setupScript("#!/bin/sh\ntouch made-by-setup\n", false)
 	f.task("Setup", "")
-	_, out, err := f.spawn("T-1", spawnOptions{})
+	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
@@ -509,7 +510,7 @@ func spawnSetupOutside(t *testing.T) {
 	gitRun(t, f.repo, "add", "-A")
 	gitRun(t, f.repo, "commit", "-q", "-m", "link")
 	f.task("Setup", "")
-	_, out, err := f.spawn("T-1", spawnOptions{})
+	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
@@ -524,7 +525,7 @@ func spawnSetupOutside(t *testing.T) {
 func spawnSetupAbsent(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Setup", "")
-	_, out, err := f.spawn("T-1", spawnOptions{})
+	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil || !strings.Contains(out, "no .curia/setup.sh") {
 		t.Errorf("spawn = %v, output:\n%s", err, out)
 	}
@@ -535,7 +536,7 @@ func spawnSetupExit3(t *testing.T) {
 	f.setupScript("#!/bin/sh\ni=1\nwhile [ $i -le 30 ]; do echo \"line $i\"; i=$((i+1)); done\n"+
 		"printf 'evil \\033[31mred\\033]0;title\\007 end\\n'\nexit 3\n", true)
 	f.task("Setup", "")
-	_, out, err := f.spawn("T-1", spawnOptions{})
+	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err == nil || !strings.Contains(err.Error(), f.setupLog()) {
 		t.Fatalf("spawn = %v, want a failure naming the log", err)
 	}
@@ -560,7 +561,7 @@ func spawnSetupCapped(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.setupScript("#!/bin/sh\nhead -c 2097152 /dev/zero | tr '\\000' a\n", true)
 	f.task("Setup", "")
-	if _, out, err := f.spawn("T-1", spawnOptions{}); err != nil {
+	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
 	fi, err := os.Stat(f.setupLog())
@@ -573,9 +574,9 @@ func spawnSetupTimeLimit(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.setupScript("#!/bin/sh\necho started\nsleep 30\necho never\n", true)
 	f.task("Setup", "")
-	spawnSetupLimit = 100 * time.Millisecond
+	lifecycle.SpawnSetupLimit = 100 * time.Millisecond
 	begin := time.Now()
-	_, out, err := f.spawn("T-1", spawnOptions{})
+	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("spawn = %v, want a time-out\n%s", err, out)
 	}
@@ -595,7 +596,7 @@ func TestSpawnSetupFailureLeavesWorktree(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.setupScript("#!/bin/sh\necho broken\nexit 1\n", true)
 	f.task("Setup", "")
-	if _, _, err := f.spawn("T-1", spawnOptions{}); err == nil {
+	if _, _, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err == nil {
 		t.Fatal("spawn with a failing setup succeeded")
 	}
 	wt := f.worktree("T-1")
@@ -615,7 +616,7 @@ func TestSpawnSetupFailureLeavesWorktree(t *testing.T) {
 	if out, err := runRoot(t, "setup", "approve", "T-1"); err != nil {
 		t.Fatalf("setup approve: %v\n%s", err, out)
 	}
-	_, out, err := f.spawn("T-1", spawnOptions{})
+	_, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("second spawn: %v\n%s", err, out)
 	}
@@ -631,7 +632,7 @@ func TestSpawnRefusesMissingWorktreeBeforeWindow(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.setupScript("#!/bin/sh\nrm -rf \"$CURIA_WORKTREE\"\n", true)
 	f.task("Vanishing", "")
-	_, _, err := f.spawn("T-1", spawnOptions{})
+	_, _, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err == nil || !strings.Contains(err.Error(), "no window opened") {
 		t.Fatalf("spawn with the worktree gone = %v", err)
 	}
@@ -661,30 +662,30 @@ func TestSpawnWaitsForLink(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	r, out, err := f.spawn("T-1", spawnOptions{Wait: spawnWait})
+	r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{Wait: lifecycle.SpawnWait})
 	if err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
 	if r.Session.ID != "1a2b3c4d-0000-4000-8000-000000000000" || f.sleeps != 3 {
 		t.Errorf("session %q after %d sleeps, want the linked one after 3", r.Session.ID, f.sleeps)
 	}
-	if got, want := spawnLine(r), "T-1 running in api-server:T-1 (%100), session 1a2b3c4d"; got != want {
-		t.Errorf("spawnLine = %q, want %q", got, want)
+	if got, want := lifecycle.SpawnLine(r), "T-1 running in api-server:T-1 (%100), session 1a2b3c4d"; got != want {
+		t.Errorf("lifecycle.SpawnLine = %q, want %q", got, want)
 	}
 
 	f.onSleep = nil
 	f.sleeps = 0
 	f.task("Silent", "")
-	r, out, err = f.spawn("T-2", spawnOptions{Wait: spawnWait})
+	r, out, err = f.spawn("T-2", lifecycle.SpawnOptions{Wait: lifecycle.SpawnWait})
 	if err != nil {
 		t.Fatalf("spawn T-2: %v\n%s", err, out)
 	}
-	if r.Session.ID != "" || f.sleeps != int(spawnWait/spawnPoll) {
+	if r.Session.ID != "" || f.sleeps != int(lifecycle.SpawnWait/lifecycle.SpawnPoll) {
 		t.Errorf("session %q after %d sleeps, want none after 80", r.Session.ID, f.sleeps)
 	}
 	want := "T-2 launched in api-server:T-2 (%101); the agent has not reported yet (look at the window: it may be showing a startup dialog)"
-	if got := spawnLine(r); got != want {
-		t.Errorf("spawnLine = %q, want %q", got, want)
+	if got := lifecycle.SpawnLine(r); got != want {
+		t.Errorf("lifecycle.SpawnLine = %q, want %q", got, want)
 	}
 }
 
@@ -692,7 +693,7 @@ func TestSpawnReportsAgentThatExited(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Untrusted", "")
 	f.onSleep = func(int) { f.fake.Panes = nil } // the agent exited and its window closed
-	_, _, err := f.spawn("T-1", spawnOptions{Wait: spawnWait})
+	_, _, err := f.spawn("T-1", lifecycle.SpawnOptions{Wait: lifecycle.SpawnWait})
 	if err == nil || !strings.Contains(err.Error(), "exited before it reported") || !strings.Contains(err.Error(), "trust") {
 		t.Fatalf("spawn = %v, want a plain report that the agent exited", err)
 	}
@@ -704,7 +705,7 @@ func TestSpawnReportsAgentThatExited(t *testing.T) {
 func TestSpawnWaitZeroReturnsAtOnce(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Now", "")
-	r, out, err := f.spawn("T-1", spawnOptions{})
+	r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
@@ -734,7 +735,7 @@ func TestSpawnInRealTmuxAndGit(t *testing.T) {
 	if err := os.Symlink("/bin/sh", bin); err != nil {
 		t.Fatal(err)
 	}
-	spawnBin = func() (string, error) { return bin, nil }
+	lifecycle.SpawnBin = func() (string, error) { return bin, nil }
 
 	raw := func(args ...string) (string, error) {
 		out, err := exec.CommandContext(ctx, "tmux", append([]string{"-L", spawnRealSocket, "-f", os.DevNull}, args...)...).CombinedOutput()
@@ -746,7 +747,7 @@ func TestSpawnInRealTmuxAndGit(t *testing.T) {
 		t.Fatalf("new-session: %v: %s", err, out)
 	}
 	f.task("Real", "")
-	r, err := spawnTask(ctx, f.st, tmux.NewExec(spawnRealSocket), f.cfg, "T-1", spawnOptions{})
+	r, err := lifecycle.SpawnTask(ctx, f.st, tmux.NewExec(spawnRealSocket), f.cfg, "T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
@@ -788,7 +789,7 @@ func spawnKillServer(socket string) {
 func TestSpawnAgainAfterAgentExits(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Again", "")
-	r, out, err := f.spawn("T-1", spawnOptions{})
+	r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("first spawn: %v\n%s", err, out)
 	}
@@ -801,13 +802,13 @@ func TestSpawnAgainAfterAgentExits(t *testing.T) {
 	}
 	// While the agent's window is open, a second spawn is refused for that.
 	f.now = f.now.Add(time.Minute)
-	if _, _, err = f.spawn("T-1", spawnOptions{}); err == nil || !strings.Contains(err.Error(), "already running") {
+	if _, _, err = f.spawn("T-1", lifecycle.SpawnOptions{}); err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("spawn while the agent runs = %v, want already running", err)
 	}
 	// The agent exits and its window closes: the task spawns again at once.
 	f.fake.Panes = nil
 	f.now = f.now.Add(time.Minute)
-	r2, out, err := f.spawn("T-1", spawnOptions{})
+	r2, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn after the agent exited: %v\n%s", err, out)
 	}
@@ -826,7 +827,7 @@ func TestSpawnIgnoresRecycledPaneID(t *testing.T) {
 	f.update("T-1", func(tk *model.Task) { tk.Pane, tk.LaunchedAt = "%0", launched })
 	// tmux restarted after the launch, and %0 is now the user's own shell.
 	f.fake.Panes = []tmux.Pane{{ID: "%0", Session: "base", WindowName: "bash", ServerStart: launched.Add(time.Minute)}}
-	if _, out, err := f.spawn("T-1", spawnOptions{}); err != nil {
+	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
 		t.Fatalf("spawn with a recycled pane id: %v\n%s", err, out)
 	}
 	if got := f.get("T-1").Pane; got == "%0" {
@@ -836,7 +837,7 @@ func TestSpawnIgnoresRecycledPaneID(t *testing.T) {
 	f.task("Ours", "")
 	f.update("T-2", func(tk *model.Task) { tk.Pane, tk.LaunchedAt = "%0", launched })
 	f.fake.Panes = []tmux.Pane{{ID: "%0", Session: "api-server", WindowName: "T-2", ServerStart: launched.Add(-time.Minute)}}
-	if _, _, err := f.spawn("T-2", spawnOptions{}); err == nil || !strings.Contains(err.Error(), "still open") {
+	if _, _, err := f.spawn("T-2", lifecycle.SpawnOptions{}); err == nil || !strings.Contains(err.Error(), "still open") {
 		t.Fatalf("spawn with the task's own pane open = %v, want still open", err)
 	}
 }
@@ -974,13 +975,13 @@ func TestSpawnDefaultsToCheaperModelUnderWarning(t *testing.T) {
 		t.Errorf("the note is not printed exactly once:\n%s", out)
 	}
 
-	// spawnTask itself returns the note for callers that show no output
+	// lifecycle.SpawnTask itself returns the note for callers that show no output
 	// (the clock back where the CLI spawn's 20 s wait started).
 	f.now = f.start
 	f.task("Cheap too", "")
-	r, _, err := f.spawn("T-2", spawnOptions{})
+	r, _, err := f.spawn("T-2", lifecycle.SpawnOptions{})
 	if err != nil || r.Note != spawnWarningNote("T-2") {
-		t.Errorf("spawnTask: note %q, err %v; want %q", r.Note, err, spawnWarningNote("T-2"))
+		t.Errorf("lifecycle.SpawnTask: note %q, err %v; want %q", r.Note, err, spawnWarningNote("T-2"))
 	}
 }
 
@@ -1003,13 +1004,13 @@ func TestSpawnModelFlagBeatsForecast(t *testing.T) {
 func TestSpawnKeepsTaskModelUnderWarning(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Kept", "")
-	if _, out, err := f.spawn("T-1", spawnOptions{Model: "opus"}); err != nil {
+	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{Model: "opus"}); err != nil {
 		t.Fatalf("first spawn: %v\n%s", err, out)
 	}
 	f.fake.Panes, f.fake.Calls = nil, nil // the agent exited, its window closed
 	f.now = f.now.Add(time.Minute)
 	f.spawnWarning()
-	r, out, err := f.spawn("T-1", spawnOptions{})
+	r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("second spawn: %v\n%s", err, out)
 	}
@@ -1047,7 +1048,7 @@ func TestSpawnNoCheaperModelWithoutWarning(t *testing.T) {
 			f := spawnNewFixture(t)
 			f.task("Plain", "")
 			c.feed(f)
-			r, out, err := f.spawn("T-1", spawnOptions{})
+			r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 			if err != nil {
 				t.Fatalf("spawn: %v\n%s", err, out)
 			}
@@ -1066,7 +1067,7 @@ func TestSpawnCheaperModelOff(t *testing.T) {
 	f.task("Off", "")
 	f.spawnWarning()
 	f.cfg.Usage.CheaperModel = ""
-	r, out, err := f.spawn("T-1", spawnOptions{})
+	r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
@@ -1101,7 +1102,7 @@ func TestSpawnHostileCheaperModelIgnored(t *testing.T) {
 			f.task("Hostile", "")
 			f.spawnWarning()
 			f.cfg.Usage.CheaperModel = bad
-			r, out, err := f.spawn("T-1", spawnOptions{})
+			r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 			if err != nil {
 				t.Fatalf("spawn: %v\n%s", err, out)
 			}
@@ -1119,7 +1120,7 @@ func TestSpawnResumeIgnoresForecast(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Resumed", "")
 	f.spawnWarning()
-	r, out, err := f.spawn("T-1", spawnOptions{Resume: launchUUID})
+	r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{Resume: launchUUID})
 	if err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
@@ -1131,7 +1132,7 @@ func TestSpawnResumeIgnoresForecast(t *testing.T) {
 	f.task("Resumed with a model", "")
 	f.update("T-2", func(tk *model.Task) { tk.AgentModel = "opus" })
 	f.fake.Calls = nil
-	if r, out, err = f.spawn("T-2", spawnOptions{Resume: launchUUID}); err != nil {
+	if r, out, err = f.spawn("T-2", lifecycle.SpawnOptions{Resume: launchUUID}); err != nil {
 		t.Fatalf("spawn T-2: %v\n%s", err, out)
 	}
 	if got := f.windows(); !slices.Equal(got, []string{f.spawnWindowOf("T-2", "--model", "opus", "--resume", launchUUID)}) || r.Note != "" {
@@ -1144,7 +1145,7 @@ func TestSpawnUsageReadFailureDoesNotBlock(t *testing.T) {
 	f.task("Broken usage", "")
 	f.spawnWarning()
 	statusExec(t, f.db, "DROP TABLE usage_samples")
-	r, out, err := f.spawn("T-1", spawnOptions{})
+	r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn: %v\n%s", err, out)
 	}
@@ -1171,7 +1172,7 @@ func TestSpawnAgentCodexIsStored(t *testing.T) {
 	}
 
 	// Without --agent the task's own agent is used; --agent claude switches.
-	again := func(o spawnOptions, want string) {
+	again := func(o lifecycle.SpawnOptions, want string) {
 		t.Helper()
 		f.fake.Panes, f.fake.Calls = nil, nil
 		f.now = f.now.Add(time.Minute)
@@ -1182,16 +1183,16 @@ func TestSpawnAgentCodexIsStored(t *testing.T) {
 			t.Errorf("spawn %+v: tasks.agent = %q, want %q", o, got, want)
 		}
 	}
-	again(spawnOptions{}, model.AgentCodex)
-	again(spawnOptions{Agent: model.AgentClaude}, model.AgentClaude)
-	again(spawnOptions{Agent: model.AgentCodex}, model.AgentCodex)
+	again(lifecycle.SpawnOptions{}, model.AgentCodex)
+	again(lifecycle.SpawnOptions{Agent: model.AgentClaude}, model.AgentClaude)
+	again(lifecycle.SpawnOptions{Agent: model.AgentCodex}, model.AgentCodex)
 	// A resume keeps the stored agent whatever the option says.
-	again(spawnOptions{Agent: model.AgentClaude, Resume: launchUUID}, model.AgentCodex)
+	again(lifecycle.SpawnOptions{Agent: model.AgentClaude, Resume: launchUUID}, model.AgentCodex)
 
 	// A task never spawned is claude.
 	f.task("Default", "")
 	f.fake.Panes = nil
-	if _, out, err := f.spawn("T-2", spawnOptions{}); err != nil {
+	if _, out, err := f.spawn("T-2", lifecycle.SpawnOptions{}); err != nil {
 		t.Fatalf("spawn T-2: %v\n%s", err, out)
 	}
 	if got := f.get("T-2").Agent; got != model.AgentClaude {
@@ -1223,7 +1224,7 @@ func TestSpawnStoresAgentBeforeWindow(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Racy", "")
 	probe := &spawnAgentProbe{Fake: f.fake, st: f.st}
-	if _, err := spawnTask(context.Background(), f.st, probe, f.cfg, "T-1", spawnOptions{Agent: model.AgentCodex}); err != nil {
+	if _, err := lifecycle.SpawnTask(context.Background(), f.st, probe, f.cfg, "T-1", lifecycle.SpawnOptions{Agent: model.AgentCodex}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
 	if !slices.Equal(probe.seen, []string{model.AgentCodex}) {
@@ -1270,7 +1271,7 @@ func TestSpawnAgentRefusals(t *testing.T) {
 func TestSpawnRefusesOptionLikeValues(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Flags", "")
-	for _, o := range []spawnOptions{
+	for _, o := range []lifecycle.SpawnOptions{
 		{Model: "--dangerously-bypass-approvals-and-sandbox"},
 		{Model: "-s", Agent: model.AgentCodex},
 		{Model: "--sandbox", Agent: model.AgentCodex},
@@ -1284,7 +1285,7 @@ func TestSpawnRefusesOptionLikeValues(t *testing.T) {
 	}
 	// A task whose stored model starts with a dash is refused too.
 	f.update("T-1", func(tk *model.Task) { tk.AgentModel = "-s" })
-	if _, out, err := f.spawn("T-1", spawnOptions{}); err == nil {
+	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err == nil {
 		t.Errorf("spawn with a stored model -s succeeded:\n%s", out)
 	}
 	f.wantNothingStarted("T-1")
@@ -1308,7 +1309,7 @@ func TestSpawnCodexNeverGetsCheaperModel(t *testing.T) {
 	// A task stored as codex, spawned again with no --agent: the same.
 	f.fake.Panes, f.fake.Calls = nil, nil
 	f.now = f.now.Add(time.Minute)
-	r, out, err := f.spawn("T-1", spawnOptions{})
+	r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("second spawn: %v\n%s", err, out)
 	}
@@ -1324,7 +1325,7 @@ func TestSpawnCheaperModelOnlyForThatSpawn(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Cheap once", "")
 	f.spawnWarning()
-	r, out, err := f.spawn("T-1", spawnOptions{})
+	r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn under the warning: %v\n%s", err, out)
 	}
@@ -1337,7 +1338,7 @@ func TestSpawnCheaperModelOnlyForThatSpawn(t *testing.T) {
 	// The window closed and the warning lifted: the burn is outside the window.
 	f.fake.Panes, f.fake.Calls = nil, nil
 	f.now = f.now.Add(45 * time.Minute)
-	r, out, err = f.spawn("T-1", spawnOptions{})
+	r, out, err = f.spawn("T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn after the warning: %v\n%s", err, out)
 	}
@@ -1359,7 +1360,7 @@ func spawnOtherAgentNote(id, modelName, storedFor, agent string) string {
 func TestSpawnStoredModelOnlyWithItsAgent(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Switch", "")
-	if _, out, err := f.spawn("T-1", spawnOptions{Model: "sonnet"}); err != nil {
+	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{Model: "sonnet"}); err != nil {
 		t.Fatalf("first spawn: %v\n%s", err, out)
 	}
 	if tk := f.get("T-1"); tk.AgentModel != "sonnet" || tk.Agent != model.AgentClaude {
@@ -1369,7 +1370,7 @@ func TestSpawnStoredModelOnlyWithItsAgent(t *testing.T) {
 	f.now = f.now.Add(time.Minute)
 	probe := &spawnAgentProbe{Fake: f.fake, st: f.st}
 	var out bytes.Buffer
-	r, err := spawnTask(context.Background(), f.st, probe, f.cfg, "T-1", spawnOptions{Agent: model.AgentCodex, Out: &out})
+	r, err := lifecycle.SpawnTask(context.Background(), f.st, probe, f.cfg, "T-1", lifecycle.SpawnOptions{Agent: model.AgentCodex, Out: &out})
 	if err != nil {
 		t.Fatalf("codex spawn: %v\n%s", err, out.String())
 	}
@@ -1394,12 +1395,12 @@ func TestSpawnStoredModelOnlyWithItsAgent(t *testing.T) {
 func TestSpawnCodexModelNeverReachesClaude(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Switch back", "")
-	if _, out, err := f.spawn("T-1", spawnOptions{Agent: model.AgentCodex}); err != nil {
+	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{Agent: model.AgentCodex}); err != nil {
 		t.Fatalf("codex spawn: %v\n%s", err, out)
 	}
 	f.fake.Panes, f.fake.Calls = nil, nil
 	f.now = f.now.Add(time.Minute)
-	if _, out, err := f.spawn("T-1", spawnOptions{Model: "gpt-5"}); err != nil {
+	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{Model: "gpt-5"}); err != nil {
 		t.Fatalf("codex spawn with a model: %v\n%s", err, out)
 	}
 	if tk := f.get("T-1"); tk.Agent != model.AgentCodex || tk.AgentModel != "gpt-5" {
@@ -1408,7 +1409,7 @@ func TestSpawnCodexModelNeverReachesClaude(t *testing.T) {
 	f.fake.Panes, f.fake.Calls = nil, nil
 	f.now = f.now.Add(time.Minute)
 	f.spawnWarning()
-	r, outText, err := f.spawn("T-1", spawnOptions{Agent: model.AgentClaude})
+	r, outText, err := f.spawn("T-1", lifecycle.SpawnOptions{Agent: model.AgentClaude})
 	if err != nil {
 		t.Fatalf("claude spawn: %v\n%s", err, outText)
 	}
@@ -1436,7 +1437,7 @@ func TestSpawnHostileStoredModelOfOtherAgent(t *testing.T) {
 			f := spawnNewFixture(t)
 			f.task("Mixed", "")
 			f.update("T-1", func(tk *model.Task) { tk.Agent, tk.AgentModel = model.AgentClaude, bad })
-			r, out, err := f.spawn("T-1", spawnOptions{Agent: model.AgentCodex})
+			r, out, err := f.spawn("T-1", lifecycle.SpawnOptions{Agent: model.AgentCodex})
 			if err != nil {
 				t.Fatalf("codex spawn: %v\n%s", err, out)
 			}
@@ -1459,7 +1460,7 @@ func TestSpawnByAgentRefusesHowItRuns(t *testing.T) {
 	f.task("Fix", "Body")
 	f.update("T-1", func(tk *model.Task) { tk.Status = model.TaskReady })
 	before := f.get("T-1")
-	for opt, o := range map[string]spawnOptions{
+	for opt, o := range map[string]lifecycle.SpawnOptions{
 		"--agent":  {Agent: model.AgentCodex},
 		"--model":  {Model: "gpt-expensive"},
 		"--team":   {Team: true},
@@ -1484,8 +1485,8 @@ func TestSpawnCodexNotInstalledStoresNothing(t *testing.T) {
 	f := spawnNewFixture(t)
 	f.task("Fix", "Body")
 	f.update("T-1", func(tk *model.Task) { tk.AgentModel = "opus" })
-	launchLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
-	_, _, err := f.spawn("T-1", spawnOptions{Agent: model.AgentCodex})
+	lifecycle.LaunchLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	_, _, err := f.spawn("T-1", lifecycle.SpawnOptions{Agent: model.AgentCodex})
 	if err == nil || !strings.Contains(err.Error(), "codex is not installed") || !strings.Contains(err.Error(), "--agent claude") {
 		t.Fatalf("err = %v, want codex is not installed, with --agent claude", err)
 	}

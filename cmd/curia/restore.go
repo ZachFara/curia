@@ -25,6 +25,7 @@ import (
 	"github.com/ZachFara/curia/internal/deliver"
 	"github.com/ZachFara/curia/internal/fleet"
 	"github.com/ZachFara/curia/internal/gitops"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -437,8 +438,8 @@ func restoreCheckAgent(r restoreRow, _ restoreServer, _ time.Time, _ time.Durati
 		return restoreNotClaude, "a Codex session: restore does not resume Codex sessions yet (see below)"
 	case r.Session.Agent != model.AgentClaude:
 		return restoreNotClaude, "not a Claude Code session"
-	case r.Linked && spawnStoredAgent(r.Task) != model.AgentClaude:
-		return restoreOtherAgent, r.Task.ID + " now runs " + sanitize.Line(spawnStoredAgent(r.Task), 20) +
+	case r.Linked && lifecycle.SpawnStoredAgent(r.Task) != model.AgentClaude:
+		return restoreOtherAgent, r.Task.ID + " now runs " + sanitize.Line(lifecycle.SpawnStoredAgent(r.Task), 20) +
 			", not this session's Claude Code"
 	}
 	return "", ""
@@ -451,7 +452,7 @@ func restorePrintByHand(w io.Writer, rows []restoreRow) {
 		if r.Action != restoreNotClaude || r.Session.Agent != model.AgentCodex {
 			continue
 		}
-		why := "skipped " + spawnShortID(r.Session.ID) + ": a Codex session, not restored until Codex resume is verified; "
+		why := "skipped " + lifecycle.SpawnShortID(r.Session.ID) + ": a Codex session, not restored until Codex resume is verified; "
 		if !restoreSessionID.MatchString(r.Session.ID) {
 			_, _ = fmt.Fprintln(w, why+"its id is not one codex resume takes")
 			continue
@@ -622,7 +623,7 @@ func restoreSpecAgent(row restoreRow) error {
 	switch {
 	case row.Session.Agent != model.AgentClaude:
 		return errors.New("not a Claude Code session: restore resumes only Claude Code sessions")
-	case row.Linked && spawnStoredAgent(row.Task) != row.Session.Agent:
+	case row.Linked && lifecycle.SpawnStoredAgent(row.Task) != row.Session.Agent:
 		return fmt.Errorf("%s now runs another agent than this session's", sanitize.Line(row.Task.ID, 20))
 	case !restoreSessionID.MatchString(row.Session.ID):
 		return errors.New("not a Claude Code session id")
@@ -662,7 +663,7 @@ func restorePrintPlan(w io.Writer, rows []restoreRow, now time.Time) {
 		if r.Session.Repo != "" || r.Session.Branch != "" {
 			repo = ui.RepoName(r.Session.Repo) + "@" + r.Session.Branch
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", cell(spawnShortID(r.Session.ID), 8), cell(where, 90),
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", cell(lifecycle.SpawnShortID(r.Session.ID), 8), cell(where, 90),
 			cell(r.Session.TaskID, 20), cell(repo, 80), cell(active, 20), cell(action, 120))
 	}
 	_ = tw.Flush()
@@ -738,7 +739,7 @@ func restoreExecute(ctx context.Context, e restoreEnv, rows, todo []restoreRow) 
 	for _, r := range todo {
 		l, err := restoreOpen(ctx, e, r, tools)
 		if err != nil {
-			_, _ = fmt.Fprintf(e.out, "could not open a window for %s: %s\n", spawnShortID(r.Session.ID), sanitize.Line(err.Error(), 400))
+			_, _ = fmt.Fprintf(e.out, "could not open a window for %s: %s\n", lifecycle.SpawnShortID(r.Session.ID), sanitize.Line(err.Error(), 400))
 			failed++
 			continue
 		}
@@ -798,7 +799,7 @@ func restoreOpen(ctx context.Context, e restoreEnv, r restoreRow, tools restoreT
 	r.Task = claimed
 	l, err := restoreOpenLinked(ctx, e, r, tools)
 	if err != nil {
-		return nil, spawnRelease(ctx, e.st, claimed, err)
+		return nil, lifecycle.SpawnRelease(ctx, e.st, claimed, err)
 	}
 	return l, nil
 }
@@ -877,7 +878,7 @@ func restoreClaimTask(ctx context.Context, st *store.Store, t model.Task) (model
 }
 
 // restoreOpenLinked opens the window of a linked row whose task r.Task is
-// claimed, and records the pane on the task (spawnLink, which closes the
+// claimed, and records the pane on the task (lifecycle.SpawnLink, which closes the
 // window again when that fails).
 func restoreOpenLinked(ctx context.Context, e restoreEnv, r restoreRow, tools restoreTools) (*restoreLaunch, error) {
 	spec, err := restoreSpec(r, tools.bin, tools.claude)
@@ -888,7 +889,7 @@ func restoreOpenLinked(ctx context.Context, e restoreEnv, r restoreRow, tools re
 	if err != nil {
 		return nil, fmt.Errorf("open the window: %w", err)
 	}
-	t, err := spawnLink(ctx, e.st, e.tm, r.Task, pane, spawnOptions{Team: r.Task.Team, Model: r.Task.AgentModel})
+	t, err := lifecycle.SpawnLink(ctx, e.st, e.tm, r.Task, pane, lifecycle.SpawnOptions{Team: r.Task.Team, Model: r.Task.AgentModel})
 	if err != nil {
 		return nil, err
 	}
@@ -944,11 +945,11 @@ func restoreCheckBack(l *restoreLaunch, sessions []model.Session, panes []tmux.P
 
 // restoreLine is step 8's line for one window.
 func restoreLine(l *restoreLaunch) string {
-	short, where := spawnShortID(l.row.Session.ID), spawnPaneName(l.pane)
+	short, where := lifecycle.SpawnShortID(l.row.Session.ID), lifecycle.SpawnPaneName(l.pane)
 	switch l.state {
 	case restoreBack:
 		if l.newID != "" {
-			return fmt.Sprintf("restored %s in %s as session %s (the resume gave it a new id)", short, where, spawnShortID(l.newID))
+			return fmt.Sprintf("restored %s in %s as session %s (the resume gave it a new id)", short, where, lifecycle.SpawnShortID(l.newID))
 		}
 		return fmt.Sprintf("restored %s in %s", short, where)
 	case restoreClosed:
@@ -1011,7 +1012,7 @@ func restoreEndOthers(ctx context.Context, e restoreEnv, rows []restoreRow, l *r
 		}
 	}
 	if mates > 0 {
-		_, _ = fmt.Fprintf(e.out, "%s's %d teammates did not survive the restart: their rows are ended\n", spawnShortID(s.ID), mates)
+		_, _ = fmt.Fprintf(e.out, "%s's %d teammates did not survive the restart: their rows are ended\n", lifecycle.SpawnShortID(s.ID), mates)
 	}
 }
 
@@ -1039,7 +1040,7 @@ func restoreEndRow(ctx context.Context, e restoreEnv, id string, srv restoreServ
 // offered once to deliver.Message, whose guards decide whether it is typed.
 func restoreNotice(ctx context.Context, e restoreEnv, l *restoreLaunch) {
 	lead := cmp.Or(l.newID, l.row.Session.ID)
-	short := spawnShortID(lead)
+	short := lifecycle.SpawnShortID(lead)
 	m, err := e.st.CreateMessage(ctx, model.Message{
 		Text: restoreLeadText, Kind: model.KindInstruction, Sender: model.SenderUser, TargetSession: lead,
 		TargetTask: l.row.Task.ID, RoutedBy: model.RoutedAddress, Status: model.MsgQueued, CreatedAt: clock(),

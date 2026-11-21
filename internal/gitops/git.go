@@ -84,7 +84,7 @@ func mainRepo(top, common string) (repo, worktree string) {
 // open and again on the open handle, and the open does not block.
 func headBranch(gitDir string) (string, error) {
 	path := filepath.Clean(filepath.Join(gitDir, "HEAD"))
-	if err := requireRegular(os.Stat(path)); err != nil {
+	if err := RequireRegular(os.Stat(path)); err != nil {
 		return "", err
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
@@ -92,7 +92,7 @@ func headBranch(gitDir string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
-	if err = requireRegular(f.Stat()); err != nil {
+	if err = RequireRegular(f.Stat()); err != nil {
 		return "", err
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxHeadBytes+1))
@@ -109,9 +109,9 @@ func headBranch(gitDir string) (string, error) {
 	return ref, nil
 }
 
-// requireRegular passes on a stat error, or reports one when fi is not a
+// RequireRegular passes on a stat error, or reports one when fi is not a
 // regular file.
-func requireRegular(fi os.FileInfo, err error) error {
+func RequireRegular(fi os.FileInfo, err error) error {
 	if err != nil {
 		return err
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/deliver"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/notify"
 	"github.com/ZachFara/curia/internal/sanitize"
@@ -159,7 +160,7 @@ func awayNoRoot(ctx context.Context, st *store.Store, scope store.ModeScope) (na
 	live, err := modeLive(ctx, st, scope)
 	for _, s := range live {
 		if s.State != model.StateEnded && s.Repo == "" && s.Worktree == "" {
-			names = append(names, spawnShortID(s.ID))
+			names = append(names, lifecycle.SpawnShortID(s.ID))
 		}
 	}
 	return names, err
@@ -196,7 +197,7 @@ func awayAsk(ctx context.Context, st *store.Store, tm tmux.Client, logger *slog.
 			continue
 		}
 		if s.Pane == "" || s.Agent == model.AgentCodex {
-			notReady = append(notReady, spawnShortID(s.ID)+" (cannot be messaged)")
+			notReady = append(notReady, lifecycle.SpawnShortID(s.ID)+" (cannot be messaged)")
 			continue
 		}
 		m, err := st.CreateMessage(ctx, model.Message{
@@ -204,7 +205,7 @@ func awayAsk(ctx context.Context, st *store.Store, tm tmux.Client, logger *slog.
 			TargetSession: s.ID, RoutedBy: model.RoutedSend, Status: model.MsgQueued, CreatedAt: clock(),
 		})
 		if err != nil {
-			notReady = append(notReady, spawnShortID(s.ID)+" (not messaged: "+sanitize.Line(err.Error(), 80)+")")
+			notReady = append(notReady, lifecycle.SpawnShortID(s.ID)+" (not messaged: "+sanitize.Line(err.Error(), 80)+")")
 			continue
 		}
 		if _, err = deliver.Message(ctx, st, tm, logger, m.ID, clock()); err != nil {
@@ -254,9 +255,9 @@ func awayNotReady(ctx context.Context, st *store.Store, sent map[string]string) 
 		}
 		switch {
 		case !found || got.IsZero() || !s.UpdatedAt.After(got):
-			out = append(out, spawnShortID(sid)+" ("+awayWhy(s, got)+")")
+			out = append(out, lifecycle.SpawnShortID(sid)+" ("+awayWhy(s, got)+")")
 		case s.State != model.StateIdle && s.State != model.StateNeedsDecision:
-			out = append(out, spawnShortID(sid)+" ("+awayWhy(s, got)+")")
+			out = append(out, lifecycle.SpawnShortID(sid)+" ("+awayWhy(s, got)+")")
 		}
 	}
 	slices.Sort(out)
@@ -402,7 +403,7 @@ func awayRefusals(rep store.DenialReport) string {
 		w("  nothing")
 	}
 	for _, d := range rep.Groups {
-		w("  %dx %s %s: %s", d.Count, spawnShortID(d.SessionID), sanitize.Line(d.Tool, 40), sanitize.Line(d.Summary, 100))
+		w("  %dx %s %s: %s", d.Count, lifecycle.SpawnShortID(d.SessionID), sanitize.Line(d.Tool, 40), sanitize.Line(d.Summary, 100))
 	}
 	if rep.Omitted > 0 {
 		w("  and %d more kind(s) of refusal: `curia back --all` lists every one", rep.Omitted)
@@ -484,7 +485,7 @@ func awayDid(ctx context.Context, st *store.Store, from, to time.Time) (string, 
 		}
 		c := counts[id]
 		fmt.Fprintf(&b, "  %s %s: %d turn(s), %d ticket(s) raised, %d review(s) opened, %d message(s) delivered\n",
-			spawnShortID(id), sanitize.Line(repo[id], 40), c["turn_end"], c["ticket_raised"], c["review_opened"], c["message_delivered"])
+			lifecycle.SpawnShortID(id), sanitize.Line(repo[id], 40), c["turn_end"], c["ticket_raised"], c["review_opened"], c["message_delivered"])
 	}
 	return b.String(), nil
 }

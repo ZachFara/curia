@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
@@ -467,9 +468,9 @@ func TestAutoSpawnFailedSpawnGivesClaimBackAndWaitsTheInterval(t *testing.T) {
 	tk := autoReady(f, "a")
 	calls := 0
 	prev := autoSpawnFn
-	autoSpawnFn = func(context.Context, *store.Store, tmux.Client, config.Config, string, spawnOptions) (spawnResult, error) {
+	autoSpawnFn = func(context.Context, *store.Store, tmux.Client, config.Config, string, lifecycle.SpawnOptions) (lifecycle.SpawnResult, error) {
 		calls++
-		return spawnResult{}, os.ErrPermission
+		return lifecycle.SpawnResult{}, os.ErrPermission
 	}
 	t.Cleanup(func() { autoSpawnFn = prev })
 	e := autoEnv(f)

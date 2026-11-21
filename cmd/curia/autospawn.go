@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -23,7 +24,7 @@ import (
 
 // F29 auto-spawn (spec F29, Ruling 159, owner decisions D-7 and D-8): the
 // monitor starts the next ready task, within caps, through the same
-// spawnTask as `curia spawn`.
+// lifecycle.SpawnTask as `curia spawn`.
 //
 // Why starting sessions from the monitor does not let an agent start agents:
 // the monitor is the user's own background process, and everything it needs
@@ -36,7 +37,7 @@ import (
 // `curia spawn`/MCP call and every edit leave none); and cannot approve a
 // setup script (`curia setup approve` is user-only, and an unapproved
 // script makes the task not eligible). The monitor never types into a
-// pane: spawnTask only creates a window.
+// pane: lifecycle.SpawnTask only creates a window.
 
 const (
 	// autoEvery is the job's own tick (F29: 30 seconds), apart from the monitor's.
@@ -47,7 +48,7 @@ const (
 
 var (
 	// autoSpawnFn is the spawn path; tests count its calls.
-	autoSpawnFn = spawnTask
+	autoSpawnFn = lifecycle.SpawnTask
 	// autoRepoCfg is the auto-spawn setting in effect for a repository: the
 	// user file tightened by the repository's own file. A resolution that
 	// fails is "off".
@@ -194,9 +195,9 @@ func autoTaskSkips(ctx context.Context, st *store.Store, cfg config.Config, t mo
 		return false, false, err
 	}
 	over = b.Level() == model.BudgetOver
-	s, rerr := setupRead(t.Repo)
+	s, rerr := lifecycle.SetupRead(t.Repo)
 	if rerr != nil {
-		return over, !errors.Is(rerr, errSetupAbsent), nil // unreadable counts as not approved
+		return over, !errors.Is(rerr, lifecycle.ErrSetupAbsent), nil // unreadable counts as not approved
 	}
 	approved, err := st.SetupApproval(ctx, t.Repo)
 	return over, approved != s.Sum, err
@@ -243,7 +244,7 @@ func autoDetail(reason string, t model.Task) string {
 }
 
 // autoStart claims r's task with one UPDATE (so two monitors, or a restart,
-// start it once), starts it through spawnTask (a new session, own worktree
+// start it once), starts it through lifecycle.SpawnTask (a new session, own worktree
 // and window, never a pane that exists), and logs the result. A failed
 // spawn gives the claim back and is retried after the interval.
 func (e *monitorEnv) autoStart(ctx context.Context, cfg config.Config, r autoRow, now time.Time) error {
@@ -254,13 +255,13 @@ func (e *monitorEnv) autoStart(ctx context.Context, cfg config.Config, r autoRow
 	}
 	// shortcut: a crash between the claim and the spawn leaves the task ready
 	// with no hash and a start counted (nothing starts twice, nothing is logged),
-	// and a long spawn (up to spawnSetupLimit+2m) holds the monitor pass and the
+	// and a long spawn (up to lifecycle.SpawnSetupLimit+2m) holds the monitor pass and the
 	// jobs behind it; fix both with a claim row finished by the spawn if they bite.
 	// A spawn may run an approved setup script for minutes: it gets its own
 	// deadline, not the tick's.
-	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), spawnSetupLimit+2*time.Minute)
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lifecycle.SpawnSetupLimit+2*time.Minute)
 	defer cancel()
-	res, err := autoSpawnFn(sctx, e.st, newTmuxClient(), cfg, t.ID, spawnOptions{Wait: spawnWait})
+	res, err := autoSpawnFn(sctx, e.st, newTmuxClient(), cfg, t.ID, lifecycle.SpawnOptions{Wait: lifecycle.SpawnWait})
 	if err != nil {
 		rerr := e.st.AutoRelease(sctx, t.ID, now, t.AutoSpawnedAt, t.ReadyHash)
 		_, lerr := e.st.LogAuto(sctx, store.AutoRun{
