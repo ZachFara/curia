@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -85,7 +86,8 @@ func costlensRegular(path string) bool {
 }
 
 // costlensExec is the real costlensRun: node <analyzer> --project <project>,
-// no shell, stdin /dev/null, stderr discarded, the environment as it is. It
+// no shell, stdin /dev/null, stderr discarded, the environment without Curia's keys and tokens
+// (costlensEnv). It
 // runs in the analyzer's own folder, which is there (costlensAnalyzer checked
 // the file), whereas the project may be a removed worktree (probe C2); and
 // so no file of the repository's can steer it. It runs in its own process
@@ -95,6 +97,7 @@ func costlensExec(ctx context.Context, node, analyzer, project string) ([]byte, 
 	out := &costlensCapped{max: usage.MaxSummary}
 	cmd := exec.CommandContext(ctx, node, analyzer, "--project", project)
 	cmd.Dir, cmd.Stdout = filepath.Dir(analyzer), out // Stdin and Stderr nil: the null device
+	cmd.Env = costlensEnv(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = costlensWaitDelay
@@ -108,6 +111,15 @@ func costlensExec(ctx context.Context, node, analyzer, project string) ([]byte, 
 		return nil, err
 	}
 	return out.buf, nil
+}
+
+// costlensEnv is env without the CURIA_* variables named *_KEY, *_TOKEN or
+// *_SECRET (CURIA_LINEAR_API_KEY, CURIA_NTFY_TOKEN, ...): the analyzer needs none.
+func costlensEnv(env []string) []string {
+	return slices.DeleteFunc(slices.Clone(env), func(kv string) bool {
+		name, _, _ := strings.Cut(kv, "=")
+		return strings.HasPrefix(name, "CURIA_") && (strings.HasSuffix(name, "_KEY") || strings.HasSuffix(name, "_TOKEN") || strings.HasSuffix(name, "_SECRET"))
+	})
 }
 
 // costlensCapped keeps at most max bytes; a write past them fails, which

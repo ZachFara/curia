@@ -926,7 +926,7 @@ func restoreAwait(ctx context.Context, e restoreEnv, launches []*restoreLaunch) 
 // tmux listed its panes and the window's is gone.
 func restoreCheckBack(l *restoreLaunch, sessions []model.Session, panes []tmux.Pane, listed bool) {
 	for _, s := range sessions {
-		if s.Pane != l.pane.ID || s.State == model.StateStale || s.StartedAt.Before(l.opened) {
+		if s.Pane != l.pane.ID || fleet.OtherSocket(l.pane.Socket, s) || s.State == model.StateStale || s.StartedAt.Before(l.opened) {
 			continue
 		}
 		l.state = restoreBack

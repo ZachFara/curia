@@ -72,6 +72,7 @@ type Budget struct {
 	PauseLabel string // "T-7 (P3) api-server"
 	PauseTitle string // the task's title
 	PauseLimit string // when the limit lands: "limit ~48m" or "at limit"
+	PauseBusy  bool   // the suggested task cannot be paused yet: its agent is mid-turn
 }
 
 // pauseSuggestion is what a pause prompt names: the suggestion as the
@@ -80,7 +81,7 @@ type pauseSuggestion struct{ task, label, title string }
 
 // suggestion is b's pause suggestion as a prompt names it; zero when none.
 func (b Budget) suggestion() pauseSuggestion {
-	if b.PauseTask == "" {
+	if b.PauseTask == "" || b.PauseBusy {
 		return pauseSuggestion{}
 	}
 	return pauseSuggestion{task: b.PauseTask, label: b.PauseLabel, title: b.PauseTitle}
@@ -1193,7 +1194,7 @@ func (m Model) askPause() Model {
 	switch {
 	case m.mode != ModePopup || !m.pauseOn:
 		m.notice = cmp.Or(m.noPause, noticeNoPause)
-	case m.budget.PauseTask == "":
+	case m.budget.PauseTask == "" || m.budget.PauseBusy:
 		m.notice = noticeNothingToPause
 	default:
 		m.pauseAsk, m.pauseSince, m.pauseWait = m.budget.suggestion(), m.now(), dwell
@@ -1277,7 +1278,7 @@ func (m Model) cancelPause(notice string) Model {
 // suggestionMoved is the notice of a prompt canceled because the
 // suggestion changed: what is suggested now, if anything.
 func (m Model) suggestionMoved() string {
-	if m.budget.PauseTask == "" {
+	if m.budget.PauseTask == "" || m.budget.PauseBusy {
 		return noticeSuggestionMoved + ": nothing to pause now"
 	}
 	return noticeSuggestionMoved + ": now " + m.budget.PauseLabel

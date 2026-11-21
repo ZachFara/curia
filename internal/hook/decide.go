@@ -152,7 +152,9 @@ func protectedRoots(home string, cfg config.Config) []string {
 	var raw []string
 	if home != "" {
 		raw = append(raw, filepath.Join(home, ".config", "curia"), filepath.Join(home, ".local", "share", "curia"),
-			filepath.Join(home, ".local", "state", "curia"))
+			filepath.Join(home, ".local", "state", "curia"),
+			config.XDGDir("XDG_CONFIG_HOME", home, ".config"), config.XDGDir("XDG_DATA_HOME", home, ".local/share"),
+			config.XDGDir("XDG_STATE_HOME", home, ".local/state"))
 	}
 	for _, p := range []string{cfg.DBPath, cfg.LogPath} {
 		if p != "" {
