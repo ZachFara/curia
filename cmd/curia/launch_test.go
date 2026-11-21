@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
@@ -26,7 +27,7 @@ func init() {
 	launchExec = launchUnexpectedExec
 }
 
-// launchStub is the path launchLookPath returns under launchRecord.
+// launchStub is the path lifecycle.LaunchLookPath returns under launchRecord.
 const launchStub = "/stub/bin/claude"
 
 // launchRecorder records the one exec a launch makes.
@@ -41,19 +42,19 @@ type launchRecorder struct {
 func launchRecord(t *testing.T) *launchRecorder {
 	t.Helper()
 	rec := &launchRecorder{}
-	prevExec, prevLook := launchExec, launchLookPath
+	prevExec, prevLook := launchExec, lifecycle.LaunchLookPath
 	launchExec = func(argv0 string, argv, envv []string) error {
 		rec.calls++
 		rec.path, rec.argv, rec.envv = argv0, slices.Clone(argv), slices.Clone(envv)
 		return nil
 	}
-	launchLookPath = func(file string) (string, error) {
+	lifecycle.LaunchLookPath = func(file string) (string, error) {
 		if file != "claude" {
 			return "", errors.New("unexpected lookup of " + file)
 		}
 		return launchStub, nil
 	}
-	t.Cleanup(func() { launchExec, launchLookPath = prevExec, prevLook })
+	t.Cleanup(func() { launchExec, lifecycle.LaunchLookPath = prevExec, prevLook })
 	return rec
 }
 
@@ -167,8 +168,8 @@ func TestLaunchModelTeamResume(t *testing.T) {
 			true,
 		},
 		// After a pause the agent is told its work is in the WIP commit.
-		{[]string{"T-1", "--resume", launchUUID, "--after-pause"}, []string{"claude", "--resume", launchUUID, launchAfterPauseNote("T-1")}, false},
-		{[]string{"T-1", "--after-pause"}, []string{"claude", task.Brief(tk, false) + "\n\n" + launchAfterPauseNote("T-1")}, false},
+		{[]string{"T-1", "--resume", launchUUID, "--after-pause"}, []string{"claude", "--resume", launchUUID, lifecycle.LaunchAfterPauseNote("T-1")}, false},
+		{[]string{"T-1", "--after-pause"}, []string{"claude", task.Brief(tk, false) + "\n\n" + lifecycle.LaunchAfterPauseNote("T-1")}, false},
 	}
 	for _, c := range cases {
 		rec := launchRecord(t)
@@ -226,7 +227,7 @@ func TestLaunchFailureWaitsAndExitsOne(t *testing.T) {
 	rec := launchRecord(t)
 	check("unknown task", []string{"T-9"}, "no task T-9")
 
-	launchLookPath = func(string) (string, error) {
+	lifecycle.LaunchLookPath = func(string) (string, error) {
 		return "", errors.New("exec: \"claude\": \x1b[31mexecutable file not found\x1b[0m in $PATH")
 	}
 	check("claude missing", []string{"T-1"}, "executable file not found")
@@ -286,7 +287,7 @@ func TestLaunchRejectsBadArguments(t *testing.T) {
 	}
 }
 
-// launchCodexStub is the path launchLookPath returns for codex under
+// launchCodexStub is the path lifecycle.LaunchLookPath returns for codex under
 // launchRecordCodex.
 const launchCodexStub = "/stub/bin/codex"
 
@@ -295,7 +296,7 @@ const launchCodexStub = "/stub/bin/codex"
 func launchRecordCodex(t *testing.T) *launchRecorder {
 	t.Helper()
 	rec := launchRecord(t)
-	launchLookPath = func(file string) (string, error) {
+	lifecycle.LaunchLookPath = func(file string) (string, error) {
 		if file != "codex" {
 			return "", errors.New("unexpected lookup of " + file)
 		}
@@ -341,7 +342,7 @@ func TestLaunchCodexPassesBriefByExec(t *testing.T) {
 	tk := launchCodexTask(t)
 	rec := launchRecordCodex(t)
 	t.Setenv("CURIA_TASK_ID", "T-99")
-	t.Setenv(launchTeamVar, "")
+	t.Setenv(lifecycle.LaunchTeamVar, "")
 	if _, stderr, err := launchRun(t, &launchEnter{}, "T-1"); err != nil {
 		t.Fatalf("launch: %v\n%s", err, stderr)
 	}
@@ -361,7 +362,7 @@ func TestLaunchCodexPassesBriefByExec(t *testing.T) {
 	if ids := launchTaskIDs(rec.envv); !slices.Equal(ids, []string{"T-1"}) {
 		t.Errorf("CURIA_TASK_ID entries = %q, want exactly T-1", ids)
 	}
-	if slices.Contains(rec.envv, launchTeamVar+"=1") {
+	if slices.Contains(rec.envv, lifecycle.LaunchTeamVar+"=1") {
 		t.Error("the team switch is set for codex")
 	}
 }
@@ -377,8 +378,8 @@ func TestLaunchCodexModelAndResume(t *testing.T) {
 		// codex resume takes no model here (section 4.10: codex resume <uuid>).
 		{[]string{"T-1", "--resume", launchUUID, "--model", "o3"}, []string{"codex", "resume", launchUUID}},
 		// After a pause the agent is told its work is in the WIP commit.
-		{[]string{"T-1", "--resume", launchUUID, "--after-pause"}, []string{"codex", "resume", launchUUID, launchAfterPauseNote("T-1")}},
-		{[]string{"T-1", "--after-pause"}, []string{"codex", brief + "\n\n" + launchAfterPauseNote("T-1")}},
+		{[]string{"T-1", "--resume", launchUUID, "--after-pause"}, []string{"codex", "resume", launchUUID, lifecycle.LaunchAfterPauseNote("T-1")}},
+		{[]string{"T-1", "--after-pause"}, []string{"codex", brief + "\n\n" + lifecycle.LaunchAfterPauseNote("T-1")}},
 	}
 	for _, c := range cases {
 		rec := launchRecordCodex(t)
@@ -440,7 +441,7 @@ func TestLaunchCodexNeverAddsSandboxOrApprovalFlags(t *testing.T) {
 func TestLaunchCodexMissing(t *testing.T) {
 	launchCodexTask(t)
 	rec := launchRecordCodex(t)
-	launchLookPath = func(file string) (string, error) {
+	lifecycle.LaunchLookPath = func(file string) (string, error) {
 		return "", errors.New("exec: \"" + file + "\": \x1b[31mexecutable file not found\x1b[0m in $PATH")
 	}
 	stdin := &launchEnter{}

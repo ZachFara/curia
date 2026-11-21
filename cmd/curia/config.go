@@ -19,6 +19,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/install"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
 )
@@ -357,7 +358,7 @@ func runConfigRollback(cmd *cobra.Command, args []string) error {
 	if err = config.ValidateUser([]byte(rev.File)); err != nil {
 		return fmt.Errorf("revision %d is no longer valid, nothing written: %w", n, err)
 	}
-	answer, err := setupConfirm(fmt.Sprintf("Write the file as it was after revision %d (%s, %s)? Type yes: ", n, rev.At.Local().Format("2006-01-02 15:04"), sanitize.Line(rev.Actor, 20)))
+	answer, err := lifecycle.SetupConfirm(fmt.Sprintf("Write the file as it was after revision %d (%s, %s)? Type yes: ", n, rev.At.Local().Format("2006-01-02 15:04"), sanitize.Line(rev.Actor, 20)))
 	if err != nil || answer != "yes" {
 		return errors.New("not rolled back: confirmation was not given")
 	}

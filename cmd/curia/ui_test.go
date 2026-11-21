@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ZachFara/curia/internal/config"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
@@ -358,8 +359,8 @@ func TestBoardSourceSpawnDoesNotWait(t *testing.T) {
 	if i < 0 {
 		t.Fatalf("no window for T-1 (pane %q): %+v", tk.Pane, f.fake.Panes)
 	}
-	if want := spawnLine(spawnResult{Task: tk, Pane: f.fake.Panes[i]}); line != want {
-		t.Errorf("line = %q, want spawnLine's %q", line, want)
+	if want := lifecycle.SpawnLine(lifecycle.SpawnResult{Task: tk, Pane: f.fake.Panes[i]}); line != want {
+		t.Errorf("line = %q, want lifecycle.SpawnLine's %q", line, want)
 	}
 }
 
@@ -939,7 +940,7 @@ func TestStoreSourcePauseRunsPause(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Pause(T-1): %v", err)
 	}
-	if want := "Paused T-1: curia resume T-1 brings it back (it continues session " + spawnShortID(lifecycleLead) + ")"; line != want {
+	if want := "Paused T-1: curia resume T-1 brings it back (it continues session " + lifecycle.SpawnShortID(lifecycleLead) + ")"; line != want {
 		t.Errorf("line = %q, want the pause's last line %q", line, want)
 	}
 	if worktreeExists(wt) {

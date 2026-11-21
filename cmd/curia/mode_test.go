@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 )
@@ -25,9 +26,9 @@ func modeEnv(t *testing.T, typed string) *store.Store {
 	modeReset(t)
 	db := hookHome(t)
 	userTerminalAs(t, true)
-	old := setupConfirm
-	setupConfirm = func(string) (string, error) { return typed, nil }
-	t.Cleanup(func() { setupConfirm = old })
+	old := lifecycle.SetupConfirm
+	lifecycle.SetupConfirm = func(string) (string, error) { return typed, nil }
+	t.Cleanup(func() { lifecycle.SetupConfirm = old })
 	st, err := store.Open(db)
 	if err != nil {
 		t.Fatal(err)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -161,7 +162,7 @@ func usagePause(rep *usageReport, cards []task.Card, burns map[string]float64) {
 			sum += burns[s.ID]
 		}
 		// The test curia pause applies without --force.
-		busy := pauseCheckStates(c.Task, c.Sessions) != nil
+		busy := lifecycle.PauseCheckStates(c.Task, c.Sessions) != nil
 		running = append(running, usage.Running{TaskID: c.Task.ID, N: c.Task.N, Priority: c.Task.Priority, BurnUSD: sum, Busy: busy})
 		if busy {
 			busyIDs[c.Task.ID] = true

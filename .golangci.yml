@@ -421,6 +421,29 @@ linters:
             - pkg: github.com/ZachFara/curia
               desc: "internal/gitops may import only model, sanitize and task: no store, no ui"
 
+        # Session lifecycle moved out of cmd/curia: starts, pauses, resumes and
+        # cleans an agent's session and worktree. No ui, hook or mcp, and no
+        # cmd: who the user is stays with the commands that call it.
+        lifecycle:
+          list-mode: strict
+          files:
+            - "**/internal/lifecycle/**"
+          allow:
+            - $gostd
+            - github.com/ZachFara/curia/internal/config$
+            - github.com/ZachFara/curia/internal/fleet$
+            - github.com/ZachFara/curia/internal/gitops$
+            - github.com/ZachFara/curia/internal/model$
+            - github.com/ZachFara/curia/internal/sanitize$
+            - github.com/ZachFara/curia/internal/store$
+            - github.com/ZachFara/curia/internal/task$
+            - github.com/ZachFara/curia/internal/tmux$
+            - github.com/ZachFara/curia/internal/usage$
+            - github.com/ZachFara/curia/internal/lifecycle$
+          deny:
+            - pkg: github.com/ZachFara/curia
+              desc: "internal/lifecycle may import only config, fleet, gitops, model, sanitize, store, task, tmux and usage: no ui, hook, mcp or cmd"
+
         tmux:
           list-mode: strict
           files:
@@ -703,6 +726,7 @@ linters:
             - github.com/ZachFara/curia/internal/install$
             - github.com/ZachFara/curia/internal/latency$
             - github.com/ZachFara/curia/internal/gitops$
+            - github.com/ZachFara/curia/internal/lifecycle$
           deny:
             - pkg: github.com/ZachFara/curia
               desc: "cmd/curia may import only the internal packages in the plan's File structure table (docs/decisions/0003)"
@@ -729,6 +753,7 @@ linters:
             - "!**/internal/sanitize/**"
             - "!**/internal/latency/**"
             - "!**/internal/gitops/**"
+            - "!**/internal/lifecycle/**"
             - "!**/internal/decision/**"
             - "!**/internal/precedent/**"
             - "!**/internal/task/**"

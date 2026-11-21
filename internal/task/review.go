@@ -121,3 +121,8 @@ func PRBody(t model.Task, r model.Review, decided []model.Decision) string {
 	}
 	return head.String() + summary + tail
 }
+
+// ReviewStatusWord is a review status as a sentence says it.
+func ReviewStatusWord(s model.ReviewStatus) string {
+	return strings.ReplaceAll(sanitize.Line(string(s), 30), "_", " ")
+}

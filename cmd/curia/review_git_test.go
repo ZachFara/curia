@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/ZachFara/curia/internal/gitops"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/task"
@@ -36,7 +37,7 @@ type reviewFixture struct {
 
 func reviewNew(t *testing.T) *reviewFixture {
 	t.Helper()
-	f := &reviewFixture{spawnFixture: lifecycleSpawned(t, spawnOptions{})}
+	f := &reviewFixture{spawnFixture: lifecycleSpawned(t, lifecycle.SpawnOptions{})}
 	f.wt = f.worktree("T-1")
 	f.commitOnBranch("auth.go", "package auth\n", "fix auth")
 	f.origin = filepath.Join(filepath.Dir(f.repo), "origin.git")

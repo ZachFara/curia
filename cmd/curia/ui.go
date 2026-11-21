@@ -14,6 +14,7 @@ import (
 
 	"github.com/ZachFara/curia/internal/config"
 	"github.com/ZachFara/curia/internal/fleet"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/sanitize"
 	"github.com/ZachFara/curia/internal/store"
@@ -299,7 +300,7 @@ func (s storeSource) Pause(ctx context.Context, id string) (string, error) {
 		return "", fmt.Errorf("%s not paused: the suggestion changed; %s. Nothing was done", sanitize.Line(id, 40), now)
 	}
 	var out bytes.Buffer
-	if err = pauseTask(ctx, s.st, s.tm, s.cfg, id, pauseOptions{}, &out); err != nil {
+	if err = lifecycle.PauseTask(ctx, s.st, s.tm, s.cfg, id, lifecycle.PauseOptions{}, &out); err != nil {
 		return "", err
 	}
 	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
@@ -374,7 +375,7 @@ func uiBacklogOrReady(s model.TaskStatus) bool {
 }
 
 // Spawn starts task id as curia spawn does, without waiting for the agent
-// to report, and returns spawnLine's line with the spawn's note (the model
+// to report, and returns lifecycle.SpawnLine's line with the spawn's note (the model
 // it chose) and any setup step that was skipped (an unapproved script). The board bounds an action by a few
 // seconds; a spawn runs to its own limits instead (git's, an approved setup
 // script's), so a slow checkout or setup is not cut short. The board runs
@@ -386,11 +387,11 @@ func (b boardSource) Spawn(ctx context.Context, id string) (string, error) {
 	var out bytes.Buffer
 	// ReadyOnly unless the guard passed (Ruling 113), should the source be
 	// wired without the refusal elsewhere.
-	r, err := spawnTask(context.WithoutCancel(ctx), b.st, b.tm, b.cfg, id, spawnOptions{Wait: 0, Out: &out, ReadyOnly: b.refused != nil})
+	r, err := lifecycle.SpawnTask(context.WithoutCancel(ctx), b.st, b.tm, b.cfg, id, lifecycle.SpawnOptions{Wait: 0, Out: &out, ReadyOnly: b.refused != nil})
 	if err != nil {
 		return "", err
 	}
-	parts := []string{spawnLine(r)}
+	parts := []string{lifecycle.SpawnLine(r)}
 	if r.Note != "" {
 		parts = append(parts, strings.Split(r.Note, "\n")...)
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ZachFara/curia/internal/gitops"
+	"github.com/ZachFara/curia/internal/lifecycle"
 	"github.com/ZachFara/curia/internal/model"
 	"github.com/ZachFara/curia/internal/store"
 	"github.com/ZachFara/curia/internal/tmux"
@@ -28,7 +29,7 @@ const lifecycleBranch = "curia/T-1-fix-auth"
 // lifecycleSpawned is a spawn fixture whose repository ignores node_modules/
 // and .env, with task T-1 "Fix auth" spawned with o (window pane %100, no
 // wait) and no session linked yet.
-func lifecycleSpawned(t *testing.T, o spawnOptions) *spawnFixture {
+func lifecycleSpawned(t *testing.T, o lifecycle.SpawnOptions) *spawnFixture {
 	t.Helper()
 	f := spawnNewFixture(t)
 	worktreeWrite(t, filepath.Join(f.repo, ".gitignore"), "node_modules/\n.env\n")
@@ -45,7 +46,7 @@ func lifecycleSpawned(t *testing.T, o spawnOptions) *spawnFixture {
 // task's window pane, started at the launch.
 func lifecycleWithLead(t *testing.T) *spawnFixture {
 	t.Helper()
-	f := lifecycleSpawned(t, spawnOptions{})
+	f := lifecycleSpawned(t, lifecycle.SpawnOptions{})
 	lifecycleSession(f, lifecycleLead, "%100", model.StateIdle, f.now)
 	return f
 }
@@ -373,7 +374,7 @@ func TestPauseCleanWorktreeMakesNoCommit(t *testing.T) {
 func TestPauseRefusesWorkingAgentWithoutForce(t *testing.T) {
 	for _, state := range []model.State{model.StateWorking, model.StateWaiting} {
 		t.Run(string(state), func(t *testing.T) {
-			f := lifecycleSpawned(t, spawnOptions{})
+			f := lifecycleSpawned(t, lifecycle.SpawnOptions{})
 			lifecycleSession(f, lifecycleLead, "%100", state, f.now)
 			_, err := lifecycleRun(t, "pause", "T-1")
 			if err == nil || !strings.Contains(err.Error(), string(state)) || !strings.Contains(err.Error(), "--force") {
@@ -447,7 +448,7 @@ func TestPauseNeverKillsRecycledPane(t *testing.T) {
 }
 
 func TestPauseRefusesPaneItCannotIdentify(t *testing.T) {
-	f := lifecycleSpawned(t, spawnOptions{})
+	f := lifecycleSpawned(t, lifecycle.SpawnOptions{})
 	// The recorded pane is open, no session reported and the launch claim
 	// has lapsed: nothing ties %100 to T-1 any more.
 	f.update("T-1", func(tk *model.Task) { tk.LaunchedAt = time.Time{} })
@@ -562,7 +563,7 @@ func TestPauseKeepsWorktreeWhenIgnoredFileAppearsAfterCommit(t *testing.T) {
 func TestPausePicksLeadAsResumeSession(t *testing.T) {
 	claude := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", claude)
-	f := lifecycleSpawned(t, spawnOptions{})
+	f := lifecycleSpawned(t, lifecycle.SpawnOptions{})
 	teamsWriteCaptured(t, filepath.Join(claude, "teams"))
 	f.fake.Panes = append(f.fake.Panes, tmux.Pane{ID: "%17", Session: "api-server", WindowName: "T-1"})
 	lifecycleSession(f, teamsCapturedLead, "%100", model.StateIdle, f.now.Add(-time.Minute))
@@ -583,7 +584,7 @@ func TestPausePicksLeadAsResumeSession(t *testing.T) {
 }
 
 func TestPauseKeepsNoSessionIDThatIsNotOne(t *testing.T) {
-	f := lifecycleSpawned(t, spawnOptions{})
+	f := lifecycleSpawned(t, lifecycle.SpawnOptions{})
 	lifecycleSession(f, "not-a-claude-id", "%100", model.StateIdle, f.now)
 	out, err := lifecycleRun(t, "pause", "T-1")
 	if err != nil {
@@ -662,7 +663,7 @@ func TestLifecycleRefusesMovedOrSymlinkedWorktree(t *testing.T) {
 }
 
 func TestLifecycleRefusesWhileSpawnUnderWay(t *testing.T) {
-	f := lifecycleSpawned(t, spawnOptions{})
+	f := lifecycleSpawned(t, lifecycle.SpawnOptions{})
 	// The launch claim is fresh, no agent has reported and no window is
 	// open: a spawn (its setup script) may be running in the worktree.
 	f.fake.Panes = nil
@@ -673,14 +674,14 @@ func TestLifecycleRefusesWhileSpawnUnderWay(t *testing.T) {
 	}
 	lifecycleWantKept(f)
 
-	f.now = f.now.Add(spawnSetupLimit + 2*time.Minute)
+	f.now = f.now.Add(lifecycle.SpawnSetupLimit + 2*time.Minute)
 	if out, err := lifecycleRun(t, "pause", "T-1"); err != nil {
 		t.Fatalf("pause after the claim lapsed: %v\n%s", err, out)
 	}
 }
 
 // lifecyclePaused is lifecycleWithLead after a change to README and a pause.
-func lifecyclePaused(t *testing.T, o spawnOptions, lead bool) *spawnFixture {
+func lifecyclePaused(t *testing.T, o lifecycle.SpawnOptions, lead bool) *spawnFixture {
 	t.Helper()
 	f := lifecycleSpawned(t, o)
 	if lead {
@@ -694,7 +695,7 @@ func lifecyclePaused(t *testing.T, o spawnOptions, lead bool) *spawnFixture {
 }
 
 func TestResumeRecreatesWorktreeAndResumes(t *testing.T) {
-	f := lifecyclePaused(t, spawnOptions{}, true)
+	f := lifecyclePaused(t, lifecycle.SpawnOptions{}, true)
 	wt := f.worktree("T-1")
 	out, err := lifecycleRun(t, "resume", "T-1")
 	if err != nil {
@@ -723,7 +724,7 @@ func TestResumeRecreatesWorktreeAndResumes(t *testing.T) {
 }
 
 func TestResumeWithoutSessionStartsFresh(t *testing.T) {
-	f := lifecyclePaused(t, spawnOptions{}, false)
+	f := lifecyclePaused(t, lifecycle.SpawnOptions{}, false)
 	if got := f.get("T-1").ResumeSession; got != "" {
 		t.Fatalf("resume_session = %q, want none", got)
 	}
@@ -745,7 +746,7 @@ func TestResumeWithoutSessionStartsFresh(t *testing.T) {
 }
 
 func TestResumeKeepsModelAndTeam(t *testing.T) {
-	f := lifecyclePaused(t, spawnOptions{Model: "opus", Team: true}, true)
+	f := lifecyclePaused(t, lifecycle.SpawnOptions{Model: "opus", Team: true}, true)
 	if out, err := lifecycleRun(t, "resume", "T-1"); err != nil {
 		t.Fatalf("resume: %v\n%s", err, out)
 	}
@@ -771,7 +772,7 @@ func TestResumeRefusesWhenNotPaused(t *testing.T) {
 }
 
 func TestResumeRefusesWhenBranchGone(t *testing.T) {
-	f := lifecyclePaused(t, spawnOptions{}, true)
+	f := lifecyclePaused(t, lifecycle.SpawnOptions{}, true)
 	gitRun(t, f.repo, "branch", "-D", lifecycleBranch)
 	if _, err := lifecycleRun(t, "resume", "T-1"); err == nil || !strings.Contains(err.Error(), "is gone") {
 		t.Errorf("resume = %v, want the branch is gone", err)
@@ -785,7 +786,7 @@ func TestResumeRefusesWhenBranchGone(t *testing.T) {
 }
 
 func TestResumeFailureStaysPaused(t *testing.T) {
-	f := lifecyclePaused(t, spawnOptions{}, true)
+	f := lifecyclePaused(t, lifecycle.SpawnOptions{}, true)
 	f.fake.NewWindowErr = errors.New("no server")
 	_, err := lifecycleRun(t, "resume", "T-1")
 	if err == nil || !strings.Contains(err.Error(), "paused again") {
@@ -998,11 +999,11 @@ func TestSpawnAfterCleanStartsOver(t *testing.T) {
 		t.Fatalf("clean: %v\n%s", err, out)
 	}
 	// Clean marks the task dropped: nothing spawns it again by accident.
-	if _, _, err := f.spawn("T-1", spawnOptions{}); err == nil || !strings.Contains(err.Error(), "T-1 is dropped") {
+	if _, _, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err == nil || !strings.Contains(err.Error(), "T-1 is dropped") {
 		t.Fatalf("spawn right after clean = %v, want T-1 is dropped", err)
 	}
 	f.update("T-1", func(tk *model.Task) { tk.Status = model.TaskReady }) // the user brings it back
-	if _, out, err := f.spawn("T-1", spawnOptions{}); err != nil {
+	if _, out, err := f.spawn("T-1", lifecycle.SpawnOptions{}); err != nil {
 		t.Fatalf("spawn after clean: %v\n%s", err, out)
 	}
 	wt := f.worktree("T-1")
@@ -1036,7 +1037,7 @@ func TestPauseInRealTmuxAndGit(t *testing.T) {
 	if err := os.Symlink("/bin/sh", bin); err != nil {
 		t.Fatal(err)
 	}
-	spawnBin = func() (string, error) { return bin, nil }
+	lifecycle.SpawnBin = func() (string, error) { return bin, nil }
 	raw := func(args ...string) (string, error) {
 		out, err := exec.CommandContext(ctx, "tmux", append([]string{"-L", lifecycleRealSocket, "-f", os.DevNull}, args...)...).CombinedOutput()
 		return strings.TrimSpace(string(out)), err
@@ -1055,7 +1056,7 @@ func TestPauseInRealTmuxAndGit(t *testing.T) {
 	f.start = f.now
 	tm := tmux.NewExec(lifecycleRealSocket)
 	f.task("Real", "")
-	r, err := spawnTask(ctx, f.st, tm, f.cfg, "T-1", spawnOptions{})
+	r, err := lifecycle.SpawnTask(ctx, f.st, tm, f.cfg, "T-1", lifecycle.SpawnOptions{})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
@@ -1064,7 +1065,7 @@ func TestPauseInRealTmuxAndGit(t *testing.T) {
 	worktreeWrite(t, filepath.Join(wt, "README"), "changed\n")
 
 	var out strings.Builder
-	if err = pauseTask(ctx, f.st, tm, f.cfg, "T-1", pauseOptions{}, &out); err != nil {
+	if err = lifecycle.PauseTask(ctx, f.st, tm, f.cfg, "T-1", lifecycle.PauseOptions{}, &out); err != nil {
 		t.Fatalf("pause: %v\n%s", err, out.String())
 	}
 	panes, err := raw("list-panes", "-a", "-F", "#{pane_id}")
@@ -1123,7 +1124,7 @@ func TestPauseNeverKillsOtherServersPaneWithoutSession(t *testing.T) {
 		{"older row", "-", "may still be open on another server"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			f := lifecycleSpawned(t, spawnOptions{})
+			f := lifecycleSpawned(t, lifecycle.SpawnOptions{})
 			if c.recorded == "-" {
 				f.update("T-1", func(tk *model.Task) { tk.PaneSocket = "" })
 			}
