@@ -109,6 +109,9 @@ type Decision struct {
 	// ExportedAt is when the decision was last written to the Obsidian
 	// folder; zero means never.
 	ExportedAt time.Time
+	// CoercedFrom is "blocking" when the ticket was raised blocking while its
+	// session was away and stored as assume (F20); write-only, no query reads it back into the struct.
+	CoercedFrom string
 }
 
 // Ticket is an open decision with what the queue shows about its session.

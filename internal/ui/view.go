@@ -616,15 +616,22 @@ func (m Model) pauseNotice() string {
 	if m.mode != ModePopup || !m.pauseOn || m.budget.PauseTask == "" {
 		return ""
 	}
+	if m.budget.PauseBusy {
+		return cmp.Or(m.budget.PauseLimit, "limit") + " before reset: " + m.budget.PauseLabel + " can be paused when its agent is idle"
+	}
 	return cmp.Or(m.budget.PauseLimit, "limit") + " before reset: P pauses " + m.budget.PauseLabel
 }
 
 // pausePrompt asks to confirm the pause the prompt names. The title is cut
-// first, so the question and y/N fit whenever the window allows.
+// first, and under 80 cells the tail is shortened, so the question, what it
+// does and y/N fit from 40 cells.
 func (m Model) pausePrompt() string {
 	head := "pause " + clean(m.pauseAsk.task) + ` "`
 	tail := `"? it commits work in progress and closes its pane  y/N`
 	title := clean(m.pauseAsk.title)
+	if m.width > 0 && m.width < 80 { // narrow: keep the consequence, shortened, rather than cut it
+		tail = `"? closes its pane  y/N`
+	}
 	if m.width > 0 {
 		title = truncate(title, max(m.width-lipgloss.Width(head)-lipgloss.Width(tail), 0))
 	}
@@ -649,7 +656,7 @@ func (m Model) helpText() string {
 		text = fmt.Sprintf("%d of %d sessions match /%s", m.shownSessions(), len(m.sessions), m.filter)
 	}
 	if m.mode == ModePopup {
-		text += "  enter jump  i detail  d decisions  r review  t tasks  b burn  / filter  x kill  q quit"
+		text += "  " + commandHelp()
 		if m.inbox != nil {
 			text += "  tab inbox"
 		}

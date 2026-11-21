@@ -122,11 +122,7 @@ type DecideModel struct {
 	quietUntil   time.Time     // keys before this are ignored (see quietPeriod, answeredQuiet)
 	quietFor     time.Duration // the length of the running quiet period, which a refused key restarts
 	shownSince   time.Time     // when the selected ticket, as it is now, came on screen
-	promptSince  time.Time     // when the confirmation opened, or a "y" in a burst restarted its wait
-	keyAt        time.Time     // when the last key came, acted on or not
-	prevKeyAt    time.Time     // when the key before it came
-	confirmAt    time.Time     // when a "y" was taken, waiting out burstGap before it sends; zero when none
-	confirmSeq   int           // the decideConfirmMsg the taken "y" waits for
+	gate         confirmGate   // the confirmation's wait and burst rule
 	inputSince   time.Time     // when the input opened, or last refused a too early Enter
 	inputByEnter bool          // an Enter opened the reasoning input
 	lastEnter    time.Time     // when the last Enter came, acted on or not
@@ -223,8 +219,8 @@ func (m DecideModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		return m.moveTo(m.cursor), nil
 	case tea.KeyMsg:
-		m.prevKeyAt, m.keyAt = m.keyAt, m.now()
-		if !m.confirmAt.IsZero() {
+		m.gate.keyed(m.now())
+		if m.gate.waiting() {
 			return m.keyAfterConfirm()
 		}
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste {
@@ -705,7 +701,8 @@ func (m DecideModel) submitInput() (DecideModel, tea.Cmd) {
 // other at once.
 func (m DecideModel) proceed(p pendingAnswer) (DecideModel, tea.Cmd) {
 	if p.ticket.Reversibility == model.ReversIrreversible {
-		m.pending, m.confirming, m.promptSince = p, true, m.now()
+		m.pending, m.confirming = p, true
+		m.gate.open(m.now())
 		return m, nil
 	}
 	return m.send(p)
@@ -718,17 +715,17 @@ func (m DecideModel) proceed(p pendingAnswer) (DecideModel, tea.Cmd) {
 // and the wait restarts, the prompt still open.
 func (m DecideModel) confirmKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cmd) {
 	now := m.now()
-	if split || now.Sub(m.promptSince) < dwell || msg.Paste || msg.String() != "y" {
+	if split || now.Sub(m.gate.since) < dwell || msg.Paste || msg.String() != "y" {
 		m.pending, m.confirming = pendingAnswer{}, false
 		m.notice = "answer canceled"
 		return m, nil
 	}
-	if inBurst(now, m.prevKeyAt) {
-		m.promptSince, m.notice = now, noticeTooSoon
+	if m.gate.soon(now) {
+		m.gate.refuse(now)
+		m.notice = noticeTooSoon
 		return m, nil
 	}
-	m.confirmAt, m.confirmSeq = now, m.confirmSeq+1
-	seq := m.confirmSeq
+	seq := m.gate.take(now)
 	return m, tea.Tick(burstGap, func(time.Time) tea.Msg { return decideConfirmMsg{seq: seq} })
 }
 
@@ -736,9 +733,8 @@ func (m DecideModel) confirmKey(msg tea.KeyMsg, split bool) (DecideModel, tea.Cm
 // it arrived with it: the "y" is refused and the wait restarts, the prompt still open. Later (the wait's
 // message is late) the answer is sent and the key is ignored.
 func (m DecideModel) keyAfterConfirm() (DecideModel, tea.Cmd) {
-	if inBurst(m.keyAt, m.confirmAt) {
-		m.confirmAt = time.Time{}
-		m.promptSince, m.notice = m.keyAt, noticeTooSoon
+	if m.gate.late() {
+		m.notice = noticeTooSoon
 		return m, nil
 	}
 	return m.confirmed()
@@ -746,7 +742,7 @@ func (m DecideModel) keyAfterConfirm() (DecideModel, tea.Cmd) {
 
 // applyConfirm sends the answer of the "y" msg waited for, when it still waits.
 func (m DecideModel) applyConfirm(msg decideConfirmMsg) (DecideModel, tea.Cmd) {
-	if msg.seq != m.confirmSeq || m.confirmAt.IsZero() {
+	if !m.gate.due(msg.seq) {
 		return m, nil
 	}
 	return m.confirmed()
@@ -755,7 +751,7 @@ func (m DecideModel) applyConfirm(msg decideConfirmMsg) (DecideModel, tea.Cmd) {
 // confirmed closes the confirmation and sends its answer.
 func (m DecideModel) confirmed() (DecideModel, tea.Cmd) {
 	p := m.pending
-	m.pending, m.confirming, m.confirmAt = pendingAnswer{}, false, time.Time{}
+	m.pending, m.confirming, m.gate.confirmAt = pendingAnswer{}, false, time.Time{}
 	return m.send(p)
 }
 
@@ -809,4 +805,45 @@ func (m DecideModel) applyAnswer(msg decideAnsweredMsg) (DecideModel, tea.Cmd) {
 	m, cmd := m.refresh(false)
 	m.applied = m.issued
 	return m, cmd
+}
+
+// WithDecide returns m with the d key enabled in the popup: on a row with
+// open tickets, d shows the model open builds for that session's id until
+// it sends DecideClosedMsg. Without it, d says why it cannot answer.
+func (m Model) WithDecide(open func(sessionID string) tea.Model) Model {
+	return m.withView("decide", open)
+}
+
+// WithoutDecide returns m with the d key disabled, saying why when pressed.
+func (m Model) WithoutDecide(why string) Model {
+	m.noAnswer = why
+	return m.withView("decide", nil)
+}
+
+// openDecide shows the decide view for the selected session's tickets. It
+// does nothing in the sidebar, which reads no counts, and says why when
+// the session has no open ticket or the dashboard has no factory. The view
+// gets the window size, and its commands are wrapped as child gen.
+func (m Model) openDecide() (Model, tea.Cmd) {
+	r, ok := m.current()
+	if m.mode != ModePopup || !ok {
+		return m, nil
+	}
+	if c := m.counts[r.s.ID]; c.Blocking+c.Assume == 0 {
+		m.notice = "no open decisions"
+		return m, nil
+	}
+	open := m.views["decide"]
+	if open == nil {
+		m.notice = noticeNoAnswer
+		if m.noAnswer != "" {
+			m.notice = m.noAnswer
+		}
+		return m, nil
+	}
+	return m.showChild(open(r.s.ID))
+}
+
+func init() {
+	registerCommand(command{keys: []string{"d"}, help: "d decisions", order: 30, run: Model.openDecide})
 }

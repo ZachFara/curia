@@ -26,9 +26,39 @@ func dbPath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "curia.db")
 }
 
-// open opens a Store and closes it when the test ends.
+var (
+	templateOnce sync.Once
+	templateDB   *sql.DB
+)
+
+// migratedTemplate returns a connection to a fresh, fully migrated
+// database, built once per test binary: migrating from scratch costs about
+// 250 ms under -race, which was most of the per-test cost. The file lives
+// in the OS temp directory for the rest of the run.
+func migratedTemplate() *sql.DB {
+	templateOnce.Do(func() {
+		p := filepath.Join(os.TempDir(), fmt.Sprintf("curia-store-template-%d.db", os.Getpid()))
+		s, err := store.Open(p)
+		if err == nil {
+			err = s.Close()
+		}
+		if err == nil {
+			templateDB, err = sql.Open("sqlite", p)
+		}
+		if err != nil {
+			panic(err)
+		}
+	})
+	return templateDB
+}
+
+// open opens a Store and closes it when the test ends. A path with no
+// database yet starts as a copy of the migrated template (VACUUM INTO
+// refuses an existing file, which then goes to Open as it is); tests of
+// migrating from scratch call store.Open directly.
 func open(t *testing.T, path string) *store.Store {
 	t.Helper()
+	_, _ = migratedTemplate().Exec(`VACUUM INTO ?`, path)
 	s, err := store.Open(path)
 	if err != nil {
 		t.Fatalf("Open(%q): %v", path, err)
@@ -168,7 +198,7 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Errorf("schema_migrations has %d rows, want %d", n, len(allMigrations))
 	}
 	names := migrationNames(t, rawDB(t, path))
-	if want := []string{"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql", "0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0019_session_mode.sql", "0020_auto_spawn.sql"}; !reflect.DeepEqual(names, want) {
+	if want := allMigrations; !reflect.DeepEqual(names, want) {
 		t.Errorf("migration names = %v, want %v", names, want)
 	}
 }
@@ -176,9 +206,19 @@ func TestOpenIsIdempotent(t *testing.T) {
 // allMigrations is every migration file in the order Open applies them:
 // file name order, so the two files numbered 0005 (Plan 4's reviews and
 // Plan 3's send limits, merged with their names kept) apply in a fixed order.
-var allMigrations = []string{
-	"0001_init.sql", "0002_decisions.sql", "0003_typed_confirmation.sql", "0004_tasks.sql",
-	"0005_reviews.sql", "0005_send_limits.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0019_session_mode.sql", "0020_auto_spawn.sql",
+var allMigrations = migrationFiles()
+
+// migrationFiles lists the files of migrations/ (os.ReadDir sorts by name).
+func migrationFiles() []string {
+	es, err := os.ReadDir("migrations")
+	if err != nil {
+		panic(err)
+	}
+	var names []string
+	for _, e := range es {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 // plan3Applied is what a Plan 3 binary (with the fix wave) applies.
@@ -271,14 +311,14 @@ func TestBothMigrationsNumberedFive(t *testing.T) {
 	}{
 		{"fresh", nil, allMigrations},
 		{"plan 4 database", allMigrations[:5], allMigrations},
-		{"plan 3 database", plan3Applied, append(slices.Clone(plan3Applied), "0005_reviews.sql", "0006_cost.sql", "0007_usage_forecast.sql", "0008_config_revisions.sql", "0008_context_live.sql", "0009_decision_near_match.sql", "0009_session_checked_cwd.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0019_session_mode.sql", "0020_auto_spawn.sql")},
+		{"plan 3 database", plan3Applied, append(append(slices.Clone(plan3Applied), "0005_reviews.sql"), allMigrations[6:]...)},
 		{"plan 4 database with both 0005 files", allMigrations[:6], allMigrations},
 		// 0008 and 0009 each exist twice (plan-5: context_live, checked_cwd;
 		// plan-6: config_revisions, decision_near_match). They touch different
 		// tables or columns, so their order does not matter; a store that ran
 		// either branch's set gets the other branch's two files.
-		{"plan-5 database", plan5Applied, append(slices.Clone(plan5Applied), "0008_config_revisions.sql", "0009_decision_near_match.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0019_session_mode.sql", "0020_auto_spawn.sql")},
-		{"plan-6 database", plan6Applied, append(slices.Clone(plan6Applied), "0008_context_live.sql", "0009_session_checked_cwd.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0019_session_mode.sql", "0020_auto_spawn.sql")},
+		{"plan-5 database", plan5Applied, append(slices.Clone(plan5Applied), "0008_config_revisions.sql", "0009_decision_near_match.sql", "0010_task_pane_socket.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0017_schedules.sql", "0018_container_samples.sql", "0019_session_mode.sql", "0020_auto_spawn.sql", "0021_away_runs.sql", "0022_remote_control.sql")},
+		{"plan-6 database", plan6Applied, append(slices.Clone(plan6Applied), "0008_context_live.sql", "0009_session_checked_cwd.sql", "0010_task_pane_socket.sql", "0011_task_filed.sql", "0012_task_budget.sql", "0013_broadcast.sql", "0014_resource_samples.sql", "0016_device_tokens.sql", "0017_schedules.sql", "0018_container_samples.sql", "0019_session_mode.sql", "0020_auto_spawn.sql", "0021_away_runs.sql", "0022_remote_control.sql")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			path := dbPath(t)

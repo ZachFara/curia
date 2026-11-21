@@ -33,6 +33,7 @@ type servewebFix struct {
 	home string
 	log  *pushLogBuffer
 	srv  *httptest.Server
+	tm   *tmux.Fake
 	now  atomic.Int64
 }
 
@@ -41,6 +42,12 @@ type servewebFix struct {
 // server's own address.
 func servewebNewFix(t *testing.T, on bool, scheme string) *servewebFix {
 	t.Helper()
+	return servewebNewFixW(t, on, scheme, false)
+}
+
+// servewebNewFixW is servewebNewFix with serve.web_write as write.
+func servewebNewFixW(t *testing.T, on bool, scheme string, write bool) *servewebFix {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	st, db := pushStore(t)
@@ -48,10 +55,11 @@ func servewebNewFix(t *testing.T, on bool, scheme string) *servewebFix {
 	f := &servewebFix{t: t, st: st, db: db, log: buf, home: home}
 	f.now.Store(serveT0.UnixNano())
 	srv := httptest.NewUnstartedServer(nil)
-	deps := serveDeps{Store: st, Tmux: &tmux.Fake{}, Log: logger, Now: f.clock}
+	f.tm = &tmux.Fake{}
+	deps := serveDeps{Store: st, Tmux: f.tm, Log: logger, Now: f.clock}
 	if on {
 		deps.Web = servewebNew(servewebOpts{
-			Store: st, Log: logger, Now: f.clock, TTL: time.Hour,
+			Store: st, Tmux: f.tm, Log: logger, Now: f.clock, TTL: time.Hour, Write: write,
 			PublicURL: scheme + "://" + srv.Listener.Addr().String(),
 		})
 	}
@@ -330,7 +338,7 @@ func TestServewebWrongTokenIsUniformAndLimited(t *testing.T) {
 }
 
 func TestServewebLimiterTableIsBounded(t *testing.T) {
-	l := servewebNewLimiter()
+	l := servewebNewLimiter(servewebMaxFailures)
 	now := serveT0
 	for i := range 10 * servewebMaxAddrs {
 		l.failed(string(rune('a'+i%26))+strings.Repeat("x", i), now)
@@ -573,7 +581,7 @@ func TestServewebHeadersOnEveryResponse(t *testing.T) {
 
 func TestServewebStartLine(t *testing.T) {
 	var out strings.Builder
-	serveWebStartLine(&out, "127.0.0.1:8787")
+	serveWebStartLine(&out, "127.0.0.1:8787", false)
 	s := out.String()
 	for _, want := range []string{"127.0.0.1:8787", "device token", "private", "tailnet", "Funnel"} {
 		if !strings.Contains(s, want) {
