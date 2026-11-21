@@ -1,0 +1,7 @@
+body{font:16px/1.4 system-ui,sans-serif;margin:0 auto;max-width:60rem;padding:0 16px 32px;color:#111;background:#fff}
+@media(prefers-color-scheme:dark){body{color:#eee;background:#111}a{color:#8ab4f8}}
+nav a{margin-right:12px}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:4px 8px;border-bottom:1px solid #8884;vertical-align:top;overflow-wrap:anywhere}
+pre{white-space:pre-wrap;overflow-wrap:anywhere}
+h2{margin-top:1.5em}

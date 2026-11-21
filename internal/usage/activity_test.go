@@ -226,3 +226,191 @@ func TestActivityTaskType(t *testing.T) {
 		}
 	}
 }
+
+// Background commands (F27, probe round 2).
+
+func bgPre(sec int, cmd, use string) ActivityEvent {
+	e := ev(model.PreToolUse, sec, "Bash", cmd)
+	e.Background, e.ToolUseID = true, use
+	return e
+}
+
+func bgPost(sec int, use, id string) ActivityEvent {
+	e := ev(model.PostToolUse, sec, "Bash", "")
+	e.ToolUseID, e.TaskID = use, id
+	return e
+}
+
+func stopListing(sec int, ids ...string) ActivityEvent {
+	e := ev(model.Stop, sec, "", "")
+	e.HasList, e.Listed = true, ids
+	return e
+}
+
+func notice(sec int, id string) ActivityEvent {
+	e := ev(model.UserPromptSubmit, sec, "", "")
+	e.Prompt = "<task-notification>\n<task-id>" + id + "</task-id>\n<status>completed</status>\n</task-notification>"
+	return e
+}
+
+func classifyFull(t *testing.T, evs []ActivityEvent, o ActivityOpts) ActivityTime {
+	t.Helper()
+	if o.IdleCap == 0 {
+		o.IdleCap = 30 * time.Minute
+	}
+	if o.Now.IsZero() {
+		o.Now = actAt(100000)
+	}
+	return ClassifyActivity(evs, mustRules(t), o)
+}
+
+func TestActivityBackgroundCompletes(t *testing.T) {
+	a := classifyFull(t, []ActivityEvent{
+		ev(model.UserPromptSubmit, 0, "", ""),
+		bgPre(10, "make test", "tu1"), bgPost(10, "tu1", "b1"),
+		stopListing(15, "b1"),
+		notice(75, "b1"),
+		stopListing(80),
+		ev(model.UserPromptSubmit, 380, "", ""),
+		ev(model.SessionEnd, 380, "", ""),
+	}, ActivityOpts{})
+	// The agent's own turn (10 to 15) counts as thinking; 15 to 75 is its command.
+	checkTimes(t, a.ByClass, map[string]time.Duration{
+		ClassThinking: 20 * time.Second, ClassTesting: 60 * time.Second, ClassWaitingMe: 300 * time.Second,
+	})
+	checkTimes(t, a.Background, map[string]time.Duration{ClassTesting: 65 * time.Second})
+	if a.Unfinished != 0 {
+		t.Errorf("unfinished = %d", a.Unfinished)
+	}
+}
+
+func TestActivityBackgroundWhileAgentWorksCountsOnce(t *testing.T) {
+	a := classifyFull(t, []ActivityEvent{
+		ev(model.UserPromptSubmit, 0, "", ""),
+		bgPre(0, "make test", "tu1"), bgPost(0, "tu1", "b1"),
+		ev(model.PreToolUse, 10, "Edit", ""), ev(model.PostToolUse, 40, "Edit", ""),
+		stopListing(50, "b1"),
+		notice(60, "b1"),
+		stopListing(60),
+		ev(model.SessionEnd, 60, "", ""),
+	}, ActivityOpts{})
+	// 60 seconds in all: editing is coding, not also testing.
+	checkTimes(t, a.ByClass, map[string]time.Duration{ClassThinking: 20 * time.Second, ClassCoding: 30 * time.Second, ClassTesting: 10 * time.Second})
+	checkTimes(t, a.Background, map[string]time.Duration{ClassTesting: 60 * time.Second})
+}
+
+func TestActivityBackgroundUnfinishedAtSessionEnd(t *testing.T) {
+	evs := []ActivityEvent{
+		ev(model.UserPromptSubmit, 0, "", ""),
+		bgPre(10, "go build ./...", "tu1"), bgPost(10, "tu1", "b1"),
+		stopListing(15, "b1"),
+		ev(model.SessionEnd, 100, "", ""),
+	}
+	a := classifyFull(t, evs, ActivityOpts{})
+	checkTimes(t, a.ByClass, map[string]time.Duration{ClassThinking: 15 * time.Second, ClassBuilding: 85 * time.Second})
+	checkTimes(t, a.Background, map[string]time.Duration{ClassBuilding: 90 * time.Second})
+	if a.Unfinished != 1 {
+		t.Errorf("unfinished = %d", a.Unfinished)
+	}
+	// A live session with no end: the command runs to now.
+	a = classifyFull(t, evs[:4], ActivityOpts{Live: true, Now: actAt(160)})
+	checkTimes(t, a.ByClass, map[string]time.Duration{ClassThinking: 15 * time.Second, ClassBuilding: 145 * time.Second})
+	// Not live and no end event: it ends at the last Stop that listed it.
+	a = classifyFull(t, evs[:4], ActivityOpts{})
+	checkTimes(t, a.Background, map[string]time.Duration{ClassBuilding: 5 * time.Second})
+	if a.Unfinished != 1 {
+		t.Errorf("unfinished = %d", a.Unfinished)
+	}
+}
+
+func TestActivityBackgroundEndedByLaterStop(t *testing.T) {
+	a := classifyFull(t, []ActivityEvent{
+		ev(model.UserPromptSubmit, 0, "", ""),
+		bgPre(10, "go test ./...", "tu1"), bgPost(10, "tu1", "b1"),
+		stopListing(15, "b1"),
+		ev(model.UserPromptSubmit, 40, "", ""), // the user types; the command ends meanwhile
+		stopListing(50),
+		ev(model.SessionEnd, 50, "", ""),
+	}, ActivityOpts{})
+	checkTimes(t, a.Background, map[string]time.Duration{ClassTesting: 40 * time.Second})
+	if a.Unfinished != 0 {
+		t.Errorf("unfinished = %d", a.Unfinished)
+	}
+}
+
+func TestActivityBackgroundTwoOverlapping(t *testing.T) {
+	a := classifyFull(t, []ActivityEvent{
+		ev(model.UserPromptSubmit, 0, "", ""),
+		bgPre(10, "go test ./...", "tu1"), bgPost(10, "tu1", "a"),
+		bgPre(12, "go build ./...", "tu2"), bgPost(12, "tu2", "b"),
+		stopListing(15, "a", "b"),
+		notice(55, "a"), stopListing(58, "b"),
+		notice(100, "b"), stopListing(103),
+		ev(model.SessionEnd, 200, "", ""),
+	}, ActivityOpts{})
+	// Two running commands count once, as the first one's class.
+	checkTimes(t, a.ByClass, map[string]time.Duration{
+		ClassThinking: 21 * time.Second, ClassTesting: 40 * time.Second, ClassBuilding: 42 * time.Second, ClassWaitingMe: 97 * time.Second,
+	})
+	checkTimes(t, a.Background, map[string]time.Duration{ClassTesting: 45 * time.Second, ClassBuilding: 88 * time.Second})
+}
+
+func TestActivityNoticeDuringWaitingOnMeIsNotTheUser(t *testing.T) {
+	a := classifyFull(t, []ActivityEvent{
+		ev(model.UserPromptSubmit, 0, "", ""),
+		stopListing(10),
+		notice(100, "gone"), // a task this stream never saw start
+		stopListing(110),
+		ev(model.UserPromptSubmit, 7000, "", ""),
+		ev(model.SessionEnd, 7000, "", ""),
+	}, ActivityOpts{})
+	// The notice wakes the agent (10 s thinking) but is no user: the wait
+	// is one capped gap, not two. A user prompt there would give 90 + 1800.
+	checkTimes(t, a.ByClass, map[string]time.Duration{ClassThinking: 20 * time.Second, ClassWaitingMe: 30 * time.Minute})
+	// Agent messages are the same.
+	m := ev(model.UserPromptSubmit, 100, "", "")
+	m.Prompt = "  <agent-message from=\"x\">\n[Subagent hand-back] done"
+	b := classifyFull(t, []ActivityEvent{
+		ev(model.UserPromptSubmit, 0, "", ""), stopListing(10), m, stopListing(110),
+		ev(model.UserPromptSubmit, 7000, "", ""), ev(model.SessionEnd, 7000, "", ""),
+	}, ActivityOpts{})
+	checkTimes(t, b.ByClass, a.ByClass)
+}
+
+func TestActivityNoticeForUnknownIdLeavesCommandRunning(t *testing.T) {
+	a := classifyFull(t, []ActivityEvent{
+		ev(model.UserPromptSubmit, 0, "", ""),
+		bgPre(10, "go test ./...", "tu1"), bgPost(10, "tu1", "b1"),
+		stopListing(15, "b1"),
+		notice(30, "zzz"), stopListing(32, "b1"),
+		ev(model.SessionEnd, 100, "", ""),
+	}, ActivityOpts{})
+	checkTimes(t, a.ByClass, map[string]time.Duration{ClassThinking: 17 * time.Second, ClassTesting: 83 * time.Second})
+	if a.Unfinished != 1 {
+		t.Errorf("unfinished = %d", a.Unfinished)
+	}
+}
+
+func TestActivityBackgroundHostileIds(t *testing.T) {
+	huge := strings.Repeat("i", 1<<20)
+	a := classifyFull(t, []ActivityEvent{
+		ev(model.UserPromptSubmit, 0, "", ""),
+		bgPre(10, "go test ./...", "tu1"), bgPost(10, "tu1", huge), // too long to be an id
+		stopListing(15, huge),
+		notice(30, huge),
+		ev(model.SessionEnd, 100, "", ""),
+	}, ActivityOpts{})
+	if a.Unfinished != 1 || a.Background[ClassTesting] != 90*time.Second {
+		t.Errorf("hostile id: unfinished %d, background %v", a.Unfinished, a.Background)
+	}
+}
+
+func TestActivityBackgroundClippedToWindow(t *testing.T) {
+	a := classifyFull(t, []ActivityEvent{
+		ev(model.UserPromptSubmit, 0, "", ""),
+		bgPre(10, "go test ./...", "tu1"), bgPost(10, "tu1", "b1"),
+		stopListing(15, "b1"),
+		notice(75, "b1"),
+	}, ActivityOpts{Since: actAt(50), Live: true, Now: actAt(80)})
+	checkTimes(t, a.Background, map[string]time.Duration{ClassTesting: 25 * time.Second})
+}

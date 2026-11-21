@@ -1,0 +1,10 @@
+{
+ "session_id": "<uuid>",
+ "transcript_path": "<scratch>/scratchpad/probe-claude-config/projects/-private-tmp-p6r2-11F3-repo/<uuid>.jsonl",
+ "cwd": "/private<tmp>/repo",
+ "scratchpad_dir": "<scratch>/scratchpad",
+ "prompt_id": "<uuid>",
+ "permission_mode": "auto",
+ "hook_event_name": "UserPromptSubmit",
+ "prompt": "<task-notification>\n<task-id>bn1xn9x92</task-id>\n<tool-use-id>toolu_01QTckjtv6jGSNMb8b4gwMMM</tool-use-id>\n<output-file><redacted></output-file>\n<status>completed</status>\n<summary>Background command \"Sleep 3 seconds in background\" completed (exit code 0)</summary>\n</task-notification>"
+}

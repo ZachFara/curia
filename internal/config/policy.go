@@ -61,11 +61,13 @@ var keyPolicy = map[string]Policy{
 	"resources.enabled":                    PolicyNone,      // the spec's F28 table: nothing
 	"resources.interval":                   PolicyNone,      // monitor.* and resources.*: a repository cannot change when Curia samples
 	"monitor.autostart":                    PolicyNone,
+	"tasks.agent_filed.level":              PolicyLevel,
+	"tasks.agent_filed.max_per_day":        PolicyLower,
+	"serve.web":                            PolicyNone, // widens the network surface (F26)
+	"serve.web_session":                    PolicyNone,
 	"resources.max_containers_per_session": PolicyLower, // F19, Ruling 146: a repository may only tighten
 	"resources.max_containers_total":       PolicyLower,
 	"resources.docker_memory_refuse_pct":   PolicyLower,
 	"resources.container_memory_mb":        PolicyLower, // 0 = none is the loosest
 	"resources.container_cpus":             PolicyLower,
-	"tasks.agent_filed.level":              PolicyLevel,
-	"tasks.agent_filed.max_per_day":        PolicyLower,
 }

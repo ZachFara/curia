@@ -1,0 +1,16 @@
+{
+ "session_id": "<uuid>",
+ "transcript_path": "<scratch>/scratchpad/probe-claude-config/projects/-private-tmp-p6r2-11F3-repo/<uuid>.jsonl",
+ "cwd": "/private<tmp>/repo",
+ "scratchpad_dir": "<scratch>/scratchpad",
+ "prompt_id": "<uuid>",
+ "permission_mode": "auto",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "Stop",
+ "stop_hook_active": false,
+ "last_assistant_message": "The background `sleep 3` (ID `bn1xn9x92`) finished with exit code 0.",
+ "background_tasks": [],
+ "session_crons": []
+}
