@@ -63,4 +63,6 @@ var keyPolicy = map[string]Policy{
 	"monitor.autostart":             PolicyNone,
 	"tasks.agent_filed.level":       PolicyLevel,
 	"tasks.agent_filed.max_per_day": PolicyLower,
+	"serve.web":                     PolicyNone, // widens the network surface (F26)
+	"serve.web_session":             PolicyNone,
 }
