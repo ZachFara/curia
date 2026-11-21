@@ -220,6 +220,10 @@ func TestRCCheckTypesNothingAndNeverClaimsOnWithoutTheIndicator(t *testing.T) {
 	if s := rcStored(t, db); s.RC == "on" {
 		t.Error("rc is on without the indicator")
 	}
+	// an idle empty prompt is where typing WOULD be allowed
+	if typed := sendTyped(fake.Fake); len(typed) != 0 {
+		t.Errorf("--check typed %q on an idle screen", typed)
+	}
 }
 
 func TestRCCheckClearsAnUnconfirmedBlockWhenThePromptIsBack(t *testing.T) {

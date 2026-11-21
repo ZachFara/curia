@@ -104,3 +104,30 @@ func TestTaskBudgetUnknownCostIsNotKnown(t *testing.T) {
 		t.Error("unknown cost counts as exhausted")
 	}
 }
+
+// Review C2: EndAway's claim is its own: a second call loses and changes nothing.
+func TestEndAwayClaimsOnce(t *testing.T) {
+	s := open(t, dbPath(t))
+	ctx := context.Background()
+	awaySess(t, s, "A", "/r/a", model.StateIdle)
+	run, err := s.StartAway(ctx, store.ModeScope{All: true}, awayT, awayT.Add(6*time.Hour), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, won, err2 := s.EndAway(ctx, run.ID, awayT.Add(time.Hour)); err2 != nil || !won {
+		t.Fatalf("first EndAway = %v, %v", won, err2)
+	}
+	if _, err = s.SetModes(ctx, store.ModeScope{All: true}, model.ModeEdits, awayT.Add(5*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, won, err2 := s.EndAway(ctx, run.ID, awayT.Add(2*time.Hour)); err2 != nil || won {
+		t.Errorf("second EndAway = won %v, %v; want it to lose", won, err2)
+	}
+	if got := modeOf(t, s, "A"); got != model.ModeEdits {
+		t.Errorf("mode after the losing call = %q, want edits kept", got)
+	}
+	last, _, _ := s.LastAway(ctx)
+	if !last.EndedAt.Equal(awayT.Add(time.Hour)) {
+		t.Errorf("ended_at = %v, want the first call's time", last.EndedAt)
+	}
+}

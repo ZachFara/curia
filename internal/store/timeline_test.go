@@ -111,21 +111,64 @@ func TestTimelinePages(t *testing.T) {
 	}
 }
 
-func TestTimelineBetweenGroupsByKind(t *testing.T) {
+func TestTimelineCountsGroupBySessionAndKind(t *testing.T) {
 	s, _ := tlSeed(t)
-	g, err := s.TimelineBetween(context.Background(), t0, t0.Add(5*time.Minute))
+	c, err := s.TimelineCounts(context.Background(), t0, t0.Add(5*time.Minute), "turn_end", "ticket_raised")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(g["turn_end"]) != 2 || len(g["session_start"]) != 2 || len(g["ticket_raised"]) != 0 {
-		t.Errorf("groups = %v", g)
-	}
-	if g["turn_end"][0].At.After(g["turn_end"][1].At) {
-		t.Errorf("a group is oldest first")
+	if c["s1"]["turn_end"] != 1 || c["s2"]["turn_end"] != 1 || c["s1"]["ticket_raised"] != 0 {
+		t.Errorf("counts = %v", c)
 	}
 }
 
-var tlScan = regexp.MustCompile(`^SCAN (events|sessions|decisions|reviews|messages|tasks|pushes)( [a-z]+)?$`)
+// More events than the timeline's cap are all counted (C2-3).
+func TestTimelineCountsAboveTheCap(t *testing.T) {
+	s, db := tlSeed(t)
+	tlExec(t, db, `WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 1200)
+INSERT INTO events (session_id, kind, payload, at) SELECT 's1', 'Stop', '{}', ? FROM c`, tlAt(30))
+	c, err := s.TimelineCounts(context.Background(), t0, t0.Add(time.Hour), "turn_end")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c["s1"]["turn_end"]; got != 1201 {
+		t.Errorf("s1 turn_end = %d, want 1201", got)
+	}
+}
+
+// One row with an unreadable time is skipped and counted; the rest is read (C2-5).
+func TestTimelineSkipsAnUnreadableRow(t *testing.T) {
+	s, db := tlSeed(t)
+	tlExec(t, db, `INSERT INTO events (session_id, kind, payload, at) VALUES ('s2','Stop','{}','2026-12-01 bogus')`)
+	r, err := s.TimelineRead(context.Background(), store.TimelineQuery{Limit: 1000})
+	if err != nil {
+		t.Fatalf("one bad row fails the read: %v", err)
+	}
+	if r.Skipped != 1 || len(r.Events) != 12 {
+		t.Errorf("skipped = %d, events = %d, want 1 and 12", r.Skipped, len(r.Events))
+	}
+}
+
+// Away periods and denied actions are timeline sources (C2-2).
+func TestTimelineAwayAndDenials(t *testing.T) {
+	s, db := tlSeed(t)
+	tlExec(t, db, `INSERT INTO away_runs (started_at, ends_at, ended_at) VALUES (?, ?, ?)`, tlAt(20), tlAt(60), tlAt(40))
+	tlExec(t, db, `INSERT INTO permission_events (session_id, at, last_at, mode, tool, summary, verdict, n) VALUES ('s2', ?, ?, 'away', 'Bash', 'rm -rf x', 'deny', 7)`, tlAt(21), tlAt(25))
+	tlExec(t, db, `INSERT INTO permission_events (session_id, at, last_at, mode, tool, summary, verdict, n) VALUES ('s2', ?, ?, 'away', 'Bash', 'ls', 'allow', 3)`, tlAt(22), tlAt(22))
+	evs, err := s.Timeline(context.Background(), store.TimelineQuery{Since: t0.Add(15 * time.Minute), Before: t0.Add(50 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tlKinds(evs); !reflect.DeepEqual(got, []string{"away_end", "action_denied", "away_start"}) {
+		t.Fatalf("kinds = %v", got)
+	}
+	if !strings.Contains(evs[1].Line, "Bash") || !strings.Contains(evs[1].Line, "7") || evs[1].SessionID != "s2" {
+		t.Errorf("denial = %+v", evs[1])
+	}
+}
+
+// Any scan of a table, under its own name or an alias (the plan prints the alias).
+var tlScan = regexp.MustCompile(`^SCAN [A-Za-z_]+( [A-Za-z_]+)?$`)
 
 // A large store is read through the time indexes, never scanned whole.
 func TestTimelineQueryUsesIndexes(t *testing.T) {
@@ -137,7 +180,7 @@ func TestTimelineQueryUsesIndexes(t *testing.T) {
 	tlExec(t, db, gen+`INSERT INTO decisions (id, question, options, recommendation, rationale, reversibility, mode, scope, status, args_hash, created_at, answered_at, answer)
 SELECT 'D-x' || i, 'q', '[]', 'a', 'r', 'cheap', 'blocking', 'repo', 'answered', i, at, at, 'x' FROM ts WHERE i % 10 = 0`)
 	for _, line := range strings.Split(queryPlan(t, db, store.TimelineUnion(), tlAt(0), "9999", "", "", 50, "", "", false), "\n") {
-		if tlScan.MatchString(strings.TrimSpace(line)) {
+		if tlScan.MatchString(strings.TrimSpace(line)) && !strings.Contains(line, "CONSTANT") {
 			t.Errorf("a source scans its whole table: %q", line)
 		}
 	}

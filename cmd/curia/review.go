@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1232,12 +1230,5 @@ func reviewPrintJSON(ctx context.Context, w io.Writer, st *store.Store, cfg conf
 	if usd, ok := costlensTaskCostWait(ctx, cfg, t); ok {
 		j.BranchCostUSD = &usd
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err = enc.Encode(j); err != nil {
-		return err
-	}
-	_, err = io.WriteString(w, escapeUnprintable(buf.String()))
-	return err
+	return writeJSON(w, j, "")
 }

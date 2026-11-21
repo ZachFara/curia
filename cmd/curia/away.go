@@ -61,14 +61,19 @@ func init() {
 	away.Flags().StringVar(&awayFlags.repo, "repo", "", "only the sessions of a repository (default: everyone)")
 	away.Flags().Lookup("repo").NoOptDefVal = "."
 	rootCmd.AddCommand(away)
-	rootCmd.AddCommand(&cobra.Command{
+	back := &cobra.Command{
 		Use:         "back",
 		Short:       "End the away period, restore the modes and print what happened (the user only)",
 		Annotations: userOnlyMark(),
 		Args:        cobra.NoArgs,
 		RunE:        runBack,
-	})
+	}
+	back.Flags().BoolVar(&backAll, "all", false, "also list every refusal of the last period, not only the first few")
+	rootCmd.AddCommand(back)
 }
+
+// backAll is `curia back --all`.
+var backAll bool
 
 func awayDuration(args []string) (time.Duration, error) {
 	d := awayFlags.forDur
@@ -311,12 +316,36 @@ func runBack(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	fresh := ok
+	if !ok && backAll { // already seen: --all still lists the last period's refusals
+		if run, ok, err = st.LastAway(ctx); err != nil {
+			return err
+		}
+	}
 	if !ok {
 		_, err = fmt.Fprintln(out, "You are not away, and there is no summary you have not seen.")
 		return err
 	}
-	if run.Summary == "" { // ended elsewhere before its summary was stored
-		if err = awayFinish(ctx, st, &run); err != nil {
+	if fresh {
+		if err = awayShow(ctx, st, out, &run, now); err != nil {
+			return err
+		}
+	}
+	if !backAll {
+		return nil
+	}
+	rep, err := st.Denials(ctx, run.StartedAt, awayTo(run), 0)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprint(out, "All refusals of the last period:\n"+awayRefusals(rep))
+	return err
+}
+
+// awayShow prints a period's summary (building it first when it ended elsewhere before storing one) and marks it seen.
+func awayShow(ctx context.Context, st *store.Store, out io.Writer, run *store.AwayRun, now time.Time) error {
+	if run.Summary == "" {
+		if err := awayFinish(ctx, st, run); err != nil {
 			return err
 		}
 	}
@@ -353,16 +382,46 @@ func awayFinish(ctx context.Context, st *store.Store, run *store.AwayRun) error 
 	return st.SetAwaySummary(ctx, run.ID, text)
 }
 
+// awayDenialGroups is how many refusal lines the summary prints; `curia back --all` prints every one.
+const awayDenialGroups = 30
+
+// awayTo is where a period's window ends: when it was ended, or its deadline.
+func awayTo(run store.AwayRun) time.Time {
+	if run.EndedAt.Before(run.EndsAt) {
+		return run.EndedAt
+	}
+	return run.EndsAt
+}
+
+// awayRefusals prints the refusal section: the groups listed, and always what was left out.
+func awayRefusals(rep store.DenialReport) string {
+	var b strings.Builder
+	w := func(f string, a ...any) { _, _ = fmt.Fprintf(&b, f+"\n", a...) }
+	w("Refused (%d call(s); one line per session, tool and command line, in the order first seen):", rep.Total)
+	if rep.Total == 0 {
+		w("  nothing")
+	}
+	for _, d := range rep.Groups {
+		w("  %dx %s %s: %s", d.Count, spawnShortID(d.SessionID), sanitize.Line(d.Tool, 40), sanitize.Line(d.Summary, 100))
+	}
+	if rep.Omitted > 0 {
+		w("  and %d more kind(s) of refusal: `curia back --all` lists every one", rep.Omitted)
+	}
+	if rep.NotRecorded > 0 {
+		w("  %d further refusal(s) not recorded (a session passed %d distinct ones)", rep.NotRecorded, store.PermissionDistinctCap)
+	}
+	return b.String()
+}
+
 // awaySummary is the text `curia back` prints, from rows that exist already:
 // the timeline, the denied tool calls (grouped, cleaned, bounded: never raw
 // tool input), the tickets, reviews and messages waiting, and the cost.
 func awaySummary(ctx context.Context, st *store.Store, run store.AwayRun) (string, error) {
 	var b strings.Builder
 	w := func(f string, a ...any) { _, _ = fmt.Fprintf(&b, f+"\n", a...) }
-	to := run.EndedAt
-	how := "ended with curia back"
-	if !to.Before(run.EndsAt) {
-		to, how = run.EndsAt, "ended by itself at its deadline"
+	to, how := awayTo(run), "ended with curia back"
+	if !run.EndedAt.Before(run.EndsAt) {
+		how = "ended by itself at its deadline"
 	}
 	w("Away %s to %s (%s), %s.", run.StartedAt.Local().Format("2006-01-02 15:04"), to.Local().Format("15:04"), to.Sub(run.StartedAt).Round(time.Minute), how)
 	did, err := awayDid(ctx, st, run.StartedAt, to)
@@ -370,17 +429,11 @@ func awaySummary(ctx context.Context, st *store.Store, run store.AwayRun) (strin
 		return "", err
 	}
 	b.WriteString(did)
-	groups, total, err := st.Denials(ctx, run.StartedAt, to)
+	rep, err := st.Denials(ctx, run.StartedAt, to, awayDenialGroups)
 	if err != nil {
 		return "", err
 	}
-	w("Refused (%d call(s); one line per session, tool and command line):", total)
-	if total == 0 {
-		w("  nothing")
-	}
-	for _, d := range groups {
-		w("  %dx %s %s: %s", d.Count, spawnShortID(d.SessionID), sanitize.Line(d.Tool, 40), sanitize.Line(d.Summary, 100))
-	}
+	b.WriteString(awayRefusals(rep))
 	wt, err := st.Waiting(ctx, run.StartedAt, to)
 	if err != nil {
 		return "", err
@@ -402,7 +455,7 @@ func awaySummary(ctx context.Context, st *store.Store, run store.AwayRun) (strin
 
 // awayDid is "what each agent did" from the timeline of the window.
 func awayDid(ctx context.Context, st *store.Store, from, to time.Time) (string, error) {
-	events, err := st.TimelineBetween(ctx, from, to.Add(time.Nanosecond))
+	counts, err := st.TimelineCounts(ctx, from, to.Add(time.Nanosecond), "turn_end", "ticket_raised", "review_opened", "message_delivered")
 	if err != nil {
 		return "", err
 	}
@@ -413,15 +466,6 @@ func awayDid(ctx context.Context, st *store.Store, from, to time.Time) (string, 
 	repo := map[string]string{}
 	for _, s := range sessions {
 		repo[s.ID] = filepath.Base(s.Repo)
-	}
-	counts := map[string]map[string]int{}
-	for _, kind := range []string{"turn_end", "ticket_raised", "review_opened", "message_delivered"} {
-		for _, e := range events[kind] {
-			if counts[e.SessionID] == nil {
-				counts[e.SessionID] = map[string]int{}
-			}
-			counts[e.SessionID][kind]++
-		}
 	}
 	ids := make([]string, 0, len(counts))
 	for id := range counts {

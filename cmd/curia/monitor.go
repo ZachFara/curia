@@ -42,12 +42,14 @@ type monitorJob struct {
 
 // monitorJobs are run in order on every tick.
 var monitorJobs = []monitorJob{
+	// The state changers come first so a slow sampler (a hung docker) delays none of them; end away
+	// is first and fire schedules stays before auto-spawn, or a session spawned in a pass would get that pass's scheduled message.
+	{"end away", (*monitorEnv).expireAway},
+	{"fire schedules", (*monitorEnv).fireSchedules},
+	{"auto-spawn", (*monitorEnv).autoSpawn},
 	{"sample resources", (*monitorEnv).sampleResources},
 	{"prune resources", (*monitorEnv).pruneResources},
-	{"fire schedules", (*monitorEnv).fireSchedules},
 	{"sample containers", (*monitorEnv).sampleContainers},
-	{"end away", (*monitorEnv).expireAway},
-	{"auto-spawn", (*monitorEnv).autoSpawn},
 }
 
 // monitorEnv is what a job may use.
@@ -162,13 +164,15 @@ func (e *monitorEnv) paneTargets(ctx context.Context, sessions []model.Session) 
 	return targets
 }
 
-// pruneResources runs the age and cap prune at most once a minute, apart
+// pruneResources runs the age and cap prune (and the history tables' prune) at most once a minute, apart
 // from the insert.
 func (e *monitorEnv) pruneResources(ctx context.Context) error {
 	if now := e.now(); now.Sub(e.lastPrune) >= monitorPruneEvery {
 		e.lastPrune = now
-		_, err := e.st.PruneResources(ctx, now)
-		return err
+		if _, err := e.st.PruneResources(ctx, now); err != nil {
+			return err
+		}
+		return e.st.PruneHistory(ctx, now)
 	}
 	return nil
 }
@@ -435,6 +439,7 @@ func pidNote(pid int) string {
 // runMonitorLoop holds the lock and runs the tick loop until ctx is done or
 // SIGTERM or SIGINT arrives. A second instance finds the lock held, says so
 // and returns nil.
+// shortcut: cfg is read once here and passed to every job except auto-spawn (which rereads it), so a changed resources.*, schedule.* or docker limit needs a monitor restart; reload per tick if that bites.
 func runMonitorLoop(ctx context.Context, cfg config.Config, say func(string, ...any)) error {
 	lock, held, err := takeMonitorLock(monitorLockPath(cfg))
 	if held {

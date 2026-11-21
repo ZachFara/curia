@@ -48,18 +48,38 @@ func (s *Store) SetModes(ctx context.Context, scope ModeScope, mode string, unti
 type PermissionEvent struct {
 	SessionID, Mode, Tool, Summary, Verdict string
 	At                                      time.Time
+	N                                       int // how many times it was refused (PermissionEvents only)
 }
 
 // maxPermissionSummary bounds a stored summary, in bytes.
 const maxPermissionSummary = 200
 
-// AddPermissionEvent stores e; the summary is cut to maxPermissionSummary.
+// PermissionDistinctCap bounds the distinct refusals one session keeps in the
+// open away period. Past it, further refusals of other commands are counted in
+// one overflow row (verdict permissionOverflow) and the summary says how many.
+const PermissionDistinctCap = 500
+
+const permissionOverflow = "overflow"
+
+// AddPermissionEvent records a refusal in one statement: a repeat of a row
+// of the same session, away period, tool and summary only adds to its count
+// (so an agent's repeats never grow the table or push out a later refusal);
+// a new one is a row unless the session already has PermissionDistinctCap in
+// the period, then it adds to the session's overflow row. The count reads at
+// most the cap. The summary is cut to maxPermissionSummary.
 func (s *Store) AddPermissionEvent(ctx context.Context, e PermissionEvent) error {
 	if len(e.Summary) > maxPermissionSummary {
 		e.Summary = e.Summary[:maxPermissionSummary]
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO permission_events (session_id, at, mode, tool, summary, verdict) VALUES (?, ?, ?, ?, ?, ?)`,
-		e.SessionID, formatTime(e.At), e.Mode, e.Tool, e.Summary, e.Verdict); err != nil {
+	at := formatTime(e.At)
+	if _, err := s.db.ExecContext(ctx, `
+WITH p(v) AS (SELECT COALESCE((SELECT started_at FROM away_runs WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1), '')),
+over(x) AS (SELECT NOT EXISTS (SELECT 1 FROM permission_events, p WHERE session_id = ?1 AND period = p.v AND tool = ?4 AND summary = ?5 AND verdict = ?6)
+  AND (SELECT COUNT(*) FROM (SELECT 1 FROM permission_events, p WHERE session_id = ?1 AND period = p.v AND verdict = ?6 LIMIT ?7)) >= ?7)
+INSERT INTO permission_events (session_id, period, at, last_at, mode, tool, summary, verdict, n)
+SELECT ?1, p.v, ?2, ?2, ?3, IIF(over.x, '', ?4), IIF(over.x, '', ?5), IIF(over.x, ?8, ?6), 1 FROM p, over WHERE true
+ON CONFLICT (session_id, period, tool, summary, verdict) DO UPDATE SET n = n + 1, last_at = excluded.last_at`,
+		e.SessionID, at, e.Mode, e.Tool, e.Summary, e.Verdict, PermissionDistinctCap, permissionOverflow); err != nil {
 		return fmt.Errorf("store: add permission event: %w", err)
 	}
 	return nil
@@ -67,7 +87,7 @@ func (s *Store) AddPermissionEvent(ctx context.Context, e PermissionEvent) error
 
 // PermissionEvents returns a session's stored events, oldest first.
 func (s *Store) PermissionEvents(ctx context.Context, sessionID string) ([]PermissionEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT session_id, mode, tool, summary, verdict FROM permission_events WHERE session_id = ? ORDER BY id`, sessionID)
+	rows, err := s.db.QueryContext(ctx, `SELECT session_id, mode, tool, summary, verdict, n FROM permission_events WHERE session_id = ? ORDER BY id`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("store: permission events: %w", err)
 	}
@@ -75,7 +95,7 @@ func (s *Store) PermissionEvents(ctx context.Context, sessionID string) ([]Permi
 	var out []PermissionEvent
 	for rows.Next() {
 		var e PermissionEvent
-		if err := rows.Scan(&e.SessionID, &e.Mode, &e.Tool, &e.Summary, &e.Verdict); err != nil {
+		if err := rows.Scan(&e.SessionID, &e.Mode, &e.Tool, &e.Summary, &e.Verdict, &e.N); err != nil {
 			return nil, fmt.Errorf("store: permission events: %w", err)
 		}
 		out = append(out, e)

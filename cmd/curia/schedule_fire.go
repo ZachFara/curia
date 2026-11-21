@@ -37,6 +37,10 @@ const (
 // fireSchedules fires every due schedule once.
 func (e *monitorEnv) fireSchedules(ctx context.Context) error {
 	now := e.now()
+	// shortcut: a run is unfinished when still fired with no results after a minute (the job's deadline is 20 s).
+	if err := e.st.InterruptScheduleRuns(ctx, now.Add(-time.Minute)); err != nil {
+		return err
+	}
 	due, err := e.st.DueSchedules(ctx, now)
 	if err != nil {
 		return err
@@ -60,6 +64,7 @@ func (e *monitorEnv) fireSchedule(ctx context.Context, sc store.Schedule, now ti
 	if late {
 		outcome = "skipped_late"
 	}
+	// shortcut: a kill between this claim and the delivery loses that run (it stays recorded fired with empty results), at most once by design; mark such runs monitor_down at the next tick if it bites.
 	runID, ok, err := e.st.ClaimSchedule(ctx, sc, next, outcome, now)
 	if err != nil || !ok || late {
 		return err

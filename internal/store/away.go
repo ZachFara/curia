@@ -84,6 +84,11 @@ func (s *Store) UnshownAway(ctx context.Context) (AwayRun, bool, error) {
 	return s.awayWhere(ctx, `ended_at IS NOT NULL AND shown_at IS NULL`)
 }
 
+// LastAway is the newest ended period, shown or not.
+func (s *Store) LastAway(ctx context.Context) (AwayRun, bool, error) {
+	return s.awayWhere(ctx, `ended_at IS NOT NULL`)
+}
+
 // StartAway is, in one transaction: refuse (ErrAwayOpen) when a period is open, saves the mode
 // of every live session in scope, puts them all in away until ends and
 // records the period. A session that starts later joins through InheritAway.
@@ -327,36 +332,49 @@ type Denial struct {
 	Count                    int
 }
 
-// maxDenialGroups and maxDenialSummary bound what a summary reads of
-// permission_events, whatever was stored there.
-const (
-	maxDenialGroups  = 30
-	maxDenialSummary = 200
-)
+// maxDenialSummary bounds what a summary reads of a stored summary.
+const maxDenialSummary = 200
 
-// Denials groups the denied calls in [from, to] by session, tool and command
-// line, most frequent first, and returns how many there were in all.
-func (s *Store) Denials(ctx context.Context, from, to time.Time) (groups []Denial, total int, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT session_id, tool, substr(summary, 1, ?), COUNT(*) AS c FROM permission_events
-WHERE verdict = 'deny' AND at >= ? AND at <= ? GROUP BY session_id, tool, substr(summary, 1, ?) ORDER BY c DESC, MIN(id) LIMIT ?`,
-		maxDenialSummary, formatTime(from), formatTime(to), maxDenialSummary, maxDenialGroups)
+// DenialReport is what Denials found: the groups listed, how many calls in
+// all, how many groups were left out of the list, and how many calls were
+// refused after a session reached PermissionDistinctCap (counted only).
+type DenialReport struct {
+	Groups                      []Denial
+	Total, Omitted, NotRecorded int
+}
+
+// Denials groups the denied calls first seen in [from, to] by session, tool
+// and command line, in the order first seen (repeats cannot outrank a
+// distinct refusal), at most limit groups; limit <= 0 lists them all.
+func (s *Store) Denials(ctx context.Context, from, to time.Time, limit int) (DenialReport, error) {
+	var r DenialReport
+	f, t := formatTime(from), formatTime(to)
+	if limit <= 0 {
+		limit = -1
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT session_id, tool, substr(summary, 1, ?1), SUM(n) FROM permission_events
+WHERE verdict = 'deny' AND at >= ?2 AND at <= ?3 GROUP BY session_id, tool, substr(summary, 1, ?1) ORDER BY MIN(id) LIMIT ?4`,
+		maxDenialSummary, f, t, limit)
 	if err != nil {
-		return nil, 0, fmt.Errorf("store: denials: %w", err)
+		return r, fmt.Errorf("store: denials: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var d Denial
 		if err = rows.Scan(&d.SessionID, &d.Tool, &d.Summary, &d.Count); err != nil {
-			return nil, 0, fmt.Errorf("store: denials: %w", err)
+			return r, fmt.Errorf("store: denials: %w", err)
 		}
-		groups = append(groups, d)
+		r.Groups = append(r.Groups, d)
 	}
 	if err = rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("store: denials: %w", err)
+		return r, fmt.Errorf("store: denials: %w", err)
 	}
-	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM permission_events WHERE verdict = 'deny' AND at >= ? AND at <= ?`,
-		formatTime(from), formatTime(to)).Scan(&total)
-	return groups, total, err
+	var groups int
+	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(n) FILTER (WHERE verdict = 'deny'), 0), COALESCE(SUM(n) FILTER (WHERE verdict = ?1), 0),
+  COUNT(*) FILTER (WHERE verdict = 'deny') FROM permission_events WHERE verdict IN ('deny', ?1) AND at >= ?2 AND at <= ?3`,
+		permissionOverflow, f, t).Scan(&r.Total, &r.NotRecorded, &groups)
+	r.Omitted = max(groups-len(r.Groups), 0)
+	return r, err
 }
 
 // AwayWaiting is what waits for the user at the end of a period.

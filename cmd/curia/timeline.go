@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -90,9 +88,13 @@ func runTimeline(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	evs, err := st.Timeline(cmd.Context(), store.TimelineQuery{Since: since, Repo: timelineRepo, TaskID: timelineTask, Limit: timelineLimit})
+	res, err := st.TimelineRead(cmd.Context(), store.TimelineQuery{Since: since, Repo: timelineRepo, TaskID: timelineTask, Limit: timelineLimit})
 	if err != nil {
 		return err
+	}
+	evs := res.Events
+	if res.Skipped > 0 {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%d row(s) unreadable (bad time) and left out\n", res.Skipped)
 	}
 	slices.Reverse(evs) // newest first from the store; printed oldest first
 	if timelineJSON {
@@ -131,13 +133,5 @@ func timelinePrintJSON(w io.Writer, evs []model.TimelineEvent) error {
 	for _, e := range evs {
 		rows = append(rows, row{e.At.UTC(), sanitize.Line(e.SessionID, 80), sanitize.Line(e.TaskID, 80), e.Kind, sanitize.Line(e.Line, timelineLineLimit)})
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(rows); err != nil {
-		return err
-	}
-	_, err := io.WriteString(w, escapeUnprintable(buf.String()))
-	return err
+	return writeJSON(w, rows, "  ")
 }

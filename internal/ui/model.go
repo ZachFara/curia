@@ -826,12 +826,15 @@ func (m Model) updateRunes(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.notice = ""
 		return m.cancelPause(noticePauseCanceled), nil
 	}
+	if m.killPane != "" { // a y in a read of several keys never kills
+		return m.cancelKill(), nil
+	}
 	var cmds []tea.Cmd
 	for _, r := range msg.Runes {
 		var cmd tea.Cmd
 		m, cmd = m.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}, Alt: msg.Alt})
 		cmds = append(cmds, cmd)
-		if m.child != nil || m.pauseAsk != (pauseSuggestion{}) {
+		if m.child != nil || m.pauseAsk != (pauseSuggestion{}) || m.killPane != "" {
 			break
 		}
 	}
@@ -847,7 +850,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.notice = noticePausing
 		return m, nil
 	case m.killPane != "":
-		return m.confirmKill(msg), nil
+		return m.killKey(msg)
 	case m.pauseAsk != (pauseSuggestion{}):
 		return m.pauseKey(msg)
 	case m.filtering:
@@ -943,6 +946,7 @@ func (m Model) askKill() Model {
 	}
 	if m.notice = unreachable(r.s, m.live); m.notice == "" {
 		m.killPane = r.s.Pane
+		m.gate.open(m.now())
 	}
 	return m
 }
@@ -969,15 +973,33 @@ func unreachable(s model.Session, live []tmux.Pane) string {
 // recorded on another tmux server.
 const noticeOtherServer = "on another tmux server: open the dashboard there"
 
-// confirmKill kills the pane on "y"; any other key cancels. The row
-// disappears or changes on a later refresh; the store is not edited here.
-func (m Model) confirmKill(msg tea.KeyMsg) Model {
-	pane := m.killPane
-	m.killPane = ""
-	if msg.String() != "y" {
-		m.notice = "kill canceled"
-		return m
+// killKey takes a "y" like pauseKey: behind the shared confirmGate (dwell,
+// burst rule, wait after the y), it kills once burstGap has passed with no
+// other key. Any other key and a paste cancel.
+func (m Model) killKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	if msg.Paste || msg.String() != "y" {
+		return m.cancelKill(), nil
 	}
+	if now := m.now(); m.gate.soon(now) {
+		m.gate.refuse(now)
+		m.notice = noticeTooSoon
+		return m, nil
+	}
+	seq := m.gate.take(m.now())
+	return m, tea.Tick(burstGap, func(time.Time) tea.Msg { return pauseConfirmMsg{seq: seq} })
+}
+
+// cancelKill closes the kill prompt, and a "y" waiting with it.
+func (m Model) cancelKill() Model {
+	m.killPane, m.gate.confirmAt, m.notice = "", time.Time{}, "kill canceled"
+	return m
+}
+
+// kill kills the pane the prompt named. The row disappears or changes on a
+// later refresh; the store is not edited here.
+func (m Model) kill() Model {
+	pane := m.killPane
+	m.killPane, m.gate.confirmAt = "", time.Time{}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxTimeout)
 	defer cancel()
 	if err := m.tm.KillPane(ctx, pane); err != nil {
@@ -1002,8 +1024,7 @@ func (m Model) updateMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	case m.pauseAsk != (pauseSuggestion{}):
 		return m.cancelPause(noticePauseCanceled), nil
 	case m.killPane != "":
-		m.killPane, m.notice = "", "kill canceled"
-		return m, nil
+		return m.cancelKill(), nil
 	}
 	i := m.offset + msg.Y - 1 // line 0 is the header
 	if msg.Y < 1 || i >= len(m.rows) || (m.visibleRows() > 0 && msg.Y > m.visibleRows()) {
@@ -1057,6 +1078,14 @@ func (m Model) keyAfterPauseConfirm() (Model, tea.Cmd) {
 		m.notice = noticeTooSoon
 		return m, nil
 	}
+	return m.finishConfirm()
+}
+
+// finishConfirm acts on the taken "y" of whichever prompt is open.
+func (m Model) finishConfirm() (Model, tea.Cmd) {
+	if m.killPane != "" {
+		return m.kill(), nil
+	}
 	return m.startPause()
 }
 
@@ -1066,7 +1095,7 @@ func (m Model) applyPauseConfirm(msg pauseConfirmMsg) (Model, tea.Cmd) {
 	if !m.gate.due(msg.seq) {
 		return m, nil
 	}
-	return m.startPause()
+	return m.finishConfirm()
 }
 
 // startPause closes the prompt and pauses the task it named, off the update

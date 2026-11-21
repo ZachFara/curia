@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -49,9 +51,7 @@ func init() {
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "mcp",
 		Short: "Serve the decision and message tools over stdio (run by Claude Code)",
-		Long: "A stdio MCP server, one per agent session, with six tools: search_decisions,\n" +
-			"request_decision, check_decision, withdraw_decision, check_messages and\n" +
-			"complete_task. None of them answers a ticket, sends a message or approves a\n" +
+		Long: "A stdio MCP server, one per agent session, with " + mcpToolSummary() + ". None of them answers a ticket, sends a message or approves a\n" +
 			"review. With [ntfy] configured it also sends the queued phone pushes. Stdout\n" +
 			"carries protocol messages only; errors go to the log file.",
 		Args: cobra.NoArgs,
@@ -313,4 +313,20 @@ func mcpMarkWindow(ctx context.Context, st *store.Store, tm tmux.Client, logger 
 	if err := attention.Apply(actx, tm, st, sess.TmuxWindow, sess.Socket); err != nil && !errors.Is(err, tmux.ErrNoWindow) {
 		logger.Warn("mcp: marker", "window", sess.TmuxWindow, "err", err.Error())
 	}
+}
+
+// mcpToolSummary is "seven tools: a, b and c", from the registered tools, so
+// the help cannot go stale when one is added.
+func mcpToolSummary() string {
+	var names []string
+	for _, t := range mcp.Tools(mcp.Deps{}) {
+		names = append(names, t.Name)
+	}
+	words := []string{"no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"}
+	n := len(names)
+	count := strconv.Itoa(n)
+	if n < len(words) {
+		count = words[n]
+	}
+	return count + " tools: " + strings.Join(names[:n-1], ", ") + " and " + names[n-1]
 }

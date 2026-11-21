@@ -217,3 +217,46 @@ func TestConfigSetWriteFailureKeepsOldContent(t *testing.T) {
 		t.Errorf("file changed: %q", after)
 	}
 }
+
+const configCommented = "# my notes\nnotify_bell = false # keep\n\n# careful\n[routing]\nauto_threshold = 0.8\n"
+
+// The first write records the file as it was, so a rollback brings the
+// comments back byte for byte.
+func TestConfigFirstSetRecordsBaselineAndRollbackRestoresBytes(t *testing.T) {
+	path := configTestEnv(t)
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	if err := os.WriteFile(path, []byte(configCommented), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := configRun(t, "set", "routing.auto_threshold", "0.95"); !strings.Contains(out, "comments were not kept") {
+		t.Errorf("set output = %q, want a line that comments were not kept", out)
+	}
+	if h := configRun(t, "history"); !strings.Contains(h, "baseline") {
+		t.Fatalf("history = %q, want the baseline", h)
+	}
+	configRun(t, "rollback", "1")
+	if b, _ := os.ReadFile(filepath.Clean(path)); string(b) != configCommented {
+		t.Errorf("after rollback = %q, want the original bytes", b)
+	}
+}
+
+// An edit by hand between two sets is recorded, never lost.
+func TestConfigHandEditBetweenSetsIsKept(t *testing.T) {
+	path := configTestEnv(t)
+	configRun(t, "set", "notify_bell", "true")
+	if err := os.WriteFile(path, []byte("# mine\nnotify_bell = true\nrouting.auto_threshold = 0.7\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configRun(t, "set", "notify_bell", "false")
+	hand := false
+	for _, l := range strings.Split(configRun(t, "history"), "\n") {
+		hand = hand || (strings.Contains(l, "external") || strings.Contains(l, "baseline"))
+	}
+	if !hand {
+		t.Fatal("the hand edit has no revision")
+	}
+	configRun(t, "rollback", "2")
+	if b, _ := os.ReadFile(filepath.Clean(path)); !strings.Contains(string(b), "# mine") {
+		t.Errorf("after rollback = %q, want the hand edit", b)
+	}
+}
