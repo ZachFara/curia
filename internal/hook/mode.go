@@ -56,7 +56,7 @@ var (
 // gitdir config parsed on the hook path); add it if a repo uses one.
 var autoExecNames = []string{
 	".git", ".claude", ".curia", ".gitattributes", ".gitmodules", ".gitconfig", ".husky",
-	".mcp.json", ".envrc", ".vscode", ".idea", ".pre-commit-config.yaml", ".githooks", "lefthook.yml", ".lefthook.yml", ".lefthook",
+	".mcp.json", ".envrc", ".vscode", ".idea", ".pre-commit-config.yaml", ".githooks", ".devcontainer",
 }
 
 // askTools need the user; bypass gives no opinion on them.
